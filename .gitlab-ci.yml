@@ -1,0 +1,3 @@
+include:
+  - project: "devops/centralized-ci"
+    file: "python/application-init.yml"

@@ -1,0 +1,7 @@
+CHANGELOG.md
+package-lock.json
+packages-lock.json
+node_modules
+.venv
+.gitlab-ci.yml
+docs/build/

@@ -1,0 +1,15 @@
+{
+  "[markdown]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "prettier.prettier-vscode"
+  },
+  "[python]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    },
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  },
+  "ruff.configuration": "ruff.toml"
+}

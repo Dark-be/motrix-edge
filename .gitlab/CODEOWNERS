@@ -1,0 +1,21 @@
+[Build Script] @xiang.zhao
+.*
+.*/
+*.lock
+build.rs
+*.toml
+*.yml
+*.bat
+*.sh
+*.command
+*.ps1
+*.js
+*.ts
+*.json
+NOTICE*
+LICENSE*
+README*
+CMakeLists.txt
+*.cmake
+*.gradle
+*.properties

@@ -1,0 +1,86 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Format Python",
+      "type": "shell",
+      "command": "ruff",
+      "args": ["format"],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
+    },
+    {
+      "label": "Lint Python",
+      "type": "shell",
+      "command": "ruff",
+      "args": ["check", "--show-fixes", "--fix"],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
+    },
+    {
+      "label": "Add Header",
+      "type": "shell",
+      "command": "npx",
+      "args": [
+        "unified-ci",
+        "add-header",
+        "--replace",
+        "--ignore",
+        ".prettierignore",
+        "--extensions",
+        "py,pyi",
+        "--comment",
+        "\"#\""
+      ],
+      "dependsOn": ["NPM Install"],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
+    },
+    {
+      "label": "Prettier",
+      "type": "shell",
+      "command": "npx",
+      "args": ["prettier", "-w", "."],
+      "dependsOn": ["NPM Install"],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
+    },
+    {
+      "label": "Format & Lint",
+      "type": "shell",
+      "command": "",
+      "dependsOn": ["Format Python", "Lint Python", "Add Header", "Prettier"],
+      "options": {
+        "statusbar": {
+          "icon": {
+            "id": "coffee"
+          },
+          "color": "#F9E79F"
+        }
+      }
+    },
+    {
+      "label": "NPM Install",
+      "type": "shell",
+      "command": "npm",
+      "args": ["install", "--ignore-scripts"],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
+    }
+  ]
+}

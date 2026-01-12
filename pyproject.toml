@@ -1,0 +1,28 @@
+[build-system]
+requires = ["uv_build>=0.9.23,<0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "python-application"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+]
+lint = [
+    "ruff>=0.14.11",
+]
+
+[tool.pytest.ini_options]
+# always add pytest-cov with pytest
+addopts = "--cov --cov-config=.coveragerc --cov-report term --cov-report xml:py-coverage.xml --junitxml=py-report.xml"
+
+[[tool.uv.index]]
+name = "motphys"
+url = "http://pypi.mp/simple"
