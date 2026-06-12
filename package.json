@@ -1,5 +1,5 @@
 {
   "devDependencies": {
-    "@motphys/unified-ci": "1.15.0-a.a-master.86065"
+    "@motphys/unified-ci-dev": "1.15.0-alpha.2"
   }
 }

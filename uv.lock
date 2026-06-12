@@ -200,22 +200,21 @@ name = "python-application"
 version = "0.1.0"
 source = { editable = "." }
 
-[package.optional-dependencies]
-lint = [
-    { name = "ruff" },
-]
-test = [
+[package.dev-dependencies]
+dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.5" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=6.1.1" },
-    { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.14.11" },
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
 ]
-provides-extras = ["test", "lint"]
 
 [[package]]
 name = "ruff"

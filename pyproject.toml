@@ -1,5 +1,5 @@
 [build-system]
-requires = ["uv_build>=0.9.23,<0.10.0"]
+requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [project]
@@ -10,18 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
-[project.optional-dependencies]
-test = [
-    "pytest>=8.3.5",
-    "pytest-cov>=6.1.1",
-]
-lint = [
-    "ruff>=0.14.11",
-]
-
-[tool.pytest.ini_options]
-# always add pytest-cov with pytest
-addopts = "--cov --cov-config=.coveragerc --cov-report term --cov-report xml:py-coverage.xml --junitxml=py-report.xml"
+[dependency-groups]
+dev = ["pytest", "pytest-cov", "ruff"]
 
 [[tool.uv.index]]
 name = "motphys"

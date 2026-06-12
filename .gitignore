@@ -10,6 +10,12 @@ wheels/
 .venv
 
 .idea
+.DS_Store
 node_modules
 
 .ruff_cache
+
+code-quality-report.json
+.coverage
+py-coverage.xml
+py-report.xml
