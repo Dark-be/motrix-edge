@@ -1,17 +1,17 @@
-# Copyright (C) 2020-2025 Motphys Technology Co., Ltd. All Rights Reserved.
+# Confidential Information of Motphys. Not for disclosure or distribution without Motphys's prior
+# written consent.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This software contains code, techniques and know-how which is confidential and proprietary to
+# Motphys.
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# Product and Trade Secret source code contains trade secrets of Motphys.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+# Copyright (C) 2020-2026 Motphys Technology Co., Ltd. All Rights Reserved.
+#
+# This software belongs to the Intellectual Property of Motphys. Use of this software is subject to
+# the terms and conditions in the license file accompanying. You may not use this software except
+# in compliance with the license file.
+
 
 def inc(x):
     return x + 1

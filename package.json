@@ -1,4 +1,11 @@
 {
+  "name": "python-application",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "format": "uv run ruff format . && npx prettier --write .",
+    "add-header": "unified-ci add-header --replace --ignore .prettierignore --extensions py,pyi --comment \"#\""
+  },
   "devDependencies": {
     "@motphys/unified-ci-dev": "1.15.0-alpha.2"
   }
