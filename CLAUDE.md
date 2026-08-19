@@ -4,32 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 
 当需要了解项目背景（设计、方案、目录职责等）时，必须先查阅 `wiki/` 下的文档，再进行后续操作。
 
-## 🚧 项目初始化（创建后第一个 MR，做完即删除本节）
-
-从模板生成仓库后，第一个 MR 先把模板占位内容替换为真实项目信息：
-
--   [ ] `pyproject.toml`：改 `name` / `description`；把 `src/python_application/` 重命名为真实包名
--   [ ] `package.json`：改 `name`
--   [ ] 本文件：填写下面的 `## Project Overview`，并把 `## Directory Structure` 里的 `<project>` / `<package>` 换成真实名字
--   [ ] `README.md`：把模板目录说明替换为真实项目说明
--   [ ] `.gitattributes`：按需增删二进制扩展名（用不到网格 / 媒体类的可精简）
--   [ ] 确认 `LICENSE` / `NOTICE` 的授权方式符合项目定位（默认 Motphys Confidential）
--   [ ] **删除本节**（含本提示）——它只服务于首个 MR
+工程开发原则遵循共享文档（单一事实来源）：[`motrix-loop-docs/wiki/design/engineering-principles.md`](https://gitlab.mp/motphys-robotics/motrix-loop/motrix-loop-docs/-/blob/master/wiki/design/engineering-principles.md)；本 `CLAUDE.md` 只保留本项目差异（如脚手架相关约定），其余开发原则以该共享文档为准。
 
 ## Project Overview
 
-<在此填写项目简介：这个 `python-application` 做什么、解决什么问题。>
+对现有机器统一做一个二次抽象，形成一个边缘节点提供接口给数采，推理以及真机强化学习使用，边缘节点负责收集 observation 传输给推理节点、控制硬件数采端，部署时 edge 主动向推理端请求推理。
 
 ## Directory Structure
 
 ```
-<project>/
-├── src/<package>/            # 主 Python 包
-├── tests/                    # pytest 测试
-└── wiki/                     # 设计 / 计划 / 研究文档
-    ├── design/               # 方案、架构、算法设计
-    ├── plan/                 # 带 TODO list 的落地计划，完成后删除
-    └── research/             # 背景调研、横向对比
+src/motrix_edge/
+├── __init__.py       # 公开 API：EdgeNode / NodeLifecycle / NodeState / get_adapter / get_session
+├── __main__.py       # CLI：run / serve / adapters list / version
+├── node.py           # EdgeNode 生命周期状态机（NodeLifecycle / NodeState）
+├── adapter/          # 机器人硬件适配：RobotAdapter HAL + TestRobotAdapter + 工厂
+├── session/          # 会话：BaseSession / CaptureSession / InferSession + get_session 工厂
+├── policy/           # 推理策略客户端：BasePolicyClient / 传输 / 契约 / broker / openpi + 工厂
+├── frame/            # FrameManager：会话观测帧缓冲（preview / WebRTC 消费）
+├── identity/         # Edge 本地设备身份声明：Identity + headers() + 请求元数据生成器
+├── lease/            # Edge 级租约机制：LeaseManager
+├── server/           # MotrixEdge HTTP 控制面：FastAPI /v1/* + WebRTC
+├── config/           # 全局路径常量（_GLOBAL_CONFIG）+ yaml 配置
+└── utils/            # commands（命令总线）/ data_handler / load_file
 ```
 
 ## Workflow

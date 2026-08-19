@@ -1,0 +1,27 @@
+INFO_LEVEL: INFO # DEBUG, INFO, ERROR
+
+# Edge 本地设备身份声明（引用，非权威；权威在 MotrixConsole）
+identity:
+  edge_id: edge-test-001
+  edge_name: edge-test
+  edge_version: "0.1.0"
+
+adapter: # Edge 声明的支持适配器列表（只声明身份；能力 / 行为参数由适配器自身内置定义）
+  - id: test_robot
+    name: Test Robot
+    type: test_robot
+
+# Edge 级租约配置（受控 HTTP 操作须持有租约；Console 定时续租保持租约活跃）
+lease:
+  ttl: 120 # 租约有效期（秒）：到期未续租则失效，Console 需重新激活
+  renew_interval: 60 # 建议续租间隔（秒）：Console 每 renew_interval 续租一次
+
+# MotrixEdge HTTP 服务监听配置（node 主线程内嵌的 web 线程使用）
+server:
+  host: 0.0.0.0
+  port: 8000
+
+capture:
+  start_episode_idx: 0
+  num_episode: 50
+  obs_freq: 30

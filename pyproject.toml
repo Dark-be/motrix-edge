@@ -3,15 +3,35 @@ requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
 
 [project]
-name = "python-application"
+name = "motrix-edge"
 version = "0.1.0"
-description = "Add your description here"
+description = "Robot edge node"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "numpy",          # 数值计算
+    "pyyaml",         # 配置文件解析
+    "opencv-python-headless",  # 图像处理
+    "websockets>=11.0",  # 推理客户端传输层
+    "msgpack>=1.0.5",    # 推理客户端序列化
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.1",
+    "aiortc>=1.15.0",
+]
 
 [dependency-groups]
-dev = ["pytest", "pytest-cov", "ruff"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+# 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装。
+# CLI（console script `motrix-edge`）与 Robot Adapter entry point 随任务运行时
+# （feat/6）一并注册，此处脚手架阶段不声明（避免指向尚未落地的模块）。
+[tool.uv]
+package = true
 
 [[tool.uv.index]]
 name = "motphys"

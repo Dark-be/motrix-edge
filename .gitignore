@@ -19,3 +19,9 @@ code-quality-report.json
 .coverage
 py-coverage.xml
 py-report.xml
+
+.vscode/
+.pytest_cache
+data/
+logs/
+frontend/edge-console/

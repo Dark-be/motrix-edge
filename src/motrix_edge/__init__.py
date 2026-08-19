@@ -12,3 +12,9 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+"""motrix_edge —— 机器人边缘节点（任务运行时层）。
+
+包骨架：公共 API（EdgeNode / NodeLifecycle / NodeState / get_adapter / get_session）
+与 CLI（``motrix-edge``）随任务运行时（task-runtime）MR 落地；此处仅提供可导入的
+最小包骨架，供脚手架阶段安装 / 构建验证。
+"""

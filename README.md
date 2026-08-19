@@ -1,34 +1,38 @@
-# 📋 模板项目目录结构
+# motrix-edge
+
+机器人边缘节点（`motrix_edge`）：对现有机器人做统一的二次抽象，作为边缘节点提供
+接口给数据采集、推理与真机强化学习使用——边缘节点负责收集 observation 并**主动请
+求**推理节点（Endpoint）返回 action，本地校验后限速执行。
+
+> **状态**：当前为脚手架 + 文档阶段（冻结设计 / 计划契约）。任务运行时核心与 HTTP
+> 控制面分别由后续 MR 落地，详见 [wiki/design](wiki/design/index.md) 与
+> [wiki/plan](wiki/plan/index.md)。
+
+## 快速开始
+
+```bash
+uv sync           # 安装依赖（含 dev 依赖）
+uv run pytest     # 运行测试
+uv run ruff check .
+npm run format    # ruff format + prettier
+```
+
+## 目录结构
 
 ```
-  python-application/
-  ├── .coveragerc                             # Coverage.py 配置文件
-  ├── .gitignore                              # Git 忽略文件配置
-  ├── .gitlab-ci.yml                          # GitLab CI/CD 流水线配置
-  ├── .gitlab/                                # GitLab 相关配置目录
-  │   ├── CODEOWNERS                          # 代码所有者规则配置
-  │   └── issue_templates/                    # Issue 模板目录
-  │       ├── bug.md                          # Bug 报告模板
-  │       └── default_issue.md                # 功能请求模板
-  ├── .npmrc                                  # npm 配置文件
-  ├── .prettierignore                         # Prettier 忽略文件配置
-  ├── .prettierrc                             # Prettier 代码格式化配置
-  ├── .vscode/                                # VS Code IDE 配置目录
-  │   ├── extensions.json                     # 推荐插件列表
-  │   ├── settings.json                       # VS Code 工作区设置
-  │   └── tasks.json                          # VS Code 任务配置
-  ├── LICENSE                                 # Apache 2.0 开源许可证
-  ├── NOTICE                                  # 法律声明文件
-  ├── package-lock.json                       # npm 依赖锁定文件
-  ├── package.json                            # Node.js 项目配置（用于 CI 工具）
-  ├── pyproject.toml                          # Python 项目核心配置文件
-  ├── pytest.ini                              # pytest 测试框架配置
-  ├── README.md                               # 项目说明文档
-  ├── ruff.toml                               # Ruff 代码检查和格式化配置
-  ├── src/                                    # 源代码根目录
-  │   └── python_application/                 # 主 Python 包
-  │       └── __init__.py                     # 包初始化文件（含版权声明）
-  ├── tests/                                  # 测试文件目录
-  └── uv.lock                                 # UV 依赖锁定文件
-
+src/motrix_edge/     # 主包（当前为最小包骨架，完整结构随任务运行时 / 控制面 MR 落地）
+config/edge.yml      # 边缘节点配置
+wiki/design/         # 设计文档（架构 / 契约）
+wiki/plan/           # 实施计划
+tests/               # 测试
 ```
+
+## 文档
+
+-   架构与设计：[wiki/design/index.md](wiki/design/index.md)
+-   实施计划：[wiki/plan/index.md](wiki/plan/index.md)
+-   仓库约定：[CLAUDE.md](CLAUDE.md)
+
+## 开发
+
+提交前依次执行：`npm run format` → `uv run ruff check .` → `uv run pytest`。
