@@ -557,6 +557,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "opencv-python-headless" },
+    { name = "prompt-toolkit" },
     { name = "pyyaml" },
     { name = "uvicorn" },
     { name = "websockets", version = "16.1.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
@@ -579,6 +580,7 @@ requires-dist = [
     { name = "msgpack", specifier = ">=1.0.5" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
+    { name = "prompt-toolkit", specifier = ">=3.0.53" },
     { name = "pyyaml" },
     { name = "uvicorn", specifier = ">=0.52.1" },
     { name = "websockets", specifier = ">=11.0" },
@@ -903,6 +905,18 @@ source = { registry = "http://pypi.mp/simple" }
 sdist = { url = "http://pypi.mp/packages/pluggy/1.6.0/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3" }
 wheels = [
     { url = "http://pypi.mp/packages/pluggy/1.6.0/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746" },
+]
+
+[[package]]
+name = "prompt-toolkit"
+version = "3.0.53"
+source = { registry = "http://pypi.mp/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "http://pypi.mp/packages/prompt-toolkit/3.0.53/prompt_toolkit-3.0.53.tar.gz", hash = "sha256:9ec8a0ad96d5c56148b3f914aa79c1564c3fde5d2e6b876e7bc327e353cf8fa6" }
+wheels = [
+    { url = "http://pypi.mp/packages/prompt-toolkit/3.0.53/prompt_toolkit-3.0.53-py3-none-any.whl", hash = "sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2" },
 ]
 
 [[package]]
@@ -1323,6 +1337,15 @@ dependencies = [
 sdist = { url = "http://pypi.mp/packages/uvicorn/0.52.1/uvicorn-0.52.1.tar.gz", hash = "sha256:112ec661814189acbccd3f7b86460147cc065fc92c0821afa78918780e4354dd" }
 wheels = [
     { url = "http://pypi.mp/packages/uvicorn/0.52.1/uvicorn-0.52.1-py3-none-any.whl", hash = "sha256:e4403f9d93188cf9d1088e9f40e3acd12630e2df8675316704379a7fc20fff6a" },
+]
+
+[[package]]
+name = "wcwidth"
+version = "0.8.2"
+source = { registry = "http://pypi.mp/simple" }
+sdist = { url = "http://pypi.mp/packages/wcwidth/0.8.2/wcwidth-0.8.2.tar.gz", hash = "sha256:91fbef97204b96a3d4d421609b80340b760cf33e26da123ff243d76b1fda8dda" }
+wheels = [
+    { url = "http://pypi.mp/packages/wcwidth/0.8.2/wcwidth-0.8.2-py3-none-any.whl", hash = "sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85" },
 ]
 
 [[package]]

@@ -42,6 +42,14 @@
 | `motrix-edge version` / `--version` | 显示版本号（单一来源 `pyproject.toml [project].version`）             |
 | `motrix-edge --help`                | 查看帮助与可用子命令                                                  |
 
+交互式 `run` 使用 `prompt_toolkit` 统一处理终端输入与输出：
+
+-   `PromptSession` 提供可编辑行输入、历史记录与命令补全（基于 `CommandRegistry`，CLI / HTTP 共享同一命令契约），
+    底部工具栏在识别出命令后提示其位置参数（如 `robot execute` → `参数: qpos`）。
+-   `patch_stdout` 使 node / web / 会话线程的 `print` 输出（含 `debug_print`）不打断当前输入行。
+-   EOF / Ctrl-C 仅退出 CLI 输入线程；`EdgeNode` 主循环与生命周期清理不受影响。
+-   一次性子命令（`adapters` / `version`）直接打印后退出，无需交互会话。
+
 运行拓扑：`run` = node 主线程持续运行 `EdgeNode`（CLI 键盘线程经注册表解析行命令 → `push` 到
 共享 `CommandBus`）+ web 作为独立线程跑 FastAPI（uvicorn 日志写 `logs/uvicorn.log`）。
 
