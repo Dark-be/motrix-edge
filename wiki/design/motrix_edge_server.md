@@ -39,13 +39,13 @@ correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动�
 
 UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/v1/uploads` | 扫描请求目录；缺省使用 `upload.data_dir` |
-| GET | `/v1/uploads` | 返回 episode 汇总与当前选择集 |
-| POST | `/v1/uploads/select` | body `{episode_ids: [...]}` 替换选择集 |
+| 方法 | 路径                 | 说明                                             |
+| ---- | -------------------- | ------------------------------------------------ |
+| POST | `/v1/uploads`        | 扫描请求目录；缺省使用 `upload.data_dir`         |
+| GET  | `/v1/uploads`        | 返回 episode 汇总与当前选择集                    |
+| POST | `/v1/uploads/select` | body `{episode_ids: [...]}` 替换选择集           |
 | POST | `/v1/uploads/upload` | 将选择集加入上传队列；未配置 endpoint 返回 `501` |
-| POST | `/v1/uploads/retry` | 重置选择集中失败项；未配置 endpoint 返回 `501` |
+| POST | `/v1/uploads/retry`  | 重置选择集中失败项；未配置 endpoint 返回 `501`   |
 
 扫描按文件名 stem 配对 `.mcap` 与 `.json`，JSON 原样保留并补充文件大小、修改时间和 SHA-256；不删除源文件。
 
@@ -71,14 +71,14 @@ UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 
 采集为**观测会话**，端点经 `CaptureService` 桥接：
 
-| 方法   | 路径                     | 租约          | 说明                                                                               |
-| ------ | ------------------------ | ------------- | ---------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                  |
+| 方法   | 路径                     | 租约          | 说明                                                                                                |
+| ------ | ------------------------ | ------------- | --------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                   |
 | GET    | `/v1/captures`           | 无            | 状态快照：node_state / session / adapter / data_dir / data_files / capture_status / disk / lease_id |
-| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                    |
-| POST   | `/v1/captures/sync`      | 必需          | body `{meta}`：同步采集元信息到机器人进程（`capture sync`，采集会话内消费）       |
-| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                     |
-| GET    | `/v1/preview`            | 必需          | 最新观测预览（无需进入会话，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)） |
+| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                     |
+| POST   | `/v1/captures/sync`      | 必需          | body `{meta}`：同步采集元信息到机器人进程（`capture sync`，采集会话内消费）                         |
+| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                      |
+| GET    | `/v1/preview`            | 必需          | 最新观测预览（无需进入会话，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）       |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 
@@ -92,13 +92,13 @@ UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 
 推理会话**无回合概念**（enter → 持续推理 → exit，`infer rollout` 步进），端点经 `InferService` 桥接：
 
-| 方法   | 路径                   | 租约          | 说明                                                                     |
-| ------ | ---------------------- | ------------- | ------------------------------------------------------------------------ |
-| POST   | `/v1/infers`           | 必需          | `enter`：body 必须提供已注册的 `policy_type`，再执行 `session run infer` |
+| 方法   | 路径                   | 租约          | 说明                                                                                           |
+| ------ | ---------------------- | ------------- | ---------------------------------------------------------------------------------------------- |
+| POST   | `/v1/infers`           | 必需          | `enter`：body 必须提供已注册的 `policy_type`，再执行 `session run infer`                       |
 | GET    | `/v1/infers`           | 无            | 状态快照：node_state / session / adapter / policy / connected / metadata / endpoint / lease_id |
-| POST   | `/v1/infers/connect`   | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）             |
-| POST   | `/v1/infers/rollout`   | 必需          | body `count`（缺省 1，1–100）：连续推理并返回最后 action 与 actions 列表 |
-| DELETE | `/v1/infers?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                 |
+| POST   | `/v1/infers/connect`   | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）                                   |
+| POST   | `/v1/infers/rollout`   | 必需          | body `count`（缺省 1，1–100）：连续推理并返回最后 action 与 actions 列表                       |
+| DELETE | `/v1/infers?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                       |
 
 ## 错误语义
 

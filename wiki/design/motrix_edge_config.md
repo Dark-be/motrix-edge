@@ -21,16 +21,16 @@
     （缺省 `config/edge.yml`）。
 -   配置段：
 
-| 段           | 说明                                                                                                                                                         | 消费方         |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
-| `INFO_LEVEL` | 日志级别（DEBUG / INFO / ERROR）                                                                                                                             | 日志           |
-| `identity`   | 设备身份（edge_id / edge_name / edge_version）                                                                                                               | identity       |
-| `lease`      | 租约 ttl / renew_interval                                                                                                                                    | lease          |
-| `server`     | HTTP 监听 host / port                                                                                                                                        | server         |
-| `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）                                                                                                             | node / adapter |
-| `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                                                                            | node / CaptureSession |
-| `policy`     | 推理节点默认 host / port；策略类型、图像参数和 action_horizon 由客户端默认值或服务端 metadata 决定   | policy         |
-| `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                                                                            | UploadSession  |
+| 段           | 说明                                                                                               | 消费方                |
+| ------------ | -------------------------------------------------------------------------------------------------- | --------------------- |
+| `INFO_LEVEL` | 日志级别（DEBUG / INFO / ERROR）                                                                   | 日志                  |
+| `identity`   | 设备身份（edge_id / edge_name / edge_version）                                                     | identity              |
+| `lease`      | 租约 ttl / renew_interval                                                                          | lease                 |
+| `server`     | HTTP 监听 host / port                                                                              | server                |
+| `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）                                                  | node / adapter        |
+| `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                    | node / CaptureSession |
+| `policy`     | 推理节点默认 host / port；策略类型、图像参数和 action_horizon 由客户端默认值或服务端 metadata 决定 | policy                |
+| `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                  | UploadSession         |
 
 ## 命令行接口（CLI）
 

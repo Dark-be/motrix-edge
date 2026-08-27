@@ -40,6 +40,6 @@ UploadSession 使用线程锁保护当前汇总和选择集；源文件只读，
 
 ```yaml
 upload:
-  data_dir: /path/to/data
-  endpoint: null # 远端上传服务；未配置时上传接口返回 501
+    data_dir: /path/to/data
+    endpoint: null # 远端上传服务；未配置时上传接口返回 501
 ```

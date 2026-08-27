@@ -6,8 +6,8 @@
 
 ## TODO
 
-- [x] 增加 UploadSession：扫描 `.mcap` / `.json`、解析元数据、生成 checksum 和状态。
-- [x] 增加 `/v1/uploads` HTTP 接口：创建/重扫、查询、选择、上传占位和失败重试。
-- [x] 增加 `upload.data_dir` 配置和前端 UploadSession 面板。
-- [x] 补充扫描、配对、选择和状态接口测试。
-- [x] 运行 Docker 后端测试和宿主机前端构建。
+-   [x] 增加 UploadSession：扫描 `.mcap` / `.json`、解析元数据、生成 checksum 和状态。
+-   [x] 增加 `/v1/uploads` HTTP 接口：创建/重扫、查询、选择、上传占位和失败重试。
+-   [x] 增加 `upload.data_dir` 配置和前端 UploadSession 面板。
+-   [x] 补充扫描、配对、选择和状态接口测试。
+-   [x] 运行 Docker 后端测试和宿主机前端构建。
