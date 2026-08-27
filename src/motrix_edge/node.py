@@ -325,12 +325,10 @@ class EdgeNode:
                 return True
             policy_type = cmd.params.get("policy_type")
             if session_type == "infer":
+                # policy_type 可选：缺省用配置 policy.type（与 InferService.enter / get_policy
+                # 的契约一致，而非强制调用方显式提供 —— 修复此前真实节点对缺省 400 的分歧）。
                 if not policy_type:
-                    self._reply(
-                        cmd,
-                        CommandResult(status="rejected", error="policy_type is required", status_code=400),
-                    )
-                    return True
+                    policy_type = self.base_cfg.get("policy", {}).get("type", "openpi")
                 try:
                     policy_type = validate_policy_type(policy_type)
                 except ValueError as exc:

@@ -12,10 +12,13 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+"""server 子包 —— MotrixEdge HTTP API 服务。
 
-def inc(x):
-    return x + 1
+FastAPI 应用工厂 ``create_app(base_cfg)``；默认运行（``motrix-edge``，加载 config/edge.yml）中
+web 作为 node 的独立线程启动。
+"""
 
+from .app import CommandRequest, CommandResponse, create_app
+from .command import CommandError, CommandService
 
-def test_answer():
-    assert inc(3) == 4
+__all__ = ["create_app", "CommandRequest", "CommandResponse", "CommandError", "CommandService"]

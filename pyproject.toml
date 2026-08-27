@@ -16,7 +16,7 @@ dependencies = [
     "msgpack>=1.0.5",    # 推理客户端序列化
     "fastapi>=0.141.1",
     "uvicorn>=0.52.1",
-    "aiortc>=1.15.0",
+    "aiortc>=1.15.0,<2.0.0",  # 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），上限约束防升级静默失效
     "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
 ]
 

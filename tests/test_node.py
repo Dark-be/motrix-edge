@@ -29,6 +29,7 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
     CMD_ROBOT_TELEOP,
+    CMD_SESSION_RUN,
     Command,
     build_command_registry,
 )
@@ -281,6 +282,7 @@ def _patch_get_session(monkeypatch, captured):
     ):
         captured["session_type"] = session_type
         captured["adapter"] = adapter
+        captured["policy_type"] = policy_type
         return _FakeSelectSession()
 
     monkeypatch.setattr(node_mod, "get_session", fake_get_session)
@@ -302,6 +304,50 @@ def test_start_session_reuses_node_adapter(monkeypatch):
     assert node._task_thread is not None and node._task_thread.is_alive()  # 任务已启动
     node.session.stop()
     node._join_task_thread()
+
+
+def test_session_run_infer_defaults_policy_type_from_config(monkeypatch):
+    """READY 下 session run infer 不带 policy_type：缺省用配置 policy.type（不再 400）。
+
+    回归 review：HTTP /v1/infers 不带 policy_type 时契约「缺省用配置」，真实节点此前因
+    ``_on_ready`` 强制要求 policy_type 而 400（FakeNode 未校验掩盖了分歧）。
+    """
+    captured = {}
+    _patch_get_session(monkeypatch, captured)
+    node = EdgeNode({"policy": {"type": "openpi"}}, command_source=lambda: None)
+    node.initialize()  # INIT → IDLE
+    node.adapter = _FakeAdapter(available=True)  # 模拟 READY 已绑定
+    node.lifecycle.transition(NodeState.READY)
+    replies = []
+    node._dispatch(Command(CMD_SESSION_RUN, params={"session": "infer"}, reply_to=replies.append))
+    assert replies[-1].status == "ok"
+    assert captured["policy_type"] == "openpi"  # 缺省解析为配置 policy.type
+    assert node.state == NodeState.ACTIVE
+    node.session.stop()
+    node._join_task_thread()
+
+
+def test_session_run_infer_rejects_unregistered_policy_type(monkeypatch):
+    """READY 下 session run infer 携带未注册 policy_type：拒绝（400），不启动会话。"""
+    captured = {}
+    _patch_get_session(monkeypatch, captured)
+    node = EdgeNode({"policy": {"type": "openpi"}}, command_source=lambda: None)
+    node.initialize()  # INIT → IDLE
+    node.adapter = _FakeAdapter(available=True)  # 模拟 READY 已绑定
+    node.lifecycle.transition(NodeState.READY)
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_SESSION_RUN,
+            params={"session": "infer", "policy_type": "nonexistent"},
+            reply_to=replies.append,
+        )
+    )
+    result = replies[-1]
+    assert result.status == "rejected"
+    assert result.status_code == 400
+    assert captured.get("session_type") is None  # 被拒前短路，未启动会话
+    assert node.state == NodeState.READY  # 状态不受影响
 
 
 # ---------------------------------------------------------------------------

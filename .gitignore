@@ -13,6 +13,9 @@ wheels/
 .DS_Store
 node_modules
 
+# Web console（edge-console）是独立维护、频繁更新的 dev 工具，不入 edge 仓库版本控制
+frontend/edge-console/
+
 .ruff_cache
 
 code-quality-report.json
@@ -24,4 +27,5 @@ py-report.xml
 .pytest_cache
 data/
 logs/
-frontend/edge-console/
+
+

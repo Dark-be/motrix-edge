@@ -1,0 +1,22 @@
+# docker-compose.yml
+services:
+  edge:
+    image: edge:latest
+    container_name: edge-container
+    network_mode: host
+    privileged: true
+    # devices:
+    #   - "/dev/ttyACM0:/dev/ttyACM0"
+    #   - "/dev/ttyACM1:/dev/ttyACM1"
+    # runtime: nvidia
+    # environment:
+    #   - NVIDIA_VISIBLE_DEVICES=all
+    #   - NVIDIA_DRIVER_CAPABILITIES=all
+    volumes:
+      - /run/udev:/run/udev:ro
+      - /sys/bus/usb:/sys/bus/usb:ro
+      - /dev:/dev:rw
+      - /home/pc16/project:/root/workspace:rw
+    stdin_open: true
+    tty: true
+    command: "/bin/bash"
