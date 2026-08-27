@@ -55,29 +55,30 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 
 `UploadSession` 与 `CaptureSession`、`InferSession` 同属 `session/` 包，但不进入 EdgeNode 的机器人任务状态机。它扫描本地采集目录、配对 `.mcap` / `.json`、读取元数据并生成 episode 文件摘要；详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
 
-## CaptureSession（采集会话，观测会话）
+## CaptureSession（采集会话）
 
-基于 `RobotAdapter` 的**观测会话（无回合流程控制）**：
+基于 `RobotAdapter` 的**采集执行器（无回合流程控制）**：
 
--   `run()`：`adapter.reset()` → 等待就绪（期间可 `session quit` / `robot estop` / `robot reset`）
-    → 持续消费命令直到 `session quit` 退出。**显示观测由节点级持续写入 `frame_manager`**，
-    本会话不再 `observe` / 写 `frame_manager`——采集只负责驱动机器人进程采集（episode 起止）。
+-   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
+    **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
-    `robot teleop <bool>` 遥操作开关、`capture episode start/end` 控制一轮采集。
--   采集数据由适配器 / 进程自维护，Edge 只读共享内存观测并展示。
+    `robot teleop <bool>` 遥操作开关、`capture episode start/end` 控制一轮采集、
+    `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）。
+-   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 
 ## InferSession（推理会话）
 
 基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无回合概念，由 rollout 步进驱动）**：
 
--   `run()`：`adapter.reset()` + `policy.reset()` → **连接推理节点**（`_wait_connect`，可被打断，
-    未就绪持续重试）→ 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
+-   `run()`：`adapter.reset()` + `policy.reset()` → 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
+-   **连接推迟到显式命令**：进入会话**不连接**推理节点；`infer connect` **单次尝试**连接策略
+    服务器（成功回执含服务端 metadata；失败回执 error，连接状态保持未连接）。`infer rollout`
+    仅在已连接时可用（未连接 → 503）。
 -   `infer rollout [count]`：连续执行 `count` 次（缺省 1，范围 1–100）`obs = adapter.observe()` →
     `action = policy.infer(obs)` → `adapter.rollout(action)`；回执包含最后动作与动作列表。
     （`observe` 是**推理输入**；显示观测由节点级写入 `frame_manager`，会话不写。）
--   命令：`infer rollout [count]`、`session quit`（退出回 home）、`robot estop`、`robot reset`、
-    `robot execute`、`robot teleop`。
--   策略连接推迟到 `run()`（`_wait_connect`），避免同步连接阻塞 `session run` 命令回执。
+-   命令：`infer connect`、`infer rollout [count]`、`session quit`（退出回 home）、`robot estop`、
+    `robot reset`、`robot execute`、`robot teleop`。
 
 ## 相关文档
 

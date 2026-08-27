@@ -26,6 +26,7 @@ server 层不持有 / 不创建 / 不运行 EdgeNode：node 由 node 程序主�
 不复制。
 """
 
+import json
 import shutil
 
 import numpy as np
@@ -35,6 +36,7 @@ from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_SYNC,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     Command,
@@ -181,6 +183,20 @@ class CaptureService:
         result = self._submit(Command(CMD_SESSION_QUIT, meta={"lease_id": lease_id}), timeout=10.0)
         self._raise_on_rejected(result)
         return {"status": "accepted"}
+
+    def sync(self, meta: dict, lease_id: str | None = None) -> dict:
+        """同步采集元信息（采集员 / 任务名等）到机器人进程：submit ``capture sync``。
+
+        采集会话内消费：解析 meta JSON → ``adapter.sync_capture_meta``，进程保存一轮
+        数据时附加。受控操作：须持有有效租约。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        result = self._submit(
+            Command(CMD_CAPTURE_SYNC, params={"meta": json.dumps(meta or {})}, meta={"lease_id": lease_id})
+        )
+        self._raise_on_rejected(result)
+        return {"status": "accepted", "meta": result.data.get("meta")}
 
     def status(self) -> dict:
         """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据。"""

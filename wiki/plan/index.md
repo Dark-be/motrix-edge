@@ -15,5 +15,6 @@
 -   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
 -   [推理策略选择实施计划](./motrix_edge_policy_selection_plan.md)
 -   [UploadSession 实施计划](./motrix_edge_upload_session_plan.md)
+-   [Infer 连接显式化 + Capture 元信息同步实施计划](./motrix_edge_infer_connect_capture_sync_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->

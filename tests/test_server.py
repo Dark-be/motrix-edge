@@ -54,7 +54,7 @@ BASE_CFG = {
         "edge_name": "edge-test",
         "edge_version": "0.1.0",
     },
-    "adapter": {"host": "127.0.0.1", "port": 8090},
+    "discover": {"host": "127.0.0.1", "port": 8090},
 }
 
 

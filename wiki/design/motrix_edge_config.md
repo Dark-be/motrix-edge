@@ -12,7 +12,7 @@
 | ------------ | ------------------------------------------------------------------- |
 | `ROOT_DIR`   | 仓库根目录（本文件向上 4 级推导）                                   |
 | `CONFIG_DIR` | 配置目录（`ROOT_DIR/config`）                                       |
-| `DATA_PATH`  | 数据保存目录（采集产物）                                            |
+| `DATA_PATH`  | 数据目录（采集产物）                                                |
 | `LOG_PATH`   | 日志目录（`debug_print` 的 `logs/log_*.txt` 与 `logs/uvicorn.log`） |
 
 ## 配置加载
@@ -28,7 +28,7 @@
 | `lease`      | 租约 ttl / renew_interval                                                                                                                                    | lease          |
 | `server`     | HTTP 监听 host / port                                                                                                                                        | server         |
 | `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）                                                                                                             | node / adapter |
-| `capture`    | 观测频率 obs_freq（缺省 30 Hz）                                                                                                                              | CaptureSession |
+| `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                                                                            | node / CaptureSession |
 | `policy`     | 推理节点默认 host / port；策略类型、图像参数和 action_horizon 由客户端默认值或服务端 metadata 决定   | policy         |
 | `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                                                                            | UploadSession  |
 

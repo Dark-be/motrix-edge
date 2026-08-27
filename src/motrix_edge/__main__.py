@@ -91,9 +91,9 @@ def _run_node(args) -> None:
 
     debug_print(
         "EdgeNode",
-        "session run capture=启动采集  session run infer=启动推理 （选择+启动一步完成） \n"
-        "session quit=退出当前会话 | 推理单步: infer rollout \n"
-        "通用操作: node reset=节点复位/ERROR恢复  robot reset=机器人复位  robot estop=急停 \n"
+        "session run capture=启动采集  session run infer policy_type=<openpi|act>=选择策略并启动推理 \n"
+        "infer connect=连接推理节点 | 推理单步: infer rollout | capture sync --meta <json>=同步采集元信息 \n"
+        "session quit=退出当前会话 | 通用: node reset/robot reset/robot estop \n"
         f"web: http://{host}:{port} （node 的独立线程，接受外部 HTTP 请求）",
         "INFO",
     )

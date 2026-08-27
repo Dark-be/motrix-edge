@@ -31,8 +31,7 @@ policy/
 ## BasePolicyClient
 
 最小接口：`connect()`（初始化传输、读取服务端 metadata）、`infer(observation)`（输入观测返回
-动作）、`drain()`（只消费当前缓存的 action chunk，不发新推理请求；无缓存返回 None）、
-`reset()`（清空策略状态，如动作块缓存）、`disconnect()`。子类实现具体策略。
+动作）、`reset()`（清空策略状态，如动作块缓存）、`disconnect()`。子类实现具体策略。
 
 ## 传输层（MsgpackTransport）
 
@@ -131,13 +130,13 @@ policy:
 推理节点地址（`policy.host` / `policy.port`）既可由 `config/edge.yml` 静态配置，也可在
 运行期经命令总线动态设置（前端推理卡片设置推理端 ip / 端口后，edge 下次启动推理会话生效）：
 
-| 命令                 | 位置参数 | 语义                                                    | 状态可用性 |
-| -------------------- | -------- | ------------------------------------------------------- | ---------- |
-| `infer ip`           | —        | 查询当前推理节点 IP                                     | 全局       |
-| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）             | 全局       |
-| `infer port`         | —        | 查询当前推理节点端口                                    | 全局       |
-| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`）            | 全局       |
-| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内     |
+| 命令                 | 位置参数 | 语义                                         | 状态可用性 |
+| -------------------- | -------- | -------------------------------------------- | ---------- |
+| `infer ip`           | —        | 查询当前推理节点 IP                          | 全局       |
+| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）  | 全局       |
+| `infer port`         | —        | 查询当前推理节点端口                         | 全局       |
+| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`） | 全局       |
+| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内  |
 
 -   配置为**内存态**（写入 `base_cfg["policy"]`，不写回 yaml），下次 `session run infer`
     实例化策略客户端时生效；推理会话进行中设置仅对下一会话生效。

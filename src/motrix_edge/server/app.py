@@ -477,6 +477,11 @@ def create_app(
         policy_type = req.policy_type if req is not None else None
         return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type))
 
+    @app.post("/v1/infers/connect")
+    async def infers_connect(x_lease_id: str | None = Header(default=None)):
+        """单次尝试连接推理节点（infer connect）。须已在推理会话且持有租约。"""
+        return _infer_call(lambda: _infers().connect(lease_id=x_lease_id))
+
     @app.post("/v1/infers/rollout")
     async def infers_rollout(x_lease_id: str | None = Header(default=None)):
         """单步推理闭环（infer rollout）：上传观测 → 推理 → 下发动作。须已在推理会话且持有租约。"""
