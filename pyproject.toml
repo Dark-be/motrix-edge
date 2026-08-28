@@ -17,6 +17,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "uvicorn>=0.52.1",
     "aiortc>=1.15.0",
+    "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
 ]
 
 [dependency-groups]
@@ -27,11 +28,18 @@ dev = [
     "ruff",
 ]
 
-# 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装。
-# CLI（console script `motrix-edge`）与 Robot Adapter entry point 随任务运行时
-# （feat/6）一并注册，此处脚手架阶段不声明（避免指向尚未落地的模块）。
+# 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装，
+# 并通过 console script `motrix-edge` 提供命令行入口。
 [tool.uv]
 package = true
+
+[project.scripts]
+motrix-edge = "motrix_edge.__main__:main"
+
+# Robot Adapter 注册：entry point 名 = 适配器类型（adapter.type）。
+# 外部 SDK / 包同样在此 group 下注册自己的 RobotAdapter，核心无需改动。
+[project.entry-points."motrix_edge.adapters"]
+test_robot = "motrix_edge.adapter.test_adapter:TestRobotAdapter"
 
 [[tool.uv.index]]
 name = "motphys"

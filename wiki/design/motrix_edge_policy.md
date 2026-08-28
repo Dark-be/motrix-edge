@@ -3,13 +3,14 @@
 ## 摘要
 
 `policy/` 提供通用的「网络推理客户端」抽象：边缘节点收集 observation 后经它发给推理节点并
-取回动作。**传输层与格式契约解耦**，使不同推理策略（openpi / act / 自研）可插拔；由
-`get_policy(base_cfg)` 按配置 `policy.type` **懒加载**实例化（依赖第三方包，避免导入
-`motrix_edge` 时缺依赖报错）。
+取回动作。**传输层与格式契约解耦**，使不同推理策略（openpi / act / 自研）可插拔；进入推理
+会话时显式选择注册表中的 `policy_type`，由 `get_policy(base_cfg, policy_type=...)`
+**懒加载**实例化（依赖第三方包，避免导入 `motrix_edge` 时缺依赖报错）。
 
 ## 目标与原则
 
--   生命周期由 `InferSession` 驱动：`session_start` 时 `connect`，`session_finish` 时 `disconnect`。
+-   生命周期由 `InferSession` 驱动：**显式 `infer connect` 单次触发 `connect`**，`session_finish` 时 `disconnect`；
+    进入推理会话不自动连接。
 -   一问一答阻塞式：`infer(obs)` 上传观测 → 返回单步动作；异常返回 `None` 供上层跳过。
 -   注册式懒加载：`POLICY_REGISTRY` 登记策略类型，`get_policy()` 选中时才 `import`（连带加载依赖）。
 
@@ -23,13 +24,15 @@ policy/
 ├── msgpack_numpy.py  # numpy 数组安全序列化（msgpack 扩展，对象数组不回落 pickle）
 ├── contract.py       # 格式契约：消息 key 常量 + build_observation / extract_action / 图像编码
 ├── broker.py         # ActionChunkBroker：动作块逐帧下发（[horizon, dim] → 单步）
-└── openpi/           # OpenPIClient：按 openpi 契约实现（wire 与服务端完全兼容）
+├── openpi/           # OpenPIClient：openpi 默认图像尺寸 224×224
+└── act/              # ACTClient / ACT7DofClient：ACT 默认图像尺寸 640×480
 ```
 
 ## BasePolicyClient
 
 最小接口：`connect()`（初始化传输、读取服务端 metadata）、`infer(observation)`（输入观测返回
-动作）、`reset()`（清空策略状态，如动作块缓存）、`disconnect()`。子类实现具体策略。
+动作）、`drain()`（只消费当前缓存的 action chunk，不发新推理请求；无缓存返回 None）、
+`reset()`（清空策略状态，如动作块缓存）、`disconnect()`。子类实现具体策略。
 
 ## 传输层（MsgpackTransport）
 
@@ -57,31 +60,105 @@ policy/
 
 ## ActionChunkBroker
 
-动作块逐帧下发：`step(chunk)` 每次只取当前步动作，块耗尽后再请求服务端；单步动作（`[dim]`）
-透传不切片；`reset()` 清空缓存。
+动作块逐帧下发，**块耗尽后才由调用方向推理端请求新块**（与 openpi-client 语义一致）：
 
-## OpenPIClient
+-   `empty`：当前无可用动作块（True = 调用方需向推理端请求新块并 `feed`）。
+-   `feed(chunk)`：存入新动作块（仅在 `empty` 时调用）。
+-   `step()`：消耗缓存块的当前步动作（**不触发网络请求**）；单步动作（`[dim]`）透传不切片。
+-   `reset()`：清空缓存。
 
-按 openpi 契约实现，流程与服务端完全兼容（服务端无需改动）：
+## OpenPIClient 与 ACTClient
 
--   `connect()`：websocket 连接，接收 metadata（含 `action_horizon`）→ 初始化 `ActionChunkBroker`。
--   `infer(obs)`：组装观测 → `transport.request` → 从动作块切片返回单步动作。
+`OpenPIClient` 和 `ACTClient` 共享同一 WebSocket + MsgPack 传输与动作块消费流程：
+
+-   `connect()`：websocket 连接，接收 metadata（含 `action_horizon`），保存为客户端
+    `server_metadata` 并初始化 `ActionChunkBroker`；连接失败或断开后清空。
+-   `infer(obs)`：**仅当动作块耗尽（`broker.empty`）时**组装观测 → `transport.request` 取新动作块；
+    其余步骤直接 `broker.step()` 消耗缓存块（一个动作块支撑 horizon 步推理，期间不访问推理端）。
 -   `reset()`：清空动作块缓存；`disconnect()`：关闭传输。
+
+两者当前的协议字段相同，差异是默认图像输入尺寸：
+
+| 客户端          | 注册类型  | 默认 `image_size`                  |
+| --------------- | --------- | ---------------------------------- |
+| `OpenPIClient`  | `openpi`  | `[224, 224]`                       |
+| `ACTClient`     | `act`     | `[480, 640]`（图像宽 640、高 480） |
+| `ACT7DofClient` | `act7dof` | `[480, 640]`（同 ACT）             |
+
+ACT 可通过 `policy.image_size` 覆盖默认值；其余观测键、响应键和 `action_horizon` 约定不变。
+
+### ACT7DofClient（act7dof）
+
+固定输入布局的 ACT 变体：在通用 `ACTClient` 基础上增加五项**可配置约束**，用于适配
+「7 维 qpos + 2 相机」这类固定拓扑：
+
+-   `qpos_dim`（默认 7）：推理前校验**发送 qpos** 的维度，不匹配即抛错，避免把错误
+    维度的观测发到推理端（防御性校验）。
+-   `qpos_indices`（默认空）：从观测 `observations/qpos` 中按索引挑选 / 重排维度
+    （如从 14 维双臂观测取单臂 `[0..6]`）；空则用全量。
+-   `cameras`（默认空）：**从 adapter 已有相机观测键中挑选**要发送的相机名列表；空则
+    发送全部 `observations/images/*`（回退通用行为）。
+-   `action_indices`（默认空）：模型输出 action 映射回机器人**完整动作空间**的下标；
+    空则透传模型输出。
+-   `action_fill`（默认空）：未覆盖维度（如另一臂）的填充值 —— **home 位姿**，标量
+    广播或按未覆盖下标顺序的 list；缺省 0，**不跟随当前 qpos**。
+
+图像尺寸 / 格式与 `action_horizon` 约定同 `ACTClient`。配置示例：
+
+```yaml
+policy:
+    type: act7dof
+    qpos_dim: 7
+    qpos_indices: [0, 1, 2, 3, 4, 5, 6] # 从 14 维观测取单臂
+    action_indices: [0, 1, 2, 3, 4, 5, 6] # 模型 action 填充回 14 维
+    action_fill: [0, 0, 0, 0, 0, 0, 0] # 另一臂 home 位姿（未覆盖维度）
+    cameras: [cam_left, cam_right] # 从 adapter 观测键挑选
+```
 
 ## 配置（policy 段）
 
 ```yaml
 policy:
-    type: openpi # 策略类型（注册表键；缺省 openpi）
-    host: 0.0.0.0 # 推理节点地址
-    port: 8765 # 推理节点端口
-    api_key: <可选鉴权>
-    image_size: [224, 224] # 约定图像尺寸
-    image_format: jpeg # jpeg（默认） | uint8
-    action_horizon: <可选，服务端 metadata 未提供时使用>
+    host: 0.0.0.0 # 推理节点默认地址
+    port: 8765 # 推理节点默认端口
+```
+
+策略类型、图像尺寸、图像格式和 `action_horizon` 由具体策略客户端的默认值或服务端 metadata
+决定；进入推理会话时必须显式选择已注册策略。`infer ip` / `infer port` 仅修改上述默认端点。
+
+## 运行时端点配置（infer ip / infer port）
+
+推理节点地址（`policy.host` / `policy.port`）既可由 `config/edge.yml` 静态配置，也可在
+运行期经命令总线动态设置（前端推理卡片设置推理端 ip / 端口后，edge 下次启动推理会话生效）：
+
+| 命令                 | 位置参数 | 语义                                                    | 状态可用性 |
+| -------------------- | -------- | ------------------------------------------------------- | ---------- |
+| `infer ip`           | —        | 查询当前推理节点 IP                                     | 全局       |
+| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）             | 全局       |
+| `infer port`         | —        | 查询当前推理节点端口                                    | 全局       |
+| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`）            | 全局       |
+| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内     |
+
+-   配置为**内存态**（写入 `base_cfg["policy"]`，不写回 yaml），下次 `session run infer`
+    实例化策略客户端时生效；推理会话进行中设置仅对下一会话生效。
+-   端点是 Edge 级配置（与节点状态机解耦），任何状态（IDLE / READY / ACTIVE / ERROR）均可用。
+-   HTTP 经 `/v1/commands` capability（`infer_ip` / `infer_port` / `infer_ip_set` /
+    `infer_port_set`）走同一命令总线，本地 CLI 与前端行为一致；当前配置端点由
+    `/v1/infers` status 的 `endpoint` 字段回读。
+
+## 虚拟推理端点（scripts/test_infer_point.py）
+
+无真实推理的模拟 openpi 策略服务端（联调用）：运行在指定 ip / 端口，连接后先下发 metadata
+（含 `action_horizon`），每个请求返回一段**有界随机游走**的 action chunk（`[horizon, dim]`），
+用于在无真实模型时验证「edge → 推理端」传输契约与 `ActionChunkBroker` 逐帧切片。与 Edge 的
+耦合仅限 wire 契约（`contract` / `msgpack_numpy`），可独立运行：:
+
+```
+uv run python scripts/test_infer_point.py --host 0.0.0.0 --port 8765 --action-dim 14 --action-horizon 16
 ```
 
 ## 相关文档
 
 -   推理会话（消费 policy）：[会话（session）](./motrix_edge_session.md)
+-   命令总线（infer ip/port 命令）：[命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   代码入口：`src/motrix_edge/policy/` —— 随 **feat/6**（任务运行时核心）落地

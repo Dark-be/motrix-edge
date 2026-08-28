@@ -10,7 +10,7 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 ## 目标
 
--   `FrameManager` 单点缓存最新帧（线程安全）：session 每帧写入，preview / WebRTC 读取。
+-   `FrameManager` 单点缓存最新帧（线程安全）：**node 持续观测写入**，preview / WebRTC 读取。
 -   WebRTC 标准信令（offer / answer）推流；浏览器 `<video>` 直接播放。
 -   观测语义（observe 只读缓存、不采集）见 [机器人适配器（adapter）](./motrix_edge_adapter.md)。
 
@@ -24,16 +24,16 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 ## 预览（GET /v1/preview）
 
-| 端点              | 说明                                                                                 |
-| ----------------- | ------------------------------------------------------------------------------------ |
-| `GET /v1/preview` | 最新观测：session state / adapter 身份 / observation（qpos + action + 摄像头名列表） |
+| 端点              | 说明                                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| `GET /v1/preview` | 最新观测：状态（有会话取会话状态，否则节点状态）/ adapter 身份 / observation（qpos + action + 摄像头名列表） |
 
 响应：
 
 ```json
 {
     "state": "ready",
-    "adapter": { "id": "test_robot", "name": "Test Robot", "type": "test_robot" },
+    "adapter": { "name": "Test Robot", "type": "test_robot" },
     "observation": {
         "qpos": [0.1, 0.2],
         "action": [0.1, 0.2],
@@ -44,7 +44,7 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 -   **图像不内联**：HTTP JSON 不承载二进制，图像（jpeg）由 WebRTC 推流到前端，preview 只返回
     摄像头名列表；qpos / action 为 `ndarray → list`。
--   受控操作：须持有有效租约（`X-Lease-Id`）；无会话 → `409`；无观测 → observation 为空。
+-   受控操作：须持有有效租约（`X-Lease-Id`）；观测由节点级持续写入 **frame_manager（无需进入会话）**；无观测 → observation 为空。
 
 ## WebRTC 推流
 
@@ -60,6 +60,11 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 -   **每路相机一个 track**：`FrameStreamTrack(frame_manager, camera_name)` 从 `FrameManager.latest()`
     取指定相机帧（观测图像 jpeg → 解码 RGB → `av.VideoFrame`）；无相机观测时兜底推一路空白帧。
+-   **每路相机独立 msid**：aiortc 把同一 PC 的所有 track 归入**同一个 MediaStream**（PC 级
+    `__stream_id`），answer 各 m= 段 msid 流 id 相同 → 浏览器把多路视频轨并入同一 stream，前端
+    所有 `<video>` 显示同一路。修复：`setRemoteDescription` 后、`createAnswer` 前，为每路 video
+    sender 覆盖**独立** `_stream_id`（aiortc 生成 answer 时读取），使每路 track 有独立 msid →
+    浏览器分别为每路相机建 MediaStream（逐相机分离显示）。
 -   **无新帧重发最近一帧**（缓存 `_last_rgb`，避免黑帧闪烁）；按 30fps 节流对齐 PTS。
 -   **必须交换含候选的 SDP**：aiortc 的 ICE 候选在 `setLocalDescription` 内部 gather 后才写入
     `localDescription.sdp`；返回 `pc.localDescription.sdp`（而非 createAnswer 的原始 SDP），否则
@@ -91,5 +96,4 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 -   观测语义：[机器人适配器（adapter）](./motrix_edge_adapter.md)
 -   会话写入帧缓存：[会话（session）](./motrix_edge_session.md)
--   WebRTC 端点注册：[HTTP 控制面（server）](./motrix_edge_server.md)
--   代码入口：`src/motrix_edge/frame/`（**feat/6**）、`src/motrix_edge/server/webrtc.py`（**feat/3**）—— 随对应分支落地
+-   代码入口：`src/motrix_edge/frame/`（**feat/6**）；WebRTC 推流（`server/webrtc.py`）随 **feat/3** 落地

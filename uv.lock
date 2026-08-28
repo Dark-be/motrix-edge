@@ -551,6 +551,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiortc" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "msgpack" },
     { name = "numpy", version = "2.2.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version == '3.11.*'" },
@@ -574,6 +575,7 @@ dev = [
 requires-dist = [
     { name = "aiortc", specifier = ">=1.15.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "msgpack", specifier = ">=1.0.5" },
     { name = "numpy" },
     { name = "opencv-python-headless" },

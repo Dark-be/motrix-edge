@@ -42,10 +42,15 @@ stateDiagram-v2
 
 `EdgeNode.run()` 阻塞监听命令并驱动 `_tick()` 周期任务：
 
--   **IDLE**：周期 `discover_adapter(host, port)` 探测机器人进程；失败**持续重试等待上线**，不报错。
+-   **IDLE**：周期 `discover_adapter(host, port)` 探测机器人进程，地址来自 `adapter.host` / `adapter.port`；失败**持续重试等待上线**，不报错。
 -   **READY / ACTIVE**：周期 `adapter.health()` 检查心跳；进程失联 → ERROR。
+-   **READY / ACTIVE**：节点级**持续观测**（`adapter.observe()` → `frame_manager`），观测
+    **不依赖进入会话**——已绑定 adapter 即可预览 / 推流；**显示观测统一归节点**，会话不再
+    写 frame_manager（采集会话不 observe；推理会话 observe 仅作推理输入）。
 -   **ACTIVE + capture**：周期刷新采集数据状态缓存（`adapter.data_status()`），server 状态只读缓存，
     **不因前端轮询而实时请求 SDK**（edge 运行不依赖前端）。
+-   **ACTIVE + capture**：周期刷新采集状态缓存（`adapter.capture_status()`，采集员 / 任务名等元信息 + 运行位），
+    server 状态只读缓存，**不因前端轮询而实时请求 SDK**。
 
 ## 命令分发
 

@@ -1,27 +1,18 @@
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
-# Edge 本地设备身份声明（引用，非权威；权威在 MotrixConsole）
-identity:
-  edge_id: edge-test-001
-  edge_name: edge-test
-  edge_version: "0.1.0"
+# 机器人进程发现：Edge 向固定端口发 POST /v1/discover 寻找机器人进程；进程启动后
+# 自描述返回 id / name / type / 能力 / 相机 / 控制器等（见 wiki/design/motrix_edge_adapter.md）
+discover:
+  host: 127.0.0.1
+  port: 8090
 
-adapter: # Edge 声明的支持适配器列表（只声明身份；能力 / 行为参数由适配器自身内置定义）
-  - id: test_robot
-    name: Test Robot
-    type: test_robot
-
-# Edge 级租约配置（受控 HTTP 操作须持有租约；Console 定时续租保持租约活跃）
-lease:
-  ttl: 120 # 租约有效期（秒）：到期未续租则失效，Console 需重新激活
-  renew_interval: 60 # 建议续租间隔（秒）：Console 每 renew_interval 续租一次
-
-# MotrixEdge HTTP 服务监听配置（node 主线程内嵌的 web 线程使用）
-server:
-  host: 0.0.0.0
-  port: 8000
-
-capture:
-  start_episode_idx: 0
-  num_episode: 50
-  obs_freq: 30
+# 推理策略客户端（见 wiki/design/motrix_edge_policy.md）：host / port 可在运行期经
+# infer ip / infer ip set / infer port / infer port set 命令覆盖（内存态，下次
+# session run infer 生效）；test_infer_point.py 为无真实推理的虚拟 openpi 端点。
+policy:
+  type: openpi # 策略类型（注册表键；缺省 openpi）
+  host: 0.0.0.0 # 推理节点地址（前端推理卡片可运行时设置）
+  port: 8765 # 推理节点端口（前端推理卡片可运行时设置）
+  image_size: [224, 224] # 约定图像尺寸
+  image_format: jpeg # jpeg（默认） | uint8
+  # action_horizon: 16 # 可选，服务端 metadata 未提供时使用

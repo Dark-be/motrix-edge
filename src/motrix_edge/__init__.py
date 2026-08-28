@@ -14,7 +14,17 @@
 
 """motrix_edge —— 机器人边缘节点（任务运行时层）。
 
-包骨架：公共 API（EdgeNode / NodeLifecycle / NodeState / get_adapter / get_session）
-与 CLI（``motrix-edge``）随任务运行时（task-runtime）MR 落地；此处仅提供可导入的
-最小包骨架，供脚手架阶段安装 / 构建验证。
+对现有机器人的二次抽象：边缘节点作为任务运行时，负责收集 observation 并**主动请求**
+推理节点（Endpoint）返回 action，本地校验后限速执行；任务生命周期由控制面（Console）驱动。
+
+核心入口：
+    EdgeNode      节点生命周期控制器（唯一节点入口/启动对象）
+    get_adapter   机器人适配器工厂（硬件抽象层，entry point 发现）
+    get_session   会话工厂（capture / infer）
 """
+
+from motrix_edge.adapter import get_adapter
+from motrix_edge.node import EdgeNode, NodeLifecycle, NodeState
+from motrix_edge.session import get_session
+
+__all__ = ["EdgeNode", "NodeLifecycle", "NodeState", "get_adapter", "get_session"]

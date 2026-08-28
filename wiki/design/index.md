@@ -14,10 +14,6 @@
 -   [推理策略客户端（policy）](./motrix_edge_policy.md)
 -   [命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)
--   [HTTP 控制面（server）](./motrix_edge_server.md)
--   [设备身份（identity）](./motrix_edge_identity.md)
--   [Edge 级租约（lease）](./motrix_edge_lease.md)
 -   [配置与命令行（config / CLI）](./motrix_edge_config.md)
--   [Edge Web Console（前端）](./motrix_edge_web_console.md)
 
 <!-- 新增设计文档后在此登记标题链接。 -->

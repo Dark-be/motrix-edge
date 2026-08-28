@@ -4,7 +4,7 @@
 
 `adapter/` 是**机器人硬件抽象层（HAL）**：核心（session / server / CLI）只依赖 `RobotAdapter`
 接口与 **entry point 发现**；具体机器人由外部 SDK / 包实现本接口并注册。适配器是**薄客户端**：
-身份来自机器人进程 discover（`id` / `name` / `type`），能力与连接参数由 adapter **类级常量**定义，
+身份来自机器人进程 discover（`name` / `type`），能力与连接参数由 adapter **类级常量**定义，
 指令经 HTTP 转发进程、观测经共享内存读取（SDK 自维护硬件与连接）。
 
 ## 目标与原则
@@ -20,7 +20,7 @@
 ```
 adapter/
 ├── __init__.py        # discover_adapter / get_adapter / robot_adapters / adapter_details（工厂 + entry point 发现）
-├── base.py            # RobotAdapter ABC + AdapterCapability / RobotCapabilities / HealthStatus / CaptureData / DiscoveredRobot + 观测键契约
+├── base.py            # RobotAdapter ABC + AdapterCapability / RobotCapabilities / HealthStatus / CaptureData / CaptureStatus / DiscoveredRobot + 观测键契约
 ├── http_contract.py   # adapter ↔ SDK 进程的 HTTP 指令契约（端点 + body 字段单点定义）
 ├── shm_contract.py    # adapter ↔ SDK 进程的共享内存观测契约（ObsShmReader / ObsShmWriter）
 ├── test_adapter.py    # TestRobotAdapter（测试 / 无硬件联调；HTTP + 共享内存薄客户端）
@@ -39,7 +39,9 @@ adapter/
 | observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行** |
 | execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                |
 | teleop          | `set_teleop(enabled)`               | 设置遥操作开关（true=遥操作 / false=程控）；默认 no-op                       |
-| data_status     | `data_status()`                     | 采集数据状态：数据保存路径 + 数据列表（采集会话预留）                        |
+| data_status     | `data_status()`                     | 采集数据状态：数据目录 + 数据列表（采集会话预留）                            |
+| capture status  | `capture_status()`                  | 采集状态：机器人进程当前采集元信息（采集员 / 任务名等）+ 运行位（默认 None） |
+| capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                     |
 | capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                           |
 | rollout         | `rollout(action)`                   | 推理闭环：接收模型 action，经 HTTP 转发进程限速靠近                          |
 | safe_stop       | `safe_stop()`                       | 安全停止（幂等、失败安全）                                                   |
@@ -71,13 +73,13 @@ class AdapterCapability(str, Enum):
     `InferSession` 要求 EXECUTE，不支持 → `ValueError`）。
 -   一个适配器可同时声明多种能力（如 `TestRobotAdapter`：CAPTURE + EXECUTE + STREAMING）。
 
-## Discover 驱动（身份参数化）
+## Adapter 驱动（身份参数化）
 
-Edge 配置**不含** adapter 身份，只配置「在哪里找」（`discover` 段 host/port，缺省
-`127.0.0.1:8090`）：
+Edge 配置**不含** adapter 身份，只配置「在哪里找」（`adapter` 段 host/port，缺省
+`127.0.0.1:8090`）。Adapter 内部仍通过 `/v1/discover` 完成机器人进程探活与身份获取：
 
 ```yaml
-discover:
+adapter:
     host: 127.0.0.1
     port: 8090
 ```
@@ -89,20 +91,20 @@ discover:
 ```json
 {
     "status": "accepted",
-    "robot": { "id": "test_robot", "name": "Test Robot", "type": "test_robot", "running": true }
+    "robot": { "name": "Test Robot", "type": "test_robot", "running": true }
 }
 ```
 
--   `id` / `name` / `type`：adapter 身份；`type` = adapter 类 entry point 名（用于加载并实例化）。
+-   `name` / `type`：adapter 身份；`name` 供展示，`type` = adapter 类 entry point 名（用于加载并实例化）。
 -   `running`：进程是否运行（False = 未就绪，Edge 不绑定）。
--   `DiscoveredRobot` dataclass（`base.py`）只保留 `id` / `name` / `type`。
+-   `DiscoveredRobot` dataclass（`base.py`）只保留 `name` / `type`。
 
 ### 工厂（adapter/**init**.py）
 
 | 函数                                                     | 职责                                                                                                                                |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `discover_adapter(host, port, required_capability=None)` | 发 `POST /v1/discover` 找进程；找到则**一步完成实例化**并返回 `RobotAdapter`；不可达 / 未运行 / 实例化失败 → `None`（节点持续重试） |
-| `get_adapter(discovered, required_capability=None)`      | **只做实例化**：按 `discovered.type` 经 entry point `load()` 实例化 `cls(name=..., id=...)`；类型未注册 → `ValueError`              |
+| `get_adapter(discovered, required_capability=None)`      | **只做实例化**：按 `discovered.type` 经 entry point `load()` 实例化 `cls(name=...)`；类型未注册 → `ValueError`                      |
 | `robot_adapters(required_capability=None)`               | 列出已注册适配器 `[(type, class, module)]`；缺省不触发类加载                                                                        |
 | `adapter_details()`                                      | **静态列出全部**注册适配器 `[{type, available, capabilities}]`（不 discover / 不探活；缺 SDK 跳过）；暴露为 `GET /v1/adapters`      |
 
@@ -119,7 +121,9 @@ discover:
 | POST | `/v1/rollout`                           | `{action: [dim]}` | `{status}`                                             |
 | POST | `/v1/teleop`                            | `{enabled}`       | `{status}`                                             |
 | POST | `/v1/safe_stop`                         | —                 | `{status}`                                             |
-| GET  | `/v1/data_status`                       | —                 | `{save_dir, data_files, running}`                      |
+| GET  | `/v1/data_status`                       | —                 | `{data_dir, data_files, running}`                      |
+| GET  | `/v1/capture/status`                    | —                 | `{running, operator, task_name, meta}`                 |
+| POST | `/v1/capture/sync`                      | `{meta}`          | `{status}`                                             |
 | POST | `/v1/capture/start` / `/v1/capture/end` | —                 | `{status}`                                             |
 
 -   **共享内存观测上行**（`shm_contract.py`）：SDK 进程按 `run_hz` 持续把观测（raw RGB + 关节）
@@ -129,12 +133,13 @@ discover:
 
 -   **TestRobotAdapter**（`test_adapter.py`）：测试 / 无硬件联调桩，HTTP + 共享内存薄客户端，
     能力 CAPTURE + EXECUTE + STREAMING；`IMAGES` = cam_head / cam_left_wrist / cam_right_wrist。
--   **DualPiperAdapter**（`dual_piper_adapter.py`）：双臂 Piper 骨架（预留接口，方法体
-    `NotImplementedError` 占位，未接实机 SDK）；能力声明同 Test。
+-   **DualPiperAdapter**（`dual_piper_adapter.py`）：双臂 Piper HTTP + 共享内存薄客户端，
+    动作维度 14，能力 CAPTURE + EXECUTE + STREAMING；HTTP 转发控制指令，读取
+    `dual_piper_obs` 共享内存并将三路 raw RGB 相机帧编码为 JPEG。
 
 ## 接入方式（外部 SDK / 包）
 
-1. 实现 `RobotAdapter` 子类（构造函数接收身份 `name` / `id`，`type` 由类常量 `ADAPTER_TYPE` 确定；
+1. 实现 `RobotAdapter` 子类（构造函数接收展示名称 `name`，`type` 由类常量 `ADAPTER_TYPE` 确定；
    声明类级 `CAPABILITIES` 与连接 / 能力类常量）。
 2. 在外部包 `pyproject.toml` 声明 entry point（名 = adapter 类型）：
 

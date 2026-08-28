@@ -39,30 +39,25 @@
 | `session/`          | 会话（Capture / Infer）与工厂                   | [会话（session）](./motrix_edge_session.md)                  |
 | `policy/`           | 推理策略客户端（openpi 等）                     | [推理策略客户端（policy）](./motrix_edge_policy.md)          |
 | `frame/`            | FrameManager 观测帧缓存                         | [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md) |
-| `server/`           | FastAPI HTTP 控制面（/v1/\*）                   | [HTTP 控制面（server）](./motrix_edge_server.md)             |
-| `identity/`         | Edge 本地设备身份声明                           | [设备身份（identity）](./motrix_edge_identity.md)            |
-| `lease/`            | Edge 级租约机制                                 | [Edge 级租约（lease）](./motrix_edge_lease.md)               |
 | `utils/commands.py` | 命令模型 / 解析 / 传输（CommandBus）            | [命令总线（CommandBus）](./motrix_edge_command_bus.md)       |
 | `config/`           | 全局路径常量 + yaml 配置                        | [配置与命令行](./motrix_edge_config.md)                      |
 
 ## 拓扑与数据流
 
 ```
-Console / 浏览器 ──HTTP──▶ server（web 线程）──CommandBus.submit──▶ EdgeNode（主线程）
-                                                                     │
-        CLI 键盘 ──CommandBus.push───────────────────────────────────┤
-                                                                     ▼
-                              session（Capture / Infer）──RobotAdapter──▶ 机器人进程
-                                                                     │
-                              policy（InferSession 内）──ws──▶ 推理节点（Endpoint）
+        CLI 键盘 ──CommandBus.push──▶ EdgeNode（主线程）
+                                         │
+                                         ▼
+                      session（Capture / Infer）──RobotAdapter──▶ 机器人进程
+                                         │
+                      policy（InferSession 内）──ws──▶ 推理节点（Endpoint）
 ```
 
--   **启动**：`motrix-edge run` = node 主线程持续运行 `EdgeNode`（CLI 按键保留）+ web 作为独立线程跑 FastAPI；web 经共享 `CommandBus` 驱动 node，不持有 node。
+-   **启动**：`motrix-edge run` = node 主线程持续运行 `EdgeNode`（CLI 按键驱动命令）。
 -   **adapter 生命周期归节点**：IDLE 探测绑定 → READY → 任务间保持 → ERROR 恢复释放；会话复用注入的 adapter。
 -   **会话选定即进入 ACTIVE**（`session run <type>` 一步完成）；`session quit` 退出回 READY。
 
 ## 相关文档
 
--   前端：[Edge Web Console](./motrix_edge_web_console.md)
--   代码入口：`src/motrix_edge/__main__.py`（CLI）、`src/motrix_edge/node.py`（EdgeNode）—— 随 **feat/6**（node / CLI）与 **feat/3**（server）落地
+-   代码入口：`src/motrix_edge/__main__.py`（CLI）、`src/motrix_edge/node.py`（EdgeNode）—— 随 **feat/6** 落地
 -   计划：[开发计划](../plan/motrix_edge_development_plan.md)

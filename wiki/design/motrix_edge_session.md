@@ -3,14 +3,15 @@
 ## 摘要
 
 `session/` 是**被节点启停的任务执行器**：不实现节点生命周期，只实现任务流程。`BaseSession`
-定义最小接口（`session_start` / `run` / `session_finish` / `safe_stop`），`CaptureSession`
-与 `InferSession` 是两个内置实现，由 `get_session()` 工厂按命令 / 配置选择性实例化。会话
-**复用节点注入的 adapter**（生命周期归节点），不自行实例化。
+定义最小接口（`session_start` / `run` / `session_finish` / `safe_stop`），`CaptureSession`、`InferSession` 和 `UploadSession` 位于同一 `session/` 包。
+其中 `CaptureSession` 与 `InferSession` 是由 `get_session()` 工厂选择的机器人任务会话，
+复用节点注入的 adapter；`UploadSession` 是独立的本地文件管理会话，不进入 EdgeNode
+任务状态机，通过 `UploadSession` 直接实例化。
 
 ## 目标与原则
 
 -   **会话 = 任务环境**：`session run <type>` 一步完成「选择 + 启动」→ ACTIVE；`session quit`
-    退出回 READY。租约**独立于任务**（Edge 级，见 [lease](./motrix_edge_lease.md)），session 只消费。
+    退出回 READY。租约**独立于任务**（Edge 级，随 feat/3 落地），session 只消费。
 -   **命令驱动**：会话在 `run()` 循环内消费命令（`session quit` / `robot estop` / `robot execute` 等）。
 -   **adapter 注入**：`get_session(..., adapter=node.adapter)`；会话按能力校验（capture 要求
     CAPTURE，infer 要求 EXECUTE），不支持 → `ValueError`。
@@ -46,28 +47,37 @@ session.safe_stop()      # 安全停止（幂等、失败安全；委托 adapter
 从 `SESSION_REGISTRY` 按 `session_type`（capture / infer，缺省用配置 `session.type`，再缺省
 capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配置 `policy.type`）。
 
-## CaptureSession（采集会话，观测会话）
+## CaptureSession（采集会话）
 
-基于 `RobotAdapter` 的**观测会话（无回合流程控制）**：
+基于 `RobotAdapter` 的**采集执行器（无回合流程控制）**：
 
--   `run()`：`adapter.reset()` → 等待就绪（期间可 `session quit` / `robot estop` / `robot reset`）
-    → 按 `obs_freq`（缺省 30 Hz）持续读 `adapter.observe()` 写入 `FrameManager`（供 preview /
-    WebRTC 消费）。
+-   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
+    **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
-    `robot teleop <bool>` 遥操作开关、`capture episode start/end` 控制一轮采集。
--   采集数据由适配器 / 进程自维护，Edge 只读共享内存观测并展示。
+    `robot teleop <bool>` 遥操作开关、`capture episode start/end` 控制一轮采集、
+    `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）。
+-   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 
 ## InferSession（推理会话）
 
 基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无回合概念，由 rollout 步进驱动）**：
 
--   `run()`：`adapter.reset()` + `policy.reset()` → **连接推理节点**（`_wait_connect`，可被打断，
-    未就绪持续重试）→ 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
--   `infer rollout`：`obs = adapter.observe()` → 写 FrameManager → `action = policy.infer(obs)` →
-    `adapter.rollout(action)`（模型 action 解析为限速目标）。
--   命令：`infer rollout` 单步、`session quit`（退出回 home）、`robot estop`、`robot reset`、
-    `robot execute`、`robot teleop`。
--   策略连接推迟到 `run()`（`_wait_connect`），避免同步连接阻塞 `session run` 命令回执。
+-   `run()`：`adapter.reset()` + `policy.reset()` → 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
+-   **连接推迟到显式命令**：进入会话**不连接**推理节点；`infer connect` **单次尝试**连接策略
+    服务器（成功回执含服务端 metadata；失败回执 error，连接状态保持未连接）。`infer rollout`
+    仅在已连接时可用（未连接 → 503）。
+-   `infer rollout [mode]`：推理闭环步进，支持三种模式（参数缺省 = 1 次）：
+    -   `count`（`infer rollout <N>`，N 1–100，缺省 1）：连续执行 N 次
+        `obs = adapter.observe()` → `action = policy.infer(obs)` → `adapter.rollout(action)`；
+        回执包含最后动作与动作列表。
+    -   `continuous`（`infer rollout continuous`）：**持续推理** —— 启动即回执 `started`，
+        然后持续执行推理闭环，直到 `session quit` / `robot estop` 停止（持续期间每步轮询
+        命令响应退出 / 复位 / 急停；重复 `infer rollout` → rejected）。
+    -   `drain`（`infer rollout drain`）：**消耗当前动作块** —— 只把策略已缓存的
+        `ActionChunkBroker` 动作块消费完（不发新推理请求），回执消耗步数；无缓存则 0 步。
+        （`observe` 是**推理输入**；显示观测由节点级写入 `frame_manager`，会话不写。）
+-   命令：`infer connect`、`infer rollout [mode]`、`session quit`（退出回 home）、`robot estop`、
+    `robot reset`、`robot execute`、`robot teleop`。
 
 ## 相关文档
 
