@@ -28,6 +28,8 @@ import importlib
 # 懒加载：仅当 get_policy() 选中该类型时才 import 对应模块（连带加载其第三方依赖）。
 POLICY_REGISTRY = {
     "openpi": ("motrix_edge.policy.openpi.client", "OpenPIClient"),
+    "act": ("motrix_edge.policy.act.client", "ACTClient"),
+    "act7dof": ("motrix_edge.policy.act.client", "ACT7DofClient"),
 }
 
 

@@ -199,15 +199,16 @@ def test_openpi_connect_closes_transport_when_action_horizon_missing():
 
 
 def test_policy_clients_expose_server_metadata():
+    from motrix_edge.policy.act.client import ACTClient
     from motrix_edge.policy.openpi.client import OpenPIClient
 
     metadata = {"model": "test-policy", "action_horizon": 16, "action_dim": 14}
-    client = OpenPIClient({})
-    client._transport = _FakeTransport(metadata=metadata)
-    client.connect()
-    assert client.server_metadata == metadata
-    client.disconnect()
-    assert client.server_metadata == {}
+    for client in (OpenPIClient({}), ACTClient({})):
+        client._transport = _FakeTransport(metadata=metadata)
+        client.connect()
+        assert client.server_metadata == metadata
+        client.disconnect()
+        assert client.server_metadata == {}
 
 
 def test_openpi_infer_requests_only_when_chunk_empty():
@@ -234,14 +235,39 @@ def test_openpi_infer_requests_only_when_chunk_empty():
     assert transport.calls == 2
 
 
-def test_policy_registry_has_openpi():
+def test_act_client_uses_640x480_image_size_by_default():
+    from motrix_edge.policy.act.client import ACTClient
+
+    client = ACTClient({})
+    assert client.image_size == (480, 640)
+
+
+def test_act_infer_requests_only_when_chunk_empty():
+    from motrix_edge.policy.act.client import ACTClient
+
+    client = ACTClient({"action_horizon": 2})
+    transport = _FakeTransport(horizon=2, dim=2)
+    client._transport = transport
+    client._broker = ActionChunkBroker(2)
+
+    obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
+    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    assert transport.calls == 1
+    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    assert transport.calls == 1
+    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    assert transport.calls == 2
+
+
+def test_policy_registry_has_openpi_and_act():
     assert "openpi" in POLICY_REGISTRY
+    assert "act" in POLICY_REGISTRY
 
 
 def test_validate_policy_type():
     from motrix_edge.policy import validate_policy_type
 
-    assert validate_policy_type("openpi") == "openpi"
+    assert validate_policy_type("act") == "act"
     with pytest.raises(ValueError, match="nonexistent"):
         validate_policy_type("nonexistent")
 
@@ -256,25 +282,212 @@ def test_get_policy_default_openpi():
     assert policy.__class__.__name__ == "OpenPIClient"
 
 
+def test_get_policy_act():
+    policy = get_policy({"policy": {"type": "act"}})
+    assert policy.__class__.__name__ == "ACTClient"
+    assert policy.image_size == (480, 640)
+
+
 def test_get_policy_uses_only_shared_endpoint_config():
-    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="openpi")
+    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="act")
     assert policy.policy_config["host"] == "127.0.0.1"
     assert policy.policy_config["port"] == 8765
-    assert policy.image_size == (224, 224)
+    assert policy.image_size == (480, 640)
     assert policy.image_format == "jpeg"
 
 
-def test_openpi_drain_consumes_cached_chunk():
-    """drain：只消费缓存动作块（不发新推理请求）；无缓存返回 None。"""
-    from motrix_edge.policy.openpi.client import OpenPIClient
+class _RecordingTransport(_FakeTransport):
+    """记录最近一次 request payload（用于校验相机挑选 / qpos 维度）。"""
 
-    client = OpenPIClient({})
-    client._transport = _FakeTransport(horizon=2, dim=2)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.last_payload = None
+
+    def request(self, payload):
+        self.last_payload = payload
+        return super().request(payload)
+
+
+def _act7dof_client(policy_config=None):
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    client = ACT7DofClient(policy_config or {"action_horizon": 2})
+    transport = _RecordingTransport(horizon=2, dim=2)
+    client._transport = transport
     client._broker = ActionChunkBroker(2)
-    assert client.drain() is None  # 无缓存：不发请求
-    assert client._transport.calls == 0
-    client._broker.feed(np.array([[1.0, 2.0], [3.0, 4.0]]))
-    assert np.array_equal(client.drain(), np.array([1.0, 2.0]))
-    assert np.array_equal(client.drain(), np.array([3.0, 4.0]))
-    assert client.drain() is None  # 耗尽
-    assert client._transport.calls == 0  # drain 从不发请求
+    return client, transport
+
+
+def test_act7dof_registered_and_instantiated():
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    assert "act7dof" in POLICY_REGISTRY
+    policy = get_policy({"policy": {"type": "act7dof"}})
+    assert isinstance(policy, ACT7DofClient)
+    assert policy.qpos_dim == 7
+    assert policy.qpos_indices == ()
+    assert policy.cameras == ()
+
+
+def test_act7dof_qpos_dim_configurable():
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    client = ACT7DofClient({"qpos_dim": 6, "qpos_indices": [0, 1, 2], "cameras": ["cam_a"]})
+    assert client.qpos_dim == 6
+    assert client.qpos_indices == (0, 1, 2)
+    assert client.cameras == ("cam_a",)
+
+
+def test_act7dof_defaults_to_all_cameras():
+    """cameras 未配置：回退发送全部 observations/images/*（通用行为）。"""
+    client, transport = _act7dof_client()
+    obs = {
+        "observations/qpos": np.zeros(7, dtype=np.float32),
+        "observations/images/cam_a": np.zeros((8, 8, 3), dtype=np.uint8),
+        "observations/images/cam_b": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+    client.infer(obs)
+    assert set(transport.last_payload) == {
+        "observations/qpos",
+        "observations/images/cam_a",
+        "observations/images/cam_b",
+    }
+
+
+def test_act7dof_selects_configured_cameras():
+    """cameras 配置后：只发送挑选的相机（从 adapter 已有观测键中选择）。"""
+    client, transport = _act7dof_client({"action_horizon": 2, "cameras": ["cam_b"]})
+    obs = {
+        "observations/qpos": np.zeros(7, dtype=np.float32),
+        "observations/images/cam_a": np.zeros((8, 8, 3), dtype=np.uint8),
+        "observations/images/cam_b": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+    client.infer(obs)
+    assert set(transport.last_payload) == {"observations/qpos", "observations/images/cam_b"}
+
+
+def test_act7dof_validates_qpos_dim():
+    """qpos 维度不匹配 qpos_dim：抛错且不触达推理端。"""
+    client, transport = _act7dof_client()
+    with pytest.raises(ValueError, match="qpos dim"):
+        client.infer({"observations/qpos": np.zeros(6, dtype=np.float32)})
+    assert transport.calls == 0
+
+
+def test_act7dof_requests_only_when_chunk_empty():
+    """ACT7DofClient.infer：与父类一致，块耗尽才请求，其余步骤消耗缓存。"""
+    client, transport = _act7dof_client()
+    obs = {
+        "observations/qpos": np.zeros(7, dtype=np.float32),
+        "observations/images/cam_a": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    assert transport.calls == 1
+    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    assert transport.calls == 1  # 块未耗尽不请求
+    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    assert transport.calls == 2
+
+
+def test_act7dof_qpos_indices_selects_dims():
+    """qpos_indices：从观测 qpos（14 维双臂）按索引挑选 7 维（单臂）后发送。"""
+    client, transport = _act7dof_client({"action_horizon": 2, "qpos_indices": list(range(7))})
+    obs = {
+        "observations/qpos": np.arange(14, dtype=np.float32),
+        "observations/images/cam_a": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+    client.infer(obs)
+    sent_qpos = transport.last_payload["observations/qpos"]
+    assert sent_qpos.shape == (7,)
+    assert np.array_equal(sent_qpos, np.arange(7, dtype=np.float32))
+
+
+def test_act7dof_qpos_indices_reorders_dims():
+    """qpos_indices 支持重排：按给定索引顺序重排观测 qpos 维度。"""
+    client, transport = _act7dof_client({"action_horizon": 2, "qpos_indices": [6, 5, 4, 3, 2, 1, 0]})
+    obs = {
+        "observations/qpos": np.arange(14, dtype=np.float32),
+        "observations/images/cam_a": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+    client.infer(obs)
+    sent_qpos = transport.last_payload["observations/qpos"]
+    assert np.array_equal(sent_qpos, np.array([6, 5, 4, 3, 2, 1, 0], dtype=np.float32))
+
+
+def test_act7dof_qpos_indices_validates_selected_dim():
+    """qpos_indices 应用后维度与 qpos_dim 不匹配：抛错且不触达推理端。"""
+    client, transport = _act7dof_client({"action_horizon": 2, "qpos_indices": [0, 1]})  # 挑 2 维
+    with pytest.raises(ValueError, match="qpos dim"):
+        client.infer({"observations/qpos": np.zeros(14, dtype=np.float32)})
+    assert transport.calls == 0
+
+
+def test_act7dof_action_indices_expands_to_full_dim():
+    """action_indices + action_fill：模型 7 维 action 填充回 14 维，未覆盖维度用 home。"""
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    client = ACT7DofClient(
+        {
+            "action_horizon": 2,
+            "qpos_indices": list(range(7, 14)),
+            "action_indices": list(range(7, 14)),
+            "action_fill": list(range(7)),
+        }
+    )
+    transport = _RecordingTransport(horizon=2, dim=7)  # 模型输出 7 维（右臂）
+    client._transport = transport
+    client._broker = ActionChunkBroker(2)
+    obs = {
+        "observations/qpos": np.arange(14, dtype=np.float32),
+        "observations/images/cam_a": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+    # transport 返回 ones((2, 7))：模型输出 7 维，应扩展为 14 维
+    action = client.infer(obs)
+    assert action.shape == (14,)
+    # 未覆盖维度（左臂 0-6）用 action_fill home（0..6）；覆盖维度（右臂 7-13）为模型输出 1.0
+    assert np.array_equal(action[:7], np.arange(7, dtype=np.float64))
+    assert np.array_equal(action[7:], np.ones(7, dtype=np.float64))
+
+
+def test_act7dof_action_fill_scalar_broadcast():
+    """action_fill 标量：广播到所有未覆盖维度。"""
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    client = ACT7DofClient({"action_indices": list(range(7, 14)), "action_fill": -0.5})
+    full = client._expand_action(np.ones(7), {"observations/qpos": np.zeros(14)})
+    assert np.array_equal(full[:7], np.full(7, -0.5))
+    assert np.array_equal(full[7:], np.ones(7))
+
+
+def test_act7dof_action_fill_default_zero():
+    """action_fill 未配置：未覆盖维度默认 0（不跟随当前 qpos）。"""
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    client = ACT7DofClient({"action_indices": list(range(7, 14))})
+    obs = {"observations/qpos": np.full(14, 3.0)}  # 当前 qpos 非 0，未覆盖维度不应取它
+    full = client._expand_action(np.ones(7), obs)
+    assert np.array_equal(full[:7], np.zeros(7))
+    assert np.array_equal(full[7:], np.ones(7))
+
+
+def test_act7dof_action_fill_dim_mismatch():
+    """action_fill list 长度与未覆盖维度数不匹配：抛错。"""
+    from motrix_edge.policy.act.client import ACT7DofClient
+
+    client = ACT7DofClient({"action_indices": list(range(7, 14)), "action_fill": [0.0, 0.0]})
+    with pytest.raises(ValueError, match="action_fill dim"):
+        client._expand_action(np.ones(7), {"observations/qpos": np.zeros(14)})
+
+
+def test_act7dof_action_indices_dim_mismatch():
+    """模型输出 action 维度与 action_indices 不匹配：抛错。"""
+    client, _ = _act7dof_client({"action_horizon": 2, "action_indices": list(range(7, 14))})
+    with pytest.raises(ValueError, match="model action dim"):
+        client._expand_action(np.ones(6), {"observations/qpos": np.zeros(14)})
+
+
+def test_act7dof_action_indices_empty_passthrough():
+    """action_indices 未配置：透传模型输出（与父类行为一致）。"""
+    client, _ = _act7dof_client()
+    action = client._expand_action(np.ones(7), {"observations/qpos": np.zeros(14)})
+    assert np.array_equal(action, np.ones(7))
