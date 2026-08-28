@@ -31,6 +31,7 @@ from motrix_edge.server import create_app
 from motrix_edge.server.capture import CaptureService
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.infer import InferService
+from motrix_edge.session import UploadSession
 from motrix_edge.session.base import RunResult, SessionState
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
@@ -53,7 +54,7 @@ BASE_CFG = {
         "edge_name": "edge-test",
         "edge_version": "0.1.0",
     },
-    "discover": {"host": "127.0.0.1", "port": 8090},
+    "adapter": {"host": "127.0.0.1", "port": 8090},
 }
 
 
@@ -120,6 +121,30 @@ def test_health_returns_correlation_header():
     client = TestClient(create_app(BASE_CFG))
     resp = client.get("/v1/health")
     assert resp.headers.get("X-Correlation-Id")
+
+
+def test_upload_endpoints_scan_and_select(tmp_path):
+    (tmp_path / "episode_0.mcap").write_bytes(b"mcap")
+    (tmp_path / "episode_0.json").write_text('{"collector": "operator-1"}', encoding="utf-8")
+    upload = UploadSession()
+    client = TestClient(create_app(BASE_CFG, uploads=upload))
+
+    response = client.post("/v1/uploads", json={"folder_path": str(tmp_path)})
+    assert response.status_code == 200
+    assert response.json()["episode_count"] == 1
+
+    response = client.post("/v1/uploads/select", json={"episode_ids": ["episode_0"]})
+    assert response.status_code == 200
+    assert response.json()["selected_episode_ids"] == ["episode_0"]
+
+    assert client.post("/v1/uploads/upload").status_code == 501
+    assert client.get("/v1/uploads").json()["episodes"][0]["selected"] is True
+
+
+def test_upload_scan_without_path_returns_bad_request():
+    client = TestClient(create_app(BASE_CFG, uploads=UploadSession()))
+    response = client.post("/v1/uploads")
+    assert response.status_code == 400
 
 
 def test_command_accepted_with_metadata():

@@ -127,6 +127,7 @@ def _run_node(args) -> None:
     from motrix_edge.server.command import CommandService
     from motrix_edge.server.infer import InferService
     from motrix_edge.server.webrtc import WebRTCService
+    from motrix_edge.session import UploadSession
     from motrix_edge.utils.data_handler import debug_print
 
     debug_print("EdgeNode", f"Loaded config: {config_path}", "INFO")
@@ -154,7 +155,7 @@ def _run_node(args) -> None:
     threading.Thread(target=cli.read_loop, name="cli-keys", daemon=True).start()
 
     # node 主线程持续运行；web 是 node 的独立线程（node 接收 web 请求）
-    # 单 adapter 包：node 启动后 discover 探测并绑定唯一 adapter，采集 / 推理都基于它
+    # 单 adapter 包：node 启动后按 adapter.host/port 探测并绑定唯一 adapter，采集 / 推理都基于它
     node = EdgeNode(base_cfg, command_source=bus)
     # Edge 级租约（独立于任务）：受控 HTTP 操作（进入任务 / 命令含 estop）须持有；
     # Console 按 renew_interval 定时续租，超期 ttl 未续租则失效需重新激活
@@ -163,6 +164,7 @@ def _run_node(args) -> None:
     infers = InferService(node, bus, leases=leases)
     commands = CommandService(node, bus, leases=leases)
     webrtc = WebRTCService(node, leases=leases)
+    uploads = UploadSession(base_cfg)
     web = _start_web(
         create_app(
             base_cfg,
@@ -172,6 +174,7 @@ def _run_node(args) -> None:
             commands=commands,
             lease_manager=leases,
             webrtc=webrtc,
+            uploads=uploads,
         ),
         host,
         port,

@@ -1,19 +1,39 @@
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
-# 机器人进程发现：Edge 向固定端口发 POST /v1/discover 寻找机器人进程；进程启动后
-# 自描述返回 id / name / type / 能力 / 相机 / 控制器等（见 wiki/design/motrix_edge_adapter.md）
-discover:
+# Edge 本地设备身份声明（引用，非权威；权威在 MotrixConsole）
+identity:
+  edge_id: edge-test-001
+  edge_name: edge-test
+  edge_version: "0.1.0"
+
+# Edge 级租约配置（Console 权威：签发 / 续约 / 撤销租约镜像；Edge 只保留 + 校验）
+lease:
+  ttl: 120 # 租约默认有效期（秒）：Console 前端「签发租约」表单的缺省持续时间
+  renew_interval: 60 # 建议续租间隔（秒）：Console 前端按此定时续租保持租约活跃
+
+# MotrixEdge HTTP 服务监听配置（node 主线程内嵌的 web 线程使用）
+server:
+  host: 0.0.0.0
+  port: 8000
+
+# 本地采集 episode 扫描与上传队列；HTTP 扫描请求可覆盖 data_dir。
+upload:
+  data_dir: null
+  endpoint: null # 远端上传服务尚未配置；upload 动作返回 501，不删除源文件
+
+# 机器人适配器连接配置：Edge 向 adapter.host:adapter.port 发 POST /v1/discover
+# 寻找机器人进程；进程启动后自描述返回 id / name / type / 能力 / 相机 / 控制器等。
+adapter:
   host: 127.0.0.1
   port: 8090
 
-# 推理策略客户端（见 wiki/design/motrix_edge_policy.md）：host / port 可在运行期经
-# infer ip / infer ip set / infer port / infer port set 命令覆盖（内存态，下次
-# session run infer 生效）；test_infer_point.py 为无真实推理的虚拟 openpi 端点。
+# 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
+# 推理会话时由调用方显式选择；host / port 可运行时通过 infer ip / port 覆盖。
 policy:
-  host: 0.0.0.0 # 推理节点地址（前端推理卡片可运行时设置）
-  port: 8765 # 推理节点端口（前端推理卡片可运行时设置）
+  host: 0.0.0.0
+  port: 8765
   # act7dof（ACT7DofClient）策略参数：qpos 从观测按索引挑选、相机从观测键挑选
-  type: act7dof # 默认策略类型（注册表键；会话显式选择时覆盖）
+  type: act7dof # 默认策略类型（会话显式选择时覆盖）
   qpos_dim: 7 # ACT 模型输入 qpos 维度
   qpos_indices: [7, 8, 9, 10, 11, 12, 13] # 从 14 维观测取右臂（按需修改）
   cameras: [cam_head, cam_right_wrist] # 从 adapter 观测键挑选（按需修改）

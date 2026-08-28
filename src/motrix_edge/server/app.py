@@ -21,6 +21,7 @@
                    正在运行的 EdgeNode + 共享 CommandBus，见 wiki/design/motrix_edge_server.md）
   /v1/infers/*     推理会话控制（无回合概念：enter → 持续推理 → exit；注入 InferService 绑定
                    正在运行的 EdgeNode + 共享 CommandBus）
+  /v1/uploads/*    本地采集 episode 扫描、选择与上传队列
 
 identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` 作为请求元数据上报，
 具体发送（访问控制面 / 推理 / 上传）由后续客户端层实现。
@@ -46,6 +47,7 @@ from motrix_edge.server.capture import CaptureError, CaptureService
 from motrix_edge.server.command import CommandError, CommandService
 from motrix_edge.server.infer import InferError, InferService
 from motrix_edge.server.webrtc import WebRTCError, WebRTCService
+from motrix_edge.session.upload_session import UploadError, UploadSession
 from motrix_edge.utils.version import get_package_version
 
 
@@ -154,6 +156,18 @@ class InferEnterRequest(BaseModel):
     policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
 
 
+class UploadScanRequest(BaseModel):
+    """POST /v1/uploads 请求体：可覆盖配置的默认采集目录。"""
+
+    folder_path: str | None = Field(default=None, description="待扫描目录；缺省使用 upload.data_dir")
+
+
+class UploadSelectRequest(BaseModel):
+    """POST /v1/uploads/select 请求体：按 episode id 替换选择集。"""
+
+    episode_ids: list[str] = Field(default_factory=list)
+
+
 def create_app(
     base_cfg: dict,
     node=None,
@@ -162,6 +176,7 @@ def create_app(
     commands: CommandService | None = None,
     lease_manager: LeaseManager | None = None,
     webrtc: WebRTCService | None = None,
+    uploads: UploadSession | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
@@ -178,10 +193,12 @@ def create_app(
                    ``/v1/leases/*`` 总可用。
     webrtc: 可选 ``WebRTCService``（aiortc 推流，视频轨道从 FrameManager 取帧）；
             未注入时 ``/v1/webrtc/offer`` 返回 501。
+    uploads: 可选 ``UploadSession``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
     lease_manager = lease_manager or build_lease_manager(base_cfg)
+    uploads = uploads or UploadSession(base_cfg)
 
     app = FastAPI(title="MotrixEdge", version=get_package_version())
 
@@ -343,6 +360,40 @@ def create_app(
     async def leases_status():
         """租约状态汇总（只读，Edge 侧）：当前租约 / leasable / renew_interval。"""
         return lease_manager.status()
+
+    # ---- /v1/uploads/*：本地采集 episode 扫描、选择与上传队列 -----------------
+
+    def _upload_call(fn):
+        try:
+            return fn()
+        except UploadError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.get("/v1/uploads")
+    async def uploads_status():
+        """当前扫描汇总、episode 状态与选择集。"""
+        return uploads.status()
+
+    @app.post("/v1/uploads")
+    async def uploads_scan(req: UploadScanRequest | None = None):
+        """扫描请求目录；缺省使用配置 upload.data_dir。"""
+        folder_path = req.folder_path if req is not None else None
+        return _upload_call(lambda: uploads.scan(folder_path))
+
+    @app.post("/v1/uploads/select")
+    async def uploads_select(req: UploadSelectRequest):
+        """按 episode id 替换待上传选择集。"""
+        return _upload_call(lambda: uploads.select(req.episode_ids))
+
+    @app.post("/v1/uploads/upload")
+    async def uploads_enqueue():
+        """把选择集加入上传队列；未配置上传目标时返回 501。"""
+        return _upload_call(uploads.enqueue)
+
+    @app.post("/v1/uploads/retry")
+    async def uploads_retry():
+        """把选择集中失败项重置为 pending；实际 uploader 后续实现。"""
+        return _upload_call(uploads.retry)
 
     # ---- /v1/captures/*：数据采集回合控制（web 线程 → CaptureService → CommandBus）----
 

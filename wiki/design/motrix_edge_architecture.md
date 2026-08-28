@@ -36,7 +36,7 @@
 | `__main__.py`       | CLI 入口（run / adapters / version）            | [配置与命令行](./motrix_edge_config.md)                      |
 | `node.py`           | EdgeNode 生命周期状态机、命令分发、周期任务     | [节点生命周期（node）](./motrix_edge_node.md)                |
 | `adapter/`          | RobotAdapter HAL、discover、工厂、HTTP/SHM 契约 | [机器人适配器（adapter）](./motrix_edge_adapter.md)          |
-| `session/`          | 会话（Capture / Infer）与工厂                   | [会话（session）](./motrix_edge_session.md)                  |
+| `session/`          | 会话（Capture / Infer / Upload）与工厂           | [会话（session）](./motrix_edge_session.md)                  |
 | `policy/`           | 推理策略客户端（openpi 等）                     | [推理策略客户端（policy）](./motrix_edge_policy.md)          |
 | `frame/`            | FrameManager 观测帧缓存                         | [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md) |
 | `utils/commands.py` | 命令模型 / 解析 / 传输（CommandBus）            | [命令总线（CommandBus）](./motrix_edge_command_bus.md)       |

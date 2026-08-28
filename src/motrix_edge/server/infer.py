@@ -153,7 +153,7 @@ class InferService:
         return getattr(getattr(session, "policy", None), "name", None)
 
     def _policy_endpoint(self) -> dict:
-        """当前配置的推理节点端点（``base_cfg["policy"]`` 的 host / port；未配置为 None）。"""
+        """当前配置的推理节点端点（``base_cfg["policy"]`` 的默认 host / port）。"""
         if self._node is None:
             return {"host": None, "port": None}
         return get_policy_endpoint(self._node.base_cfg)

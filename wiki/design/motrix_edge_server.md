@@ -27,10 +27,25 @@
 | POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}` | Edge 级租约（Console 签发镜像）                | LeaseManager   |
 | GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                        | 采集会话控制                                   | CaptureService |
 | GET/POST/DELETE | `/v1/infers` + `/v1/infers/rollout`                             | 推理会话控制                                   | InferService   |
+| GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                 | 采集文件扫描、选择与上传队列                   | UploadSession  |
 | GET             | `/v1/preview`                                                   | 最新观测预览（须租约）                         | CaptureService |
 | POST            | `/v1/webrtc/offer`                                              | WebRTC 推流信令（须租约）                      | WebRTCService  |
 
 correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动生成）。
+
+## /v1/uploads（采集文件扫描与选择）
+
+UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/v1/uploads` | 扫描请求目录；缺省使用 `upload.data_dir` |
+| GET | `/v1/uploads` | 返回 episode 汇总与当前选择集 |
+| POST | `/v1/uploads/select` | body `{episode_ids: [...]}` 替换选择集 |
+| POST | `/v1/uploads/upload` | 将选择集加入上传队列；未配置 endpoint 返回 `501` |
+| POST | `/v1/uploads/retry` | 重置选择集中失败项；未配置 endpoint 返回 `501` |
+
+扫描按文件名 stem 配对 `.mcap` 与 `.json`，JSON 原样保留并补充文件大小、修改时间和 SHA-256；不删除源文件。
 
 ## /v1/commands（受控命令）
 
