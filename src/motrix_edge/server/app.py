@@ -445,6 +445,11 @@ def create_app(
         """
         return _capture_call(lambda: _captures().preview(lease_id=x_lease_id))
 
+    @app.get("/v1/captures/meta")
+    async def captures_meta():
+        """采集元信息选项（config/capture.yml 的 ``meta`` 段）：前端选择列表，只读免租约。"""
+        return _captures().meta()
+
     @app.post("/v1/captures")
     async def captures_enter(x_lease_id: str | None = Header(default=None)):
         """创建采集会话（进入任务环境）：READY → ACTIVE，需先持有有效租约（X-Lease-Id）。

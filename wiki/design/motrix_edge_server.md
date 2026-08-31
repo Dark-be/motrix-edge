@@ -30,6 +30,7 @@
 | GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                 | 采集文件扫描、选择与上传队列                   | UploadSession  |
 | GET             | `/v1/preview`                                                   | 最新观测预览（须租约）                         | CaptureService |
 | POST            | `/v1/webrtc/offer`                                              | WebRTC 推流信令（须租约）                      | WebRTCService  |
+| GET             | `/v1/captures/meta`                                             | 采集元信息选项（前端选择列表，免租约）         | CaptureService |
 | POST            | `/v1/captures/sync`                                             | 同步采集元信息到机器人进程（须租约）           | CaptureService |
 | POST            | `/v1/infers/connect`                                            | 单次尝试连接推理节点（须租约）                 | InferService   |
 
@@ -76,6 +77,7 @@ UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 | POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                   |
 | GET    | `/v1/captures`           | 无            | 状态快照：node_state / session / adapter / data_dir / data_files / capture_status / disk / lease_id |
 | GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                     |
+| GET    | `/v1/captures/meta`      | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段；前端选择列表，`capture meta` 维护）           |
 | POST   | `/v1/captures/sync`      | 必需          | body `{meta}`：同步采集元信息到机器人进程（`capture sync`，采集会话内消费）                         |
 | DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                      |
 | GET    | `/v1/preview`            | 必需          | 最新观测预览（无需进入会话，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）       |

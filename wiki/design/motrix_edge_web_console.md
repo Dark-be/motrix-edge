@@ -24,7 +24,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 3. **状态面板**：节点状态（`node_state`）、会话状态（`state`）、**匹配到的适配器**（name / type / running）、磁盘、数据列表（1s 轮询；不再展示 `data_dir` / `default robot`）。
 4. **机器人命令卡片**：estop / reset / execute / teleop 命令控制（不再显示适配器，也不提供「查看全部适配器」；匹配到的适配器见状态栏）。
 5. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项。
-6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；支持同步采集元信息（采集员 / 任务名，`POST /v1/captures/sync`，进程保存数据时附加），并展示 `GET /v1/captures` 返回的 `capture_status`（采集员 / 任务名 / 运行位）。
+6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；**采集元信息**（采集员 / 任务名）从 `GET /v1/captures/meta`（`config/capture.yml`，`capture meta` 命令维护）下拉选择，再 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加），并展示 `GET /v1/captures` 返回的 `capture_status`（采集员 / 任务名 / 运行位）。
 7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）；推理按钮对应推理会话的三种模式：
     **推理一步 / 推理多步**（`infer rollout [count]`，1–100 次）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）、**消耗缓存**（`infer rollout drain`，只消费已缓存动作块）；退出推理后结束会话，连接成功时展示策略服务器 metadata。
 8. **视频面板**：WebRTC `<video>` 播放 + 连接状态 + 连接 / 断开按钮。

@@ -35,6 +35,7 @@ from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
+from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_SYNC,
     CMD_SESSION_QUIT,
@@ -73,10 +74,13 @@ class CaptureService:
     /v1/leases）；**异租约 / 缺失租约一律拒绝**（403），无活跃租约就控制 → 409。
     """
 
-    def __init__(self, node, bus: CommandBus, leases: LeaseManager | None = None):
+    def __init__(self, node, bus: CommandBus, leases: LeaseManager | None = None, capture_meta_store=None):
         self._node = node  # 正在运行的 EdgeNode（由 node 程序主线程持有）
         self._bus = bus  # 共享命令总线：web / CLI 线程 push，EdgeNode 主循环 poll
         self._leases = leases or LeaseManager()  # Edge 级租约（独立于任务，受控操作校验用）
+        # 采集元信息选项存储（config/capture.yml）：前端选择列表 / capture meta 查看；
+        # 缺省用默认路径，测试可注入临时 store。
+        self._meta_store = capture_meta_store if capture_meta_store is not None else CaptureMetaStore()
 
     # -- 动作翻译（HTTP → 信号）---------------------------------------------
     def precheck(self) -> dict:
@@ -197,6 +201,10 @@ class CaptureService:
         )
         self._raise_on_rejected(result)
         return {"status": "accepted", "meta": result.data.get("meta")}
+
+    def meta(self) -> dict:
+        """采集元信息选项（config/capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
+        return {"meta": self._meta_store.list_meta()}
 
     def status(self) -> dict:
         """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据 / capture_status。"""
