@@ -144,8 +144,9 @@ class RobotAdapter(ABC):
 
     由 **身份参数**（discover 解析出的 ``name`` / ``id``，`type` 由类常量确定）参数化；
     能力与连接参数（SDK 地址 / 共享内存名）由 adapter 内部类常量定义。adapter 只负责
-    **连接进程**并转发指令 / 读取观测——不接收 Edge 配置、不自带 discover / probe（发现
-    由 ``discover_adapter`` 完成）。
+    **连接进程**并转发指令 / 读取观测。运行时可经 ``configure()`` 应用 Edge 配置（``adapter``
+    段）裁剪能力：启用臂 / 相机、未启用臂用 home 填充——只影响维度 / 观测布局，不重启、
+    不新建连接（``_select_qpos`` / ``_expand_action`` 为通用臂映射助手）。
     """
 
     # 本 adapter 的 entry point 类型（类确定，用于匹配 discover 的 type 加载类）；子类覆盖。
@@ -155,14 +156,110 @@ class RobotAdapter(ABC):
     # 实例 ``capabilities`` 属性把本声明并入 RobotCapabilities.capabilities。
     CAPABILITIES: dict[AdapterCapability, bool] = {}
 
+    # ---- 动作布局声明（子类覆盖；供 configure 的臂裁剪 / qpos 挑选 / 动作展开）----
+    # 完整动作维度（如双臂 14）
+    ACTION_DIM: int = 0
+    # 每臂动作维度（如 7；无臂概念 = 0）
+    ACTION_DIM_PER_ARM: int = 0
+    # 启用的臂（物理顺序，如 ("left", "right")；空 = 无臂概念，不做臂裁剪）
+    ARM_NAMES: tuple[str, ...] = ()
+    # 臂名 → qpos 切片（如 {"left": slice(0, 7), "right": slice(7, 14)}）
+    ARM_QPOS_SLICES: dict[str, slice] = {}
+    # 全动作 home 位姿（长度 = ACTION_DIM；未启用臂动作填充用）
+    HOME_QPOS: list[float] = []
+    # 缺省启用臂（物理顺序；空 = 默认全部 ARM_NAMES）
+    DEFAULT_ENABLED_ARMS: tuple[str, ...] = ()
+    # 相机布局：{相机名: 分辨率 (width, height)}（configure 校验 / 挑选用）
+    IMAGES: dict[str, tuple[int, int]] = {}
+
     def __init__(self, name: str = ""):
         """身份参数化：``name`` 由 discover 赋予（缺省为空 = 进程内测试）。
 
         ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（不随 discover 传输）；能力与连接参数
-        由子类类常量定义，不在此接收。
+        由子类类常量定义。此处初始化能力裁剪状态（启用臂 / home / 完整相机顺序）；
+        ``action_dim`` / ``images`` 由子类初始化（部分测试替身用只读 property，此处不写）。
         """
         self.name = name
         self.type = self.ADAPTER_TYPE
+        # 能力裁剪状态（configure 应用）：启用臂（物理顺序）/ 未启用臂 home / SDK 观测帧相机顺序
+        self.enabled_arms = list(self.DEFAULT_ENABLED_ARMS or self.ARM_NAMES)
+        self._home_qpos = np.asarray(self.HOME_QPOS or [0.0] * self.ACTION_DIM, dtype=np.float64)
+        self._full_image_names = list(self.IMAGES)
+
+    # ---- 能力裁剪（configure：启用臂 / 相机 / home；通用臂映射助手）---------------
+    def configure(self, enabled_arms=None, enabled_cameras=None, home_qpos=None) -> None:
+        """应用 Edge 配置（``adapter`` 段）裁剪能力：启用臂 / 相机 / 未启用臂 home。
+
+        - ``enabled_arms``：启用的臂（``ARM_NAMES`` 子集，如 right / left）；缺省启用全部。
+          运行时 ``action_dim = 启用臂数 × ACTION_DIM_PER_ARM``，动作段按**物理顺序**
+          （``ARM_NAMES``）映射，未启用臂用 home 填充；
+        - ``enabled_cameras``：启用的相机（``IMAGES`` 子集）；缺省全部；
+        - ``home_qpos``：未启用臂的 home 位姿（长度 = ``ACTION_DIM``）；缺省 ``HOME_QPOS``。
+
+        无臂概念（``ARM_NAMES`` 为空）时 ``enabled_arms`` 忽略。参数**原子校验**：任一非法
+        （未知臂 / 未知相机 / 维度错误）→ ``ValueError``，不改变当前能力。只影响本实例的
+        维度 / 观测布局，不重启 / 不新建连接。
+        """
+        arms = None
+        if enabled_arms is not None and self.ARM_NAMES:
+            arms = [str(a).strip().lower() for a in enabled_arms]
+            for a in arms:
+                if a not in self.ARM_NAMES:
+                    raise ValueError(f"unknown arm: {a!r} (available: {list(self.ARM_NAMES)})")
+            if not arms:
+                raise ValueError("enabled_arms must not be empty")
+        cameras = None
+        if enabled_cameras is not None:
+            cameras = [str(c).strip() for c in enabled_cameras]
+            unknown = [c for c in cameras if c not in self.IMAGES]
+            if unknown:
+                raise ValueError(f"unknown camera(s): {unknown} (available: {list(self.IMAGES)})")
+        home = None
+        if home_qpos is not None:
+            home = np.asarray(home_qpos, dtype=np.float64)
+            if home.ndim != 1 or home.shape[0] != self.ACTION_DIM:
+                raise ValueError(f"home_qpos must be {self.ACTION_DIM}-dim, got {home.shape}")
+        # 全部校验通过后应用
+        if arms is not None:
+            self.enabled_arms = [a for a in self.ARM_NAMES if a in arms]  # 保持物理顺序
+        if cameras is not None:
+            self.images = list(cameras)
+        if home is not None:
+            self._home_qpos = home.copy()
+        self.action_dim = self._compute_action_dim()
+
+    def _compute_action_dim(self) -> int:
+        """启用臂下的动作维度；无臂概念 → 完整维度。"""
+        if self.ARM_NAMES and self.ACTION_DIM_PER_ARM:
+            return self.ACTION_DIM_PER_ARM * len(self.enabled_arms)
+        return self.ACTION_DIM
+
+    def _select_qpos(self, qpos) -> np.ndarray:
+        """按启用臂（物理顺序）挑选 / 拼接 qpos；无臂概念 → 原样返回。"""
+        qpos = np.asarray(qpos, dtype=np.float32)
+        if not self.ARM_NAMES:
+            return qpos
+        parts = [qpos[self.ARM_QPOS_SLICES[arm]] for arm in self.enabled_arms]
+        return np.concatenate(parts) if parts else np.asarray([], dtype=np.float32)
+
+    def _expand_action(self, action: Action, operation: str) -> np.ndarray:
+        """校验启用臂维度并展开回完整动作空间（未启用臂用 home_qpos 填充）。
+
+        无臂概念 / 全臂启用 → 原样返回（动作即完整维度）；仅启用部分臂时，动作段按物理
+        顺序（``ARM_NAMES``）写入对应切片，其余切片填充 ``self._home_qpos``。
+        """
+        target = np.asarray(action, dtype=np.float64)
+        if target.ndim != 1 or target.shape[0] != self.action_dim:
+            actual = target.shape[0] if target.ndim > 0 else 0
+            raise ValueError(f"{operation} action dim {actual} != action_dim {self.action_dim}")
+        if not self.ARM_NAMES or len(self.enabled_arms) == len(self.ARM_NAMES):
+            return target
+        full = self._home_qpos.copy()
+        cursor = 0
+        for arm in self.enabled_arms:
+            full[self.ARM_QPOS_SLICES[arm]] = target[cursor : cursor + self.ACTION_DIM_PER_ARM]
+            cursor += self.ACTION_DIM_PER_ARM
+        return full
 
     # ---- health / release（硬件由 SDK 进程自维护，Edge 只查询 / 释放本地资源）-----
     def release(self) -> None:

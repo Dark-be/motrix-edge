@@ -22,6 +22,7 @@ capabilities 能力声明、health / ready。机器人 SDK 进程（HTTP + 共�
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from fake_robot import FakeRobotAdapter
 
@@ -315,3 +316,137 @@ def test_start_end_capture_forwards_to_sdk():
     adapter.start_capture()
     adapter.end_capture()
     assert [p[0] for p in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END]
+
+
+# ---------------------------------------------------------------------------
+# configure（RobotAdapter 基类能力）：启用臂 / 相机 / home_qpos —— 通用、无实机
+# ---------------------------------------------------------------------------
+
+
+def test_configure_default_enables_all_arms():
+    """缺省（不配置）：启用全部臂，action_dim = 14，动作直发。"""
+    adapter = test_adapter_mod.TestRobotAdapter()
+    assert adapter.enabled_arms == ["left", "right"]
+    assert adapter.action_dim == 14
+    assert adapter.capabilities.action_dim == 14
+
+
+def test_configure_right_arm_changes_dim_and_expands():
+    """只启用右臂：action_dim=7；execute 7 维动作展开回 14 维，左臂 home 填充。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["right"])
+    assert adapter.enabled_arms == ["right"]
+    assert adapter.action_dim == 7
+    assert adapter.capabilities.action_dim == 7
+
+    adapter.execute(np.arange(7, dtype=np.float64))
+    expected = [0.0] * 7 + list(range(7))  # 左臂 home（0），右臂动作 [7:14]
+    assert adapter.executed == [expected]
+    assert adapter._http.posts == [(PATH_EXECUTE, {FIELD_ACTION: expected})]
+    # 维度校验：7 维之外拒绝（不发送）
+    with pytest.raises(ValueError, match="execute action dim"):
+        adapter.execute([0.0] * 14)
+    assert len(adapter._http.posts) == 1
+
+
+def test_configure_left_arm_expands_with_home():
+    """只启用左臂：动作放 [0:7]，右臂用 home_qpos 填充。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["left"], home_qpos=[1.0] * 14)
+    adapter.execute(np.ones(7))
+    assert adapter.executed == [[1.0] * 7 + [1.0] * 7]  # 左臂 1.0，右臂 home 1.0
+
+
+def test_configure_both_arms_keeps_14_dim_passthrough():
+    """全臂启用：action_dim=14，动作直发（home 不影响全启用）。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["left", "right"], home_qpos=[9.0] * 14)
+    assert adapter.action_dim == 14
+    adapter.execute(np.arange(14, dtype=np.float64))
+    assert adapter.executed == [list(np.arange(14, dtype=np.float64))]
+
+
+def test_configure_cameras_subset():
+    """只启用部分相机：capabilities / observe 只暴露启用相机。"""
+    adapter = test_adapter_mod.TestRobotAdapter()
+    adapter.configure(enabled_cameras=["cam_head", "cam_right_wrist"])
+    assert adapter.images == ["cam_head", "cam_right_wrist"]
+    assert adapter.capabilities.image_names == ["cam_head", "cam_right_wrist"]
+
+
+def test_configure_validation_errors_atomic():
+    """非法配置（未知臂 / 空臂 / 未知相机 / home_qpos 维度错）：ValueError 且不改状态。"""
+    adapter = test_adapter_mod.TestRobotAdapter()
+    with pytest.raises(ValueError, match="unknown arm"):
+        adapter.configure(enabled_arms=["both"])
+    with pytest.raises(ValueError, match="empty"):
+        adapter.configure(enabled_arms=[])
+    with pytest.raises(ValueError, match="unknown camera"):
+        adapter.configure(enabled_cameras=["cam_nope"])
+    with pytest.raises(ValueError, match="home_qpos"):
+        adapter.configure(home_qpos=[0.0] * 7)
+    # 状态未被污染：仍为缺省双臂
+    assert adapter.action_dim == 14
+    assert adapter.enabled_arms == ["left", "right"]
+
+
+def test_configure_preserves_physical_arm_order():
+    """enabled_arms 顺序无关：归一化为物理顺序（left → right）。"""
+    adapter = test_adapter_mod.TestRobotAdapter()
+    adapter.configure(enabled_arms=["right", "left"])
+    assert adapter.enabled_arms == ["left", "right"]
+    assert adapter.action_dim == 14
+
+
+def test_select_qpos_picks_enabled_arm_dims():
+    """基类 _select_qpos：按启用臂物理顺序挑选 / 拼接 qpos。"""
+    adapter = test_adapter_mod.TestRobotAdapter()
+    qpos = np.arange(14, dtype=np.float32)
+    assert np.array_equal(adapter._select_qpos(qpos), qpos)  # 全臂 → 原样
+    adapter.configure(enabled_arms=["right"])
+    assert np.array_equal(adapter._select_qpos(qpos), qpos[7:14])
+    adapter.configure(enabled_arms=["left"])
+    assert np.array_equal(adapter._select_qpos(qpos), qpos[0:7])
+
+
+def test_expand_action_uses_home_for_disabled_arm():
+    """基类 _expand_action：未启用臂用 home_qpos 填充。"""
+    adapter = test_adapter_mod.TestRobotAdapter()
+    adapter.configure(enabled_arms=["right"], home_qpos=[-1.0] * 14)
+    full = adapter._expand_action(np.ones(7), "rollout")
+    assert np.array_equal(full, np.array([-1.0] * 7 + [1.0] * 7))
+
+
+# ---- node：_probe_adapter 应用 adapter 配置（配置参数化，非包装）--------------
+
+
+def test_node_probe_applies_adapter_config(monkeypatch):
+    from motrix_edge.node import EdgeNode
+
+    inner = test_adapter_mod.TestRobotAdapter(name="Test Robot")
+
+    def fake_discover(host, port, required_capability=None):
+        return inner
+
+    monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090, "enabled_arms": ["right"]}})
+    node._last_probe = 0.0
+    node._probe_adapter()
+    assert node.adapter is inner  # 复用同一进程 / 同一 adapter，不新建
+    assert inner.action_dim == 7
+    assert inner.enabled_arms == ["right"]
+
+
+def test_node_probe_invalid_config_does_not_bind(monkeypatch):
+    from motrix_edge.node import EdgeNode
+
+    inner = test_adapter_mod.TestRobotAdapter(name="Test Robot")
+
+    def fake_discover(host, port, required_capability=None):
+        return inner
+
+    monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090, "enabled_arms": ["both"]}})
+    node._last_probe = 0.0
+    node._probe_adapter()
+    assert node.adapter is None  # 配置非法：不绑定，等待重试

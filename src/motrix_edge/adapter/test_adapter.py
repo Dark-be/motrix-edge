@@ -79,7 +79,17 @@ class TestRobotAdapter(RobotAdapter):
     # ---- 能力 / 连接参数（类级常量，自包含，不随 discover 传输）----
     ROBOT_MODEL_ID = "test-robot"
     ROBOT_MODEL_VERSION = "0.0.0"
-    ACTION_DIM = 14  # 动作维度
+    ACTION_DIM = 14  # 完整动作维度
+    # 单臂动作维度与臂布局（与双臂 Piper 一致；供基类 configure / 臂映射助手）
+    ACTION_DIM_PER_ARM = 7
+    ARM_LEFT = "left"
+    ARM_RIGHT = "right"
+    LEFT_QPOS_SLICE = slice(0, 7)
+    RIGHT_QPOS_SLICE = slice(7, 14)
+    ARM_NAMES = (ARM_LEFT, ARM_RIGHT)
+    ARM_QPOS_SLICES = {ARM_LEFT: LEFT_QPOS_SLICE, ARM_RIGHT: RIGHT_QPOS_SLICE}
+    HOME_QPOS = [0.0] * 14
+    DEFAULT_ENABLED_ARMS = (ARM_LEFT, ARM_RIGHT)
     # 相机布局：{相机名: 分辨率 (width, height)}（SDK 产出 raw RGB；observe 编码 JPEG 原图）
     IMAGES: dict[str, tuple[int, int]] = {
         "cam_head": (640, 480),
@@ -104,14 +114,14 @@ class TestRobotAdapter(RobotAdapter):
 
         - ``name``：机器人进程 discover 解析出的名称（展示用；缺省回退类常量）。
         - ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（entry point 类型，用于实例化）。
-        - 能力（动作维度 / 相机布局）与连接参数（HTTP 地址 / 共享内存名）**全部由类级
-          常量定义**，不随 discover 传输、不接收 Edge 配置。
+        - 能力（动作维度 / 相机布局）与连接参数（HTTP 地址 / 共享内存名）由类级常量定义；
+          运行时经 ``configure()`` 应用 Edge 配置（启用臂 / 相机 / home_qpos）。
         """
         super().__init__(name=name)
         self.name = name or self.NAME
-        # 能力：类级常量（自包含，不随 discover 传输）
-        self.action_dim = self.ACTION_DIM
-        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键）
+        # 能力：类级常量（自包含，不随 discover 传输）；基类已初始化 enabled_arms / home
+        self.action_dim = self._compute_action_dim()  # 缺省全臂 = 14
+        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键；configure 可裁剪）
         self.robot_model_id = self.ROBOT_MODEL_ID
         self.robot_model_version = self.ROBOT_MODEL_VERSION
         self._capabilities = dict(self.CAPABILITIES)
@@ -239,20 +249,22 @@ class TestRobotAdapter(RobotAdapter):
     def observe(self) -> dict:
         """读取共享内存最新观测帧（SDK 进程产出），图像编码为 JPEG（Edge 契约）。
 
-        SDK 进程把观测填充到共享内存；observe 只读取、不推进 SDK 运行。
+        只返回启用臂 qpos 与启用相机（configure 裁剪）；SDK 进程把观测填充到共享内存，
+        observe 只读取、不推进 SDK 运行。
         """
         if self._shm is None:
             self._shm = ObsShmReader(self.shm_name)  # 惰性 attach（首次观测时）
         frame = self._shm.read()
         if frame is None:
             return None  # SDK 尚未产出首帧：瞬态无帧，不是空观测
-        qpos = np.asarray(frame["qpos"], dtype=np.float32)
+        qpos = self._select_qpos(np.asarray(frame["qpos"], dtype=np.float32))
         obs = {
             KEY_QPOS: qpos,
             KEY_ACTION: qpos.copy(),  # 测试：action = 当前执行位置
         }
-        for img, name in zip(frame["images"], self.images):
-            obs[f"{CAMERA_PREFIX}{name}"] = self._encode_jpeg(img)
+        full = {name: self._encode_jpeg(img) for name, img in zip(self._full_image_names, frame["images"])}
+        for name in self.images:  # 只暴露启用相机
+            obs[f"{CAMERA_PREFIX}{name}"] = full[name]
         return obs
 
     @staticmethod
@@ -267,12 +279,10 @@ class TestRobotAdapter(RobotAdapter):
     def execute(self, action: Action) -> None:
         """直接下发动作指令（raw）：本地记录 + HTTP 转发 SDK 进程。
 
-        校验维度（与 rollout 一致）再发送：action 解析为 float64 数组，维度须等于
-        ``action_dim``，否则抛 ``ValueError``（不发送）。
+        经 ``_expand_action`` 校验维度（启用臂数）并把动作展开回完整空间（未启用臂 home
+        填充）再发送。
         """
-        target = np.asarray(action, dtype=np.float64)
-        if target.shape[0] != self.action_dim:
-            raise ValueError(f"execute action dim {target.shape[0]} != action_dim {self.action_dim}")
+        target = self._expand_action(action, "execute")
         self.executed.append(target.tolist())
         debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
         self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
@@ -286,10 +296,8 @@ class TestRobotAdapter(RobotAdapter):
 
     # ---- rollout --------------------------------------------------------------------
     def rollout(self, action: Action) -> None:
-        """推理闭环：本地校验维度 + HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。"""
-        target = np.asarray(action, dtype=np.float64)
-        if target.shape[0] != self.action_dim:
-            raise ValueError(f"rollout action dim {target.shape[0]} != action_dim {self.action_dim}")
+        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。"""
+        target = self._expand_action(action, "rollout")
         self.rollout_calls += 1
         self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
 

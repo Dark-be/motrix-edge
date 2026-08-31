@@ -12,6 +12,6 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-from .client import ACT7DofClient, ACTClient
+from .client import ACTClient
 
-__all__ = ["ACT7DofClient", "ACTClient"]
+__all__ = ["ACTClient"]

@@ -8,14 +8,14 @@
 
 ## TODO
 
--   [ ] 设计文档：`wiki/design/motrix_edge_capture_meta.md`
--   [ ] `config/capture.yml`：`meta` 段（operator / task_name 示例数组）
--   [ ] `utils/capture_meta.py`：`CaptureMetaStore`（load / save / list / add / edit /
+-   [x] 设计文档：`wiki/design/motrix_edge_capture_meta.md`
+-   [x] `config/capture.yml`：`meta` 段（operator / task_name 示例数组）
+-   [x] `utils/capture_meta.py`：`CaptureMetaStore`（load / save / list / add / edit /
         delete / delete-key；RLock；缺省路径 `config/capture.yml`）
--   [ ] `utils/commands.py`：注册 `capture meta list/add/edit/delete/delete-key` +
+-   [x] `utils/commands.py`：注册 `capture meta list/add/edit/delete/delete-key` +
         `handle_capture_meta` 处理器（配置级，缺省默认 store）
--   [ ] `node.py`：`_dispatch` 任何状态响应 `capture meta`（注入 `capture_meta_store`）
--   [ ] `session/base.py`：`_on_capture_meta`；CaptureSession / InferSession 任务态响应
--   [ ] `server/capture.py` + `server/app.py`：`GET /v1/captures/meta`
--   [ ] 前端：`SessionPanel` 采集人员 / 任务改为选择列表（读 `/v1/captures/meta`）
--   [ ] 单元测试（store CRUD / handle_capture_meta / node 分发 / server 端点）+ 容器内校验
+-   [x] `node.py`：`_dispatch` 任何状态响应 `capture meta`（注入 `capture_meta_store`）
+-   [x] `session/base.py`：`_on_capture_meta`；CaptureSession / InferSession 任务态响应
+-   [x] `server/capture.py` + `server/app.py`：`GET /v1/captures/meta`
+-   [x] 前端：`SessionPanel` 采集人员 / 任务改为选择列表（读 `/v1/captures/meta`）
+-   [x] 单元测试（store CRUD / handle_capture_meta / node 分发 / server 端点）+ 容器内校验

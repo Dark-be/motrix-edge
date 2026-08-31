@@ -23,7 +23,9 @@ adapter 只负责两条通信通道：
 - **状态查询**：``health`` 实时查询进程，``data_status`` 查询采集产物状态。
 
 动作维度为 14（左右臂各 6 关节 + 1 夹爪），相机布局为 ``cam_head`` /
-``cam_left_wrist`` / ``cam_right_wrist``。身份由 discover 传入，能力与连接参数由类常量定义。
+``cam_left_wrist`` / ``cam_right_wrist``。身份由 discover 传入，能力与连接参数由类常量定义；
+运行时可由 Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 / 相机，未启用臂的
+动作不占位（``execute`` 按启用臂数接收动作，未启用臂用 ``HOME_QPOS`` 填充）。
 """
 
 import cv2
@@ -78,6 +80,19 @@ class DualPiperAdapter(RobotAdapter):
     ROBOT_MODEL_VERSION = "0.0.0"
     # 双臂 Piper：左 + 右臂，各 6 关节 + 1 夹爪 = 7，共 14
     ACTION_DIM = 14
+    ACTION_DIM_PER_ARM = 7  # 单臂动作维度（运行时 action_dim = 启用臂数 × 7）
+    # 双臂 14 维布局：left = qpos[0:7]，right = qpos[7:14]（物理顺序）
+    ARM_LEFT = "left"
+    ARM_RIGHT = "right"
+    LEFT_QPOS_SLICE = slice(0, 7)
+    RIGHT_QPOS_SLICE = slice(7, 14)
+    # 基类布局契约：物理顺序臂名 + 每臂 qpos 切片（供基类 configure / _select_qpos / _expand_action）
+    ARM_NAMES = (ARM_LEFT, ARM_RIGHT)
+    ARM_QPOS_SLICES = {ARM_LEFT: LEFT_QPOS_SLICE, ARM_RIGHT: RIGHT_QPOS_SLICE}
+    # 全臂 home 位姿（14 维）：未启用臂动作填充用，可经 adapter 配置覆盖
+    HOME_QPOS = [0.0] * 14
+    # 缺省启用全部臂（物理顺序：left → right）；Edge 配置可裁剪
+    DEFAULT_ENABLED_ARMS = (ARM_LEFT, ARM_RIGHT)
     # 相机布局：{相机名: 分辨率 (width, height)}（SDK 产出 raw RGB；observe 编码 JPEG 原图）
     IMAGES: dict[str, tuple[int, int]] = {
         "cam_head": (640, 480),
@@ -101,14 +116,15 @@ class DualPiperAdapter(RobotAdapter):
 
         - ``name``：机器人进程 discover 解析出的名称（展示用；缺省回退类常量）。
         - ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（entry point 类型，用于实例化）。
-        - 能力（动作维度 / 相机布局）与连接参数**全部由类级常量定义**，不随 discover 传输、
-          不接收 Edge 配置。
+        - 能力（动作维度 / 相机布局）与连接参数由类级常量定义；运行时经 ``configure()``
+          应用 Edge 配置（启用臂 / 相机 / home_qpos）。
         """
         super().__init__(name=name)
         self.name = name or self.NAME
-        # 能力：类级常量（自包含，不随 discover 传输）
-        self.action_dim = self.ACTION_DIM
-        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键）
+        # 能力：类级常量（自包含，不随 discover 传输）；运行时按 Edge 配置裁剪
+        # （基类 __init__ 已初始化 enabled_arms / _home_qpos / _full_image_names）
+        self.action_dim = self._compute_action_dim()  # 缺省全臂 = 14
+        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键；configure 可裁剪）
         self.robot_model_id = self.ROBOT_MODEL_ID
         self.robot_model_version = self.ROBOT_MODEL_VERSION
         self._capabilities = dict(self.CAPABILITIES)
@@ -180,7 +196,7 @@ class DualPiperAdapter(RobotAdapter):
         self._client().post(PATH_RESET)
 
     def execute(self, action: Action) -> None:
-        target = self._validate_action(action, "execute")
+        target = self._expand_action(action, "execute")
         self.executed.append(target.tolist())
         debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
         self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
@@ -191,7 +207,7 @@ class DualPiperAdapter(RobotAdapter):
         self._client().post(PATH_TELEOP, json={FIELD_TELEOP_ENABLED: self.teleop_enabled})
 
     def rollout(self, action: Action) -> None:
-        target = self._validate_action(action, "rollout")
+        target = self._expand_action(action, "rollout")
         self.rollout_calls += 1
         self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
 
@@ -247,25 +263,18 @@ class DualPiperAdapter(RobotAdapter):
 
     # ---- observe（共享内存观测上行）---------------------------------------------
     def observe(self) -> dict | None:
-        """读取双臂 qpos + 三路相机；尚无首帧时返回 ``None``。"""
+        """读取双臂 qpos + 三路相机；只返回启用臂 qpos 与启用相机；尚无首帧时返回 ``None``。"""
         if self._shm is None:
             self._shm = ObsShmReader(self.shm_name)
         frame = self._shm.read()
         if frame is None:
             return None
-        qpos = np.asarray(frame["qpos"], dtype=np.float32)
+        qpos = self._select_qpos(np.asarray(frame["qpos"], dtype=np.float32))
         obs = {KEY_QPOS: qpos, KEY_ACTION: qpos.copy()}
-        for image, name in zip(frame["images"], self.images):
-            obs[f"{CAMERA_PREFIX}{name}"] = self._encode_jpeg(image)
+        full = {name: self._encode_jpeg(img) for name, img in zip(self._full_image_names, frame["images"])}
+        for name in self.images:  # 只暴露启用相机
+            obs[f"{CAMERA_PREFIX}{name}"] = full[name]
         return obs
-
-    def _validate_action(self, action: Action, operation: str) -> np.ndarray:
-        """动作转 float64 一维数组并校验双臂维度。"""
-        target = np.asarray(action, dtype=np.float64)
-        if target.ndim != 1 or target.shape[0] != self.action_dim:
-            actual = target.shape[0] if target.ndim > 0 else 0
-            raise ValueError(f"{operation} action dim {actual} != action_dim {self.action_dim}")
-        return target
 
     @staticmethod
     def _encode_jpeg(rgb: np.ndarray) -> bytes:

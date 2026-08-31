@@ -38,8 +38,8 @@ class BasePolicyClient:
     def drain(self, observation=None):
         """只消费当前缓存的 action chunk，不发新推理请求；无缓存返回 None。
 
-        observation 可选：需要按策略映射（如 ACT7DofClient 把 action 扩展回完整动作
-        空间）时传入当前观测。基类默认无缓存消费逻辑，返回 None。
+        observation 可选：需要按策略映射（完整动作空间映射由 adapter 负责，见
+        DualPiperAdapter.configure）时传入当前观测。基类默认无缓存消费逻辑，返回 None。
         """
         return None
 

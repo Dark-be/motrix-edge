@@ -607,10 +607,39 @@ class EdgeNode:
         adapter = discover_adapter(host=host, port=port)  # 返回 None 或实例化后的 adapter
         if adapter is None:
             return
+        # 应用 Edge 侧 adapter 配置（enabled_arms / enabled_cameras / home_qpos）：影响
+        # execute 的动作维度（启用臂数 × 7，未启用臂 home 填充）与 observe 布局。
+        if not self._configure_adapter(adapter, adapter_cfg):
+            return
         self.adapter = adapter
         self.adapter_name = getattr(adapter, "name", None) or getattr(adapter, "type", None)
         self.adapter_type = getattr(adapter, "type", None) or getattr(adapter, "name", None)
         self.lifecycle.transition(NodeState.READY)
+
+    def _configure_adapter(self, adapter, adapter_cfg: dict) -> bool:
+        """把 ``adapter`` 段配置应用到已发现 adapter（启用臂 / 相机 / home_qpos）。
+
+        adapter 实现了 ``configure()``（如 ``DualPiperAdapter``）时调用；未实现（缺省）→
+        True（无配置可应用）。配置非法（未知臂 / 相机 / home_qpos 维度错）→ 打印 ERROR，
+        返回 False（本次不绑定，下轮探测重试——避免以错误维度运行）。
+        """
+        configure = getattr(adapter, "configure", None)
+        if not callable(configure):
+            return True
+        try:
+            configure(
+                enabled_arms=adapter_cfg.get("enabled_arms"),
+                enabled_cameras=adapter_cfg.get("enabled_cameras"),
+                home_qpos=adapter_cfg.get("home_qpos"),
+            )
+        except ValueError as exc:
+            debug_print(
+                "EdgeNode",
+                f"adapter configure failed (check adapter.enabled_arms/enabled_cameras/home_qpos): {exc}",
+                "ERROR",
+            )
+            return False
+        return True
 
     def _check_adapter_alive(self) -> None:
         """READY / ACTIVE 下周期检查 adapter 心跳：进程失联 → ERROR。"""

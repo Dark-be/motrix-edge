@@ -90,7 +90,7 @@ def test_health_returns_identity_and_version():
     assert "adapters" in body and "robots" in body["adapters"]
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act", "act7dof"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act"]
 
 
 def test_health_without_node_returns_empty_robot():
@@ -99,7 +99,7 @@ def test_health_without_node_returns_empty_robot():
     body = client.get("/v1/health").json()
     assert body["robot"] == {"name": None, "type": None}
     assert body["adapters"]["robots"] == []
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act", "act7dof"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act"]
 
 
 def test_adapters_info_returns_capabilities():

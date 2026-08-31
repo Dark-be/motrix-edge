@@ -29,7 +29,6 @@ import importlib
 POLICY_REGISTRY = {
     "openpi": ("motrix_edge.policy.openpi.client", "OpenPIClient"),
     "act": ("motrix_edge.policy.act.client", "ACTClient"),
-    "act7dof": ("motrix_edge.policy.act.client", "ACT7DofClient"),
 }
 
 

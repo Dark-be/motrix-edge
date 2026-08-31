@@ -26,16 +26,18 @@ upload:
 adapter:
   host: 127.0.0.1
   port: 8090
+  # 启用的机械臂（right / left）：只启用部分臂时 execute 动作维度 = 启用臂数 × 7，
+  # 未启用臂动作用 home_qpos 填充；缺省启用全部臂（动作维度 14）。
+  enabled_arms: [right]
+  # 启用的相机（从 cam_head / cam_left_wrist / cam_right_wrist 中挑选）；缺省全部。
+  enabled_cameras: [cam_head, cam_right_wrist]
+  # 未启用臂的 home 位姿（14 维；缺省全 0）。作用域：adapter 层，不再由策略配置承载。
+  home_qpos: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 # 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
 # 推理会话时由调用方显式选择；host / port 可运行时通过 infer ip / port 覆盖。
+# 单臂任务：策略用通用 act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 段承载。
 policy:
   host: 0.0.0.0
   port: 8765
-  # act7dof（ACT7DofClient）策略参数：qpos 从观测按索引挑选、相机从观测键挑选
-  type: act7dof # 默认策略类型（会话显式选择时覆盖）
-  qpos_dim: 7 # ACT 模型输入 qpos 维度
-  qpos_indices: [7, 8, 9, 10, 11, 12, 13] # 从 14 维观测取右臂（按需修改）
-  cameras: [cam_head, cam_right_wrist] # 从 adapter 观测键挑选（按需修改）
-  action_indices: [7, 8, 9, 10, 11, 12, 13] # 模型 action 填充回 14 维（右臂）
-  action_fill: [0, 0, 0, 0, 0, 0, 0] # 左臂 home 位姿（未覆盖维度填充；按需修改）
+  type: act # 默认策略类型（会话显式选择时覆盖）

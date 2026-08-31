@@ -365,9 +365,7 @@ def handle_capture_meta(cmd, store=None) -> CommandResult:
         if cmd.name == CMD_CAPTURE_META_ADD:
             return ok_result(meta=store.add(cmd.params.get("key"), cmd.params.get("value")))
         if cmd.name == CMD_CAPTURE_META_EDIT:
-            return ok_result(
-                meta=store.edit(cmd.params.get("key"), cmd.params.get("old"), cmd.params.get("new"))
-            )
+            return ok_result(meta=store.edit(cmd.params.get("key"), cmd.params.get("old"), cmd.params.get("new")))
         if cmd.name == CMD_CAPTURE_META_DELETE:
             return ok_result(meta=store.delete(cmd.params.get("key"), cmd.params.get("value")))
         if cmd.name == CMD_CAPTURE_META_DELETE_KEY:

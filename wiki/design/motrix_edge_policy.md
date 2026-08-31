@@ -25,7 +25,7 @@ policy/
 ├── contract.py       # 格式契约：消息 key 常量 + build_observation / extract_action / 图像编码
 ├── broker.py         # ActionChunkBroker：动作块逐帧下发（[horizon, dim] → 单步）
 ├── openpi/           # OpenPIClient：openpi 默认图像尺寸 224×224
-└── act/              # ACTClient / ACT7DofClient：ACT 默认图像尺寸 640×480
+└── act/              # ACTClient：ACT 默认图像尺寸 640×480
 ```
 
 ## BasePolicyClient
@@ -82,37 +82,15 @@ policy/
 | --------------- | --------- | ---------------------------------- |
 | `OpenPIClient`  | `openpi`  | `[224, 224]`                       |
 | `ACTClient`     | `act`     | `[480, 640]`（图像宽 640、高 480） |
-| `ACT7DofClient` | `act7dof` | `[480, 640]`（同 ACT）             |
 
 ACT 可通过 `policy.image_size` 覆盖默认值；其余观测键、响应键和 `action_horizon` 约定不变。
 
-### ACT7DofClient（act7dof）
-
-固定输入布局的 ACT 变体：在通用 `ACTClient` 基础上增加五项**可配置约束**，用于适配
-「7 维 qpos + 2 相机」这类固定拓扑：
-
--   `qpos_dim`（默认 7）：推理前校验**发送 qpos** 的维度，不匹配即抛错，避免把错误
-    维度的观测发到推理端（防御性校验）。
--   `qpos_indices`（默认空）：从观测 `observations/qpos` 中按索引挑选 / 重排维度
-    （如从 14 维双臂观测取单臂 `[0..6]`）；空则用全量。
--   `cameras`（默认空）：**从 adapter 已有相机观测键中挑选**要发送的相机名列表；空则
-    发送全部 `observations/images/*`（回退通用行为）。
--   `action_indices`（默认空）：模型输出 action 映射回机器人**完整动作空间**的下标；
-    空则透传模型输出。
--   `action_fill`（默认空）：未覆盖维度（如另一臂）的填充值 —— **home 位姿**，标量
-    广播或按未覆盖下标顺序的 list；缺省 0，**不跟随当前 qpos**。
-
-图像尺寸 / 格式与 `action_horizon` 约定同 `ACTClient`。配置示例：
-
-```yaml
-policy:
-    type: act7dof
-    qpos_dim: 7
-    qpos_indices: [0, 1, 2, 3, 4, 5, 6] # 从 14 维观测取单臂
-    action_indices: [0, 1, 2, 3, 4, 5, 6] # 模型 action 填充回 14 维
-    action_fill: [0, 0, 0, 0, 0, 0, 0] # 另一臂 home 位姿（未覆盖维度）
-    cameras: [cam_left, cam_right] # 从 adapter 观测键挑选
-```
+> **单臂任务（不再用 `act7dof`）**：原 `ACT7DofClient`（`act7dof`）把「哪条臂 / 怎么映射回
+> 14 维双臂空间」的索引配置放在策略层（edge.yml `policy` 段），已删除。单臂任务的臂对应关系由
+> **`RobotAdapter` 基类**的 `configure()` 在 **adapter 层**承载（`adapter.enabled_arms` /
+> `enabled_cameras` / `home_qpos`）：只启用部分臂时 `action_dim = 启用臂数 × 7`，`execute` 按启用臂数
+> 接收动作、未启用臂用 `HOME_QPOS` 填充，`observe()` 只返回启用臂 qpos + 启用相机；策略统一用通用
+> `ACTClient`（按启用臂数直通）。详见 [机器人适配器（adapter）](./motrix_edge_adapter.md)。
 
 ## 配置（policy 段）
 
@@ -124,6 +102,9 @@ policy:
 
 策略类型、图像尺寸、图像格式和 `action_horizon` 由具体策略客户端的默认值或服务端 metadata
 决定；进入推理会话时必须显式选择已注册策略。`infer ip` / `infer port` 仅修改上述默认端点。
+
+> 单臂任务：`policy.type` 用 `act`（通用 ACT，按启用臂数直通）；`adapter.enabled_arms` /
+> `enabled_cameras` / `home_qpos` 在 adapter 层决定单臂对应关系（见 [机器人适配器（adapter）](./motrix_edge_adapter.md)）。
 
 ## 运行时端点配置（infer ip / infer port）
 

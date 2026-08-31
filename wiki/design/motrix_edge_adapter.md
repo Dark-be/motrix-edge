@@ -24,8 +24,26 @@ adapter/
 ├── http_contract.py   # adapter ↔ SDK 进程的 HTTP 指令契约（端点 + body 字段单点定义）
 ├── shm_contract.py    # adapter ↔ SDK 进程的共享内存观测契约（ObsShmReader / ObsShmWriter）
 ├── test_adapter.py    # TestRobotAdapter（测试 / 无硬件联调；HTTP + 共享内存薄客户端）
-└── dual_piper_adapter.py  # DualPiperAdapter（双臂 Piper 骨架，预留接口未接实机）
+└── dual_piper_adapter.py  # DualPiperAdapter（双臂 Piper：HTTP + 共享内存薄客户端）
 ```
+
+## 能力裁剪（启用臂 / 相机，RobotAdapter.configure）
+
+机器人**只运行一个进程 / 一个 adapter**（不新增单臂 adapter）：`configure()` 是 **`RobotAdapter`
+基类**的通用能力（`DualPiperAdapter` / `TestRobotAdapter` 声明臂布局后继承）。子类通过类常量声明
+**动作布局**（`ARM_NAMES` / `ARM_QPOS_SLICES` / `ACTION_DIM_PER_ARM` / `HOME_QPOS` /
+`DEFAULT_ENABLED_ARMS` / `IMAGES`），基类提供 `configure` / `_select_qpos` / `_expand_action`：
+
+- `enabled_arms`（right / left）：只启用部分臂时，`action_dim = 启用臂数 × 7`，`execute` 按启用臂数
+  接收动作，**未启用臂动作用 `HOME_QPOS` 填充**（类常量，可用 `home_qpos` 覆盖）；`observe()` 只返回
+  启用臂 qpos（物理顺序 left → right 拼接）。
+- `enabled_cameras`：从 `IMAGES` 中挑选要暴露的相机（影响 `observe()` 与 `capabilities`）。
+- `home_qpos`：未启用臂 home 位姿（完整动作维度；缺省全 0）。
+
+节点 `_probe_adapter` discover 到 adapter 后调用 `configure(enabled_arms=..., enabled_cameras=...,
+home_qpos=...)`；配置非法 → ERROR 且不绑定（等待重试，避免以错误维度运行）。缺省（全臂）行为
+与未裁剪一致：`action_dim=14`、动作直发。单臂任务下策略用通用 `act`（按启用臂数直通），「哪条臂 /
+怎么映射回 14 维」全部由 adapter 承载。
 
 ## RobotAdapter 契约
 
