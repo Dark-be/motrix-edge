@@ -36,6 +36,7 @@ identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` �
 
 import shutil
 from datetime import datetime
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,10 +157,25 @@ class InferEnterRequest(BaseModel):
     policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
 
 
+class InferRolloutRequest(BaseModel):
+    """POST /v1/infers/rollout 请求体：推理模式 + 步数（count 模式）。"""
+
+    mode: Literal["count", "continuous", "drain"] | None = Field(
+        default=None, description="推理模式：count（缺省）/ continuous / drain"
+    )
+    count: int | None = Field(default=None, ge=1, le=100, description="连续推理步数（count 模式，缺省 1）")
+
+
 class UploadScanRequest(BaseModel):
     """POST /v1/uploads 请求体：可覆盖配置的默认采集目录。"""
 
     folder_path: str | None = Field(default=None, description="待扫描目录；缺省使用 upload.data_dir")
+
+
+class CaptureSyncRequest(BaseModel):
+    """POST /v1/captures/sync 请求体：采集元信息（采集员 / 任务名等，进程保存数据时附加）。"""
+
+    meta: dict = Field(default_factory=dict, description="采集元信息（operator / task_name 等）")
 
 
 class UploadSelectRequest(BaseModel):
@@ -447,6 +463,14 @@ def create_app(
         """
         return _capture_call(lambda: _captures().exit(lease_id=lease_id))
 
+    @app.post("/v1/captures/sync")
+    async def captures_sync(req: CaptureSyncRequest, x_lease_id: str | None = Header(default=None)):
+        """同步采集元信息（采集员 / 任务名等）到机器人进程（进程保存一轮数据时附加）。
+
+        受控操作：须持有有效租约（X-Lease-Id）。
+        """
+        return _capture_call(lambda: _captures().sync(meta=req.meta, lease_id=x_lease_id))
+
     # ---- /v1/infers/*：推理会话控制（无回合概念：enter → 持续推理 → exit）----
 
     def _infers():
@@ -483,9 +507,15 @@ def create_app(
         return _infer_call(lambda: _infers().connect(lease_id=x_lease_id))
 
     @app.post("/v1/infers/rollout")
-    async def infers_rollout(x_lease_id: str | None = Header(default=None)):
-        """单步推理闭环（infer rollout）：上传观测 → 推理 → 下发动作。须已在推理会话且持有租约。"""
-        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id))
+    async def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
+        """推理闭环（infer rollout [count] / continuous / drain）。
+
+        body：``mode``（count 缺省 / continuous / drain）+ ``count``（count 模式，缺省 1，1–100）。
+        须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
+        """
+        mode = req.mode if req is not None else None
+        count = req.count if req is not None else None
+        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode, count=count))
 
     @app.delete("/v1/infers")
     async def infers_exit(lease_id: str | None = None):

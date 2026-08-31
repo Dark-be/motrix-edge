@@ -36,6 +36,7 @@ from motrix_edge.session.base import RunResult, SessionState
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
+    CMD_INFER_CONNECT,
     CMD_INFER_ROLLOUT,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
@@ -46,6 +47,7 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_RUN,
     CommandBus,
     ok_result,
+    parse_rollout_mode,
 )
 
 BASE_CFG = {
@@ -221,7 +223,8 @@ class FakeInferSession:
         self.command_source = command_source
         self.pulled = []
         self.adapter = FakeRobot()
-        self.policy = SimpleNamespace(name="fake-policy")
+        self.policy = SimpleNamespace(name="fake-policy", server_metadata={})
+        self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
 
     def run(self):
         while True:
@@ -231,8 +234,26 @@ class FakeInferSession:
                 continue
             self.pulled.append(cmd)
             name = getattr(cmd, "name", None)
-            if name == CMD_INFER_ROLLOUT:  # 单步闭环：回执动作
-                self._reply(cmd, ok_result(state="ready", action=[1.0, 2.0]))
+            if name == CMD_INFER_CONNECT:  # 单次尝试连接推理节点：回执含 metadata
+                self.connected = True
+                self.policy.server_metadata = {"action_horizon": 16}
+                self._reply(cmd, ok_result(state="ready", connected=True, metadata={"action_horizon": 16}))
+            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：按 count 参数解析模式回执
+                mode, count = parse_rollout_mode((cmd.params or {}).get("count"))
+                if mode == "continuous":
+                    self._reply(cmd, ok_result(state="continuous", started=True, count=0, actions=[]))
+                elif mode == "drain":
+                    self._reply(cmd, ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]))
+                else:
+                    self._reply(
+                        cmd,
+                        ok_result(
+                            state="ready",
+                            count=count,
+                            action=[1.0, 2.0],
+                            actions=[[1.0, 2.0]] * count,
+                        ),
+                    )
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
@@ -980,6 +1001,64 @@ def test_infers_rollout_steps_inference():
     assert body["status"] == "accepted"
     assert body["action"] == [1.0, 2.0]
     assert CMD_INFER_ROLLOUT in [getattr(c, "name", None) for c in node.session.pulled]
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_rollout_modes():
+    """推理闭环模式：body count / mode=continuous / mode=drain → 命令层解析并回执。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # count 模式：body count=3 → infer rollout 3
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 3})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 3
+    assert len(body["actions"]) == 3
+    # continuous 模式：mode=continuous → 启动即回执 started
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "continuous"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "continuous"
+    # drain 模式：mode=drain → 只消耗缓存动作块
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "drain"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["action"] == [1.0, 2.0]
+    # 非法 count → 400（pydantic 校验）
+    assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 0}).status_code == 422
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_connect_exposes_status():
+    """POST /v1/infers/connect：单次尝试连接推理节点，成功回执含 metadata；status 反映 connected。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入会话：connect → 409
+    assert client.post("/v1/infers/connect", headers={"X-Lease-Id": lease}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 初始未连接：status connected=False / metadata=None
+    snap = client.get("/v1/infers").json()
+    assert snap["connected"] is False
+    assert snap["metadata"] is None
+    # 连接成功：回执 connected=True + metadata；status 同步暴露
+    r = client.post("/v1/infers/connect", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["connected"] is True
+    assert body["metadata"] == {"action_horizon": 16}
+    snap = client.get("/v1/infers").json()
+    assert snap["connected"] is True
+    assert snap["metadata"] == {"action_horizon": 16}
+    assert CMD_INFER_CONNECT in [getattr(c, "name", None) for c in node.session.pulled]
     # 清理退出
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)

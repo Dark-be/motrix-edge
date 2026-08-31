@@ -199,12 +199,13 @@ class CaptureService:
         return {"status": "accepted", "meta": result.data.get("meta")}
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据。"""
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据 / capture_status。"""
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
         data_status = self._data_status()
         save_dir = getattr(data_status, "save_dir", None) if data_status is not None else None
+        capture_status = getattr(node, "capture_status", None) if node is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
@@ -213,6 +214,16 @@ class CaptureService:
             "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
             "save_dir": str(save_dir) if save_dir is not None else None,
             "data_files": list(getattr(data_status, "data_files", []) or []) if data_status is not None else [],
+            # 采集状态缓存（adapter.capture_status()：采集员 / 任务名等元信息 + 运行位，node 周期刷新）
+            "capture_status": (
+                {
+                    "running": bool(getattr(capture_status, "running", False)),
+                    "operator": getattr(capture_status, "operator", None),
+                    "task_name": getattr(capture_status, "task_name", None),
+                }
+                if capture_status is not None
+                else None
+            ),
             "disk": self._disk_info(save_dir),
             "lease_id": lease_id,  # 当前活跃租约（独立于任务，见 /v1/leases/*）
         }

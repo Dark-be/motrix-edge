@@ -92,13 +92,15 @@ UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 
 推理会话**无回合概念**（enter → 持续推理 → exit，`infer rollout` 步进），端点经 `InferService` 桥接：
 
-| 方法   | 路径                   | 租约          | 说明                                                                                           |
-| ------ | ---------------------- | ------------- | ---------------------------------------------------------------------------------------------- |
-| POST   | `/v1/infers`           | 必需          | `enter`：body 必须提供已注册的 `policy_type`，再执行 `session run infer`                       |
-| GET    | `/v1/infers`           | 无            | 状态快照：node_state / session / adapter / policy / connected / metadata / endpoint / lease_id |
-| POST   | `/v1/infers/connect`   | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）                                   |
-| POST   | `/v1/infers/rollout`   | 必需          | body `count`（缺省 1，1–100）：连续推理并返回最后 action 与 actions 列表                       |
-| DELETE | `/v1/infers?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                       |
+| 方法   | 路径                   | 租约          | 说明                                                                                             |
+| ------ | ---------------------- | ------------- | ------------------------------------------------------------------------------------------------ |
+| POST   | `/v1/infers`           | 必需          | `enter`：body 必须提供已注册的 `policy_type`，再执行 `session run infer`                         |
+| GET    | `/v1/infers`           | 无            | 状态快照：node_state / session / adapter / policy / connected / metadata / endpoint / lease_id   |
+| POST   | `/v1/infers/connect`   | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）                                     |
+| POST   | `/v1/infers/rollout`   | 必需          | body `mode`（count 缺省 / continuous / drain）+ `count`（count 模式，缺省 1，1–100）：
+连续推理并返回最后 action 与 actions 列表；continuous 启动即回执 started，直到 session quit / estop；
+drain 只消费当前缓存动作块（不发新推理请求） |
+| DELETE | `/v1/infers?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                         |
 
 ## 错误语义
 

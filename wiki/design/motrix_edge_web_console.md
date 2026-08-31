@@ -25,7 +25,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 4. **机器人命令卡片**：estop / reset / execute / teleop 命令控制（不再显示适配器，也不提供「查看全部适配器」；匹配到的适配器见状态栏）。
 5. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项。
 6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；支持同步采集元信息（采集员 / 任务名，`POST /v1/captures/sync`，进程保存数据时附加），并展示 `GET /v1/captures` 返回的 `capture_status`（采集员 / 任务名 / 运行位）。
-7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）；提供「推理一步」和按输入次数执行的「推理多步」两个按钮；退出推理后结束会话，连接成功时展示策略服务器 metadata。
+7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）；推理按钮对应推理会话的三种模式：
+    **推理一步 / 推理多步**（`infer rollout [count]`，1–100 次）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）、**消耗缓存**（`infer rollout drain`，只消费已缓存动作块）；退出推理后结束会话，连接成功时展示策略服务器 metadata。
 8. **视频面板**：WebRTC `<video>` 播放 + 连接状态 + 连接 / 断开按钮。
 9. **观测预览面板**：`GET /v1/preview` 的 qpos / action 数值 + 摄像头名列表（与 WebRTC 并存）。**观测无需进入会话**（节点级持续观测）；面板常驻，头部「预览显示」开关控制收起 / 显示（关闭时停止轮询与推流）。
 
@@ -37,6 +38,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 | `DELETE /v1/captures?lease_id=`           | `session quit`        |
 | `POST /v1/infers`（必填 `policy_type`）   | `session run infer`   |
 | `POST /v1/infers/rollout`（body `count`） | `infer rollout count` |
+| `POST /v1/infers/rollout`（body `mode=continuous`） | `infer rollout continuous` |
+| `POST /v1/infers/rollout`（body `mode=drain`） | `infer rollout drain` |
 | `DELETE /v1/infers?lease_id=`             | `session quit`        |
 | `POST /v1/commands`（`capability=estop`） | `robot estop`         |
 
