@@ -34,20 +34,26 @@ def _print_version() -> None:
 def _start_web(app, host: str, port: int):
     """后台线程运行 FastAPI 服务，返回 uvicorn.Server（置 should_exit=True 停止）。
 
-    uvicorn 日志（access / error）写入 ``logs/uvicorn.log``（RotatingFileHandler，
-    10MB × 5），与 ``debug_print`` 的 ``logs/log_*.txt`` 分开；HTTP access 只写文件，
-    终端只保留 uvicorn 启动 / 错误日志。
+    uvicorn 日志：默认（``MOTRIX_LOG_FILE`` 未设 / =0）**全部丢弃**（不写文件、不占终端）；
+    ``MOTRIX_LOG_FILE=1`` 时写 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5，
+    HTTP access 只写文件），与 ``debug_print`` 的 ``logs/log_*.txt`` 分开。
     """
     import os
 
     import uvicorn
 
-    from motrix_edge.config._GLOBAL_CONFIG import LOG_PATH
+    from motrix_edge.config import LOG_PATH
     from motrix_edge.utils.logging import uvicorn_log_config
 
     log_dir = LOG_PATH
-    os.makedirs(log_dir, exist_ok=True)
-    log_config = uvicorn_log_config(os.path.join(log_dir, "uvicorn.log"))
+    # 文件日志**默认关闭**（MOTRIX_LOG_FILE=1 开启，uvicorn.log / access 写文件）；防长期运行塞满磁盘
+    file_log_enabled = os.getenv("MOTRIX_LOG_FILE", "0").strip().lower() not in ("0", "false", "no")
+    if file_log_enabled:
+        os.makedirs(log_dir, exist_ok=True)
+    log_config = uvicorn_log_config(
+        os.path.join(log_dir, "uvicorn.log"),
+        file_enabled=file_log_enabled,
+    )
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info", log_config=log_config))
     threading.Thread(target=server.run, name="web", daemon=True).start()
     return server
@@ -56,21 +62,23 @@ def _start_web(app, host: str, port: int):
 def _run_node(args) -> None:
     """加载配置并启动 EdgeNode（阻塞式主循环，直到 Ctrl-C）。
 
-    配置来源：``run --config <path>`` 指定 yaml 文件路径（如
-    /etc/motrix-edge/edge.yaml）；缺省回退 ``config/edge.yml``。
+    配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省选择性加载——环境变量
+    ``MOTRIX_CONFIG_DIR`` 指向的外界配置优先，否则包内默认 ``edge.yml``（只读兜底）。
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
     node），本地 CLI 按键保留。
     """
     import os
 
-    from motrix_edge.config._GLOBAL_CONFIG import CONFIG_DIR
+    from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_state_dir, load_config
     from motrix_edge.utils.load_file import load_yaml
 
-    config_path = getattr(args, "config", None) or os.path.join(CONFIG_DIR, "edge.yml")
-    try:
-        base_cfg = load_yaml(config_path)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"error: {exc}") from exc
+    explicit = getattr(args, "config", None)
+    if explicit:
+        base_cfg = load_yaml(explicit)
+        config_source = explicit
+    else:
+        base_cfg = load_config("edge.yml")
+        config_source = config_path("edge.yml") or "packaged default (config/edge.yml)"
 
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
@@ -78,11 +86,23 @@ def _run_node(args) -> None:
     from motrix_edge.server.capture import CaptureService
     from motrix_edge.server.command import CommandService
     from motrix_edge.server.infer import InferService
+    from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.session import UploadSession
     from motrix_edge.utils.data_handler import debug_print
 
-    debug_print("EdgeNode", f"Loaded config: {config_path}", "INFO")
+    # 打印配置来源 + 状态 / 日志目录（区分环境变量 MOTRIX_CONFIG_DIR vs 包内默认；文件日志默认关闭）
+    config_dir = get_config_dir()
+    file_log_enabled = os.getenv("MOTRIX_LOG_FILE", "0").strip().lower() not in ("0", "false", "no")
+    debug_print(
+        "EdgeNode",
+        f"Loaded config: {config_source}"
+        f" | config_dir={config_dir or 'packaged default (read-only)'}"
+        f" | state_dir={get_state_dir()}"
+        f" | log_dir={get_log_dir()}"
+        f" | file_logging={'ON' if file_log_enabled else 'OFF (MOTRIX_LOG_FILE=0)'}",
+        "INFO",
+    )
     os.environ["INFO_LEVEL"] = base_cfg.get("INFO_LEVEL", "DEBUG")
 
     server_cfg = base_cfg.get("server", {})
@@ -91,9 +111,6 @@ def _run_node(args) -> None:
 
     debug_print(
         "EdgeNode",
-        "session run capture=启动采集  session run infer policy_type=<openpi|act>=选择策略并启动推理 \n"
-        "infer connect=连接推理节点 | 推理单步: infer rollout | capture sync --meta <json>=同步采集元信息 \n"
-        "session quit=退出当前会话 | 通用: node reset/robot reset/robot estop \n"
         f"web: http://{host}:{port} （node 的独立线程，接受外部 HTTP 请求）",
         "INFO",
     )
@@ -108,14 +125,16 @@ def _run_node(args) -> None:
 
     # node 主线程持续运行；web 是 node 的独立线程（node 接收 web 请求）
     # 单 adapter 包：node 启动后按 adapter.host/port 探测并绑定唯一 adapter，采集 / 推理都基于它
-    node = EdgeNode(base_cfg, command_source=bus)
     # Edge 级租约（独立于任务）：受控 HTTP 操作（进入任务 / 命令含 estop）须持有；
     # Console 按 renew_interval 定时续租，超期 ttl 未续租则失效需重新激活
     leases = build_lease_manager(base_cfg)
+    node = EdgeNode(base_cfg, command_source=bus, lease_manager=leases)
     captures = CaptureService(node, bus, leases=leases)
     infers = InferService(node, bus, leases=leases)
     commands = CommandService(node, bus, leases=leases)
     webrtc = WebRTCService(node, leases=leases)
+    # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存
+    preview_service = PreviewService(node, leases=leases)
     uploads = UploadSession(base_cfg)
     web = _start_web(
         create_app(
@@ -127,6 +146,7 @@ def _run_node(args) -> None:
             lease_manager=leases,
             webrtc=webrtc,
             uploads=uploads,
+            preview=preview_service,
         ),
         host,
         port,

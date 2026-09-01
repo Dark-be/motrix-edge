@@ -2,14 +2,16 @@
 
 ## 摘要
 
-采集元信息（采集人员 / 采集任务等）在 `config/capture.yml` 中维护为**可拓展的「分类 →
-选项数组」**结构，由 `capture meta` 命令族（list / add / edit / delete / delete-key）创建 /
+采集元信息（采集人员 / 采集任务等）在 `capture.yml` 中维护为**可拓展的「分类 →
+选项数组」**（包内默认只读；可写副本位于 `MOTRIX_CONFIG_DIR` 外界目录或数据目录），由
+`capture meta` 命令族（list / add / edit / delete / delete-key）创建 /
 编辑 / 删除，经 `GET /v1/captures/meta` 暴露给前端作为**选择列表**；选中后仍由现有
 `capture sync` 同步到机器人进程（进程保存一轮数据时附加）。
 
 ## 目标与原则
 
--   **单一事实来源**：元信息选项存于 `config/capture.yml`（`meta` 段），CLI / HTTP 统一经
+-   **单一事实来源**：元信息选项存于 `capture.yml`（`meta` 段；包内默认，外界目录 /
+    数据目录可写副本），CLI / HTTP 统一经
     `CaptureMetaStore` 读写（写回保留文件其它顶层键），无内存态副本。
 -   **可拓展**：任意分类（key）→ 选项数组；`capture meta add <新key> <值>` 自动创建新分类，
     无需改代码 / 改 schema。
@@ -65,7 +67,8 @@ capture meta delete-key operator
 
 ## 分发与状态可用性
 
--   `CaptureMetaStore`：`utils/capture_meta.py`；缺省路径 `config/capture.yml`，可注入临时
+-   `CaptureMetaStore`：`utils/capture_meta.py`；缺省可写路径（外界目录 `MOTRIX_CONFIG_DIR` /
+    数据目录，首次缺省访问播种包内默认），可注入临时
     路径（测试）。
 -   `handle_capture_meta(cmd, store=None)`：`utils/commands.py`；`store` 缺省用默认路径。
 -   `EdgeNode._dispatch`：配置级命令，任何状态（INIT/IDLE/READY/ACTIVE/ERROR）先于状态机

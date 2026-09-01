@@ -319,7 +319,7 @@ def test_start_end_capture_forwards_to_sdk():
 
 
 # ---------------------------------------------------------------------------
-# configure（RobotAdapter 基类能力）：启用臂 / 相机 / home_qpos —— 通用、无实机
+# configure（RobotAdapter 基类能力）：启用臂 / 相机（home 由类常量 HOME_QPOS 定义）—— 通用、无实机
 # ---------------------------------------------------------------------------
 
 
@@ -350,17 +350,18 @@ def test_configure_right_arm_changes_dim_and_expands():
 
 
 def test_configure_left_arm_expands_with_home():
-    """只启用左臂：动作放 [0:7]，右臂用 home_qpos 填充。"""
+    """只启用左臂：动作放 [0:7]，右臂用类常量 HOME_QPOS 填充。"""
     adapter = _exec_adapter()
-    adapter.configure(enabled_arms=["left"], home_qpos=[1.0] * 14)
+    adapter.configure(enabled_arms=["left"])
     adapter.execute(np.ones(7))
-    assert adapter.executed == [[1.0] * 7 + [1.0] * 7]  # 左臂 1.0，右臂 home 1.0
+    # TestRobotAdapter 缺省 HOME_QPOS = 全 0
+    assert adapter.executed == [[1.0] * 7 + [0.0] * 7]  # 左臂 1.0，右臂 home 0.0
 
 
 def test_configure_both_arms_keeps_14_dim_passthrough():
     """全臂启用：action_dim=14，动作直发（home 不影响全启用）。"""
     adapter = _exec_adapter()
-    adapter.configure(enabled_arms=["left", "right"], home_qpos=[9.0] * 14)
+    adapter.configure(enabled_arms=["left", "right"])
     assert adapter.action_dim == 14
     adapter.execute(np.arange(14, dtype=np.float64))
     assert adapter.executed == [list(np.arange(14, dtype=np.float64))]
@@ -375,7 +376,7 @@ def test_configure_cameras_subset():
 
 
 def test_configure_validation_errors_atomic():
-    """非法配置（未知臂 / 空臂 / 未知相机 / home_qpos 维度错）：ValueError 且不改状态。"""
+    """非法配置（未知臂 / 空臂 / 未知相机）：ValueError 且不改状态。"""
     adapter = test_adapter_mod.TestRobotAdapter()
     with pytest.raises(ValueError, match="unknown arm"):
         adapter.configure(enabled_arms=["both"])
@@ -383,8 +384,6 @@ def test_configure_validation_errors_atomic():
         adapter.configure(enabled_arms=[])
     with pytest.raises(ValueError, match="unknown camera"):
         adapter.configure(enabled_cameras=["cam_nope"])
-    with pytest.raises(ValueError, match="home_qpos"):
-        adapter.configure(home_qpos=[0.0] * 7)
     # 状态未被污染：仍为缺省双臂
     assert adapter.action_dim == 14
     assert adapter.enabled_arms == ["left", "right"]
@@ -410,14 +409,15 @@ def test_select_qpos_picks_enabled_arm_dims():
 
 
 def test_expand_action_uses_home_for_disabled_arm():
-    """基类 _expand_action：未启用臂用 home_qpos 填充。"""
+    """基类 _expand_action：未启用臂用类常量 HOME_QPOS 填充。"""
     adapter = test_adapter_mod.TestRobotAdapter()
-    adapter.configure(enabled_arms=["right"], home_qpos=[-1.0] * 14)
+    adapter.configure(enabled_arms=["right"])
     full = adapter._expand_action(np.ones(7), "rollout")
-    assert np.array_equal(full, np.array([-1.0] * 7 + [1.0] * 7))
+    # TestRobotAdapter 缺省 HOME_QPOS = 全 0
+    assert np.array_equal(full, np.array([0.0] * 7 + [1.0] * 7))
 
 
-# ---- node：_probe_adapter 应用 adapter 配置（配置参数化，非包装）--------------
+# ---- node：_probe_adapter 应用运行时 adapter 配置（命令 / 前端设置，非 edge.yml）----
 
 
 def test_node_probe_applies_adapter_config(monkeypatch):
@@ -429,7 +429,9 @@ def test_node_probe_applies_adapter_config(monkeypatch):
         return inner
 
     monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
-    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090, "enabled_arms": ["right"]}})
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
+    # 运行时配置（adapter config set / 前端 POST /v1/adapters/config），不读 edge.yml
+    assert node._apply_adapter_config({"enabled_arms": ["right"]})
     node._last_probe = 0.0
     node._probe_adapter()
     assert node.adapter is inner  # 复用同一进程 / 同一 adapter，不新建
@@ -446,7 +448,93 @@ def test_node_probe_invalid_config_does_not_bind(monkeypatch):
         return inner
 
     monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
-    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090, "enabled_arms": ["both"]}})
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
+    # 无 adapter 绑定时设置非法配置（仅存状态）；discover 绑定时 configure 校验失败 → 不绑定
+    assert node._apply_adapter_config({"enabled_arms": ["both"]})
     node._last_probe = 0.0
     node._probe_adapter()
     assert node.adapter is None  # 配置非法：不绑定，等待重试
+
+
+def test_adapter_config_command_query_and_set():
+    """adapter config / adapter config set <json>：查询与设置运行时 adapter 配置。"""
+    from motrix_edge.node import EdgeNode
+    from motrix_edge.utils.commands import build_command_registry
+
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
+    registry = build_command_registry()
+
+    # 查询（初始为空）
+    replies = []
+    cmd = registry.parse_argv(["adapter", "config"])
+    cmd.reply_to = replies.append
+    node._dispatch(cmd)
+    assert replies[0].status == "ok"
+    assert replies[0].data == {}
+    assert node.adapter_config == {}
+
+    # 设置（无 adapter 绑定：仅存状态）
+    replies2 = []
+    cmd2 = registry.parse_argv(["adapter", "config", "set", '{"enabled_arms": ["right"]}'])
+    cmd2.reply_to = replies2.append
+    node._dispatch(cmd2)
+    assert replies2[0].status == "ok"
+    assert replies2[0].data["enabled_arms"] == ["right"]
+    assert node.adapter_config["enabled_arms"] == ["right"]
+
+    # 非法 JSON → rejected（400）
+    replies3 = []
+    cmd3 = registry.parse_argv(["adapter", "config", "set", "not-json"])
+    cmd3.reply_to = replies3.append
+    node._dispatch(cmd3)
+    assert replies3[0].status == "rejected"
+    assert replies3[0].status_code == 400
+    # 状态未被污染
+    assert node.adapter_config["enabled_arms"] == ["right"]
+
+
+def test_adapter_config_current_reports_effective():
+    """adapter config current：返回当前绑定 adapter 实际生效的启用臂 / 相机 / 动作维度 / home。"""
+    from motrix_edge.node import EdgeNode
+    from motrix_edge.utils.commands import build_command_registry
+
+    inner = test_adapter_mod.TestRobotAdapter(name="Test Robot")
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
+    node.adapter = inner
+    node.adapter_name = "Test Robot"
+    node.adapter_type = "test_robot"
+    inner.configure(enabled_arms=["right"], enabled_cameras=["cam_head"])
+
+    registry = build_command_registry()
+    replies = []
+    cmd = registry.parse_argv(["adapter", "config", "current"])
+    cmd.reply_to = replies.append
+    node._dispatch(cmd)
+
+    assert replies[0].status == "ok"
+    data = replies[0].data
+    assert data["adapter"] == {"name": "Test Robot", "type": "test_robot"}
+    # 能力启用字典（configure 应用后）：只启用 right 臂 + cam_head 相机
+    assert data["enabled"]["arms"].get("right") is True
+    assert data["enabled"]["arms"].get("left") is False
+    assert data["enabled"]["cameras"].get("cam_head") is True
+    assert data["action_dim"] == 7
+    assert data["home_qpos"] == [0.0] * 14  # TestRobotAdapter 缺省 HOME_QPOS 全 0
+
+
+def test_adapter_config_current_without_adapter_returns_default():
+    """adapter config current：未绑定 adapter → 回退包内默认 adapter 的默认配置（default=True）。"""
+    from motrix_edge.node import EdgeNode
+    from motrix_edge.utils.commands import build_command_registry
+
+    node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
+    registry = build_command_registry()
+    replies = []
+    cmd = registry.parse_argv(["adapter", "config", "current"])
+    cmd.reply_to = replies.append
+    node._dispatch(cmd)
+    assert replies[0].status == "ok"
+    data = replies[0].data
+    assert data["default"] is True  # 未绑定 → 默认配置标记
+    assert data["enabled"]["arms"]
+    assert data["enabled"]["cameras"]

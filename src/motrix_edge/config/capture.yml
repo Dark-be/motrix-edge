@@ -1,4 +1,5 @@
-# 采集元信息选项（capture meta 命令维护；可拓展任意分类 → 选项数组）。
+# 包内默认采集元信息选项（只读兜底；capture meta 命令写入可写位置——外部配置目录
+# MOTRIX_CONFIG_DIR 优先，否则状态目录 XDG_STATE_HOME/motrix 或 CWD 的 capture.yml）。
 # 结构：meta.<分类> = [选项, ...]；示例分类 operator（采集人员）/ task_name（采集任务）。
 # 管理命令：capture meta list / add <key> <value> / edit <key> <old> <new>
 #           / delete <key> <value> / delete-key <key>

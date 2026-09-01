@@ -22,7 +22,7 @@ webrtc）。纯前端、零后端改动。功能完整落地后删除本文档�
 -   [ ] WebRTC 视频：`POST /v1/webrtc/offer` 协商 + `<video>` 播放 + 连接状态
 -   [ ] 预览面板：`GET /v1/preview` qpos / action / 摄像头 jpeg
 -   [ ] `npm install` + `npm run build`（tsc + vite build）通过
--   [ ] 与运行中的 Edge（`config/edge.yml`，:8000）联调：租约自动续租 + 进入/退出会话 + 视频流
+-   [ ] 与运行中的 Edge（`edge.yml` 默认配置，:8000）联调：租约自动续租 + 进入/退出会话 + 视频流
 -   [x] 更新 `wiki/design/index.md` / `wiki/plan/index.md` 登记文档
 
 ## 后续重构（对齐 edge 接口 + 可用性）

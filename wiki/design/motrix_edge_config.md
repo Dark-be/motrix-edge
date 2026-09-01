@@ -2,23 +2,35 @@
 
 ## 摘要
 
-`config/` 提供**全局路径常量**（`_GLOBAL_CONFIG.py`，基于包内固定位置推导仓库根，不依赖 CWD）与
-**yaml 配置加载**；CLI 入口统一在 `__main__.py`（console script `motrix-edge` 与
-`python -m motrix_edge` 共用同一 `main()`）。
+`config/` 提供**路径解析 + 选择性加载外界配置**（`config/__init__.py`，**环境变量优先、包内
+默认兜底**）与 **yaml 配置加载**；CLI 入口统一在 `__main__.py`（console script `motrix-edge`
+与 `python -m motrix_edge` 共用同一 `main()`）。
 
-## 全局路径常量
+## 路径与配置来源（分层）
 
-| 常量         | 含义                                                                |
-| ------------ | ------------------------------------------------------------------- |
-| `ROOT_DIR`   | 仓库根目录（本文件向上 4 级推导）                                   |
-| `CONFIG_DIR` | 配置目录（`ROOT_DIR/config`）                                       |
-| `DATA_PATH`  | 数据目录（采集产物）                                                |
-| `LOG_PATH`   | 日志目录（`debug_print` 的 `logs/log_*.txt` 与 `logs/uvicorn.log`） |
+> **Edge 不负责数据目录**：采集数据落盘由 adapter / SDK 进程自维护（`data_status` 上报）；
+> Edge 只维护**采集配置**（如 `capture.yml` 的操作员 / 任务元信息），经 `capture sync` 传给 adapter。
+
+| 函数 / 常量        | 语义                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `get_config_dir()` | 外界配置目录（环境变量 `MOTRIX_CONFIG_DIR`）；未设置 → None（用包内默认，只读）                        |
+| `get_log_dir()`    | 日志目录（`debug_print` 的 `log_*.txt` 与 `uvicorn.log`）：`XDG_STATE_HOME`/motrix，缺省 `CWD/logs`  |
+| `get_state_dir()`  | 可写配置状态目录（如 `capture.yml` 元信息）：`XDG_STATE_HOME`/motrix，缺省 `CWD`                    |
+| `config_path(name)`  | 配置真实路径：外界目录 → `{config_dir}/{name}`；否则 None（读包内默认）                              |
+| `writable_config_path(name)` | 可写配置路径（写操作用）：外界目录优先，否则状态目录（包内默认只读）                     |
+| `load_config(name)` | 加载配置：外界文件优先，否则读包内默认 yml（package data，只读兜底）；缺失 → `{}`                     |
+| `CONFIG_DIR` / `LOG_PATH` | 模块级便捷常量（import 时计算；`CONFIG_DIR` 无外界配置时为 None）                          |
+
+**包内默认配置**：`src/motrix_edge/config/*.yml`（`edge.yml` / `capture.yml`）作为 package data
+打包，经 `importlib.resources` **只读**访问。外界配置只需在 `MOTRIX_CONFIG_DIR` 指向的目录放
+同名 yml（可写，覆盖包内默认）。`run --config <path>` 仍可显式指定任意 yaml 路径。
 
 ## 配置加载
 
--   运行时加载 `config/<name>.yml`（默认 `edge`），`run --config <path>` 可指定文件路径
-    （缺省 `config/edge.yml`）。
+-   缺省：`load_config("edge.yml")`（`MOTRIX_CONFIG_DIR` 外界配置优先，否则包内默认）；
+    `run --config <path>` 显式指定则从该路径加载。
+-   `CaptureMetaStore` 写 `capture.yml`：可写路径（外界目录优先，否则状态目录；首次缺省访问时
+    把包内默认播种到可写位置）。
 -   配置段：
 
 | 段           | 说明                                                                                               | 消费方                |
@@ -27,10 +39,11 @@
 | `identity`   | 设备身份（edge_id / edge_name / edge_version）                                                     | identity              |
 | `lease`      | 租约 ttl / renew_interval                                                                          | lease                 |
 | `server`     | HTTP 监听 host / port                                                                              | server                |
-| `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）                                                  | node / adapter        |
+| `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）；启用臂 / 相机 / home_qpos 为**运行时配置**（命令 / 前端） | node / adapter        |
 | `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                    | node / CaptureSession |
 | `policy`     | 推理节点默认 host / port；策略类型、图像参数和 action_horizon 由客户端默认值或服务端 metadata 决定 | policy                |
 | `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                  | UploadSession         |
+
 
 ## 命令行接口（CLI）
 

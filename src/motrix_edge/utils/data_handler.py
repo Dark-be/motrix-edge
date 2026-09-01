@@ -16,11 +16,14 @@ import datetime
 import os
 import sys
 
-from motrix_edge.config._GLOBAL_CONFIG import LOG_PATH
+from motrix_edge.config import LOG_PATH
 
 # 进程内缓存日志文件路径：首次 debug_print 时确定（含时间戳），之后固定复用——
 # 避免每次写日志都重新 makedirs + 生成新文件名（旧实现跨秒产生海量日志文件）。
 _LOG_FILE: str | None = None
+# 文件日志开关：**默认关闭**（防长期运行塞满磁盘），环境变量 ``MOTRIX_LOG_FILE=1`` 开启；
+# 终端打印保留（运行信息不受影响）。
+_LOG_FILE_ENABLED = os.getenv("MOTRIX_LOG_FILE", "0").strip().lower() not in ("0", "false", "no")
 
 
 def _get_log_file() -> str:
@@ -57,10 +60,10 @@ def debug_print(name, info, level="INFO", end="\n", flush=True):
     msg = f"[{level}][{name}] {info}"
     print(f"{color}{msg}{endc}", end=end, flush=flush)
 
-    # 写入日志文件 (INFO及以上级别)
-    if msg_level_value >= 20:
+    # 写入日志文件 (INFO及以上级别；MOTRIX_LOG_FILE=0 暂时关闭文件写入)
+    if msg_level_value >= 20 and _LOG_FILE_ENABLED:
         log_file_path = _get_log_file()
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H.%f")[:-3]
         try:
             with open(log_file_path, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}]{msg}\n")

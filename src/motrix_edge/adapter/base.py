@@ -186,19 +186,19 @@ class RobotAdapter(ABC):
         self._home_qpos = np.asarray(self.HOME_QPOS or [0.0] * self.ACTION_DIM, dtype=np.float64)
         self._full_image_names = list(self.IMAGES)
 
-    # ---- 能力裁剪（configure：启用臂 / 相机 / home；通用臂映射助手）---------------
-    def configure(self, enabled_arms=None, enabled_cameras=None, home_qpos=None) -> None:
-        """应用 Edge 配置（``adapter`` 段）裁剪能力：启用臂 / 相机 / 未启用臂 home。
+    # ---- 能力裁剪（configure：启用臂 / 相机；home 固定由 HOME_QPOS 定义）----------
+    def configure(self, enabled_arms=None, enabled_cameras=None) -> None:
+        """应用 Edge 配置（``adapter`` 段）裁剪能力：启用臂 / 相机。
 
-        - ``enabled_arms``：启用的臂（``ARM_NAMES`` 子集，如 right / left）；缺省启用全部。
-          运行时 ``action_dim = 启用臂数 × ACTION_DIM_PER_ARM``，动作段按**物理顺序**
-          （``ARM_NAMES``）映射，未启用臂用 home 填充；
-        - ``enabled_cameras``：启用的相机（``IMAGES`` 子集）；缺省全部；
-        - ``home_qpos``：未启用臂的 home 位姿（长度 = ``ACTION_DIM``）；缺省 ``HOME_QPOS``。
+        - ``enabled_arms``：启用的臂（``ARM_NAMES`` 子集，如 right / left）；缺省启用全部
+          （``DEFAULT_ENABLED_ARMS``，如双臂）。运行时 ``action_dim = 启用臂数 ×
+          ACTION_DIM_PER_ARM``，动作段按**物理顺序**（``ARM_NAMES``）映射，未启用臂用
+          类常量 ``HOME_QPOS`` 填充（home 位姿**固定由 adapter 定义**，不可运行时覆盖）；
+        - ``enabled_cameras``：启用的相机（``IMAGES`` 子集）；缺省全部（如三相机）。
 
         无臂概念（``ARM_NAMES`` 为空）时 ``enabled_arms`` 忽略。参数**原子校验**：任一非法
-        （未知臂 / 未知相机 / 维度错误）→ ``ValueError``，不改变当前能力。只影响本实例的
-        维度 / 观测布局，不重启 / 不新建连接。
+        （未知臂 / 未知相机）→ ``ValueError``，不改变当前能力。只影响本实例的维度 /
+        观测布局，不重启 / 不新建连接。
         """
         arms = None
         if enabled_arms is not None and self.ARM_NAMES:
@@ -214,19 +214,37 @@ class RobotAdapter(ABC):
             unknown = [c for c in cameras if c not in self.IMAGES]
             if unknown:
                 raise ValueError(f"unknown camera(s): {unknown} (available: {list(self.IMAGES)})")
-        home = None
-        if home_qpos is not None:
-            home = np.asarray(home_qpos, dtype=np.float64)
-            if home.ndim != 1 or home.shape[0] != self.ACTION_DIM:
-                raise ValueError(f"home_qpos must be {self.ACTION_DIM}-dim, got {home.shape}")
         # 全部校验通过后应用
         if arms is not None:
             self.enabled_arms = [a for a in self.ARM_NAMES if a in arms]  # 保持物理顺序
         if cameras is not None:
             self.images = list(cameras)
-        if home is not None:
-            self._home_qpos = home.copy()
         self.action_dim = self._compute_action_dim()
+
+    def enabled_map(self) -> dict[str, dict[str, bool]]:
+        """能力启用状态（分组字典，前端勾选展示 / 同步用）。
+
+        返回 ``{"arms": {臂名: 是否启用}, "cameras": {相机名: 是否启用}}``，由当前
+        ``enabled_arms`` / ``images``（``configure()`` 应用后）推导。
+        """
+        return {
+            "arms": {arm: arm in self.enabled_arms for arm in self.ARM_NAMES},
+            "cameras": {cam: cam in self.images for cam in self.IMAGES},
+        }
+
+    @classmethod
+    def default_enabled_map(cls) -> dict[str, dict[str, bool]]:
+        """类级**默认**能力启用字典（不依赖实例 / 绑定状态）。
+
+        基于类常量推导：臂 = ``DEFAULT_ENABLED_ARMS``（缺省 ``ARM_NAMES``，如双臂），
+        相机 = ``IMAGES`` 全部启用（如三相机）。供**未绑定 adapter** 时前端 / CLI 展示
+        默认勾选（刷新即可见）。与 ``enabled_map()``（实例实际生效）区分。
+        """
+        arms = cls.DEFAULT_ENABLED_ARMS or cls.ARM_NAMES
+        return {
+            "arms": {arm: arm in arms for arm in cls.ARM_NAMES},
+            "cameras": {cam: True for cam in cls.IMAGES},
+        }
 
     def _compute_action_dim(self) -> int:
         """启用臂下的动作维度；无臂概念 → 完整维度。"""

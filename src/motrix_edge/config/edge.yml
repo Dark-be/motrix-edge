@@ -1,3 +1,5 @@
+# 包内默认配置（只读兜底）。外界配置：设置环境变量 MOTRIX_CONFIG_DIR 指向可写目录，
+# 同名文件（edge.yml / capture.yml）优先于包内默认。
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
 # Edge 本地设备身份声明（引用，非权威；权威在 MotrixConsole）
@@ -23,20 +25,15 @@ upload:
 
 # 机器人适配器连接配置：Edge 向 adapter.host:adapter.port 发 POST /v1/discover
 # 寻找机器人进程；进程启动后自描述返回 id / name / type / 能力 / 相机 / 控制器等。
+# 启用臂 / 相机 / home_qpos 等能力配置**运行时**设置（命令 adapter config set 或前端
+# POST /v1/adapters/config），不在此配置。
 adapter:
   host: 127.0.0.1
   port: 8090
-  # 启用的机械臂（right / left）：只启用部分臂时 execute 动作维度 = 启用臂数 × 7，
-  # 未启用臂动作用 home_qpos 填充；缺省启用全部臂（动作维度 14）。
-  enabled_arms: [right]
-  # 启用的相机（从 cam_head / cam_left_wrist / cam_right_wrist 中挑选）；缺省全部。
-  enabled_cameras: [cam_head, cam_right_wrist]
-  # 未启用臂的 home 位姿（14 维；缺省全 0）。作用域：adapter 层，不再由策略配置承载。
-  home_qpos: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
 # 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
 # 推理会话时由调用方显式选择；host / port 可运行时通过 infer ip / port 覆盖。
-# 单臂任务：策略用通用 act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 段承载。
+# 单臂任务：策略用通用 act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 运行时配置承载。
 policy:
   host: 0.0.0.0
   port: 8765

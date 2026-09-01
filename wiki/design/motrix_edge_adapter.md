@@ -40,9 +40,11 @@ adapter/
 - `enabled_cameras`：从 `IMAGES` 中挑选要暴露的相机（影响 `observe()` 与 `capabilities`）。
 - `home_qpos`：未启用臂 home 位姿（完整动作维度；缺省全 0）。
 
-节点 `_probe_adapter` discover 到 adapter 后调用 `configure(enabled_arms=..., enabled_cameras=...,
-home_qpos=...)`；配置非法 → ERROR 且不绑定（等待重试，避免以错误维度运行）。缺省（全臂）行为
-与未裁剪一致：`action_dim=14`、动作直发。单臂任务下策略用通用 `act`（按启用臂数直通），「哪条臂 /
+**运行时配置（不写 edge.yml）**：`enabled_arms` / `enabled_cameras` / `home_qpos` 由命令
+`adapter config set <json>` 或前端 `POST /v1/adapters/config`（受控操作，须租约）设置，存于
+节点运行时状态 `adapter_config`，adapter discover 绑定时应用（`_probe_adapter` →
+`_apply_adapter_config`）；非法配置 → rejected / 400，状态不更新。缺省（全臂）行为与未裁剪一致：
+`action_dim=14`、动作直发。单臂任务下策略用通用 `act`（按启用臂数直通），「哪条臂 /
 怎么映射回 14 维」全部由 adapter 承载。
 
 ## RobotAdapter 契约

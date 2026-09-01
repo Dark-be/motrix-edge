@@ -200,6 +200,31 @@ def adapter_details() -> list[dict]:
     return result
 
 
+def default_adapter_config() -> dict | None:
+    """包内第一个可实例化 adapter 的**默认**能力配置（未绑定 / 刷新展示用）。
+
+    无参实例化第一个已注册 adapter（身份缺省 → 类常量回退），读其**默认**能力字典
+    （``enabled_map``，未 configure = 类默认状态）+ 默认 ``action_dim`` / ``home_qpos``，
+    并标记 ``default=True``（供前端显示「未绑定，展示默认配置」）。缺失 SDK / 导入
+    失败 → 跳过继续；**无任何可实例化 adapter → None**（调用方回退 404）。
+    """
+    for ep in entry_points(group=ADAPTER_EP_GROUP):
+        try:
+            adapter = ep.load()()  # 无参实例化（身份缺省 → 类常量回退）
+        except Exception:  # noqa: BLE001 缺失 SDK / 导入失败 → 跳过，不中断
+            continue
+        home = getattr(adapter, "_home_qpos", None)
+        enabled_map = getattr(adapter, "enabled_map", None)
+        return {
+            "adapter": {"name": getattr(adapter, "name", None), "type": ep.name},
+            "enabled": enabled_map() if callable(enabled_map) else {},
+            "action_dim": getattr(adapter, "action_dim", None),
+            "home_qpos": [float(v) for v in home] if home is not None else None,
+            "default": True,
+        }
+    return None
+
+
 __all__ = [
     "ADAPTER_EP_GROUP",
     "CAMERA_PREFIX",
@@ -214,6 +239,7 @@ __all__ = [
     "RobotAdapter",
     "RobotCapabilities",
     "adapter_details",
+    "default_adapter_config",
     "discover_adapter",
     "get_adapter",
     "robot_adapters",

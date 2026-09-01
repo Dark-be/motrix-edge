@@ -171,6 +171,20 @@ def test_revoke_not_found_404():
     assert ei.value.status_code == 404
 
 
+def test_revoke_current_revokes_active_lease():
+    """revoke_current：撤销当前租约（无需 id）；无租约 → None；撤销后槽位清空可重签。"""
+    mgr, _ = make_manager()
+    assert mgr.revoke_current() is None  # 无租约
+    mgr.install(make_lease(ttl=10))
+    lease = mgr.revoke_current()
+    assert lease.lease_id == "ls_console_issued"
+    assert lease.state == LeaseState.REVOKED
+    # 撤销后 status 清空当前槽位（leasable=True，可重新签发）
+    info = mgr.status()
+    assert info["lease_id"] is None
+    assert info["leasable"] is True
+
+
 def test_mirror_returns_lease_info():
     mgr, _ = make_manager()
     mgr.install(make_lease(ttl=10))

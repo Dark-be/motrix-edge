@@ -72,16 +72,19 @@ class CommandResult:
 | `infer port`            | —         | 配置级 | 查询推理节点端口（内存态 `policy.port`）                       | none |
 | `infer port set`        | `port`    | 配置级 | 设置推理节点端口（下次 `session run infer` 生效）              | none |
 | `capture sync`          | `meta`    | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集会话内消费） | none |
-| `capture meta list`     | `key`     | 配置级 | 列出采集元信息选项（可拓展分类 → 选项数组，`config/capture.yml`） | none |
+| `capture meta list`     | `key`     | 配置级 | 列出采集元信息选项（可拓展分类 → 选项数组，`capture.yml`） | none |
 | `capture meta add`      | `key, value` | 配置级 | 新增元信息选项（分类不存在则创建）                          | none |
 | `capture meta edit`     | `key, old, new` | 配置级 | 编辑元信息选项（`old` → `new` 重命名）                  | none |
 | `capture meta delete`   | `key, value` | 配置级 | 删除元信息选项（分类清空则删除分类）                        | none |
 | `capture meta delete-key` | `key`    | 配置级 | 删除整个元信息分类                                        | none |
+| `adapter config`        | —         | 配置级 | 查询运行时 adapter 能力配置（enabled_arms / cameras / home）| none |
+| `adapter config set`    | `json`    | 配置级 | 设置运行时 adapter 能力配置（JSON；应用到当前已绑定 adapter，discover 绑定时生效）| none |
 
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
-`node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`、`capture meta`（配置级，
-与节点状态机解耦）全局可用。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、
-`infer ip set 192.168.1.10`、`infer port set 8765`、`capture meta add operator 王五`、`capture meta list`。
+`node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`、`capture meta`、
+`adapter config`（配置级，与节点状态机解耦）全局可用。CLI 示例：`session run capture`、
+`robot execute 0,0,0`、`robot teleop true`、`infer ip set 192.168.1.10`、`infer port set 8765`、
+`capture meta add operator 王五`、`adapter config set '{"enabled_arms": ["right"]}'`。
 
 ## 本地 vs HTTP（行为对齐）
 

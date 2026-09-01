@@ -29,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from motrix_edge.config._GLOBAL_CONFIG import CONFIG_DIR
+from motrix_edge.config import writable_config_path
 from motrix_edge.utils.load_file import load_yaml
 
 
@@ -42,16 +42,38 @@ class CaptureMetaError(ValueError):
 
 
 class CaptureMetaStore:
-    """读写 ``config/capture.yml`` 的 ``meta`` 段（分类 → 选项数组）。
+    """读写 ``capture.yml`` 的 ``meta`` 段（分类 → 选项数组）。
 
     线程安全（RLock）：CLI / HTTP 命令可能并发管理选项。选项按添加顺序保持；
-    写回时保留文件其它顶层键。``path`` 缺省用仓库 ``config/capture.yml``，测试可注入
-    临时路径。``meta`` 缺失 / 非映射 / 选项非列表 → 视为空（非法键忽略）。
+    写回时保留文件其它顶层键。``path`` 缺省用**可写配置路径**（外部配置目录
+    ``MOTRIX_CONFIG_DIR`` 优先，否则状态目录；首次缺省访问时把包内默认播种到该位置），
+    测试可注入临时路径。``meta`` 缺失 / 非映射 / 选项非列表 → 视为空（非法键忽略）。
     """
 
     def __init__(self, path: str | Path | None = None):
-        self.path = Path(path) if path is not None else CONFIG_DIR / "capture.yml"
+        # 可写配置路径：外部配置目录（MOTRIX_CONFIG_DIR）优先，否则状态目录（包内默认只读）
+        if path is None:
+            self.path = writable_config_path("capture.yml")
+            self._seed_default_if_missing()
+        else:
+            self.path = Path(path)
         self._lock = threading.RLock()
+
+    def _seed_default_if_missing(self) -> None:
+        """无外界配置目录时，把包内默认 ``capture.yml``（只读）播种到可写位置。
+
+        让默认元信息选项开箱可用，同时保留可写性（包内默认本身只读）。
+        """
+        if self.path.exists():
+            return
+        from motrix_edge.config import load_config
+
+        default = load_config("capture.yml")
+        if not default:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(default, f, allow_unicode=True, sort_keys=False)
 
     # -- 只读 ---------------------------------------------------------------
     def list_meta(self, key: str | None = None) -> dict:

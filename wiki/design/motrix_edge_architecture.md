@@ -40,7 +40,7 @@
 | `policy/`           | 推理策略客户端（openpi 等）                     | [推理策略客户端（policy）](./motrix_edge_policy.md)          |
 | `frame/`            | FrameManager 观测帧缓存                         | [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md) |
 | `utils/commands.py` | 命令模型 / 解析 / 传输（CommandBus）            | [命令总线（CommandBus）](./motrix_edge_command_bus.md)       |
-| `config/`           | 全局路径常量 + yaml 配置                        | [配置与命令行](./motrix_edge_config.md)                      |
+| `config/`           | 路径解析 + 选择性加载外界配置（包内默认 yml）          | [配置与命令行](./motrix_edge_config.md)                      |
 
 ## 拓扑与数据流
 

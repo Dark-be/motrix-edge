@@ -103,12 +103,13 @@ policy:
 策略类型、图像尺寸、图像格式和 `action_horizon` 由具体策略客户端的默认值或服务端 metadata
 决定；进入推理会话时必须显式选择已注册策略。`infer ip` / `infer port` 仅修改上述默认端点。
 
-> 单臂任务：`policy.type` 用 `act`（通用 ACT，按启用臂数直通）；`adapter.enabled_arms` /
-> `enabled_cameras` / `home_qpos` 在 adapter 层决定单臂对应关系（见 [机器人适配器（adapter）](./motrix_edge_adapter.md)）。
+> 单臂任务：`policy.type` 用 `act`（通用 ACT，按启用臂数直通）；`enabled_arms` /
+> `enabled_cameras` / `home_qpos` 为**运行时配置**（命令 `adapter config set` / 前端
+> `POST /v1/adapters/config`，见 [机器人适配器（adapter）](./motrix_edge_adapter.md)）。
 
 ## 运行时端点配置（infer ip / infer port）
 
-推理节点地址（`policy.host` / `policy.port`）既可由 `config/edge.yml` 静态配置，也可在
+推理节点地址（`policy.host` / `policy.port`）既可由 `edge.yml`（包内默认 / `MOTRIX_CONFIG_DIR`）静态配置，也可在
 运行期经命令总线动态设置（前端推理卡片设置推理端 ip / 端口后，edge 下次启动推理会话生效）：
 
 | 命令                 | 位置参数 | 语义                                                    | 状态可用性 |

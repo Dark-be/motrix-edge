@@ -55,6 +55,10 @@ CMD_CAPTURE_META_ADD = "capture meta add"  # 新增采集元信息选项（位�
 CMD_CAPTURE_META_EDIT = "capture meta edit"  # 编辑采集元信息选项（位置参数 key, old, new）
 CMD_CAPTURE_META_DELETE = "capture meta delete"  # 删除采集元信息选项（位置参数 key, value）
 CMD_CAPTURE_META_DELETE_KEY = "capture meta delete-key"  # 删除采集元信息分类（位置参数 key）
+CMD_ADAPTER_CONFIG = "adapter config"  # 查询运行时 adapter 能力配置（enabled_arms / cameras / home）
+CMD_ADAPTER_CONFIG_SET = "adapter config set"  # 设置运行时 adapter 能力配置（位置参数 json，JSON 对象）
+CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adapter 实际生效的能力配置（启用臂 / 相机）
+CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
 CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（参数 count，连续执行多步）
 CMD_INFER_CONNECT = "infer connect"  # 单次尝试连接推理节点（推理会话内消费）
@@ -430,6 +434,10 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_CAPTURE_META_EDIT, positional=("key", "old", "new")),  # edit <key> <old> <new>
         CommandSpec(name=CMD_CAPTURE_META_DELETE, positional=("key", "value")),  # capture meta delete <key> <value>
         CommandSpec(name=CMD_CAPTURE_META_DELETE_KEY, positional=("key",)),  # capture meta delete-key <key>
+        CommandSpec(name=CMD_ADAPTER_CONFIG),  # adapter config：查询运行时 adapter 能力配置
+        CommandSpec(name=CMD_ADAPTER_CONFIG_SET, positional=("json",)),  # adapter config set <json>
+        CommandSpec(name=CMD_ADAPTER_CONFIG_CURRENT),  # adapter config current：当前生效能力（启用臂 / 相机）
+        CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
         CommandSpec(name=CMD_INFER_ROLLOUT, positional=("count",)),  # infer rollout [count]
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：单次尝试连接推理节点
