@@ -86,3 +86,66 @@ def test_select_rejects_unknown_or_invalid_episode(tmp_path):
 
     with pytest.raises(UploadError, match="episodes are not selectable"):
         session.select(["episode_0"])
+
+
+def test_scan_extracts_structured_metadata_fields(tmp_path):
+    """schema 驱动的结构化元信息解析：已知字段归一化类型（int / float / str）。"""
+    (tmp_path / "episode_0.mcap").write_bytes(b"mcap")
+    (tmp_path / "episode_0.json").write_text(
+        json.dumps(
+            {
+                "relative_path": "3ded50a2b2f74ed097c42687a38c73a5.mcap",
+                "robot_name": "test_robot_my_pc",
+                "robot_type": "test_robot",
+                "operator": "李四",
+                "task_name": "桌面前移",
+                "frames": 110,
+                "size_bytes": 1056419,
+                "duration": 3.6409189701080322,
+                "sha256": "d721f62bf386028a6d09e41dfb128d6ef5597b5772a21493e42aa96d7c74dfe8",
+                "created_at": "2026-09-01T16:01:08",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    episode = UploadSession().scan(str(tmp_path))["episodes"][0]
+
+    assert episode["status"] == "ready"
+    meta = episode["meta"]
+    assert meta["relative_path"] == "3ded50a2b2f74ed097c42687a38c73a5.mcap"
+    assert meta["robot_name"] == "test_robot_my_pc"
+    assert meta["robot_type"] == "test_robot"
+    assert meta["operator"] == "李四"
+    assert meta["task_name"] == "桌面前移"
+    assert meta["frames"] == 110
+    assert isinstance(meta["frames"], int)
+    assert meta["size_bytes"] == 1056419
+    assert isinstance(meta["size_bytes"], int)
+    assert meta["duration"] == pytest.approx(3.6409189701080322)
+    assert isinstance(meta["duration"], float)
+    assert len(meta["sha256"]) == 64
+    assert meta["created_at"] == "2026-09-01T16:01:08"
+    assert episode["metadata_unknown"] == {}
+    assert episode["metadata_content"]["operator"] == "李四"  # 原始 JSON 保留
+
+
+def test_scan_metadata_unknown_and_type_mismatch_handled(tmp_path):
+    """未知字段保留在 metadata_unknown；类型不符 / 缺失字段 → meta 中为 None（不判 invalid）。"""
+    (tmp_path / "episode_0.mcap").write_bytes(b"mcap")
+    (tmp_path / "episode_0.json").write_text(
+        json.dumps(
+            {
+                "frames": "not-an-int",  # 类型不符 → None
+                "future_field": {"nested": 1},  # schema 未识别 → metadata_unknown
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    episode = UploadSession().scan(str(tmp_path))["episodes"][0]
+
+    assert episode["status"] == "ready"  # 类型不符不判 invalid
+    assert episode["meta"]["frames"] is None
+    assert episode["meta"]["duration"] is None  # 缺失字段补 None
+    assert episode["metadata_unknown"] == {"future_field": {"nested": 1}}

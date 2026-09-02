@@ -444,6 +444,20 @@ def create_app(
         except UploadError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+    def _upload_default_folder() -> str | None:
+        """缺省扫描目录回退链：请求 ``folder_path`` → **adapter 数据目录** → ``upload.data_dir``。
+
+        adapter 数据目录来自节点缓存的采集数据状态（``node.data_status.data_dir``），
+        与前端「获取数据目录」按钮（``GET /v1/captures``）**同源**；未绑定 / 无数据
+        目录时回退配置目录。
+        """
+        if node is not None:
+            data_status = node.data_status
+            data_dir = getattr(data_status, "data_dir", None) if data_status is not None else None
+            if data_dir:
+                return data_dir
+        return uploads.default_folder
+
     @app.get("/v1/uploads")
     async def uploads_status():
         """当前扫描汇总、episode 状态与选择集。"""
@@ -451,9 +465,9 @@ def create_app(
 
     @app.post("/v1/uploads")
     async def uploads_scan(req: UploadScanRequest | None = None):
-        """扫描请求目录；缺省使用配置 upload.data_dir。"""
+        """扫描请求目录；缺省回退链：adapter 数据目录 → upload.data_dir。"""
         folder_path = req.folder_path if req is not None else None
-        return _upload_call(lambda: uploads.scan(folder_path))
+        return _upload_call(lambda: uploads.scan(folder_path or _upload_default_folder()))
 
     @app.post("/v1/uploads/select")
     async def uploads_select(req: UploadSelectRequest):
@@ -488,7 +502,7 @@ def create_app(
 
     @app.get("/v1/captures")
     async def captures_status():
-        """状态快照：state / adapter / save_dir / data_files / disk / running。"""
+        """状态快照：state / adapter / data_dir / data_files / disk / running。"""
         return _captures().status()
 
     @app.get("/v1/captures/precheck")

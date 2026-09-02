@@ -32,9 +32,30 @@ class UploadError(Exception):
 
 
 class UploadSession:
-    """扫描本地目录并按同名 stem 配对 ``.mcap`` / ``.json`` episode。"""
+    """扫描本地目录并按同名 stem 配对 ``.mcap`` / ``.json`` episode。
+
+    JSON 描述文件按 ``METADATA_SCHEMA`` **schema 驱动**提取为结构化 ``meta`` 字段；
+    新增已知字段只需在 schema 加一行，解析与前端展示自动跟随（未知字段保留在
+    ``metadata_unknown``，原始 JSON 保留在 ``metadata_content``）。
+    """
 
     _SELECTABLE_STATES = {"ready", "pending", "failed"}
+
+    # ---- 元信息 schema：JSON 描述文件的已知字段 → (类型, 描述) -----------------
+    # 类型：str / int / float；类型不符或缺省 → meta 中该字段为 None（不判 invalid）。
+    # 新增已知字段只需在此加一行。
+    METADATA_SCHEMA: dict[str, tuple[str, str]] = {
+        "relative_path": ("str", "相对路径"),
+        "robot_name": ("str", "机器人名称"),
+        "robot_type": ("str", "机器人类型"),
+        "operator": ("str", "采集员"),
+        "task_name": ("str", "任务名称"),
+        "frames": ("int", "帧数"),
+        "size_bytes": ("int", "数据大小（字节）"),
+        "duration": ("float", "时长（秒）"),
+        "sha256": ("str", "数据 SHA-256"),
+        "created_at": ("str", "创建时间"),
+    }
 
     def __init__(self, base_cfg: dict | None = None):
         cfg = (base_cfg or {}).get("upload", {})
@@ -154,14 +175,49 @@ class UploadSession:
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
                 errors.append(f"invalid metadata JSON: {exc}")
 
+        meta, metadata_unknown = cls._extract_metadata(metadata_content)
+
         return {
             "episode_id": episode_id,
             "status": "invalid" if errors else "ready",
             "mcap": cls._file_info(mcap_path),
             "metadata": cls._file_info(json_path),
+            "meta": meta,
             "metadata_content": metadata_content,
+            "metadata_unknown": metadata_unknown,
             "errors": errors,
         }
+
+    @classmethod
+    def _extract_metadata(cls, content: dict | None) -> tuple[dict, dict]:
+        """按 schema 提取结构化字段并归一化类型；未知字段保留在 metadata_unknown。
+
+        - ``meta``：已知字段（类型归一化：int / float / str）；JSON 缺失或类型不符的
+          schema 字段补 ``None``（可空，不判 invalid），前端可稳定遍历。
+        - ``metadata_unknown``：schema 未识别的原始字段（向前兼容新数据）。
+        """
+        if not isinstance(content, dict):
+            return {}, {}
+        meta: dict = {}
+        unknown: dict = {}
+        for key, value in content.items():
+            spec = cls.METADATA_SCHEMA.get(key)
+            if spec is None:
+                unknown[key] = value
+                continue
+            kind = spec[0]
+            try:
+                if kind == "int":
+                    meta[key] = int(value)
+                elif kind == "float":
+                    meta[key] = float(value)
+                else:
+                    meta[key] = str(value)
+            except (TypeError, ValueError):
+                meta[key] = None  # 类型不符 → 可空
+        for key in cls.METADATA_SCHEMA:  # 补齐缺失字段为 None
+            meta.setdefault(key, None)
+        return meta, unknown
 
     @staticmethod
     def _file_info(path: Path | None) -> dict | None:
