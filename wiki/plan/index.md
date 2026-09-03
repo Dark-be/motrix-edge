@@ -16,5 +16,6 @@
 -   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
 -   [推理策略选择实施计划](./motrix_edge_policy_selection_plan.md)
 -   [UploadSession 实施计划](./motrix_edge_upload_session_plan.md)
+-   [ACT 走 Lerobot gRPC + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->
