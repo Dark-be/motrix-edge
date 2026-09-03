@@ -20,7 +20,7 @@
 - 连接建立后**先下发首条 metadata**（msgpack，含 ``action_horizon``）；
 - 每个请求接收 msgpack 观测 ``{"observations/qpos": ndarray, "observations/images/*": ...}``，
   返回一段**有界随机游走**的 action chunk ``{"action": ndarray}``（``[horizon, dim]``，块间连续），
-  供 ``ActionChunkBroker`` 逐帧切片验证。
+  供 openpi 策略（``OpenPIClient``，自有动作块缓存）逐帧切片验证。
 
 与 Edge 的耦合**仅限 wire 契约**（``motrix_edge.policy.contract`` / ``msgpack_numpy``），
 不 import ``motrix_edge`` 的业务 / 硬件逻辑。既可独立运行（进程入口），也可被测试进程内
@@ -59,7 +59,7 @@ class SimInferCore:
     """模拟推理核心（本进程自包含，无真实模型）。
 
     ``chunk()``：返回下一个动作块 ``[action_horizon, action_dim]``，为**有界随机游走**
-    的连续轨迹（每块首步衔接上一块末步，使 ``ActionChunkBroker`` 跨块取动作时无跳变）。
+    的连续轨迹（每块首步衔接上一块末步，使 openpi 策略跨块取动作时无跳变）。
     单步幅 ``step``、值域 ``range`` 可配置；``reset()`` 复位游走起点。
     """
 

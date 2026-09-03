@@ -17,8 +17,10 @@
 与 adapter / session 包一致：通过 POLICY_REGISTRY 注册策略客户端，
 由 get_policy(base_cfg) 依据配置 policy.type 选择性实例化。
 
-策略客户端 = 通用 msgpack 传输（transport.py）+ 格式契约（contract.py）+ 策略特有行为（openpi/ 等）。
-openpi 客户端依赖第三方包（websockets / msgpack），懒加载避免导入 motrix_edge
+策略客户端 = 传输（``motrix_edge.transport``：openpi → ws+msgpack，act → lerobot gRPC）
+            + 格式契约（contract.py）+ 策略特有行为（openpi/、act/）。各策略**自持**动作
+            块缓存与流式语义（无通用 broker）：openpi 块逐帧切片，act 按 timestep 键控。
+第三方依赖（websockets / grpc / vendored lerobot）均为懒加载，避免导入 motrix_edge
 时因缺依赖报错。
 """
 

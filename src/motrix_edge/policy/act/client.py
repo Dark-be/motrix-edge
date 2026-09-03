@@ -41,6 +41,9 @@ class ACTClient(BasePolicyClient):
                  “timestep 已预测” 过滤新观测）；
       disconnect() 关闭 channel。
 
+    动作块缓存为 act 自有（``_actions``: timestep → 动作），无通用 broker：未来若做
+    lerobot 风格的重叠预取 / 时序平滑，在 ``_store_action_chunk`` 中对重叠步加权平均即可。
+
     wire 层已从 policy 解耦：
       - 连接（channel/stub）: ``motrix_edge.transport.grpc.AsyncInferenceGrpcTransport``
       - proto / 分块 / pickle 工具 与观测/动作 pickle 数据类（RemotePolicyConfig /
@@ -204,6 +207,17 @@ class ACTClient(BasePolicyClient):
         iterator = send_bytes_in_chunks(data, services_pb2.Observation, silent=True)
         self._transport.stub.SendObservations(iterator)
 
+    def _store_action_chunk(self, timed_actions) -> None:
+        """把动作块落入本地缓存（timestep → 动作）。
+
+        act 动作缓存为**策略自有**（无通用 broker）。edge 采用 lerobot 同步按需语义：
+        块不重叠、timestep 顺序推进，故按 timestep 直接落缓存即可。**若未来引入 lerobot
+        风格的重叠预取 / 时序平滑**（相邻块在 timestep 上重叠），在此对新块与已缓存的
+        重叠步做加权平均（参照官方 robot_client ``_aggregate_action_queues``）。
+        """
+        for timed in timed_actions:
+            self._actions.setdefault(timed.get_timestep(), self._to_numpy(timed.get_action()))
+
     def _wait_for_timestep(self, timestep: int) -> None:
         """GetActions 轮询直到取到含该 timestep 的动作块（服务端空闲返回 Empty → 稍候重试）。"""
         from lerobot.transport import services_pb2  # noqa: PLC0415
@@ -213,8 +227,7 @@ class ACTClient(BasePolicyClient):
         while time.monotonic() < deadline:
             response = self._transport.stub.GetActions(services_pb2.Empty())
             if response.data:
-                for timed in bytes_to_python_object(response.data):
-                    self._actions.setdefault(timed.get_timestep(), self._to_numpy(timed.get_action()))
+                self._store_action_chunk(bytes_to_python_object(response.data))
                 if timestep in self._actions:
                     return
             else:

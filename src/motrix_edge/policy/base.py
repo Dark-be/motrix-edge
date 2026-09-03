@@ -39,7 +39,8 @@ class BasePolicyClient:
         """只消费当前缓存的 action chunk，不发新推理请求；无缓存返回 None。
 
         observation 可选：需要按策略映射（完整动作空间映射由 adapter 负责，见
-        DualPiperAdapter.configure）时传入当前观测。基类默认无缓存消费逻辑，返回 None。
+        DualPiperAdapter.configure）时传入当前观测。动作块缓存由**各策略自有**实现
+        （openpi/act 各自管理），基类无缓存消费逻辑，返回 None。
         """
         return None
 
