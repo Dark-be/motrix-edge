@@ -35,12 +35,15 @@ adapter:
 # 推理会话时由调用方显式选择；host / port 可运行时通过 infer ip / port 覆盖。
 # 单臂任务：策略用通用 act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 运行时配置承载。
 policy:
-  host: 0.0.0.0
-  port: 8765
+  host: 127.0.0.1
+  port: 8080
   type: act # 默认策略类型（会话显式选择时覆盖）
   # --- act（lerobot gRPC）可选键（缺省用客户端默认，见 wiki/design/motrix_edge_policy.md）---
-  # device: cuda # 下发给服务端的推理设备；GPU 部署填 cuda / cuda:0（勿缺省 cpu 以免策略跑 CPU）
-  # pretrained_name_or_path: <checkpoint> # 必填：服务端据此加载 ACT 模型
-  # actions_per_chunk: 50 # 动作块长 K（须匹配模型 chunk，且 > smooth_overlap）
-  # smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭
-  # aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
+  device: cuda # 下发给服务端的推理设备；GPU 部署填 cuda / cuda:0（勿缺省 cpu 以免策略跑 CPU）
+  # pretrained_name_or_path: <真实策略标识> # 必填：服务端据此加载 ACT 模型。
+  #   取值必须是「可加载的策略」：本地策略目录（含 config.json + model.safetensors，
+  #   如 <proj>/outputs/train/<exp>/checkpoints/last）或 HF 策略 repo id（如 lerobot/act_*）。
+  #   注意：数据集目录（含 data/images/meta/videos）不能用于加载；勿留字面占位符。
+  actions_per_chunk: 50 # 动作块长 K（须匹配模型 chunk，且 > smooth_overlap）
+  smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭
+  aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
