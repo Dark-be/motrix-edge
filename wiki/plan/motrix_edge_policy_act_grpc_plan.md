@@ -57,13 +57,13 @@
 -   [ ] 配置：`policy` 段 act 专用键（`pretrained_name_or_path` / `actions_per_chunk` /
         `fps` / `task` / `rename_cameras` / `image_size` / `device` / 平滑键）登记
         edge.yml 兜底
--   [ ] **连接生命周期内聚 policy**（见 design「BasePolicyClient」/ session）：
-        - [ ] `BasePolicyClient`：`connected` property + `ensure_connected()`（惰性）+ `prepare(obs)`
+-   [x] **连接生命周期内聚 policy**（见 design「BasePolicyClient」/ session）：
+        - [x] `BasePolicyClient`：`connected` property + `ensure_connected()`（惰性）+ `prepare(obs)`
               （默认 no-op）；openpi/act 实现 `connected`；act 实现 `prepare`（首次发策略指令预热）
-        - [ ] `transport`：`WsTransport` 暴露 `connected`（grpc 已有）
-        - [ ] `infer_session`：删 `_connected`/503，rollout 前 `ensure_connected()`；`infer connect`
+        - [x] `transport`：`WsTransport` 暴露 `connected`（grpc 已有）
+        - [x] `infer_session`：删 `_connected`/503，rollout 前 `ensure_connected()`；`infer connect`
               改为可选预连+预热（`adapter.observe()` → `policy.prepare(obs)`）
-        - [ ] 测试更新（test_infer_session / test_server：惰性自连 + prepare）
+        - [x] 测试更新（test_infer_session / test_server：惰性自连 + prepare）
 -   [x] **act 时序平滑**（见 design「ACT 时序平滑」）：
         - [x] 客户端：缓存剩余步 ≤ `smooth_overlap` 时同步重叠预取；`_store_action_chunk`
               对重叠步做 `aggregate_fn` 加权（对齐 lerobot `AGGREGATE_FUNCTIONS`）
