@@ -95,7 +95,20 @@ class ACTClient(BasePolicyClient):
         self._next_timestep = 0  # 已执行动作步数（下一观测的 timestep）
         self._actions: dict[int, np.ndarray] = {}  # timestep -> 动作
 
-    # -- 连接 / 断开 -----------------------------------------------------------
+    # -- 连接 / 预热 / 断开 ---------------------------------------------------
+    @property
+    def connected(self) -> bool:
+        return self._transport.connected
+
+    def prepare(self, observation=None):
+        """预热：显式 connect 后提前下发策略指令（SendPolicyInstructions，服务端加载模型）。
+
+        需要观测确定 state 维度 / 相机；已下发过则 no-op。openpi 无此阶段（connect 即
+        就绪）——act 的「真正就绪 = 服务端加载模型」，可提前触发避免首次 infer 阻塞。
+        """
+        if not self._policy_sent and observation is not None:
+            self._ensure_policy(observation)
+
     def connect(self):
         """建立 gRPC channel 并 ``Ready`` 握手；读取 protocol 概要为 server_metadata。"""
         try:

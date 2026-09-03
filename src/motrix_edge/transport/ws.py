@@ -43,6 +43,10 @@ class WsTransport(BaseTransport):
         self._ws = None
         self.server_metadata = None
 
+    @property
+    def connected(self) -> bool:
+        return self._ws is not None
+
     def connect(self):
         """连接推理节点（单次尝试限时）。
 

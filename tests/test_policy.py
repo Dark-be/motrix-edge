@@ -129,7 +129,7 @@ def test_openpi_connect_closes_transport_when_action_horizon_missing():
     with pytest.raises(ValueError, match="action_horizon"):
         client.connect()
 
-    assert transport.close_calls == 1
+    assert transport.close_calls >= 1  # refresh 语义：connect 先释放既有/半开连接
     assert client.server_metadata == {}
     assert client._chunk is None
     assert client._action_horizon is None

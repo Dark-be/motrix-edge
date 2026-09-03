@@ -47,8 +47,13 @@ class OpenPIClient(BasePolicyClient):
         self._chunk = None  # 缓存动作块（[horizon, dim] 或单步 [dim]）
         self._cursor = 0  # 当前块消费游标
 
+    @property
+    def connected(self) -> bool:
+        return self._transport.connected
+
     def connect(self):
         try:
+            self._transport.close()  # 幂等：断开既有连接（refresh 语义，重连安全）
             self._transport.connect()
             self.server_metadata = dict(self._transport.server_metadata or {})
             self._action_horizon = self.server_metadata.get("action_horizon") or self.policy_config.get(

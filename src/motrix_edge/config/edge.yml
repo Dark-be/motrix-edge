@@ -38,3 +38,9 @@ policy:
   host: 0.0.0.0
   port: 8765
   type: act # 默认策略类型（会话显式选择时覆盖）
+  # --- act（lerobot gRPC）可选键（缺省用客户端默认，见 wiki/design/motrix_edge_policy.md）---
+  # device: cuda # 下发给服务端的推理设备；GPU 部署填 cuda / cuda:0（勿缺省 cpu 以免策略跑 CPU）
+  # pretrained_name_or_path: <checkpoint> # 必填：服务端据此加载 ACT 模型
+  # actions_per_chunk: 50 # 动作块长 K（须匹配模型 chunk，且 > smooth_overlap）
+  # smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭
+  # aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative

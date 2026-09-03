@@ -24,9 +24,27 @@ class BasePolicyClient:
         self.policy_config = policy_config or {}
         self.server_metadata: dict = {}
 
+    @property
+    def connected(self) -> bool:
+        """是否已建立到推理节点的连接。子类实现（如基于 ``transport.connected``）。"""
+        return False
+
     def connect(self):
-        """连接推理节点（初始化传输、读取服务端 metadata）。"""
+        """建立连接（可安全重复 / 重连）：初始化传输、读取服务端 metadata。"""
         raise NotImplementedError("Subclasses should implement this method.")
+
+    def ensure_connected(self):
+        """惰性连接：未连接则 ``connect()``，已连 no-op。供会话 rollout 自动触发。"""
+        if not self.connected:
+            self.connect()
+
+    def prepare(self, observation=None):
+        """可选预热：下发策略指令 / 触发服务端模型加载（act 覆盖）；其余策略 no-op。
+
+        需要观测以确定 state 维度 / 相机；显式 ``infer connect`` 或首次 rollout 前调用，
+        把「真正就绪」提前，避免首次 infer 阻塞模型加载。
+        """
+        pass
 
     def infer(self, observation: dict):
         """输入观测，返回动作。

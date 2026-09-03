@@ -27,6 +27,11 @@ class BaseTransport:
         self.config: dict = kwargs or {}
         self.server_metadata: dict = {}
 
+    @property
+    def connected(self) -> bool:
+        """是否已建立连接（子类覆盖）。"""
+        return False
+
     def connect(self):
         """建立连接（初始化传输并读取服务端 metadata）；失败应清理半开连接后抛异常。"""
         raise NotImplementedError("Subclasses should implement this method.")
