@@ -43,7 +43,7 @@ from websockets.sync.server import serve
 # 唯一允许依赖的 Edge 部分：wire 契约（消息 key 常量）+ msgpack-numpy 序列化，
 # 保证与 policy 客户端的收发逻辑统一（见 motrix_edge/policy/contract.py、msgpack_numpy.py）。
 from motrix_edge.policy.contract import KEY_ACTION, KEY_OBS_QPOS
-from motrix_edge.policy.msgpack_numpy import packb, unpackb
+from motrix_edge.transport.msgpack_numpy import packb, unpackb
 
 # 默认参数（SimInferCore 类常量与此对齐）
 DEFAULT_HOST = "0.0.0.0"

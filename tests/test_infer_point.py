@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from motrix_edge.policy.transport import MsgpackTransport
+from motrix_edge.transport import MsgpackTransport
 
 # scripts/ 非安装包：把仓库根加入 sys.path 以便导入虚拟端点模块（与 test_robot_sdk 同为
 # 独立运行的联调脚本，非 src-layout 包内模块）。

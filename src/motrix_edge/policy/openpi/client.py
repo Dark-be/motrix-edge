@@ -20,7 +20,7 @@ from motrix_edge.policy.contract import (
     build_observation,
     extract_action,
 )
-from motrix_edge.policy.transport import MsgpackTransport
+from motrix_edge.transport import WsTransport
 
 
 class OpenPIClient(BasePolicyClient):
@@ -37,7 +37,7 @@ class OpenPIClient(BasePolicyClient):
         super().__init__(policy_config=policy_config)
         self.image_size = tuple(self.policy_config.get("image_size", [224, 224]))
         self.image_format = self.policy_config.get("image_format", "jpeg")
-        self._transport = MsgpackTransport(
+        self._transport = WsTransport(
             host=self.policy_config.get("host", "0.0.0.0"),
             port=self.policy_config.get("port"),
             api_key=self.policy_config.get("api_key"),
