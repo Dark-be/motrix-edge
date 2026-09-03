@@ -15,7 +15,7 @@
 """Test Infer Point —— 独立运行的模拟 openpi 推理服务端（虚拟推理端点）。
 
 **不进行真实推理**：作为联调用的虚拟策略服务端，验证「edge → 推理端」的传输契约
-（见 ``motrix_edge/policy/contract.py`` 与 ``msgpack_numpy.py``）。运行在指定 ip / 端口：
+（见 ``motrix_edge/policy/contract.py`` 与 ``motrix_edge/transport/msgpack_numpy.py``）。运行在指定 ip / 端口：
 
 - 连接建立后**先下发首条 metadata**（msgpack，含 ``action_horizon``）；
 - 每个请求接收 msgpack 观测 ``{"observations/qpos": ndarray, "observations/images/*": ...}``，
