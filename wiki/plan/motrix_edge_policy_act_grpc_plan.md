@@ -27,12 +27,12 @@
 -   [ ] `pyproject.toml`：增 `grpcio`（runtime）与 dev `grpcio-tools`/`protobuf`；
         **torch 不入 pyproject**（默认源是 CUDA 构建），act 部署按上方案手动装 CPU 版；
         `uv lock` + 容器 `uv sync`（顺带补齐 ws/msgpack）
--   [ ] vendored lerobot：从 `/home/pc16/project/lerobot/src/lerobot` 复制最小模块
+-   [x] vendored lerobot：从 `/home/pc16/project/lerobot/src/lerobot` 复制最小模块
         到 `src/lerobot`（`transport/`、`async_inference/helpers.py` 裁剪为仅
-        wire 数据类、`configs/types.py`(PolicyFeature/enums)、`utils/constants.py`
-        + `feature_utils.py`），保留 Apache-2.0 头；验证 `import lerobot...`
--   [ ] pb2：`grpc_tools.protoc` 在 vendored `lerobot/transport` 下重生成
-        `services_pb2{,_grpc}.py`（不再依赖生成时的旧路径）
+        wire 数据类），保留 Apache-2.0 头；已验证 `import lerobot` / pb2 / torch
+        张量动作 pickle 往返
+-   [x] pb2：随 vendored `src/lerobot/transport` 原样可用（生成物以 `lerobot.transport`
+        为包根，vendored 后路径即满足），无需单独重生成
 -   [ ] `motrix_edge/transport` 通用化：定义 `BaseTransport`（connect/request/
         close/server_metadata）+ `WsTransport`（迁移现 `policy/transport.py`
         msgpack-over-websocket）+ `GrpcTransport`（AsyncInference 封装）；proto/
