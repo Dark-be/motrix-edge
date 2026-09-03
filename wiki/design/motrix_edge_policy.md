@@ -17,8 +17,10 @@
 
 ## 目标与原则
 
--   生命周期由 `InferSession` 驱动：**显式 `infer connect` 单次触发 `connect`**，`session_finish`
-    时 `disconnect`；进入推理会话不自动连接。
+-   生命周期：连接状态与时机**内聚到 policy**（策略自行管理，不硬编码在会话层）。
+    `connect()` 幂等可重连；`ensure_connected()` 惰性（未连则单次限时连接，供 rollout 自动触发）；
+    `prepare(obs)` 可选**预热**（act：提前下发策略指令 / 服务端加载模型；openpi：no-op）；
+    `session_finish` 时 `disconnect`。进入推理会话不自动连接（首个 rollout 惰性自连）。
 -   `infer(obs)` 输入观测返回单步动作；异常返回 `None` 供上层跳过。动作块缓存**策略自有**
     （openpi 块切片 / act timestep 键控），不共享通用缓存器——不同策略的块语义与平滑需求不同。
 -   注册式懒加载：`POLICY_REGISTRY` 登记类型，`get_policy()` 选中时才 `import`。
@@ -58,9 +60,16 @@ lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保�
 
 ## BasePolicyClient
 
-最小接口：`connect()`（初始化传输、读取服务端 metadata）、`infer(observation)`（返回单步动作）、
+最小接口：`connect()`（幂等/可重连：初始化传输、读取服务端 metadata）、`connected`（只读：是否已连）、
+`ensure_connected()`（未连则 `connect()`，已连 no-op——**惰性自连**入口）、`prepare(observation=None)`
+（可选预热，默认 no-op；act 覆盖为首次下发策略指令/触发服务端加载）、`infer(observation)`（返回单步动作）、
 `drain(observation=None)`（只消费缓存动作块，不发新推理请求；无缓存返回 `None`）、`reset()`（清策略
-状态）、`disconnect()`。基类默认无缓存消费逻辑。动作块缓存为**各策略自有**（见下）。
+状态）、`disconnect()`。基类默认无缓存消费逻辑、无连接判断（`connected` 默认 False，子类覆盖）。
+动作块缓存为**各策略自有**（见下）。
+
+> 连接语义（旧版由 `InferSession` 维护 `_connected` + 强制先 `infer connect`，act 引入后
+> connect 只轻握手、真正就绪=服务端加载模型 → 该硬编码已删除）：策略自行管理连接状态；
+> 会话只做编排（rollout 前 `ensure_connected()`；`infer connect` 可选显式预连 + `prepare` 预热）。
 
 ## 格式契约（contract.py，openpi wire）
 

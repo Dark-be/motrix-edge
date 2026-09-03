@@ -50,12 +50,20 @@
         标量 + **edge 侧 letterbox 到 image_size（默认 224×224，上下留黑边）** 的 uint8
         RGB 图）；`lerobot_features` 按 state 维度 + 相机（rename_map）生成
 -   [x] 通用 broker 移除：删 `policy/broker.py`，openpi/act 动作缓存策略自持
--   [x] `session/infer_session.py`：接口（connect/infer/drain/reset/disconnect）不变，
-        同步流式无需收线程，**无改动**
+-   [x] `session/infer_session.py`（act 流式适配）：`BasePolicyClient` 接口不变、同步流式
+        无需收线程，此阶段**无改动**；连接语义调整见下方「连接生命周期内聚 policy」
 -   [x] 测试：`tests/test_act_grpc_client.py`（fake AsyncInference servicer，覆盖握手/
         流式/落块/reset/letterbox）+ `tests/test_policy.py`（openpi 自有缓存）+ 全量回归
 -   [ ] 配置：`policy` 段 act 专用键（`pretrained_name_or_path` / `actions_per_chunk` /
-        `fps` / `task` / `rename_cameras` / `image_size` / 平滑键）登记 edge.yml 兜底
+        `fps` / `task` / `rename_cameras` / `image_size` / `device` / 平滑键）登记
+        edge.yml 兜底
+-   [ ] **连接生命周期内聚 policy**（见 design「BasePolicyClient」/ session）：
+        - [ ] `BasePolicyClient`：`connected` property + `ensure_connected()`（惰性）+ `prepare(obs)`
+              （默认 no-op）；openpi/act 实现 `connected`；act 实现 `prepare`（首次发策略指令预热）
+        - [ ] `transport`：`WsTransport` 暴露 `connected`（grpc 已有）
+        - [ ] `infer_session`：删 `_connected`/503，rollout 前 `ensure_connected()`；`infer connect`
+              改为可选预连+预热（`adapter.observe()` → `policy.prepare(obs)`）
+        - [ ] 测试更新（test_infer_session / test_server：惰性自连 + prepare）
 -   [x] **act 时序平滑**（见 design「ACT 时序平滑」）：
         - [x] 客户端：缓存剩余步 ≤ `smooth_overlap` 时同步重叠预取；`_store_action_chunk`
               对重叠步做 `aggregate_fn` 加权（对齐 lerobot `AGGREGATE_FUNCTIONS`）

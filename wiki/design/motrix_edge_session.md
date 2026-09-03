@@ -71,14 +71,17 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无回合概念，由 rollout 步进驱动）**：
 
 -   `run()`：`adapter.reset()` + `policy.reset()` → 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
--   **连接推迟到显式命令**：进入会话**不连接**推理节点；`infer connect` **单次尝试**连接策略
-    服务器（成功回执含服务端 metadata；失败回执 error，连接状态保持未连接）。`infer rollout`
-    仅在已连接时可用（未连接 → 503）。
+-   **连接内聚到 policy、rollout 惰性自连**：进入会话**不连接**推理节点。`infer rollout`
+    前自动 `policy.ensure_connected()`（未连则单次限时连接；失败回执 error、可重试）——
+    不再要求先 `infer connect`。
+-   `infer connect`（**可选**）：显式预连 + 预热 —— `policy.connect()` 成功回执含服务端 metadata，
+    随后尝试 `adapter.observe()` 一帧调 `policy.prepare(obs)`（act：提前下发策略指令、服务端加载
+    模型到 device，避免首次 rollout 卡模型加载；openpi：no-op）。失败回执 error，可重试。
 -   `infer rollout [count]`：连续执行 `count` 次（缺省 1，范围 1–100）`obs = adapter.observe()` →
     `action = policy.infer(obs)` → `adapter.rollout(action)`；回执包含最后动作与动作列表。
     （`observe` 是**推理输入**；显示观测由节点级写入 `frame_manager`，会话不写。）
--   命令：`infer connect`、`infer rollout [count]`、`session quit`（退出回 home）、`robot estop`、
-    `robot reset`、`robot execute`、`robot teleop`。
+-   命令：`infer connect`（可选预连/预热）、`infer rollout [count]`、`session quit`（退出回 home）、
+    `robot estop`、`robot reset`、`robot execute`、`robot teleop`。
 
 ## 相关文档
 
