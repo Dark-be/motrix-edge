@@ -56,11 +56,12 @@
         流式/落块/reset/letterbox）+ `tests/test_policy.py`（openpi 自有缓存）+ 全量回归
 -   [ ] 配置：`policy` 段 act 专用键（`pretrained_name_or_path` / `actions_per_chunk` /
         `fps` / `task` / `rename_cameras` / `image_size` / 平滑键）登记 edge.yml 兜底
--   [ ] **act 时序平滑**（见 design「ACT 时序平滑」）：
-        - [ ] 客户端：缓存剩余步 ≤ `smooth_overlap` 时同步重叠预取；`_store_action_chunk`
+-   [x] **act 时序平滑**（见 design「ACT 时序平滑」）：
+        - [x] 客户端：缓存剩余步 ≤ `smooth_overlap` 时同步重叠预取；`_store_action_chunk`
               对重叠步做 `aggregate_fn` 加权（对齐 lerobot `AGGREGATE_FUNCTIONS`）
-        - [ ] 配置：`smooth_overlap`（0=关）/ `aggregate_fn`；默认关或小窗口
-        - [ ] 测试：fake servicer 返回可重叠块，断言重叠步 = 加权结果、drain 不触发推理
+        - [x] 配置：`smooth_overlap`（默认 10 开启，0=关）/ `aggregate_fn`
+              （默认 weighted_average）；edge 侧可自配
+        - [x] 测试：fake servicer 返回可重叠块，断言重叠步 = 加权结果、drain 不触发推理
 -   [ ] 联调：对本地 `/home/pc16/project/lerobot` 的 `policy_server` 真实互通（可选）
 -   [ ] wiki：`wiki/design/motrix_edge_policy.md` 已更新到最终形态（含时序平滑）；本 plan
         落地后删除并更新 `plan/index.md`

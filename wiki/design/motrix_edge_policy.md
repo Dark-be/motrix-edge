@@ -150,7 +150,7 @@ policy:
     fps: 30 # 训练/环境频率（动作块时间标定）
     task: "" # 指令（任务描述）随观测上传
     rename_cameras: {} # edge 相机名 → 策略图像特征名重命名
-    smooth_overlap: 8 # act 时序平滑重叠窗口（步）；0 = 关闭
+    smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭（edge 侧参数，默认开启）
     aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
 ```
 
