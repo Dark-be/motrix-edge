@@ -18,7 +18,12 @@ import time
 import numpy as np
 
 from motrix_edge.policy.base import BasePolicyClient
-from motrix_edge.policy.contract import KEY_OBS_IMAGE_PREFIX, KEY_OBS_QPOS, to_rgb_uint8
+from motrix_edge.policy.contract import (
+    KEY_OBS_IMAGE_PREFIX,
+    KEY_OBS_QPOS,
+    resize_with_pad,
+    to_rgb_uint8,
+)
 from motrix_edge.transport.grpc import AsyncInferenceGrpcTransport
 
 
@@ -54,6 +59,12 @@ class ACTClient(BasePolicyClient):
         self._fps = int(self.policy_config.get("fps", 30))
         self._task = self.policy_config.get("task", "")
         self._rename_cameras = dict(self.policy_config.get("rename_cameras") or {})
+        # 图像在 edge 侧直接 letterbox 到 (height, width)（默认 224×224，横向图上下留黑边），
+        # 服务端 ACT 按 image_features(224×224) 再处理时 resize 为 no-op、不变形。
+        image_size = self.policy_config.get("image_size", 224)
+        if isinstance(image_size, (int, float)):
+            image_size = (int(image_size), int(image_size))
+        self._image_size = (int(image_size[0]), int(image_size[1]))  # (height, width)
         self._get_actions_timeout = float(self.policy_config.get("get_actions_timeout", 10.0))
         # 运行时状态
         self._policy_sent = False
@@ -166,7 +177,8 @@ class ACTClient(BasePolicyClient):
     def _build_raw_observation(self, observation) -> dict:
         """edge 观测（qpos + jpeg/ndarray 图像）→ lerobot raw obs（state 分量标量 + uint8 图像）。
 
-        图像解码为 uint8 (H, W, 3)（尺寸缩放由服务端按策略 image_features 处理）。
+        图像解码为 uint8 RGB 后由 edge 直接 ``resize_with_pad`` 等比缩放到
+        ``image_size``（默认 224×224，横向图上下留黑边），不依赖服务端缩放。
         """
         raw: dict = {}
         qpos = np.asarray(observation[KEY_OBS_QPOS])
@@ -176,7 +188,7 @@ class ACTClient(BasePolicyClient):
             if key.startswith(KEY_OBS_IMAGE_PREFIX):
                 edge = key[len(KEY_OBS_IMAGE_PREFIX) :]
                 dataset_cam = self._rename_cameras.get(edge, edge)
-                raw[dataset_cam] = to_rgb_uint8(value)
+                raw[dataset_cam] = resize_with_pad(to_rgb_uint8(value), *self._image_size)
         if self._task:
             raw["task"] = self._task
         return raw

@@ -50,6 +50,7 @@ class _FakeAsyncInferenceServicer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_calls = 0
         self.obs_calls = 0
         self.policy_data: bytes | None = None
+        self.last_raw: dict | None = None
         self._obs_queue: "queue.Queue[int]" = queue.Queue()
 
     def Ready(self, request, context):  # noqa: N802
@@ -64,6 +65,7 @@ class _FakeAsyncInferenceServicer(services_pb2_grpc.AsyncInferenceServicer):
     def SendObservations(self, request_iterator, context):  # noqa: N802
         data = receive_bytes_in_chunks(request_iterator, None, threading.Event())
         timed = pickle.loads(data)  # noqa: S301 测试用（vendored 类）
+        self.last_raw = timed.get_observation()
         self._obs_queue.put(timed.get_timestep())
         self.obs_calls += 1
         return services_pb2.Empty()
@@ -150,4 +152,24 @@ def test_act_grpc_requires_pretrained_model(act_server):
     client.connect()
     with pytest.raises(ValueError, match="pretrained_name_or_path"):
         client.infer({"observations/qpos": np.zeros(2, dtype=np.float32)})
+    client.disconnect()
+
+
+def test_act_grpc_image_letterboxed(act_server):
+    """图像上传前被 letterbox 到 224×224：等比缩放 + 上下留黑边，内容不变形。"""
+    port, servicer = act_server
+    client = _make_client(port)
+    client.connect()
+    # 640×360 横向纯红图
+    img = np.zeros((360, 640, 3), dtype=np.uint8)
+    img[:, :, 2] = 255  # R
+    obs = {"observations/qpos": np.zeros(2, dtype=np.float32), "observations/images/cam": img}
+    client.infer(obs)
+
+    got = servicer.last_raw["cam"]
+    assert got.shape == (224, 224, 3)
+    assert not got[:40].any()  # 上黑边
+    assert not got[-40:].any()  # 下黑边
+    # 中部内容行（等比缩放后内容区高 126，居中于 [49, 175)）保持纯红
+    assert np.all(got[112, :, 2] == 255)
     client.disconnect()
