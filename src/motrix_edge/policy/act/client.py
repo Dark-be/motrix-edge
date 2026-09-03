@@ -26,6 +26,15 @@ from motrix_edge.policy.contract import (
 )
 from motrix_edge.transport.grpc import AsyncInferenceGrpcTransport
 
+# 重叠聚合函数（对齐 lerobot 官方 robot_client 的 AGGREGATE_FUNCTIONS）。
+# 默认 weighted_average：重叠步动作 = 0.3*旧块 + 0.7*新块（新决策更占主导）。
+_AGGREGATE_FUNCTIONS = {
+    "weighted_average": lambda old, new: 0.3 * old + 0.7 * new,
+    "latest_only": lambda old, new: new,
+    "average": lambda old, new: 0.5 * old + 0.5 * new,
+    "conservative": lambda old, new: 0.7 * old + 0.3 * new,
+}
+
 
 class ACTClient(BasePolicyClient):
     """ACT 策略客户端：与 lerobot 官方 AsyncInference gRPC policy_server 互通（流式动作块）。
@@ -34,15 +43,19 @@ class ACTClient(BasePolicyClient):
     （edge = Robot 侧 gRPC 客户端）：
       connect()  建立 gRPC channel + ``Ready`` 握手（策略指令延后到首次 infer，
                  那时才知道 state 维度 / 相机）；
-      infer(obs) 动作块耗尽时上传观测（``TimedObservation`` 分块）→ ``GetActions``
-                 取回动作块按 timestep 消费单步；块未耗尽直接消费缓存（不访问推理端）；
-      drain()    只消费缓存动作块；无缓存返回 None；
+      infer(obs) 消费缓存单步；缓存耗尽，或缓存剩余 ≤ ``smooth_overlap``（时序平滑
+                 窗口）时**同步预取**下一块（上传观测 → ``GetActions`` 取块），与旧块
+                 重叠的 timestep 做加权聚合后继续消费；
+      drain()    只消费缓存动作块（含已平滑区）；无缓存返回 None；不发新推理请求；
       reset()    清空缓存动作（timestep 单调递增，不回退，避免服务端按
                  “timestep 已预测” 过滤新观测）；
       disconnect() 关闭 channel。
 
-    动作块缓存为 act 自有（``_actions``: timestep → 动作），无通用 broker：未来若做
-    lerobot 风格的重叠预取 / 时序平滑，在 ``_store_action_chunk`` 中对重叠步加权平均即可。
+    动作块缓存为 act 自有（``_actions``: timestep → 动作，无通用 broker）。**时序平滑**
+    = edge 同步重叠预取 + 加权聚合：在块耗尽前提前请求下一块，使相邻块在 timestep 上
+    重叠 ``smooth_overlap`` 步，重叠步在 ``_store_action_chunk`` 中按 ``aggregate_fn``
+    融合，块边界平滑衔接（服务端每次 ``GetActions`` 都推理、无动作缓存，语义对照
+    lerobot 官方 ``robot_client``）。
 
     wire 层已从 policy 解耦：
       - 连接（channel/stub）: ``motrix_edge.transport.grpc.AsyncInferenceGrpcTransport``
@@ -69,6 +82,14 @@ class ACTClient(BasePolicyClient):
             image_size = (int(image_size), int(image_size))
         self._image_size = (int(image_size[0]), int(image_size[1]))  # (height, width)
         self._get_actions_timeout = float(self.policy_config.get("get_actions_timeout", 10.0))
+        # act 时序平滑：缓存剩余 ≤ smooth_overlap 步时提前同步预取下一块并对重叠步加权
+        # 聚合。smooth_overlap=0 关闭（退化为「块耗尽才推理」）；应 < actions_per_chunk。
+        self._smooth_overlap = int(self.policy_config.get("smooth_overlap", 10))
+        aggregate_name = self.policy_config.get("aggregate_fn", "weighted_average")
+        if aggregate_name not in _AGGREGATE_FUNCTIONS:
+            available = list(_AGGREGATE_FUNCTIONS)
+            raise ValueError(f"Unknown aggregate_fn '{aggregate_name}'. Available: {available}")
+        self._aggregate = _AGGREGATE_FUNCTIONS[aggregate_name]
         # 运行时状态
         self._policy_sent = False
         self._next_timestep = 0  # 已执行动作步数（下一观测的 timestep）
@@ -105,25 +126,41 @@ class ACTClient(BasePolicyClient):
         return action
 
     def infer(self, observation):
-        """单步推理：动作块耗尽时请求新块，否则消费缓存块（不访问推理端）。
+        """单步推理：优先消费缓存单步；缓存耗尽或进入平滑重叠窗口时同步预取新块。
 
-        与 lerobot RobotClient 语义一致：obs.timestep = 已执行步数；服务端对一个观测
-        预测动作块 [timestep, timestep+K)，edge 逐帧消费；块耗尽才上传新观测
-        （``must_go=True`` 强制服务端推理）。
+        obs.timestep = 已执行步数；服务端对一个观测预测动作块 [timestep, timestep+K)。
+        - 缓存耗尽（remaining=0）：请求新块（无重叠）。
+        - 缓存剩余 ≤ ``smooth_overlap``：**提前**请求下一块，与旧块重叠步加权聚合
+          （时序平滑），随后继续消费。
         """
         cur = self._next_timestep
+        remaining = self._cached_remaining()
+        if remaining == 0 or (self._smooth_overlap > 0 and remaining <= self._smooth_overlap):
+            self._request_chunk(observation, cur)
         action = self._actions.pop(cur, None)
         if action is not None:
             self._next_timestep = cur + 1
-            return action
+        return action
 
+    def _cached_remaining(self) -> int:
+        """缓存中从 ``_next_timestep`` 起连续未消费的步数（空为 0）。"""
+        if not self._actions:
+            return 0
+        highest = max(self._actions)
+        if highest < self._next_timestep:
+            return 0
+        return highest - self._next_timestep + 1
+
+    def _request_chunk(self, observation, timestep: int) -> None:
+        """同步请求一块以 ``timestep`` 起的动作块并落缓存（块耗尽 / 平滑预取共用）。
+
+        上传当前观测（``must_go=True``）→ ``GetActions`` 等含 ``timestep`` 的块；
+        新块与已缓存重叠的步在 ``_store_action_chunk`` 内加权聚合。
+        """
         self._ensure_policy(observation)
         raw = self._build_raw_observation(observation)
-        self._send_observation(raw, cur)
-        self._wait_for_timestep(cur)
-        action = self._actions.pop(cur)
-        self._next_timestep = cur + 1
-        return action
+        self._send_observation(raw, timestep)
+        self._wait_for_timestep(timestep)
 
     # -- 内部 ----------------------------------------------------------------
     def _lerobot_features(self, observation) -> dict:
@@ -208,15 +245,21 @@ class ACTClient(BasePolicyClient):
         self._transport.stub.SendObservations(iterator)
 
     def _store_action_chunk(self, timed_actions) -> None:
-        """把动作块落入本地缓存（timestep → 动作）。
+        """把动作块落入本地缓存（timestep → 动作），与已缓存重叠的步做加权聚合。
 
-        act 动作缓存为**策略自有**（无通用 broker）。edge 采用 lerobot 同步按需语义：
-        块不重叠、timestep 顺序推进，故按 timestep 直接落缓存即可。**若未来引入 lerobot
-        风格的重叠预取 / 时序平滑**（相邻块在 timestep 上重叠），在此对新块与已缓存的
-        重叠步做加权平均（参照官方 robot_client ``_aggregate_action_queues``）。
+        act 动作缓存为**策略自有**（无通用 broker）。时序平滑依赖此处聚合：当平滑预取
+        返回的新块与旧缓存重叠时，重叠步 = ``aggregate(old, new)``（默认
+        weighted_average：0.3*旧 + 0.7*新），块边界由此平滑衔接（参照 lerobot 官方
+        robot_client ``_aggregate_action_queues``）。非重叠步直接落入缓存。
         """
         for timed in timed_actions:
-            self._actions.setdefault(timed.get_timestep(), self._to_numpy(timed.get_action()))
+            timestep = timed.get_timestep()
+            new = self._to_numpy(timed.get_action())
+            old = self._actions.get(timestep)
+            if old is None:
+                self._actions[timestep] = new
+            else:
+                self._actions[timestep] = self._aggregate(old, new)
 
     def _wait_for_timestep(self, timestep: int) -> None:
         """GetActions 轮询直到取到含该 timestep 的动作块（服务端空闲返回 Empty → 稍候重试）。"""
