@@ -1,4 +1,7 @@
-# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+#!/usr/bin/env python
+
+# Copyright 2025 The HuggingFace Inc. team.
+# All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,22 +15,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""transport.utils —— 分块 / pickle / gRPC channel 工具（vendored 裁剪版）。
-
-裁剪自 ``src/lerobot/transport/utils.py``：仅保留 AsyncInference 客户端/服务端
-互通所需函数（chunk 分片收发、python 对象 pickle、gRPC 重试 channel options），
-**移除对 ``lerobot.utils`` / ``torch`` / 训练侧（state/transition）的依赖**。
-"""
-
 import io
 import json
 import logging
-import pickle  # noqa: S301 内部白名单序列化（与 lerobot 官方 wire 一致）
+import pickle  # nosec B403: Safe usage for internal serialization only
+from multiprocessing.synchronize import Event as MpEvent
+from queue import Queue
 from typing import Any
+
+import torch
+
+from lerobot.utils.transition import Transition
 
 from . import services_pb2
 
-# protobuf enum：与官方一致引用（类型检查忽略）
+# FIX for protobuf: Assign the enum to a variable and ignore the type error once
 TransferState = services_pb2.TransferState  # type: ignore[attr-defined]
 
 CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB
@@ -42,7 +44,6 @@ def bytes_buffer_size(buffer: io.BytesIO) -> int:
 
 
 def send_bytes_in_chunks(buffer: bytes, message_class: Any, log_prefix: str = "", silent: bool = True):
-    """把 bytes 按 TransferState 分块产出 message_class(transfer_state, data) 序列（流式发送）。"""
     bytes_buffer: io.BytesIO = io.BytesIO(buffer)
     size_in_bytes = bytes_buffer_size(bytes_buffer)
 
@@ -70,15 +71,14 @@ def send_bytes_in_chunks(buffer: bytes, message_class: Any, log_prefix: str = ""
     logging_method(f"{log_prefix} Published {sent_bytes / 1024 / 1024} MB")
 
 
-def receive_bytes_in_chunks(iterator, queue=None, shutdown_event=None, log_prefix: str = ""):
-    """从流式 iterator 聚合分块 bytes；有 queue 则逐条放入，否则返回完整 bytes（收尾块）。"""
+def receive_bytes_in_chunks(iterator, queue: Queue | None, shutdown_event: MpEvent, log_prefix: str = ""):
     bytes_buffer = io.BytesIO()
     step = 0
 
     logging.info(f"{log_prefix} Starting receiver")
     for item in iterator:
         logging.debug(f"{log_prefix} Received item")
-        if shutdown_event is not None and shutdown_event.is_set():
+        if shutdown_event.is_set():
             logging.info(f"{log_prefix} Shutting down receiver")
             return
 
@@ -111,13 +111,44 @@ def receive_bytes_in_chunks(iterator, queue=None, shutdown_event=None, log_prefi
             raise ValueError(f"Received unknown transfer state {item.transfer_state}")
 
 
+def state_to_bytes(state_dict: dict[str, torch.Tensor]) -> bytes:
+    """Convert model state dict to flat array for transmission"""
+    bytes_buffer = io.BytesIO()
+
+    torch.save(state_dict, bytes_buffer)
+
+    return bytes_buffer.getvalue()
+
+
+def bytes_to_state_dict(buffer: bytes) -> dict[str, torch.Tensor]:
+    bytes_buffer = io.BytesIO(buffer)
+    bytes_buffer.seek(0)
+    return torch.load(bytes_buffer, weights_only=True)
+
+
 def python_object_to_bytes(python_object: Any) -> bytes:
     return pickle.dumps(python_object)
 
 
 def bytes_to_python_object(buffer: bytes) -> Any:
-    obj = pickle.loads(buffer)  # noqa: S301 与 lerobot 官方 wire 一致（仅与受信策略服务端互通）
+    bytes_buffer = io.BytesIO(buffer)
+    bytes_buffer.seek(0)
+    obj = pickle.load(bytes_buffer)  # nosec B301: Safe usage of pickle.load
+    # Add validation checks here
     return obj
+
+
+def bytes_to_transitions(buffer: bytes) -> list[Transition]:
+    bytes_buffer = io.BytesIO(buffer)
+    bytes_buffer.seek(0)
+    transitions = torch.load(bytes_buffer, weights_only=True)
+    return transitions
+
+
+def transitions_to_bytes(transitions: list[Transition]) -> bytes:
+    bytes_buffer = io.BytesIO()
+    torch.save(transitions, bytes_buffer)
+    return bytes_buffer.getvalue()
 
 
 def grpc_channel_options(
@@ -129,22 +160,26 @@ def grpc_channel_options(
     backoff_multiplier: float = 2,
     max_backoff: str = "2s",
 ):
-    """gRPC channel options：消息大小上限 + 对 UNAVAILABLE / DEADLINE_EXCEEDED 的重试。"""
     service_config = {
         "methodConfig": [
             {
-                "name": [{}],  # 作用于所有 service 的所有 method
+                "name": [{}],  # Applies to ALL methods in ALL services
                 "retryPolicy": {
-                    "maxAttempts": max_attempts,
-                    "initialBackoff": initial_backoff,
-                    "maxBackoff": max_backoff,
-                    "backoffMultiplier": backoff_multiplier,
-                    "retryableStatusCodes": ["UNAVAILABLE", "DEADLINE_EXCEEDED"],
+                    "maxAttempts": max_attempts,  # Max retries (total attempts = 5)
+                    "initialBackoff": initial_backoff,  # First retry after 0.1s
+                    "maxBackoff": max_backoff,  # Max wait time between retries
+                    "backoffMultiplier": backoff_multiplier,  # Exponential backoff factor
+                    "retryableStatusCodes": [
+                        "UNAVAILABLE",
+                        "DEADLINE_EXCEEDED",
+                    ],  # Retries on network failures
                 },
             }
         ]
     }
+
     service_config_json = json.dumps(service_config)
+
     retries_option = 1 if enable_retries else 0
 
     return [
