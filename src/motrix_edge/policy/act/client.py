@@ -75,6 +75,11 @@ class ACTClient(BasePolicyClient):
         self._fps = int(self.policy_config.get("fps", 30))
         self._task = self.policy_config.get("task", "")
         self._rename_cameras = dict(self.policy_config.get("rename_cameras") or {})
+        # 策略输入相机子集（edge 观测图像名；None = 全部）：只下发这些相机，其余过滤——
+        # 避免把策略 image_features 里没有的相机（如 cam_left_wrist）发给服务端导致
+        # KeyError；顺序保持观测键序（rename_cameras 再改名到策略训练名）。
+        raw_cameras = self.policy_config.get("image_cameras")
+        self._image_cameras = [str(c).strip() for c in raw_cameras] if raw_cameras else None
         # 图像在 edge 侧直接 letterbox 到 (height, width)（默认 224×224，横向图上下留黑边），
         # 服务端 ACT 按 image_features(224×224) 再处理时 resize 为 no-op、不变形。
         image_size = self.policy_config.get("image_size", 224)
@@ -186,18 +191,24 @@ class ACTClient(BasePolicyClient):
         dim = int(np.asarray(observation[KEY_OBS_QPOS]).size)
         state_names = [f"qpos_{i}" for i in range(dim)]
         features = {"observation.state": {"dtype": "float32", "shape": (dim,), "names": state_names}}
-        for dataset_cam in self._camera_dataset_names(observation):
+        for _, dataset_cam in self._policy_cameras(observation):
             features[f"observation.images.{dataset_cam}"] = {"dtype": "video"}
         return features
 
-    def _camera_dataset_names(self, observation) -> list[str]:
-        """观测图像键（edge 相机名）→ 策略图像特征名（重命名映射后；默认同名）。"""
-        names = []
+    def _policy_cameras(self, observation) -> list[tuple[str, str]]:
+        """策略输入相机（edge 名, 下发名）列表，保持观测键序。
+
+        经 ``image_cameras`` 过滤（未列出的相机不下发，避免服务端按策略 image_features
+        查键 KeyError）与 ``rename_cameras`` 重命名（edge 名 → 策略训练相机名）。
+        """
+        cams: list[tuple[str, str]] = []
         for key in observation:
             if key.startswith(KEY_OBS_IMAGE_PREFIX):
                 edge = key[len(KEY_OBS_IMAGE_PREFIX) :]
-                names.append(self._rename_cameras.get(edge, edge))
-        return names
+                if self._image_cameras is not None and edge not in self._image_cameras:
+                    continue
+                cams.append((edge, self._rename_cameras.get(edge, edge)))
+        return cams
 
     def _ensure_policy(self, observation) -> None:
         """首次 infer 时下发策略指令（SendPolicyInstructions）：pickle RemotePolicyConfig。
@@ -237,11 +248,9 @@ class ACTClient(BasePolicyClient):
         qpos = np.asarray(observation[KEY_OBS_QPOS])
         for i, value in enumerate(qpos):
             raw[f"qpos_{i}"] = float(value)
-        for key, value in observation.items():
-            if key.startswith(KEY_OBS_IMAGE_PREFIX):
-                edge = key[len(KEY_OBS_IMAGE_PREFIX) :]
-                dataset_cam = self._rename_cameras.get(edge, edge)
-                raw[dataset_cam] = resize_with_pad(to_rgb_uint8(value), *self._image_size)
+        for edge, dataset_cam in self._policy_cameras(observation):
+            value = observation[f"{KEY_OBS_IMAGE_PREFIX}{edge}"]
+            raw[dataset_cam] = resize_with_pad(to_rgb_uint8(value), *self._image_size)
         if self._task:
             raw["task"] = self._task
         return raw

@@ -221,3 +221,22 @@ def test_act_grpc_unknown_aggregate_fn():
     """未知 aggregate_fn：构造即拒绝（配置错误尽早暴露）。"""
     with pytest.raises(ValueError, match="aggregate_fn"):
         ACTClient({"host": "127.0.0.1", "port": 1, "aggregate_fn": "bogus"})
+
+
+def test_act_grpc_image_cameras_subset(act_server):
+    """image_cameras：只下发策略用相机；多余相机（策略 image_features 没有的）被过滤，
+    rename_cameras 把 edge 相机名改到策略训练名。"""
+    port, servicer = act_server
+    client = _make_client(port, image_cameras=["cam_head"], rename_cameras={"cam_head": "cam_front"})
+    client.connect()
+    obs = {
+        "observations/qpos": np.zeros(2, dtype=np.float32),
+        "observations/images/cam_head": np.zeros((64, 64, 3), dtype=np.uint8),
+        "observations/images/cam_left_wrist": np.zeros((64, 64, 3), dtype=np.uint8),
+    }
+    client.infer(obs)
+    raw = servicer.last_raw
+    assert "cam_front" in raw  # 策略相机（rename 后）
+    assert raw["cam_front"].shape == (224, 224, 3)
+    assert "cam_left_wrist" not in raw  # 多余相机被过滤
+    client.disconnect()
