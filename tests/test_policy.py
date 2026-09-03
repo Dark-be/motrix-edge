@@ -198,17 +198,16 @@ def test_openpi_connect_closes_transport_when_action_horizon_missing():
     assert client._action_horizon is None
 
 
-def test_policy_clients_expose_server_metadata():
-    from motrix_edge.policy.act.client import ACTClient
+def test_openpi_exposes_server_metadata():
     from motrix_edge.policy.openpi.client import OpenPIClient
 
     metadata = {"model": "test-policy", "action_horizon": 16, "action_dim": 14}
-    for client in (OpenPIClient({}), ACTClient({})):
-        client._transport = _FakeTransport(metadata=metadata)
-        client.connect()
-        assert client.server_metadata == metadata
-        client.disconnect()
-        assert client.server_metadata == {}
+    client = OpenPIClient({})
+    client._transport = _FakeTransport(metadata=metadata)
+    client.connect()
+    assert client.server_metadata == metadata
+    client.disconnect()
+    assert client.server_metadata == {}
 
 
 def test_openpi_infer_requests_only_when_chunk_empty():
@@ -235,28 +234,8 @@ def test_openpi_infer_requests_only_when_chunk_empty():
     assert transport.calls == 2
 
 
-def test_act_client_uses_640x480_image_size_by_default():
-    from motrix_edge.policy.act.client import ACTClient
-
-    client = ACTClient({})
-    assert client.image_size == (480, 640)
-
-
-def test_act_infer_requests_only_when_chunk_empty():
-    from motrix_edge.policy.act.client import ACTClient
-
-    client = ACTClient({"action_horizon": 2})
-    transport = _FakeTransport(horizon=2, dim=2)
-    client._transport = transport
-    client._broker = ActionChunkBroker(2)
-
-    obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
-    assert transport.calls == 1
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
-    assert transport.calls == 1
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
-    assert transport.calls == 2
+# act 策略已改为 lerobot gRPC 流式客户端（见 tests/test_act_grpc_client.py），
+# 不再使用 ws / ActionChunkBroker / image_size；相关旧断言已移除。
 
 
 def test_policy_registry_has_openpi_and_act():
@@ -285,12 +264,13 @@ def test_get_policy_default_openpi():
 def test_get_policy_act():
     policy = get_policy({"policy": {"type": "act"}})
     assert policy.__class__.__name__ == "ACTClient"
-    assert policy.image_size == (480, 640)
+    # act 走 lerobot gRPC：不再有 ws 的 image_size / image_format
+    assert not hasattr(policy, "image_size")
 
 
 def test_get_policy_uses_only_shared_endpoint_config():
     policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="act")
     assert policy.policy_config["host"] == "127.0.0.1"
     assert policy.policy_config["port"] == 8765
-    assert policy.image_size == (480, 640)
-    assert policy.image_format == "jpeg"
+    assert policy._transport._host == "127.0.0.1"
+    assert policy._transport._port == 8765
