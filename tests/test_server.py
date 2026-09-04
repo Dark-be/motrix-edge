@@ -580,21 +580,22 @@ def test_leases_install_renew_revoke():
     assert snap["state"] == "active"
     assert snap["lease_version"] == 1
     assert snap["leasable"] is False
+    assert snap["expires_at"].endswith("+08:00")  # 统一北京时区序列化
     # 查询镜像：GET /v1/leases/{id} → 200（返回 lease 信息）；不存在 → 404
     info = client.get(f"/v1/leases/{lease}").json()
     assert info["lease_id"] == lease
     assert info["edge_id"] == "edge-test-001"
     assert client.get("/v1/leases/ls_none").status_code == 404
-    # 续约：POST /v1/leases/{id}:renew（lease_version 递增，原地延长）
-    future = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-    r1 = client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 2, "expires_at": future})
+    # 续约：POST /v1/leases/{id}:renew（lease_version 递增；Edge 权威时钟按 ttl 重算 expires_at）
+    r1 = client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 2, "ttl": 60})
     assert r1.status_code == 200
     body = r1.json()
     assert body["lease_id"] == lease
     assert body["lease_version"] == 2
     assert body["state"] == "active"
+    assert body["expires_at"].endswith("+08:00")
     # 版本回退 → 409
-    assert client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 1, "expires_at": future}).status_code == 409
+    assert client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 1, "ttl": 60}).status_code == 409
     # 续约后镜像版本更新
     assert client.get(f"/v1/leases/{lease}").json()["lease_version"] == 2
     # 撤销：POST /v1/leases/{id}:revoke → Revoked 失效；镜像查询保留
@@ -624,6 +625,19 @@ def test_leases_expired_rejected_410():
     # 过期后可重新签发（覆盖）
     lease2 = install_lease(client, ttl=30)
     assert lease2 != lease
+
+
+def test_leases_expiry_computed_by_edge_clock():
+    """过期时间由 Edge 权威时钟计算：客户端传过期 expires_at 被忽略，按 ttl 重算且统一 +08:00。"""
+    client = TestClient(create_app(BASE_CFG))
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    lease = install_lease(client, ttl=60, expires_at=past)
+    snap = client.get("/v1/leases").json()
+    assert snap["lease_id"] == lease
+    assert snap["state"] == "active"
+    exp = datetime.fromisoformat(snap["expires_at"])
+    assert exp > datetime.now(timezone.utc) - timedelta(seconds=5)  # 仍在未来（不受「过去」影响）
+    assert snap["expires_at"].endswith("+08:00")
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,11 @@
 Edge；Edge 经 ``LeaseManager.install`` 只保留 + ``require`` 校验，**不生成租约**。
 受控操作（进入 / 控制任务、commands 含 estop）须携带匹配租约（``X-Lease-Id``）。
 
+**过期时间由 Edge 权威时钟计算**：install / renew 均按 Edge 自身时钟 ``now + ttl``
+计算 ``expires_at``，**不信任客户端 / Console 传入的过期时刻**（避免跨机时钟偏差
+导致租约被提前误判过期）；对外时间字段统一以北京时间（``Asia/Shanghai``，+08:00）
+序列化，客户端时钟只用于展示倒计时。
+
 Edge 监听（Console → Edge）：
   - ``POST /v1/leases``          签发租约镜像（install）
   - ``POST /v1/leases/{id}:renew``  续约（lease_version 递增，版本回退拒绝）
@@ -42,6 +47,13 @@ DEFAULT_RENEW_INTERVAL = 60.0
 
 def _now() -> datetime:
     return datetime.now(BEIJING_TZ)
+
+
+def _as_beijing(dt: datetime | None) -> datetime | None:
+    """归一化到北京时间（Asia/Shanghai）：所有对外时间字段统一序列化为 +08:00。"""
+    if dt is None:
+        return None
+    return dt.astimezone(BEIJING_TZ) if dt.tzinfo is not None else dt.replace(tzinfo=BEIJING_TZ)
 
 
 class LeaseManager:
@@ -72,34 +84,43 @@ class LeaseManager:
     def install(self, lease: Lease) -> Lease:
         """部署 Console 签发的租约**镜像**（Edge 只保留 + 校验，不生成 lease_id）。
 
+        **过期时间由 Edge 权威时钟计算**：``expires_at = now + ttl``（``ttl`` 缺省用
+        ``default_ttl``）；**不信任传入的 ``expires_at``** —— 跨机时钟偏差不会让租约
+        被提前误判过期。``renewed_at`` 取当前时刻（签发即最近一次续约时间）。
+
         单活跃控制租约：已有 ``Active`` 且未过期租约 → ``LeaseError(409)``；过期 /
-        撤销 / 无租约 → 覆盖为新镜像。``renewed_at`` 缺省取当前时刻（签发即视作最近
-        一次续约时间）。
+        撤销 / 无租约 → 覆盖为新镜像。
         """
         with self._lock:
             cur = self._lease
             if cur is not None and cur.state == LeaseState.ACTIVE and cur.expires_at > self._now():
                 raise LeaseError("lease already active", 409)
-            if lease.renewed_at is None:
-                lease.renewed_at = self._now()
+            now = self._now()
+            ttl = lease.ttl if lease.ttl is not None and lease.ttl > 0 else self._default_ttl
+            lease.ttl = ttl
+            lease.expires_at = now + timedelta(seconds=ttl)
+            lease.renewed_at = now
             self._lease = lease
             return self._lease
 
-    def renew(self, lease_id: str, lease_version: int, expires_at: datetime) -> Lease:
-        """Console 续约：以更高 ``lease_version`` 原地延长 ``expires_at``。
+    def renew(self, lease_id: str, lease_version: int, ttl: float | None = None) -> Lease:
+        """Console 续约：以更高 ``lease_version`` 原地延长（版本回退拒绝）。
 
-        版本回退（``lease_version <= 当前``）→ ``LeaseError(409)``；租约不存在 →
-        ``LeaseError(404)``。续约后若新 ``expires_at`` 在未来 → ``Active``（可控制），
-        否则 → ``Expired``。
+        **过期时间由 Edge 权威时钟计算**：``expires_at = now + ttl``（``ttl`` 缺省沿用
+        当前租约的 ``ttl``，再回退 ``default_ttl``）；不信任客户端传入的过期时刻。
+        续约后新 ``expires_at`` 在未来 → ``Active``（可控制），否则 → ``Expired``。
         """
         with self._lock:
             lease = self._require_mirror(lease_id)
             if lease_version <= lease.lease_version:
                 raise LeaseError("lease version rollback rejected", 409)
+            now = self._now()
+            next_ttl = ttl if ttl is not None and ttl > 0 else (lease.ttl or self._default_ttl)
             lease.lease_version = lease_version
-            lease.expires_at = expires_at
-            lease.renewed_at = self._now()
-            lease.state = LeaseState.ACTIVE if expires_at > self._now() else LeaseState.EXPIRED
+            lease.ttl = next_ttl
+            lease.expires_at = now + timedelta(seconds=next_ttl)
+            lease.renewed_at = now
+            lease.state = LeaseState.ACTIVE if lease.expires_at > now else LeaseState.EXPIRED
             return lease
 
     def revoke(self, lease_id: str) -> Lease:
@@ -208,8 +229,8 @@ class LeaseManager:
             "holder_subject_id": lease.holder_subject_id,
             "purpose": lease.purpose,
             "state": state,
-            "expires_at": lease.expires_at.isoformat(),
-            "renewed_at": lease.renewed_at.isoformat() if lease.renewed_at is not None else None,
+            "expires_at": _as_beijing(lease.expires_at).isoformat() if lease.expires_at is not None else None,
+            "renewed_at": _as_beijing(lease.renewed_at).isoformat() if lease.renewed_at is not None else None,
             "lease_version": lease.lease_version,
             "ttl": lease.ttl,
         }

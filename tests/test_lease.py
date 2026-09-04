@@ -56,15 +56,16 @@ def make_lease(
     ttl: float = 10.0,
     lease_version: int = 1,
     renewed_at=None,
+    expires_at=None,
 ):
-    """构造 Console 签发的租约镜像（缺省 Active + 10s 后过期）。"""
+    """构造 Console 签发的租约镜像（缺省 Active + ttl 秒后过期；expires_at 可显式覆盖）。"""
     return Lease(
         lease_id=lease_id,
         edge_id=edge_id,
         holder_subject_id=holder_subject_id,
         purpose=purpose,
         state=state,
-        expires_at=_BASE + timedelta(seconds=ttl),
+        expires_at=expires_at if expires_at is not None else _BASE + timedelta(seconds=ttl),
         renewed_at=renewed_at,
         lease_version=lease_version,
         ttl=ttl,
@@ -113,14 +114,29 @@ def test_install_sets_renewed_at():
     assert lease.renewed_at == _BASE
 
 
+def test_install_expiry_computed_by_edge_clock():
+    """过期时间由 Edge 权威时钟计算（now + ttl），忽略客户端传入的过期时刻。"""
+    mgr, clock = make_manager(ttl=10)
+    # 客户端 / Console 传「过去」的 expires_at → 仍按 Edge now+ttl 重算
+    lease = make_lease(ttl=20, expires_at=_BASE - timedelta(seconds=999))
+    mgr.install(lease)
+    assert lease.expires_at == clock.t + timedelta(seconds=20)
+    assert lease.renewed_at == clock.t
+    # 对外时间字段统一 +08:00 序列化
+    snap = mgr.status()
+    assert snap["expires_at"].endswith("+08:00")
+    assert snap["renewed_at"].endswith("+08:00")
+
+
 def test_renew_extends_expiry_with_version():
-    """续约：更高 lease_version 原地延长 expires_at，renewed_at 更新。"""
+    """续约：更高 lease_version 原地延长（expires_at = Edge now + ttl），renewed_at 更新。"""
     mgr, clock = make_manager()
     lease = mgr.install(make_lease(ttl=10))
     old = lease.expires_at
     clock.advance(5)
-    renewed = mgr.renew("ls_console_issued", lease_version=2, expires_at=clock.t + timedelta(seconds=10))
+    renewed = mgr.renew("ls_console_issued", lease_version=2)
     assert renewed.lease_version == 2
+    assert renewed.expires_at == clock.t + timedelta(seconds=10)  # Edge 权威时钟重算
     assert renewed.expires_at > old
     assert renewed.state == LeaseState.ACTIVE
     assert renewed.renewed_at == clock.t
@@ -131,14 +147,14 @@ def test_renew_rejects_version_rollback():
     mgr, _ = make_manager()
     mgr.install(make_lease(ttl=10))
     with pytest.raises(LeaseError) as ei:
-        mgr.renew("ls_console_issued", lease_version=1, expires_at=_BASE + timedelta(seconds=30))
+        mgr.renew("ls_console_issued", lease_version=1)
     assert ei.value.status_code == 409
 
 
 def test_renew_not_found_404():
     mgr, _ = make_manager()
     with pytest.raises(LeaseError) as ei:
-        mgr.renew("ls_none", lease_version=2, expires_at=_BASE + timedelta(seconds=30))
+        mgr.renew("ls_none", lease_version=2)
     assert ei.value.status_code == 404
 
 
@@ -147,7 +163,7 @@ def test_renew_reactivates_reserved_or_expired():
     mgr, clock = make_manager()
     mgr.install(make_lease(state=LeaseState.RESERVED, ttl=10))
     clock.advance(11)  # reserved 到期
-    renewed = mgr.renew("ls_console_issued", lease_version=2, expires_at=clock.t + timedelta(seconds=10))
+    renewed = mgr.renew("ls_console_issued", lease_version=2)
     assert renewed.state == LeaseState.ACTIVE
 
 

@@ -67,7 +67,7 @@ class Lease:
     holder_subject_id: str
     purpose: str
     state: LeaseState
-    expires_at: datetime  # 到期时间（北京时间）
+    expires_at: datetime  # 到期时间（北京时间；由 Edge 权威时钟 now+ttl 计算）
     renewed_at: datetime | None = None  # 最近一次续约时间
     lease_version: int = 1  # 租约版本；续约递增
     ttl: float | None = None  # 有效期（秒，信息字段）

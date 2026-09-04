@@ -124,8 +124,8 @@ class LeaseInstallRequest(BaseModel):
     """POST /v1/leases 请求体：Console 签发并下发的租约**镜像**（权威在 Console）。
 
     字段见 wiki/design/motrix_edge_lease.md「lease 信息」：lease_id / edge_id /
-    holder_subject_id / purpose / state / expires_at / renewed_at / lease_version；
-    ``ttl`` 为有效期（秒，信息字段）。
+    holder_subject_id / purpose / state / lease_version；``ttl`` 为有效期（秒）。
+    ``expires_at`` 可选：**Edge 权威时钟计算** ``now + ttl`` 后覆盖，仅向前兼容保留。
     """
 
     lease_id: str = Field(..., description="Console 生成的租约 id")
@@ -133,16 +133,19 @@ class LeaseInstallRequest(BaseModel):
     holder_subject_id: str = Field(..., description="租约所属操作员")
     purpose: str = Field(..., description="租约用途（如 capture / rollout / maintenance）")
     state: LeaseState = Field(default=LeaseState.ACTIVE, description="签发状态（reserved / active）")
-    expires_at: datetime = Field(..., description="过期时间（ISO 8601，北京时间）")
+    expires_at: datetime | None = Field(default=None, description="过期时间（忽略；Edge 按 now+ttl 重算）")
     lease_version: int = Field(default=1, ge=1, description="租约版本；续约时递增")
-    ttl: float | None = Field(default=None, gt=0, description="有效期（秒，信息字段）")
+    ttl: float | None = Field(default=None, gt=0, description="有效期（秒）—— Edge 据此计算 expires_at")
 
 
 class LeaseRenewRequest(BaseModel):
-    """POST /v1/leases/{id}:renew 请求体：Console 续约 —— 更高 lease_version + 新 expires_at。"""
+    """POST /v1/leases/{id}:renew 请求体：Console 续约 —— 更高 lease_version（可选 ttl）。
+
+    ``expires_at`` 由 Edge 权威时钟按 ``now + ttl`` 计算（不再由客户端提供）。
+    """
 
     lease_version: int = Field(..., ge=1, description="新租约版本（须高于当前，版本回退拒绝）")
-    expires_at: datetime = Field(..., description="续约后的过期时间（ISO 8601，北京时间）")
+    ttl: float | None = Field(default=None, gt=0, description="续约有效期（秒）；缺省沿用当前租约 ttl")
 
 
 class WebRTCOfferRequest(BaseModel):
@@ -411,13 +414,13 @@ def create_app(
         续约 = 以更高 ``lease_version`` 原地延长 ``expires_at``；Edge 在旧租约到期前
         收到新镜像即可保持控制。
         """
-        lease = _leases_call(lambda: lease_manager.renew(lease_id, req.lease_version, req.expires_at))
+        lease = _leases_call(lambda: lease_manager.renew(lease_id, req.lease_version, ttl=req.ttl))
         return {
             "status": "accepted",
             "lease_id": lease.lease_id,
             "lease_version": lease.lease_version,
             "state": lease.state.value,
-            "expires_at": lease.expires_at.isoformat(),
+            "expires_at": lease.expires_at.astimezone(BEIJING_TZ).isoformat(),
         }
 
     @app.get("/v1/leases/{lease_id}")
