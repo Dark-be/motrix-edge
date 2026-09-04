@@ -252,6 +252,18 @@ def create_app(
         response.headers["X-Correlation-Id"] = corr
         return response
 
+    @app.middleware("http")
+    async def _no_store_cache(request: Request, call_next):
+        """控制面（/v1/*）响应一律 ``Cache-Control: no-store``：实时状态禁止浏览器缓存。
+
+        预览 / 租约等轮询 GET 若被浏览器缓存，会回放旧的 410 / 过期状态（同一 URL
+        每秒轮询命中缓存，表现为 "date" 是旧时间、请求不进服务端日志）。
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/v1"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/v1/health")
     async def health():
         """探活：版本 / identity / 已绑定适配器 / 磁盘 / 时钟。

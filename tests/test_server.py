@@ -641,6 +641,20 @@ def test_leases_expiry_computed_by_edge_clock():
 
 
 # ---------------------------------------------------------------------------
+# /v1 控制面防缓存：实时状态一律 Cache-Control: no-store（防浏览器回放旧 410 / 状态）
+# ---------------------------------------------------------------------------
+
+
+def test_v1_responses_are_no_store():
+    """/v1/* 响应统一 no-store：preview / 租约等轮询 GET 不得被浏览器缓存。"""
+    client = TestClient(create_app(BASE_CFG))
+    for path in ("/v1/health", "/v1/leases", "/v1/adapters", "/v1/captures", "/v1/infers", "/v1/preview"):
+        r = client.get(path)
+        assert r.status_code in (200, 501), f"{path} -> {r.status_code}"  # 未注入服务也可能 501
+        assert r.headers.get("cache-control") == "no-store", path
+
+
+# ---------------------------------------------------------------------------
 # /v1/commands（受控命令：须持有租约；capability=estop → 全局急停）—— 无硬件可跑
 # ---------------------------------------------------------------------------
 
