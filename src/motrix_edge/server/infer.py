@@ -28,9 +28,12 @@ from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
 from motrix_edge.utils.commands import (
+    CMD_INFER_CONNECT,
     CMD_INFER_ROLLOUT,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
+    ROLLOUT_MODE_CONTINUOUS,
+    ROLLOUT_MODE_DRAIN,
     Command,
     CommandBus,
     CommandResult,
@@ -55,15 +58,22 @@ class InferService:
         self._leases = leases or LeaseManager()  # Edge 级租约（受控操作校验用）
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / policy / 端点 / 租约。"""
+        """状态快照（只读）：node_state / 会话类型 / session state / adapter / policy /
+        connected / metadata / 端点 / 租约。"""
         node = self._node
         session = self._session()
+        connected = bool(getattr(session, "connected", False)) if session is not None else False
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT,
             "adapter": self._adapter_state(),
             "policy": self._policy_ref(),
+            # 策略服务器连接状态；metadata 仅在已连接时暴露（连接成功后才有服务端元信息）
+            "connected": connected,
+            "metadata": (
+                dict(getattr(getattr(session, "policy", None), "server_metadata", None) or {}) if connected else None
+            ),
             "endpoint": self._policy_endpoint(),  # 当前配置的推理节点 host / port（前端推理卡片设置）
             "lease_id": self._leases.status()["lease_id"],
         }
@@ -106,23 +116,58 @@ class InferService:
         self._raise_on_rejected(result)
         return {"status": "accepted"}
 
-    def rollout(self, lease_id: str | None = None) -> dict:
-        """单步推理闭环（infer rollout）：上传观测 → 推理 → 下发动作，返回动作回执。
+    def connect(self, lease_id: str | None = None) -> dict:
+        """单次尝试连接推理节点（infer connect）：提交命令，回执含服务端 metadata。
 
-        须已在推理会话（ACTIVE）且持有活跃租约；未在会话 → 409。推理会话由外部
-        rollout 步进驱动（真机 RL / 前端联调每步触发一次闭环）。
+        须已在推理会话（ACTIVE）且持有活跃租约；连接失败 → 回执 error（502）透传，
+        连接状态保持未连接（前端可再次触发重连）。
         """
         self._ensure_node()
         self._ensure_lease(lease_id)
         node = self._node
         if node.session is None or node.state != NodeState.ACTIVE:
             raise InferError("not in a task session")
-        result = self._submit(Command(CMD_INFER_ROLLOUT, meta={"lease_id": lease_id}))
+        result = self._submit(Command(CMD_INFER_CONNECT, meta={"lease_id": lease_id}))
         self._raise_on_rejected(result)
         return {
             "status": "accepted",
             "state": result.data.get("state"),
+            "connected": bool(result.data.get("connected", False)),
+            "metadata": result.data.get("metadata"),
+        }
+
+    def rollout(
+        self,
+        lease_id: str | None = None,
+        mode: str | None = None,
+        count: int | None = None,
+    ) -> dict:
+        """推理闭环（infer rollout [count] / continuous / drain），返回最后 action 与 actions 列表。
+
+        - mode 缺省 / "count"：连续推理 count 次（缺省 1，1–100），回执 count / action / actions；
+        - mode="continuous"：持续推理（启动即回执 started，直到 session quit / estop）；
+        - mode="drain"：只消耗当前缓存动作块（不发新推理请求），回执消耗步数。
+
+        须已在推理会话（ACTIVE）且持有活跃租约；未在会话 → 409；未连接推理节点 → 503。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        params: dict = {}
+        if mode in (ROLLOUT_MODE_CONTINUOUS, ROLLOUT_MODE_DRAIN):
+            params["count"] = mode  # 命令层 parse_rollout_mode 按字符串识别 continuous / drain
+        elif count is not None:
+            params["count"] = count
+        result = self._submit(Command(CMD_INFER_ROLLOUT, params=params, meta={"lease_id": lease_id}))
+        self._raise_on_rejected(result)
+        return {
+            "status": "accepted",
+            "state": result.data.get("state"),
+            "count": result.data.get("count"),
             "action": result.data.get("action"),
+            "actions": result.data.get("actions"),
         }
 
     # -- 内部 ---------------------------------------------------------------

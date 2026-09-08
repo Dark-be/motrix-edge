@@ -36,6 +36,7 @@ identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` �
 
 import shutil
 from datetime import datetime
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -154,6 +155,15 @@ class InferEnterRequest(BaseModel):
     """POST /v1/infers 请求体：可选推理策略类型（缺省用配置 policy.type）。"""
 
     policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
+
+
+class InferRolloutRequest(BaseModel):
+    """POST /v1/infers/rollout 请求体：推理模式 + 步数（count 模式）。"""
+
+    mode: Literal["count", "continuous", "drain"] | None = Field(
+        default=None, description="推理模式：count（缺省）/ continuous / drain"
+    )
+    count: int | None = Field(default=None, ge=1, le=100, description="连续推理步数（count 模式，缺省 1）")
 
 
 class UploadScanRequest(BaseModel):
@@ -477,10 +487,21 @@ def create_app(
         policy_type = req.policy_type if req is not None else None
         return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type))
 
+    @app.post("/v1/infers/connect")
+    async def infers_connect(x_lease_id: str | None = Header(default=None)):
+        """单次尝试连接推理节点（infer connect）。须已在推理会话且持有租约。"""
+        return _infer_call(lambda: _infers().connect(lease_id=x_lease_id))
+
     @app.post("/v1/infers/rollout")
-    async def infers_rollout(x_lease_id: str | None = Header(default=None)):
-        """单步推理闭环（infer rollout）：上传观测 → 推理 → 下发动作。须已在推理会话且持有租约。"""
-        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id))
+    async def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
+        """推理闭环（infer rollout [count] / continuous / drain）。
+
+        body：``mode``（count 缺省 / continuous / drain）+ ``count``（count 模式，缺省 1，1–100）。
+        须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
+        """
+        mode = req.mode if req is not None else None
+        count = req.count if req is not None else None
+        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode, count=count))
 
     @app.delete("/v1/infers")
     async def infers_exit(lease_id: str | None = None):
