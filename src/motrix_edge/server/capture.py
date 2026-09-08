@@ -26,6 +26,7 @@ server 层不持有 / 不创建 / 不运行 EdgeNode：node 由 node 程序主�
 不复制。
 """
 
+import json
 import shutil
 
 import numpy as np
@@ -34,7 +35,9 @@ from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
+from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_SYNC,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     Command,
@@ -71,10 +74,13 @@ class CaptureService:
     /v1/leases）；**异租约 / 缺失租约一律拒绝**（403），无活跃租约就控制 → 409。
     """
 
-    def __init__(self, node, bus: CommandBus, leases: LeaseManager | None = None):
+    def __init__(self, node, bus: CommandBus, leases: LeaseManager | None = None, capture_meta_store=None):
         self._node = node  # 正在运行的 EdgeNode（由 node 程序主线程持有）
         self._bus = bus  # 共享命令总线：web / CLI 线程 push，EdgeNode 主循环 poll
         self._leases = leases or LeaseManager()  # Edge 级租约（独立于任务，受控操作校验用）
+        # 采集元信息选项存储（config/capture.yml）：前端选择列表 / capture meta 查看；
+        # 缺省用默认路径，测试可注入临时 store。
+        self._meta_store = capture_meta_store if capture_meta_store is not None else CaptureMetaStore()
 
     # -- 动作翻译（HTTP → 信号）---------------------------------------------
     def precheck(self) -> dict:
@@ -182,13 +188,32 @@ class CaptureService:
         self._raise_on_rejected(result)
         return {"status": "accepted"}
 
+    def sync(self, meta: dict, lease_id: str | None = None) -> dict:
+        """同步采集元信息（采集员 / 任务名等）到机器人进程：submit ``capture sync``。
+
+        采集会话内消费：解析 meta JSON → ``adapter.sync_capture_meta``，进程保存一轮
+        数据时附加。受控操作：须持有有效租约。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        result = self._submit(
+            Command(CMD_CAPTURE_SYNC, params={"meta": json.dumps(meta or {})}, meta={"lease_id": lease_id})
+        )
+        self._raise_on_rejected(result)
+        return {"status": "accepted", "meta": result.data.get("meta")}
+
+    def meta(self) -> dict:
+        """采集元信息选项（config/capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
+        return {"meta": self._meta_store.list_meta()}
+
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据。"""
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据 / capture_status。"""
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
         data_status = self._data_status()
         save_dir = getattr(data_status, "save_dir", None) if data_status is not None else None
+        capture_status = getattr(node, "capture_status", None) if node is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
@@ -197,6 +222,16 @@ class CaptureService:
             "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
             "save_dir": str(save_dir) if save_dir is not None else None,
             "data_files": list(getattr(data_status, "data_files", []) or []) if data_status is not None else [],
+            # 采集状态缓存（adapter.capture_status()：采集员 / 任务名等元信息 + 运行位，node 周期刷新）
+            "capture_status": (
+                {
+                    "running": bool(getattr(capture_status, "running", False)),
+                    "operator": getattr(capture_status, "operator", None),
+                    "task_name": getattr(capture_status, "task_name", None),
+                }
+                if capture_status is not None
+                else None
+            ),
             "disk": self._disk_info(save_dir),
             "lease_id": lease_id,  # 当前活跃租约（独立于任务，见 /v1/leases/*）
         }

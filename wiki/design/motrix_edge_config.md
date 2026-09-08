@@ -16,7 +16,7 @@
 -   **优先级**：① 外界配置目录 `MOTRIX_CONFIG_DIR`（可写，同名 `yml` 覆盖包内默认）；
     ② 包内默认 `src/motrix_edge/config/edge.yml`（`importlib.resources` 只读访问，不可写）。
 -   `load_config(name)`：外界文件存在 → 读取；否则若 `name ∈ DEFAULT_CONFIG_FILES`
-    （`("edge.yml",)`）读包内默认；均缺失 → `{}`（兜底不抛错）。
+    （`("edge.yml", "capture.yml")`）读包内默认；均缺失 → `{}`（兜底不抛错）。
 -   `run --config <path>`：指定任意 yaml 路径（如 `/etc/motrix-edge/edge.yaml`）；
     **路径不存在 → `SystemExit("error: File ... does not exist.")`**（干净报错，不回显 traceback）。
 

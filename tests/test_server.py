@@ -746,6 +746,25 @@ def test_captures_501_when_not_enabled():
     assert client.delete("/v1/captures").status_code == 501
 
 
+def test_captures_meta_returns_options(tmp_path):
+    """GET /v1/captures/meta：返回 config/capture.yml 的元信息选项（前端选择列表，免租约）。"""
+    from motrix_edge.utils.capture_meta import CaptureMetaStore
+
+    store = CaptureMetaStore(tmp_path / "capture.yml")
+    store.add("operator", "张三")
+    store.add("task_name", "桌面前移")
+    bus = CommandBus()
+    node = FakeNode()
+    node.command_source = bus
+    service = CaptureService(node, bus, capture_meta_store=store)
+    client = TestClient(create_app(BASE_CFG, captures=service))
+    resp = client.get("/v1/captures/meta")
+    assert resp.status_code == 200
+    assert resp.json() == {"meta": {"operator": ["张三"], "task_name": ["桌面前移"]}}
+    # 未注入 captures 服务 → 501
+    assert TestClient(create_app(BASE_CFG)).get("/v1/captures/meta").status_code == 501
+
+
 def test_captures_enter_exit_lifecycle():
     node = FakeNode()
     service, client = make_captures_client(node)

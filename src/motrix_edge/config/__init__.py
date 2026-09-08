@@ -30,7 +30,7 @@ import yaml
 
 # 包内默认配置文件（作为 package data 打包；外界配置目录存在同名文件时优先）。
 # 通过 ``importlib.resources`` 只读访问，不可写。
-DEFAULT_CONFIG_FILES = ("edge.yml",)
+DEFAULT_CONFIG_FILES = ("edge.yml", "capture.yml")
 
 
 def get_config_dir() -> Path | None:

@@ -29,10 +29,13 @@ motrix_edge_lease.md）。当前实现（capability 映射）：
 勿依赖去重。
 """
 
+import json
+
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
+    CMD_CAPTURE_SYNC,
     CMD_INFER_CONNECT,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
@@ -165,6 +168,27 @@ class CommandService:
                 "status": result.status,
                 "command_id": command_id,
                 "executed": "infer_connect",
+                "data": result.data,
+                "error": result.error,
+            }
+
+        if capability == "capture_sync":
+            # 同步采集元信息到机器人进程（采集会话内消费；submit 同步等回执）
+            try:
+                result = self._bus.submit(
+                    Command(
+                        CMD_CAPTURE_SYNC,
+                        params={"meta": json.dumps((params or {}).get("meta"))},
+                        meta={"lease_id": lease_id},
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as exc:  # noqa: BLE001 submit 超时（命令未被消费）→ HTTP 错误
+                raise CommandError(str(exc), status_code=504) from exc
+            return {
+                "status": result.status,
+                "command_id": command_id,
+                "executed": "capture_sync",
                 "data": result.data,
                 "error": result.error,
             }

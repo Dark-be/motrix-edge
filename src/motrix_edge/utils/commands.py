@@ -50,6 +50,11 @@ CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作开关（位置参数 enable
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）
+CMD_CAPTURE_META_LIST = "capture meta list"  # 列出采集元信息选项（位置参数 key 可选）
+CMD_CAPTURE_META_ADD = "capture meta add"  # 新增采集元信息选项（位置参数 key, value）
+CMD_CAPTURE_META_EDIT = "capture meta edit"  # 编辑采集元信息选项（位置参数 key, old, new）
+CMD_CAPTURE_META_DELETE = "capture meta delete"  # 删除采集元信息选项（位置参数 key, value）
+CMD_CAPTURE_META_DELETE_KEY = "capture meta delete-key"  # 删除采集元信息分类（位置参数 key）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
 CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（参数 count，连续执行多步）
 CMD_INFER_CONNECT = "infer connect"  # 单次尝试连接推理节点（推理会话内消费）
@@ -343,6 +348,35 @@ def handle_infer_endpoint(base_cfg, cmd):
     return ok_result(**get_policy_endpoint(base_cfg))
 
 
+def handle_capture_meta(cmd, store=None) -> CommandResult:
+    """处理 ``capture meta`` 命令族（list / add / edit / delete / delete-key）。
+
+    读写 ``config/capture.yml`` 的 ``meta`` 段（``CaptureMetaStore``，可拓展任意分类 →
+    选项数组）；配置级命令「任何状态可用」（与 ``infer ip`` 一致），节点主循环与会话
+    循环共用本函数。``store`` 缺省用默认路径，测试可注入临时 store。
+    参数缺失 / 重复 / 不存在 → rejected（不崩溃）。
+    """
+    from motrix_edge.utils.capture_meta import CaptureMetaStore
+
+    store = store if store is not None else CaptureMetaStore()
+    try:
+        if cmd.name == CMD_CAPTURE_META_LIST:
+            return ok_result(meta=store.list_meta(cmd.params.get("key")))
+        if cmd.name == CMD_CAPTURE_META_ADD:
+            return ok_result(meta=store.add(cmd.params.get("key"), cmd.params.get("value")))
+        if cmd.name == CMD_CAPTURE_META_EDIT:
+            return ok_result(
+                meta=store.edit(cmd.params.get("key"), cmd.params.get("old"), cmd.params.get("new"))
+            )
+        if cmd.name == CMD_CAPTURE_META_DELETE:
+            return ok_result(meta=store.delete(cmd.params.get("key"), cmd.params.get("value")))
+        if cmd.name == CMD_CAPTURE_META_DELETE_KEY:
+            return ok_result(meta=store.delete_key(cmd.params.get("key")))
+    except ValueError as exc:
+        return CommandResult(status="rejected", error=str(exc), status_code=400)
+    return CommandResult(status="rejected", error=f"unknown capture meta command: {cmd.name}", status_code=400)
+
+
 class CommandBus:
     """命令传输 —— 单总线多生产者（CLI / HTTP / 脚本）、单消费者（EdgeNode / 会话 poll）。
 
@@ -393,6 +427,11 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>
+        CommandSpec(name=CMD_CAPTURE_META_LIST, positional=("key",)),  # capture meta list [key]
+        CommandSpec(name=CMD_CAPTURE_META_ADD, positional=("key", "value")),  # capture meta add <key> <value>
+        CommandSpec(name=CMD_CAPTURE_META_EDIT, positional=("key", "old", "new")),  # edit <key> <old> <new>
+        CommandSpec(name=CMD_CAPTURE_META_DELETE, positional=("key", "value")),  # capture meta delete <key> <value>
+        CommandSpec(name=CMD_CAPTURE_META_DELETE_KEY, positional=("key",)),  # capture meta delete-key <key>
         CommandSpec(name=CMD_NODE_RESET),
         CommandSpec(name=CMD_INFER_ROLLOUT, positional=("count",)),  # infer rollout [count]
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：单次尝试连接推理节点

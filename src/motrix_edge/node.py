@@ -37,7 +37,13 @@ from motrix_edge.frame import FrameManager
 from motrix_edge.policy import validate_policy_type
 from motrix_edge.session import get_session
 from motrix_edge.session.base import RunResult
+from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_META_ADD,
+    CMD_CAPTURE_META_DELETE,
+    CMD_CAPTURE_META_DELETE_KEY,
+    CMD_CAPTURE_META_EDIT,
+    CMD_CAPTURE_META_LIST,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
     CMD_INFER_PORT,
@@ -50,6 +56,7 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     CommandResult,
+    handle_capture_meta,
     handle_infer_endpoint,
     ok_result,
     parse_bool,
@@ -144,6 +151,7 @@ class EdgeNode:
         alive_check_interval=2.0,
         data_status_interval=2.0,
         observe_interval=0.05,
+        capture_meta_store=None,
     ):
         self.base_cfg = base_cfg
         self.command_source = command_source if command_source is not None else _noop_command_source
@@ -153,6 +161,8 @@ class EdgeNode:
         self.lifecycle = NodeLifecycle(NodeState.INIT)  # 构造后默认 INIT；initialize()/run() 后进入 IDLE
         self.session = None
         self.session_type = None
+        # 采集元信息选项存储（config/capture.yml）：capture meta 配置级命令读写；测试可注入临时 store
+        self.capture_meta_store = capture_meta_store if capture_meta_store is not None else CaptureMetaStore()
         # 任务线程（session run 启动后台线程）：启动后置非 None，任务期间主循环不 poll
         # 命令（会话命令由任务线程内的会话循环消费）；_tick 检测线程结束收尾。
         self._task_thread = None
@@ -273,6 +283,18 @@ class EdgeNode:
         # base_cfg["policy"]，下次 session run infer 生效（进行中会话不受影响）。
         if cmd.name in (CMD_INFER_IP, CMD_INFER_IP_SET, CMD_INFER_PORT, CMD_INFER_PORT_SET):
             self._reply(cmd, self._on_infer_endpoint(cmd))
+            return
+
+        # 采集元信息选项（capture meta list/add/edit/delete/delete-key）：配置级命令，任何状态
+        # 均可用（读写 config/capture.yml 的 meta 段；与 infer ip 同一语义，与会话状态机解耦）。
+        if cmd.name in (
+            CMD_CAPTURE_META_LIST,
+            CMD_CAPTURE_META_ADD,
+            CMD_CAPTURE_META_EDIT,
+            CMD_CAPTURE_META_DELETE,
+            CMD_CAPTURE_META_DELETE_KEY,
+        ):
+            self._reply(cmd, handle_capture_meta(cmd, self.capture_meta_store))
             return
 
         # 状态处理器返回是否已回执；未回执（当前状态不适用）→ 兜底回执，避免 submit 挂起

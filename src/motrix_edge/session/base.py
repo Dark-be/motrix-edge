@@ -29,6 +29,7 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
+    handle_capture_meta,
     handle_infer_endpoint,
     ok_result,
     parse_bool,
@@ -83,6 +84,7 @@ class BaseSession:
         command_source=None,
         frame_manager=None,
         adapter=None,
+        capture_meta_store=None,
     ):
         self.name = name
         self.base_cfg = base_cfg
@@ -90,6 +92,9 @@ class BaseSession:
         self.frame_manager = frame_manager or FrameManager()  # 观测帧缓存（preview / WebRTC 消费）
         # 节点级 active adapter（注入，生命周期归节点）：会话只引用，不持有 / 不释放
         self.adapter = adapter
+        # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令任务态读写；
+        # 缺省用默认路径（与节点 / server 同源），测试可注入临时 store。
+        self.capture_meta_store = capture_meta_store
         # 退出命令（session quit）：submit 通道命令由节点任务结束后补发回执
         self.exit_command = None
         # 外部请求停止标志（node 失联 ERROR 时终止仍在运行的任务线程用）
@@ -157,6 +162,15 @@ class BaseSession:
         与节点主循环（非任务态）共用同一逻辑，保证「任何状态可用」。
         """
         return handle_infer_endpoint(self.base_cfg, cmd)
+
+    def _on_capture_meta(self, cmd):
+        """处理采集元信息选项命令（capture meta list/add/edit/delete/delete-key）。
+
+        会话运行期间（ACTIVE）命令由会话循环 poll，本方法让配置命令在任务态也可用——
+        委托 ``utils.commands.handle_capture_meta``（读写 config/capture.yml），与节点主循环
+        （非任务态）共用同一逻辑，保证「任何状态可用」。
+        """
+        return handle_capture_meta(cmd, self.capture_meta_store)
 
     def _record_exit(self, cmd) -> None:
         """记录退出命令（仅 submit 通道命令需节点补发回执），由节点任务结束后补发。"""

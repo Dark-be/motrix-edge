@@ -18,6 +18,11 @@ from motrix_edge.adapter import AdapterCapability
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
+    CMD_CAPTURE_META_ADD,
+    CMD_CAPTURE_META_DELETE,
+    CMD_CAPTURE_META_DELETE_KEY,
+    CMD_CAPTURE_META_EDIT,
+    CMD_CAPTURE_META_LIST,
     CMD_CAPTURE_SYNC,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
@@ -119,6 +124,14 @@ class CaptureSession(BaseSession):
                 CMD_INFER_PORT_SET,
             ):
                 self._reply(cmd, self._on_infer_endpoint(cmd))
+            elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
+                CMD_CAPTURE_META_LIST,
+                CMD_CAPTURE_META_ADD,
+                CMD_CAPTURE_META_EDIT,
+                CMD_CAPTURE_META_DELETE,
+                CMD_CAPTURE_META_DELETE_KEY,
+            ):
+                self._reply(cmd, self._on_capture_meta(cmd))
             elif name == CMD_CAPTURE_SYNC:  # 同步采集元信息（采集员 / 任务名等）到机器人进程
                 try:
                     meta = parse_meta(cmd.params.get("meta"))

@@ -172,6 +172,12 @@ class UploadScanRequest(BaseModel):
     folder_path: str | None = Field(default=None, description="待扫描目录；缺省使用 upload.data_dir")
 
 
+class CaptureSyncRequest(BaseModel):
+    """POST /v1/captures/sync 请求体：采集元信息（采集员 / 任务名等，进程保存数据时附加）。"""
+
+    meta: dict = Field(default_factory=dict, description="采集元信息（operator / task_name 等）")
+
+
 class UploadSelectRequest(BaseModel):
     """POST /v1/uploads/select 请求体：按 episode id 替换选择集。"""
 
@@ -439,6 +445,11 @@ def create_app(
         """
         return _capture_call(lambda: _captures().preview(lease_id=x_lease_id))
 
+    @app.get("/v1/captures/meta")
+    async def captures_meta():
+        """采集元信息选项（config/capture.yml 的 ``meta`` 段）：前端选择列表，只读免租约。"""
+        return _captures().meta()
+
     @app.post("/v1/captures")
     async def captures_enter(x_lease_id: str | None = Header(default=None)):
         """创建采集会话（进入任务环境）：READY → ACTIVE，需先持有有效租约（X-Lease-Id）。
@@ -456,6 +467,14 @@ def create_app(
         revoke）管理，session 只消费（校验）租约。
         """
         return _capture_call(lambda: _captures().exit(lease_id=lease_id))
+
+    @app.post("/v1/captures/sync")
+    async def captures_sync(req: CaptureSyncRequest, x_lease_id: str | None = Header(default=None)):
+        """同步采集元信息（采集员 / 任务名等）到机器人进程（进程保存一轮数据时附加）。
+
+        受控操作：须持有有效租约（X-Lease-Id）。
+        """
+        return _capture_call(lambda: _captures().sync(meta=req.meta, lease_id=x_lease_id))
 
     # ---- /v1/infers/*：推理会话控制（无回合概念：enter → 持续推理 → exit）----
 
