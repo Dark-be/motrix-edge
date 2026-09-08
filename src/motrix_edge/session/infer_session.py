@@ -67,6 +67,10 @@ class InferSession(BaseSession):
         if not self.adapter.capabilities.supports(AdapterCapability.EXECUTE):
             raise ValueError("injected adapter does not support EXECUTE capability")
         self.policy_config = self.base_cfg.get("policy", {})
+        # 推理步进频率（Hz）：会话 观测→推理→下发动作 的节奏。``policy.infer_freq`` 可调
+        # （默认 10Hz ≈ 0.1s/步；测试传 1000 让主循环几乎不 sleep）。间隔 = 1 / infer_freq。
+        infer_freq = float(self.policy_config.get("infer_freq", 10.0))
+        self.step_interval = 1.0 / infer_freq if infer_freq > 0 else 0.1
         # 运行时策略选择：session run infer 携带 policy_type（HTTP / 命令）；由节点校验
         self.policy_type = policy_type
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
@@ -225,7 +229,7 @@ class InferSession(BaseSession):
             if action is not None:
                 self.adapter.rollout(action)  # 解析模型 action 为限速目标并推进一帧
             actions.append(self._action_repr(action))
-            time.sleep(0.33)  # 轻量轮询，避免忙等
+            time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
         else:
             debug_print(self.name, f"Rollout executed {count} step(s).", "INFO")
             self._reply(
@@ -251,7 +255,7 @@ class InferSession(BaseSession):
                 break
             self.adapter.rollout(action)
             actions.append(self._action_repr(action))
-            time.sleep(0.33)
+            time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
         debug_print(self.name, f"Drain consumed {len(actions)} step(s).", "INFO")
         self._reply(
             cmd,
@@ -299,13 +303,13 @@ class InferSession(BaseSession):
                     ),
                 )
             obs = self.adapter.observe()
-            if obs is None:  # 观测未就绪：轻量轮询
-                time.sleep(0.33)
+            if obs is None:  # 观测未就绪：按步进间隔轮询
+                time.sleep(self.step_interval)
                 continue
             action = self.policy.infer(obs)
             if action is not None:
                 self.adapter.rollout(action)
-            time.sleep(0.33)
+            time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
 
     @staticmethod
     def _action_repr(action):

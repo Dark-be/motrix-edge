@@ -580,12 +580,13 @@ def test_leases_install_renew_revoke():
     assert snap["state"] == "active"
     assert snap["lease_version"] == 1
     assert snap["leasable"] is False
+    assert snap["expires_at"].endswith("+08:00")  # 统一北京时区序列化
     # 查询镜像：GET /v1/leases/{id} → 200（返回 lease 信息）；不存在 → 404
     info = client.get(f"/v1/leases/{lease}").json()
     assert info["lease_id"] == lease
     assert info["edge_id"] == "edge-test-001"
     assert client.get("/v1/leases/ls_none").status_code == 404
-    # 续约：POST /v1/leases/{id}:renew（lease_version 递增，原地延长）
+    # 续约：POST /v1/leases/{id}:renew（lease_version 递增；Console 传新 expires_at）
     future = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
     r1 = client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 2, "expires_at": future})
     assert r1.status_code == 200
@@ -593,6 +594,7 @@ def test_leases_install_renew_revoke():
     assert body["lease_id"] == lease
     assert body["lease_version"] == 2
     assert body["state"] == "active"
+    assert body["expires_at"].endswith("+08:00")
     # 版本回退 → 409
     assert client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 1, "expires_at": future}).status_code == 409
     # 续约后镜像版本更新
@@ -624,6 +626,33 @@ def test_leases_expired_rejected_410():
     # 过期后可重新签发（覆盖）
     lease2 = install_lease(client, ttl=30)
     assert lease2 != lease
+
+
+def test_leases_trusts_console_expiry():
+    """过期时间由 Console 决定：Edge 信任镜像 expires_at，传「过去」则状态为过期（不重算）。"""
+    client = TestClient(create_app(BASE_CFG))
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    lease = install_lease(client, ttl=60, expires_at=past)
+    snap = client.get("/v1/leases").json()
+    assert snap["lease_id"] == lease
+    assert snap["state"] == "expired"  # 过去的 expires_at 被保留（未按 ttl 重算）
+    exp = datetime.fromisoformat(snap["expires_at"])
+    assert exp < datetime.now(timezone.utc)  # 仍是「过去」时刻
+    assert snap["expires_at"].endswith("+08:00")
+
+
+# ---------------------------------------------------------------------------
+# /v1 控制面防缓存：实时状态一律 Cache-Control: no-store（防浏览器回放旧 410 / 状态）
+# ---------------------------------------------------------------------------
+
+
+def test_v1_responses_are_no_store():
+    """/v1/* 响应统一 no-store：preview / 租约等轮询 GET 不得被浏览器缓存。"""
+    client = TestClient(create_app(BASE_CFG))
+    for path in ("/v1/health", "/v1/leases", "/v1/adapters", "/v1/captures", "/v1/infers", "/v1/preview"):
+        r = client.get(path)
+        assert r.status_code in (200, 501), f"{path} -> {r.status_code}"  # 未注入服务也可能 501
+        assert r.headers.get("cache-control") == "no-store", path
 
 
 # ---------------------------------------------------------------------------

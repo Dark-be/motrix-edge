@@ -124,8 +124,8 @@ class LeaseInstallRequest(BaseModel):
     """POST /v1/leases 请求体：Console 签发并下发的租约**镜像**（权威在 Console）。
 
     字段见 wiki/design/motrix_edge_lease.md「lease 信息」：lease_id / edge_id /
-    holder_subject_id / purpose / state / expires_at / renewed_at / lease_version；
-    ``ttl`` 为有效期（秒，信息字段）。
+    holder_subject_id / purpose / state / expires_at / lease_version；``ttl`` 为
+    有效期（秒，信息字段）。``expires_at`` 由 Console 决定并随镜像下发。
     """
 
     lease_id: str = Field(..., description="Console 生成的租约 id")
@@ -133,7 +133,7 @@ class LeaseInstallRequest(BaseModel):
     holder_subject_id: str = Field(..., description="租约所属操作员")
     purpose: str = Field(..., description="租约用途（如 capture / rollout / maintenance）")
     state: LeaseState = Field(default=LeaseState.ACTIVE, description="签发状态（reserved / active）")
-    expires_at: datetime = Field(..., description="过期时间（ISO 8601，北京时间）")
+    expires_at: datetime = Field(..., description="过期时间（ISO 8601，北京时间；Console 决定）")
     lease_version: int = Field(default=1, ge=1, description="租约版本；续约时递增")
     ttl: float | None = Field(default=None, gt=0, description="有效期（秒，信息字段）")
 
@@ -142,7 +142,7 @@ class LeaseRenewRequest(BaseModel):
     """POST /v1/leases/{id}:renew 请求体：Console 续约 —— 更高 lease_version + 新 expires_at。"""
 
     lease_version: int = Field(..., ge=1, description="新租约版本（须高于当前，版本回退拒绝）")
-    expires_at: datetime = Field(..., description="续约后的过期时间（ISO 8601，北京时间）")
+    expires_at: datetime = Field(..., description="续约后的过期时间（ISO 8601，北京时间；Console 决定）")
 
 
 class WebRTCOfferRequest(BaseModel):
@@ -247,6 +247,18 @@ def create_app(
         request.state.correlation_id = corr
         response = await call_next(request)
         response.headers["X-Correlation-Id"] = corr
+        return response
+
+    @app.middleware("http")
+    async def _no_store_cache(request: Request, call_next):
+        """控制面（/v1/*）响应一律 ``Cache-Control: no-store``：实时状态禁止浏览器缓存。
+
+        预览 / 租约等轮询 GET 若被浏览器缓存，会回放旧的 410 / 过期状态（同一 URL
+        每秒轮询命中缓存，表现为 "date" 是旧时间、请求不进服务端日志）。
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/v1"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.get("/v1/health")
@@ -417,7 +429,7 @@ def create_app(
             "lease_id": lease.lease_id,
             "lease_version": lease.lease_version,
             "state": lease.state.value,
-            "expires_at": lease.expires_at.isoformat(),
+            "expires_at": lease.expires_at.astimezone(BEIJING_TZ).isoformat(),
         }
 
     @app.get("/v1/leases/{lease_id}")
