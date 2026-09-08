@@ -1,3 +1,5 @@
+# 包内默认配置（只读兜底）。外界配置：设置环境变量 MOTRIX_CONFIG_DIR 指向可写目录，
+# 同名文件（edge.yml / capture.yml）优先于包内默认。
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
 # Edge 本地设备身份声明（引用，非权威；权威在 MotrixConsole）
@@ -23,16 +25,25 @@ upload:
 
 # 机器人适配器连接配置：Edge 向 adapter.host:adapter.port 发 POST /v1/discover
 # 寻找机器人进程；进程启动后自描述返回 id / name / type / 能力 / 相机 / 控制器等。
+# 启用臂 / 相机 / home_qpos 等能力配置**运行时**设置（命令 adapter config set 或前端
+# POST /v1/adapters/config），不在此配置。
 adapter:
   host: 127.0.0.1
   port: 8090
 
 # 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
 # 推理会话时由调用方显式选择；host / port 可运行时通过 infer ip / port 覆盖。
+# 单臂任务：策略用通用 act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 运行时配置承载。
 policy:
-  type: openpi # 策略类型（注册表键；缺省 openpi）
-  host: 0.0.0.0 # 推理节点地址（前端推理卡片可运行时设置）
-  port: 8765 # 推理节点端口（前端推理卡片可运行时设置）
-  image_size: [224, 224] # 约定图像尺寸
-  image_format: jpeg # jpeg（默认） | uint8
-  # action_horizon: 16 # 可选，服务端 metadata 未提供时使用
+  host: 127.0.0.1
+  port: 8080
+  type: act # 默认策略类型（会话显式选择时覆盖）
+  # --- act（lerobot gRPC）可选键（缺省用客户端默认，见 wiki/design/motrix_edge_policy.md）---
+  device: cuda # 下发给服务端的推理设备；GPU 部署填 cuda / cuda:0（勿缺省 cpu 以免策略跑 CPU）
+  # pretrained_name_or_path: <真实策略标识> # 必填：服务端据此加载 ACT 模型。
+  #   取值必须是「可加载的策略」：本地策略目录（含 config.json + model.safetensors，
+  #   如 <proj>/outputs/train/<exp>/checkpoints/last）或 HF 策略 repo id（如 lerobot/act_*）。
+  #   注意：数据集目录（含 data/images/meta/videos）不能用于加载；勿留字面占位符。
+  actions_per_chunk: 50 # 动作块长 K（须匹配模型 chunk，且 > smooth_overlap）
+  smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭
+  aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative

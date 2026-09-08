@@ -72,45 +72,66 @@ class InferSession(BaseSession):
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
 
         self.state = SessionState.INIT  # 实时状态（供外部查询）
-        self._connected = False  # 策略服务器连接状态（infer connect 成功后置 True）
 
         debug_print(self.name, f"Policy config: {self.policy_config} (type={self.policy_type})", "INFO")
 
     @property
     def connected(self) -> bool:
-        """策略服务器是否已连接（``infer connect`` 成功后为 True）。"""
-        return self._connected
+        """策略是否已连接推理节点（委托 policy.connected；rollout 可惰性自动连接）。"""
+        return bool(getattr(self.policy, "connected", False))
 
     def session_start(self):
         """进入会话（节点进入 ACTIVE 前调用）：adapter 已由节点 discover 绑定。
 
-        推理节点**不自动连接**：连接推迟到显式 ``infer connect`` 命令（单次尝试），
-        避免同步连接阻塞 ``session run`` 命令回执 / 无限重试。
+        推理节点**不自动连接**：连接时机内聚到 policy——首个 ``infer rollout`` 前经
+        ``policy.ensure_connected()`` 惰性自连（单次限时）；显式 ``infer connect`` 可选
+        预连 + 预热（避免同步连接阻塞命令回执 / 无限重试）。
         """
         self.state = SessionState.READY
 
     def session_finish(self):
         """释放资源（节点释放会话时调用）。adapter 由节点持有，不在此释放。"""
         self.policy.disconnect()
-        self._connected = False
         self.state = SessionState.FINISHED
 
     def _connect_policy(self, cmd) -> None:
-        """infer connect：单次尝试连接推理节点。
+        """infer connect（可选）：显式预连 + 预热。
 
-        成功 → 回执 ok（含服务端 metadata）；失败 → 回执 error（连接状态保持未连接，
-        ``infer rollout`` 在未连接时 503）。
+        连接成功后用当前观测 ``policy.prepare(obs)`` 提前下发策略指令（act：服务端加载
+        模型；openpi：no-op）；预热失败不致命（首个 rollout 会自动重试）。成功回执 ok
+        （含服务端 metadata）；连接失败回执 error（保持未连接，可重试；rollout 也可惰性
+        自动连接）。
         """
         try:
             self.policy.connect()
-            self._connected = True
             metadata = dict(getattr(self.policy, "server_metadata", None) or {})
             self._reply(cmd, ok_result(state="ready", connected=True, metadata=metadata))
             debug_print(self.name, f"Inference server connected: {metadata}", "INFO")
         except Exception as exc:  # noqa: BLE001 单次尝试失败：保持未连接，不无限重试
-            self._connected = False
             debug_print(self.name, f"infer connect failed: {exc}", "WARNING")
             self._reply(cmd, CommandResult(status="error", error=f"infer connect failed: {exc}", status_code=502))
+            return
+        # 预热：用当前观测下发策略指令（act 提前加载模型；openpi no-op）。
+        try:
+            obs = self.adapter.observe()
+            if obs is not None:
+                self.policy.prepare(obs)
+                debug_print(self.name, "Policy prepared (model warmed up).", "INFO")
+        except Exception as exc:  # noqa: BLE001 预热失败不致命：首个 rollout 会自动重试
+            debug_print(self.name, f"policy prepare failed (will retry on rollout): {exc}", "WARNING")
+
+    def _ensure_connected(self, cmd) -> bool:
+        """rollout 前惰性连接：未连接则 ``policy.ensure_connected()``（单次限时）。
+
+        成功 → True；失败 → 回执 error 并返回 False（不执行推理，可重试）。
+        """
+        try:
+            self.policy.ensure_connected()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            debug_print(self.name, f"policy connect failed: {exc}", "WARNING")
+            self._reply(cmd, CommandResult(status="error", error=f"policy connect failed: {exc}", status_code=502))
+            return False
 
     def run(self):
         """阻塞式推理主循环：等待就绪 → 显式 infer connect → 等待 infer rollout 步进闭环。"""
@@ -138,20 +159,12 @@ class InferSession(BaseSession):
             if name == CMD_INFER_CONNECT:  # 显式连接推理节点（单次尝试，可反复触发重连）
                 self._connect_policy(cmd)
             elif name == CMD_INFER_ROLLOUT:  # 推理闭环：count 次数 / continuous 持续 / drain 消耗块
-                if not self._connected:
-                    self._reply(
-                        cmd,
-                        CommandResult(
-                            status="rejected",
-                            error="policy not connected (run infer connect)",
-                            status_code=503,
-                        ),
-                    )
-                    continue
                 try:
                     mode, count = parse_rollout_mode(cmd.params.get("count"))
                 except ValueError as exc:
                     self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                    continue
+                if not self._ensure_connected(cmd):  # 惰性自连：未连接则自动连接（失败已回执）
                     continue
                 if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 session quit / estop
                     self._reply(cmd, ok_result(state="continuous", started=True))

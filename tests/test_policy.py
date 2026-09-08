@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 
 from motrix_edge.policy import POLICY_REGISTRY, get_policy
-from motrix_edge.policy.broker import ActionChunkBroker
 from motrix_edge.policy.contract import (
     KEY_ACTION,
     KEY_OBS_IMAGE_PREFIX,
@@ -98,68 +97,6 @@ def test_extract_action_missing_key():
         extract_action({"foo": 1})
 
 
-def test_broker_chunk_slicing():
-    """feed 新块后逐帧切片；块耗尽后 empty → 需重新 feed。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    chunk = np.array([[1.0, 2.0], [3.0, 4.0]])
-    assert broker.empty  # 初始无块
-    broker.feed(chunk)
-    assert not broker.empty
-    assert np.array_equal(broker.step(), np.array([1.0, 2.0]))
-    assert np.array_equal(broker.step(), np.array([3.0, 4.0]))
-    # 块耗尽后 empty → 需重新 feed 新块（调用方向推理端请求的时机）
-    assert broker.empty
-    new_chunk = np.array([[5.0, 6.0], [7.0, 8.0]])
-    broker.feed(new_chunk)
-    assert np.array_equal(broker.step(), np.array([5.0, 6.0]))
-
-
-def test_broker_single_step_passthrough():
-    """单步动作（[dim]）透传不切片，消耗后即空。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    broker.feed(np.array([0.1, 0.2]))
-    action = broker.step()
-    assert np.array_equal(action, np.array([0.1, 0.2]))
-    assert broker.empty
-
-
-def test_broker_uses_actual_short_chunk_length():
-    """服务端返回短于协商 horizon 的末块时，按实际块长耗尽，不越界。"""
-    broker = ActionChunkBroker(action_horizon=4)
-    broker.feed(np.array([[1.0, 2.0], [3.0, 4.0]]))
-
-    assert np.array_equal(broker.step(), np.array([1.0, 2.0]))
-    assert np.array_equal(broker.step(), np.array([3.0, 4.0]))
-    assert broker.empty
-
-
-def test_broker_preserves_actual_long_chunk_length():
-    """服务端返回长于协商 horizon 的块时，不静默丢弃尾部动作。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    chunk = np.array([[1.0], [2.0], [3.0]])
-    broker.feed(chunk)
-
-    assert [broker.step().item() for _ in range(3)] == [1.0, 2.0, 3.0]
-    assert broker.empty
-
-
-def test_broker_reset():
-    broker = ActionChunkBroker(action_horizon=2)
-    chunk = np.array([[1.0, 2.0], [3.0, 4.0]])
-    broker.feed(chunk)
-    broker.reset()
-    assert broker.empty  # reset 清空缓存
-    broker.feed(chunk)
-    assert np.array_equal(broker.step(), np.array([1.0, 2.0]))
-
-
-def test_broker_step_without_feed_raises():
-    """未 feed 直接 step：明确报错（调用方应先检查 empty）。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    with pytest.raises(RuntimeError):
-        broker.step()
-
-
 class _FakeTransport:
     """计数 transport：支持 connect/close，并返回固定动作块 [horizon, dim]。"""
 
@@ -192,13 +129,13 @@ def test_openpi_connect_closes_transport_when_action_horizon_missing():
     with pytest.raises(ValueError, match="action_horizon"):
         client.connect()
 
-    assert transport.close_calls == 1
+    assert transport.close_calls >= 1  # refresh 语义：connect 先释放既有/半开连接
     assert client.server_metadata == {}
-    assert client._broker is None
+    assert client._chunk is None
     assert client._action_horizon is None
 
 
-def test_policy_clients_expose_server_metadata():
+def test_openpi_exposes_server_metadata():
     from motrix_edge.policy.openpi.client import OpenPIClient
 
     metadata = {"model": "test-policy", "action_horizon": 16, "action_dim": 14}
@@ -211,7 +148,7 @@ def test_policy_clients_expose_server_metadata():
 
 
 def test_openpi_infer_requests_only_when_chunk_empty():
-    """OpenPIClient.infer：**仅当 broker 块耗尽时才向推理端请求**（其余步骤消耗缓存块）。
+    """OpenPIClient.infer：**仅当缓存块耗尽时才向推理端请求**（其余步骤消耗缓存块）。
 
     一个动作块（[horizon, dim]）应支撑 horizon 步推理，期间不再访问推理端。
     """
@@ -220,7 +157,7 @@ def test_openpi_infer_requests_only_when_chunk_empty():
     client = OpenPIClient({"action_horizon": 2})
     transport = _FakeTransport(horizon=2, dim=2)
     client._transport = transport
-    client._broker = ActionChunkBroker(2)
+    client.connect()  # 以 config action_horizon=2 初始化空缓存
 
     obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
     # 第 1 步：块为空 → 请求 1 次，消耗缓存第 1 步
@@ -234,14 +171,19 @@ def test_openpi_infer_requests_only_when_chunk_empty():
     assert transport.calls == 2
 
 
-def test_policy_registry_has_openpi():
+# act 策略已改为 lerobot gRPC 流式客户端（见 tests/test_act_grpc_client.py），
+# 不再使用 ws / ActionChunkBroker / image_size；相关旧断言已移除。
+
+
+def test_policy_registry_has_openpi_and_act():
     assert "openpi" in POLICY_REGISTRY
+    assert "act" in POLICY_REGISTRY
 
 
 def test_validate_policy_type():
     from motrix_edge.policy import validate_policy_type
 
-    assert validate_policy_type("openpi") == "openpi"
+    assert validate_policy_type("act") == "act"
     with pytest.raises(ValueError, match="nonexistent"):
         validate_policy_type("nonexistent")
 
@@ -256,25 +198,16 @@ def test_get_policy_default_openpi():
     assert policy.__class__.__name__ == "OpenPIClient"
 
 
+def test_get_policy_act():
+    policy = get_policy({"policy": {"type": "act"}})
+    assert policy.__class__.__name__ == "ACTClient"
+    # act 走 lerobot gRPC：不再有 ws 的 image_size / image_format
+    assert not hasattr(policy, "image_size")
+
+
 def test_get_policy_uses_only_shared_endpoint_config():
-    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="openpi")
+    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="act")
     assert policy.policy_config["host"] == "127.0.0.1"
     assert policy.policy_config["port"] == 8765
-    assert policy.image_size == (224, 224)
-    assert policy.image_format == "jpeg"
-
-
-def test_openpi_drain_consumes_cached_chunk():
-    """drain：只消费缓存动作块（不发新推理请求）；无缓存返回 None。"""
-    from motrix_edge.policy.openpi.client import OpenPIClient
-
-    client = OpenPIClient({})
-    client._transport = _FakeTransport(horizon=2, dim=2)
-    client._broker = ActionChunkBroker(2)
-    assert client.drain() is None  # 无缓存：不发请求
-    assert client._transport.calls == 0
-    client._broker.feed(np.array([[1.0, 2.0], [3.0, 4.0]]))
-    assert np.array_equal(client.drain(), np.array([1.0, 2.0]))
-    assert np.array_equal(client.drain(), np.array([3.0, 4.0]))
-    assert client.drain() is None  # 耗尽
-    assert client._transport.calls == 0  # drain 从不发请求
+    assert policy._transport._host == "127.0.0.1"
+    assert policy._transport._port == 8765

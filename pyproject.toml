@@ -19,6 +19,7 @@ dependencies = [
     "aiortc>=1.15.0,<2.0.0",  # 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），上限约束防升级静默失效
     "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
     "prompt-toolkit>=3.0.53",
+    "grpcio>=1.62.0",  # lerobot gRPC AsyncInference 传输（act 策略；vendored lerobot 在 src/lerobot）
 ]
 
 [dependency-groups]
@@ -27,6 +28,8 @@ dev = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "grpcio-tools>=1.62.0",  # 重生成 vendored lerobot/transport 的 services_pb2{,_grpc}.py
+    "protobuf>=4.25",
 ]
 
 # 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装，

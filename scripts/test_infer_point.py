@@ -15,12 +15,12 @@
 """Test Infer Point —— 独立运行的模拟 openpi 推理服务端（虚拟推理端点）。
 
 **不进行真实推理**：作为联调用的虚拟策略服务端，验证「edge → 推理端」的传输契约
-（见 ``motrix_edge/policy/contract.py`` 与 ``msgpack_numpy.py``）。运行在指定 ip / 端口：
+（见 ``motrix_edge/policy/contract.py`` 与 ``motrix_edge/transport/msgpack_numpy.py``）。运行在指定 ip / 端口：
 
 - 连接建立后**先下发首条 metadata**（msgpack，含 ``action_horizon``）；
 - 每个请求接收 msgpack 观测 ``{"observations/qpos": ndarray, "observations/images/*": ...}``，
   返回一段**有界随机游走**的 action chunk ``{"action": ndarray}``（``[horizon, dim]``，块间连续），
-  供 ``ActionChunkBroker`` 逐帧切片验证。
+  供 openpi 策略（``OpenPIClient``，自有动作块缓存）逐帧切片验证。
 
 与 Edge 的耦合**仅限 wire 契约**（``motrix_edge.policy.contract`` / ``msgpack_numpy``），
 不 import ``motrix_edge`` 的业务 / 硬件逻辑。既可独立运行（进程入口），也可被测试进程内
@@ -43,7 +43,7 @@ from websockets.sync.server import serve
 # 唯一允许依赖的 Edge 部分：wire 契约（消息 key 常量）+ msgpack-numpy 序列化，
 # 保证与 policy 客户端的收发逻辑统一（见 motrix_edge/policy/contract.py、msgpack_numpy.py）。
 from motrix_edge.policy.contract import KEY_ACTION, KEY_OBS_QPOS
-from motrix_edge.policy.msgpack_numpy import packb, unpackb
+from motrix_edge.transport.msgpack_numpy import packb, unpackb
 
 # 默认参数（SimInferCore 类常量与此对齐）
 DEFAULT_HOST = "0.0.0.0"
@@ -59,7 +59,7 @@ class SimInferCore:
     """模拟推理核心（本进程自包含，无真实模型）。
 
     ``chunk()``：返回下一个动作块 ``[action_horizon, action_dim]``，为**有界随机游走**
-    的连续轨迹（每块首步衔接上一块末步，使 ``ActionChunkBroker`` 跨块取动作时无跳变）。
+    的连续轨迹（每块首步衔接上一块末步，使 openpi 策略跨块取动作时无跳变）。
     单步幅 ``step``、值域 ``range`` 可配置；``reset()`` 复位游走起点。
     """
 

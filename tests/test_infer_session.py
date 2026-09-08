@@ -48,14 +48,27 @@ class _FakePolicy:
         self.infer_calls = 0
         self.reset_calls = 0
         self.disconnect_calls = 0
+        self.prepare_calls = 0
+        self.connect_calls = 0
         self.action = np.arange(14, dtype=float)
         self._drained = False
+        self.connected = False
+        self.server_metadata = {}
 
     def connect(self):
-        pass
+        self.connect_calls += 1
+        self.connected = True
+
+    def ensure_connected(self):
+        if not self.connected:
+            self.connect()
+
+    def prepare(self, obs=None):
+        self.prepare_calls += 1
 
     def disconnect(self):
         self.disconnect_calls += 1
+        self.connected = False
 
     def reset(self):
         self.reset_calls += 1
@@ -277,8 +290,8 @@ def test_robot_execute_in_infer_loop(monkeypatch):
     assert adapter.executed == [[0.0] * 7]  # qpos 直接作为参数传给 adapter.execute
 
 
-def test_infer_rollout_before_connect_is_503(monkeypatch):
-    """未连接推理节点时 infer rollout → 503，不执行推理。"""
+def test_infer_rollout_auto_connects(monkeypatch):
+    """未显式 infer connect：rollout 前惰性自动连接（policy.ensure_connected）并推理。"""
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
     _patch(monkeypatch, policy)
@@ -288,14 +301,37 @@ def test_infer_rollout_before_connect_is_503(monkeypatch):
     session = _build_session(adapter, policy, (rollout, "session quit"))
 
     assert session.run() == RunResult.FINISHED
+    assert policy.connect_calls == 1  # 自动连接一次，无需先 infer connect
+    assert policy.infer_calls == 1
+    assert len(adapter.executed) == 1
+    assert replies[0].status == "ok"
+
+
+def test_infer_rollout_auto_connect_failure_replies_error(monkeypatch):
+    """rollout 自动连接失败 → 回执 error（502），不执行推理，可重试。"""
+
+    class _FailConnectPolicy(_FakePolicy):
+        def connect(self):
+            self.connect_calls += 1
+            raise OSError("inference server not reachable")
+
+    adapter = _FakeAdapter(ready=True)
+    policy = _FailConnectPolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    rollout = _REGISTRY.parse_argv(["infer", "rollout"])
+    rollout.reply_to = replies.append
+    session = _build_session(adapter, policy, (rollout, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.connect_calls == 1  # 单次尝试，不无限重试
     assert policy.infer_calls == 0
-    assert replies[0].status == "rejected"
-    assert replies[0].status_code == 503
-    assert replies[0].error == "policy not connected (run infer connect)"
+    assert replies[0].status == "error"
+    assert replies[0].status_code == 502
 
 
 def test_infer_connect_success_replies_metadata(monkeypatch):
-    """infer connect：单次尝试成功 → connected=True，回执含服务端 metadata。"""
+    """infer connect（可选）：预连成功 → 回执 metadata，并用当前观测预热 prepare(obs)。"""
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
     policy.server_metadata = {"action_horizon": 16}
@@ -307,6 +343,8 @@ def test_infer_connect_success_replies_metadata(monkeypatch):
 
     assert session.run() == RunResult.FINISHED
     assert session.connected is True
+    assert policy.connect_calls == 1
+    assert policy.prepare_calls == 1  # 预热：adapter 有帧 → policy.prepare(obs)
     assert replies[0].status == "ok"
     assert replies[0].data["connected"] is True
     assert replies[0].data["metadata"] == {"action_horizon": 16}
