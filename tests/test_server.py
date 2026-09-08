@@ -38,6 +38,7 @@ from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_INFER_CONNECT,
+    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
@@ -328,6 +329,9 @@ class FakeInferSession:
                             actions=[[1.0, 2.0]] * count,
                         ),
                     )
+            elif name == CMD_INFER_PROMPT:  # 运行时改文本指令（openpi 动态 prompt）
+                self.policy.prompt = (cmd.params or {}).get("prompt")
+                self._reply(cmd, ok_result(state="ready", prompt=self.policy.prompt))
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
@@ -1203,6 +1207,48 @@ def test_infers_connect_exposes_status():
     assert snap["connected"] is True
     assert snap["metadata"] == {"action_horizon": 16}
     assert CMD_INFER_CONNECT in [getattr(c, "name", None) for c in node.session.pulled]
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_prompt_updates_runtime_prompt():
+    """运行时改文本指令：POST /v1/infers/prompt → 会话内 infer prompt 命令 → 回执。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入推理会话：prompt → 409
+    assert client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "x"}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 运行时设置 prompt：会话内命令被执行，回执回显
+    r = client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["prompt"] == "把零件放好"
+    assert CMD_INFER_PROMPT in [getattr(c, "name", None) for c in node.session.pulled]
+    assert node.session.policy.prompt == "把零件放好"
+    # 缺 prompt → pydantic 422
+    assert client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={}).status_code == 422
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_enter_applies_host_port():
+    """进入会话前可把推理端点（host / port）随 enter 传入：写 base_cfg，创建会话即生效。"""
+    import copy
+
+    node = FakeNode()
+    node.base_cfg = copy.deepcopy(BASE_CFG)  # 独立配置副本，避免污染全局 BASE_CFG
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    r = client.post("/v1/infers", headers={"X-Lease-Id": lease}, json={"host": "10.0.0.9", "port": 8765})
+    assert r.status_code == 200
+    assert node.base_cfg["policy"]["host"] == "10.0.0.9"
+    assert node.base_cfg["policy"]["port"] == 8765
+    # 非法端口 → 400（pydantic 校验）
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}, json={"port": 0}).status_code == 422
     # 清理退出
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)

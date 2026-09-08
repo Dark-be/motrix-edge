@@ -98,7 +98,7 @@ def test_extract_action_missing_key():
 
 
 class _FakeTransport:
-    """计数 transport：支持 connect/close，并返回固定动作块 [horizon, dim]。"""
+    """计数 transport：支持 connect/close，记录最近 payload，返回固定动作块 [horizon, dim]。"""
 
     def __init__(self, horizon=2, dim=2, metadata=None):
         self.calls = 0
@@ -106,6 +106,7 @@ class _FakeTransport:
         self.horizon = horizon
         self.dim = dim
         self.server_metadata = metadata
+        self.last_payload = None
 
     def connect(self):
         pass
@@ -115,24 +116,37 @@ class _FakeTransport:
 
     def request(self, payload):
         self.calls += 1
-        return {"action": np.ones((self.horizon, self.dim), dtype=np.float32)}
+        self.last_payload = payload
+        return {"actions": np.ones((self.horizon, self.dim), dtype=np.float32)}
 
 
-def test_openpi_connect_closes_transport_when_action_horizon_missing():
-    """metadata / config 均缺 action_horizon 时，必须关闭已建立的 WebSocket。"""
+def test_openpi_defaults_action_horizon_when_metadata_missing():
+    """官方服务端 metadata 不提供 action_horizon → 回退 policy_config（缺省 50），不再报错。
+
+    连接失败清理（refresh 语义：close 既有/半开连接）仍须保持。
+    """
     from motrix_edge.policy.openpi.client import OpenPIClient
 
-    client = OpenPIClient({})
-    transport = _FakeTransport(metadata={})
+    client = OpenPIClient({})  # 无 metadata action_horizon、无 config action_horizon
+    transport = _FakeTransport(metadata={"model": "piper", "action_dim": 14})
     client._transport = transport
-
-    with pytest.raises(ValueError, match="action_horizon"):
-        client.connect()
-
-    assert transport.close_calls >= 1  # refresh 语义：connect 先释放既有/半开连接
+    client.connect()
+    assert client.server_metadata == {"model": "piper", "action_dim": 14}
+    assert client._action_horizon == 50  # 缺省 50（配置键 policy.action_horizon）
+    client.disconnect()
     assert client.server_metadata == {}
-    assert client._chunk is None
-    assert client._action_horizon is None
+
+    # metadata 有则优先；config 其次
+    client2 = OpenPIClient({"action_horizon": 40})
+    client2._transport = _FakeTransport(metadata={"action_horizon": 8})
+    client2.connect()
+    assert client2._action_horizon == 8  # metadata 优先
+    client2.disconnect()
+    client3 = OpenPIClient({"action_horizon": 40})
+    client3._transport = _FakeTransport(metadata={})
+    client3.connect()
+    assert client3._action_horizon == 40  # config 兜底
+    client3.disconnect()
 
 
 def test_openpi_exposes_server_metadata():
@@ -143,6 +157,7 @@ def test_openpi_exposes_server_metadata():
     client._transport = _FakeTransport(metadata=metadata)
     client.connect()
     assert client.server_metadata == metadata
+    assert client._action_horizon == 16
     client.disconnect()
     assert client.server_metadata == {}
 
@@ -169,6 +184,94 @@ def test_openpi_infer_requests_only_when_chunk_empty():
     # 第 3 步：块耗尽（empty）→ 再请求 1 次
     assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
     assert transport.calls == 2
+
+
+def _jpeg_bytes(rgb):
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    assert ok
+    return buf.tobytes()
+
+
+def test_openpi_sends_official_flat_observation():
+    """OpenPIClient 按官方 flat 契约组装观测：state=qpos、图像为 uint8 数组（非 jpeg bytes）、
+    相机集来自 bind_adapter（adapter 启用的相机名，非 edge.yml）、rename_cameras 改名、
+    prompt 动态携带。"""
+    from motrix_edge.policy.contract import OPENPI_KEY_IMAGES, OPENPI_KEY_PROMPT, OPENPI_KEY_STATE
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    client = OpenPIClient(
+        {
+            "action_horizon": 2,
+            "image_size": 16,
+            "rename_cameras": {"cam_head": "base_0_rgb"},
+            "prompt": "open the box",
+        }
+    )
+    transport = _FakeTransport(horizon=2, dim=2)
+    client._transport = transport
+    # 布局来自 adapter 运行时配置（InferSession 进入时 bind_adapter）：只启用 cam_head + cam_right_wrist
+    client.bind_adapter(action_dim=7, camera_names=["cam_head", "cam_right_wrist"])
+    client.connect()
+
+    rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+    rgb[..., 0] = 200
+    obs = {
+        "observations/qpos": np.arange(2, dtype=np.float32),
+        "observations/images/cam_head": _jpeg_bytes(rgb),  # jpeg bytes → 改名 base_0_rgb
+        "observations/images/cam_left_wrist": _jpeg_bytes(rgb),  # 未启用（不在 bind 相机集）→ 过滤
+        "observations/images/cam_right_wrist": rgb,  # 数组直传
+    }
+    assert client.infer(obs) is not None
+
+    payload = transport.last_payload
+    assert np.array_equal(payload[OPENPI_KEY_STATE], obs["observations/qpos"])
+    assert payload[OPENPI_KEY_PROMPT] == "open the box"
+    images = payload[OPENPI_KEY_IMAGES]
+    assert set(images) == {"base_0_rgb", "cam_right_wrist"}  # bind 相机集过滤 + 改名
+    for img in images.values():
+        assert isinstance(img, np.ndarray)
+        assert img.dtype == np.uint8
+        assert img.shape == (16, 16, 3)  # uint8 HWC（非 jpeg bytes）
+
+
+def test_openpi_camera_layout_comes_from_bind_adapter_not_config():
+    """openpi **不读 edge.yml 的相机名**：仅 bind_adapter 决定要下发的相机（未绑定 = 透传全部）。"""
+    from motrix_edge.policy.contract import OPENPI_KEY_IMAGES
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    client = OpenPIClient({"action_horizon": 1, "image_size": 8})  # policy_config 不带任何相机列表
+    transport = _FakeTransport(horizon=1, dim=1)
+    client._transport = transport
+    client.connect()
+    obs = {
+        "observations/qpos": np.zeros(1, dtype=np.float32),
+        "observations/images/cam_head": np.zeros((4, 4, 3), dtype=np.uint8),
+        "observations/images/cam_left_wrist": np.zeros((4, 4, 3), dtype=np.uint8),
+    }
+    client.infer(obs)  # 未绑定 → 透传观测内全部相机
+    assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head", "cam_left_wrist"}
+
+    client.bind_adapter(action_dim=7, camera_names=["cam_head"])  # adapter 只启用 cam_head（双相机→单相机）
+    client.infer(obs)  # 上一块（horizon=1）已耗尽 → 再请求
+    assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head"}
+
+
+def test_openpi_prompt_dynamic_per_request():
+    """prompt 运行时动态可换（会话侧 set policy.prompt 后，下一请求携带新文本）。"""
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    client = OpenPIClient({"action_horizon": 1, "image_size": 8})
+    transport = _FakeTransport(horizon=1, dim=1)
+    client._transport = transport
+    client.connect()
+    obs = {"observations/qpos": np.zeros(1, dtype=np.float32)}
+
+    client.infer(obs)  # 块为空 → 请求
+    assert "prompt" not in transport.last_payload  # 缺省 prompt=None → 不发（服务端 default_prompt 兜底）
+
+    client.prompt = "switch tasks now"
+    client.infer(obs)  # 块已耗尽（horizon=1）→ 再请求
+    assert transport.last_payload["prompt"] == "switch tasks now"
 
 
 # act 策略已改为 lerobot gRPC 流式客户端（见 tests/test_act_grpc_client.py），

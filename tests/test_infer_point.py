@@ -73,10 +73,10 @@ def test_chunks_are_continuous_random_walk():
     assert np.any(np.abs(second[0] - first[-1]) > 1e-9)
 
 
-def test_chunk_adapts_to_observation_qpos_dim():
-    """观测携带 qpos 时按 qpos 维数适配动作维。"""
+def test_chunk_adapts_to_observation_state_dim():
+    """观测携带 state（openpi 官方 flat 键）时按 state 维数适配动作维（单臂 7 维）。"""
     core = SimInferCore(action_dim=14, action_horizon=16, seed=0)
-    obs = {"observations/qpos": np.zeros(7, dtype=np.float32)}
+    obs = {"state": np.zeros(7, dtype=np.float32)}
     chunk = core.chunk_for(obs)
     assert chunk.shape == (16, 7)
     assert core.action_dim == 7
@@ -91,12 +91,18 @@ def test_reset_zeros_walk_start():
     assert np.all(np.abs(chunk[0]) <= DEFAULT_STEP + 1e-9)
 
 
-def test_build_metadata_contains_action_horizon():
+def test_build_metadata_defaults_without_action_horizon():
+    """官方 metadata 默认不含 action_horizon（客户端从 policy_config 兜底）；可开关发布。"""
     core = SimInferCore(action_dim=14, action_horizon=16)
     meta = build_metadata(core)
-    assert meta["action_horizon"] == 16
-    assert meta["action_dim"] == 14
-    assert meta["model"] == "test-infer-point"
+    assert meta == {"model": "test-infer-point", "action_dim": 14}
+    assert "action_horizon" not in meta
+
+    core2 = SimInferCore(action_dim=14, action_horizon=16, publish_action_horizon=True)
+    meta2 = build_metadata(core2)
+    assert meta2["action_horizon"] == 16
+    assert meta2["action_dim"] == 14
+    assert meta2["model"] == "test-infer-point"
 
 
 # ---------------------------------------------------------------------------
@@ -113,24 +119,26 @@ def _serve_in_thread(core):
 
 
 def test_wire_contract_metadata_and_action_chunk():
-    """MsgpackTransport 连接虚拟端点：收到 metadata（action_horizon）→ 发观测 → 收动作块。"""
+    """MsgpackTransport 连接虚拟端点：收到 metadata（无 action_horizon）→ 发官方 flat 观测
+    → 收 ``actions`` 动作块。"""
     core = SimInferCore(action_dim=14, action_horizon=16, seed=0)
     server, port = _serve_in_thread(core)
     transport = MsgpackTransport(host="127.0.0.1", port=port, connect_timeout=5.0)
     try:
         transport.connect()
-        assert transport.server_metadata["action_horizon"] == 16
+        assert transport.server_metadata["model"] == "test-infer-point"
         assert transport.server_metadata["action_dim"] == 14
+        assert "action_horizon" not in transport.server_metadata  # 官方默认不带
 
-        obs = {"observations/qpos": np.zeros(14, dtype=np.float32)}
+        obs = {"state": np.zeros(14, dtype=np.float32), "prompt": "do something"}
         resp = transport.request(obs)
-        action = np.asarray(resp["action"])
+        action = np.asarray(resp["actions"])
         assert action.shape == (16, 14)
         assert np.all(action >= DEFAULT_RANGE[0]) and np.all(action <= DEFAULT_RANGE[1])
 
         # 第二次请求：动作块从上一块末步继续（随机游走连续）
         resp2 = transport.request(obs)
-        action2 = np.asarray(resp2["action"])
+        action2 = np.asarray(resp2["actions"])
         assert action2.shape == (16, 14)
         delta = np.abs(action2[0] - action[-1])
         assert np.all(delta <= DEFAULT_STEP + 1e-9)
@@ -139,16 +147,41 @@ def test_wire_contract_metadata_and_action_chunk():
         server.shutdown()
 
 
-def test_wire_contract_adapts_to_qpos_dim():
-    """虚拟端点按观测 qpos 维数返回对应维度的动作块。"""
+def test_wire_contract_adapts_to_state_dim():
+    """虚拟端点按观测 state 维数返回对应维度的动作块。"""
     core = SimInferCore(action_dim=14, action_horizon=16, seed=0)
     server, port = _serve_in_thread(core)
     transport = MsgpackTransport(host="127.0.0.1", port=port, connect_timeout=5.0)
     try:
         transport.connect()
-        resp = transport.request({"observations/qpos": np.zeros(7, dtype=np.float32)})
-        action = np.asarray(resp["action"])
+        resp = transport.request({"state": np.zeros(7, dtype=np.float32)})
+        action = np.asarray(resp["actions"])
         assert action.shape == (16, 7)
     finally:
         transport.close()
+        server.shutdown()
+
+
+def test_openpi_client_e2e_official_flat_wire():
+    """OpenPIClient ↔ 官方契约 mock 端到端：metadata 无 action_horizon（配置兜底 50）、
+    ``actions`` 响应键、官方 flat 观测、prompt 动态可换。"""
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    core = SimInferCore(action_dim=14, action_horizon=4, seed=0)
+    server, port = _serve_in_thread(core)
+    client = OpenPIClient({"host": "127.0.0.1", "port": port, "action_horizon": 50, "prompt": "pick and place"})
+    try:
+        client.connect()
+        assert client.server_metadata["model"] == "test-infer-point"
+        assert "action_horizon" not in client.server_metadata  # 官方默认不带
+        assert client._action_horizon == 50  # 配置兜底
+
+        obs = {"observations/qpos": np.zeros(14, dtype=np.float32)}
+        actions = [client.infer(obs) for _ in range(20)]  # 跨动作块逐帧消费（每块 4 步）
+        assert all(a is not None and np.ndim(a) == 1 and len(a) == 14 for a in actions)
+
+        client.prompt = "now do a different task"  # 动态 prompt 可换
+        assert np.ndim(client.infer(obs)) == 1
+    finally:
+        client.disconnect()
         server.shutdown()

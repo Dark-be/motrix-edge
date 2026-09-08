@@ -46,6 +46,16 @@ class BasePolicyClient:
         """
         pass
 
+    def bind_adapter(self, action_dim=None, camera_names=None):
+        """绑定推理时机器人适配器启用的布局（启用臂 qpos 维数 + 启用相机名）。
+
+        由推理会话（InferSession）在进入会话时调用：把 adapter 运行时配置（``adapter
+        config set`` 的 enabled_arms / enabled_cameras）传给策略客户端，使布局的单一
+        事实来源 = adapter（策略**不另读** edge.yml 的相机名）。默认 no-op；需要按启用
+        相机过滤 / 按启用臂切分的策略（如 openpi）覆盖。
+        """
+        pass
+
     def infer(self, observation: dict):
         """输入观测，返回动作。
 

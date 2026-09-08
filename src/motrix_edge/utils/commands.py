@@ -66,6 +66,7 @@ CMD_INFER_IP = "infer ip"  # 查询推理节点 IP（内存态 policy.host）
 CMD_INFER_IP_SET = "infer ip set"  # 设置推理节点 IP（位置参数 ip；下次 session run infer 生效）
 CMD_INFER_PORT = "infer port"  # 查询推理节点端口（内存态 policy.port）
 CMD_INFER_PORT_SET = "infer port set"  # 设置推理节点端口（位置参数 port；下次 session run infer 生效）
+CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；openpi 会话内运行时可改）
 
 
 class CommandError(Exception):
@@ -445,6 +446,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_INFER_IP_SET, positional=("ip",)),  # infer ip set <ip>
         CommandSpec(name=CMD_INFER_PORT),  # infer port：查询推理节点端口（无参）
         CommandSpec(name=CMD_INFER_PORT_SET, positional=("port",)),  # infer port set <port>
+        CommandSpec(name=CMD_INFER_PROMPT, positional=("prompt",)),  # infer prompt <text>：运行时改文本指令
     ]:
         registry.register(spec)
     return registry

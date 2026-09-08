@@ -40,10 +40,11 @@ policy:
   type: act # 默认策略类型（会话显式选择时覆盖）
   # --- act（lerobot gRPC）可选键（缺省用客户端默认，见 wiki/design/motrix_edge_policy.md）---
   device: cuda # 下发给服务端的推理设备；GPU 部署填 cuda / cuda:0（勿缺省 cpu 以免策略跑 CPU）
-  # pretrained_name_or_path: <真实策略标识> # 必填：服务端据此加载 ACT 模型。
-  #   取值必须是「可加载的策略」：本地策略目录（含 config.json + model.safetensors，
-  #   如 <proj>/outputs/train/<exp>/checkpoints/last）或 HF 策略 repo id（如 lerobot/act_*）。
-  #   注意：数据集目录（含 data/images/meta/videos）不能用于加载；勿留字面占位符。
+  pretrained_name_or_path: /home/pc16/project/lerobot/outputs/train/act_shred_scrap_paper_32/checkpoints/020000/pretrained_model # 必填：服务端据此加载 ACT 模型
   actions_per_chunk: 50 # 动作块长 K（须匹配模型 chunk，且 > smooth_overlap）
-  smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭
+  smooth_overlap: 20 # act 时序平滑重叠窗口（步）；0 = 关闭
   aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
+  # 其余策略参数（openpi 的 action_horizon/image_size/rename_cameras/prompt、act 之外的
+  # 可选键）**一律用代码缺省值**，不在 yaml 维护；后续如需运行时可配置再走运行时通道
+  # （如 infer ip/port、adapter config set 同款机制）。布局（单臂/双相机）由 adapter
+  # 运行时配置决定并自动传入策略（bind_adapter），openpi 侧无相机配置。

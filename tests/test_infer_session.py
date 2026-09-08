@@ -50,10 +50,19 @@ class _FakePolicy:
         self.disconnect_calls = 0
         self.prepare_calls = 0
         self.connect_calls = 0
+        self.prompt = None  # openpi 动态文本指令（会话可写）
+        self.bind_calls = 0  # bind_adapter（adapter 布局传入）
+        self.bound_cameras = None
+        self.bound_action_dim = None
         self.action = np.arange(14, dtype=float)
         self._drained = False
         self.connected = False
         self.server_metadata = {}
+
+    def bind_adapter(self, action_dim=None, camera_names=None):
+        self.bind_calls += 1
+        self.bound_action_dim = action_dim
+        self.bound_cameras = camera_names
 
     def connect(self):
         self.connect_calls += 1
@@ -86,12 +95,14 @@ class _FakePolicy:
 
 
 class _FakeAdapter:
-    def __init__(self, ready=True, observations=None):
+    def __init__(self, ready=True, observations=None, images=None, action_dim=None):
         self.ready = ready
         self.safe_stop_calls = 0
         self.executed = []
         self.reset_calls = 0
         self.teleop_values: list[bool] = []
+        self.images = list(images) if images is not None else None  # 启用相机（adapter config 决定）
+        self.action_dim = action_dim  # 启用臂 qpos 维数
         self.capabilities = SimpleNamespace(supports=lambda cap: True)  # EXECUTE 能力校验通过
         self._observations = iter(observations) if observations is not None else None
 
@@ -177,6 +188,82 @@ def test_infer_rollout_rejects_invalid_count(monkeypatch):
     assert policy.infer_calls == 0
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
+
+
+def test_infer_rollout_sets_dynamic_prompt(monkeypatch):
+    """infer rollout 携带 prompt=... → 会话写入策略运行时 prompt（openpi 动态文本指令）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    rollout = _REGISTRY.parse_argv(["infer", "rollout", "1", "prompt=把零件放好"])
+    session = _build_session(adapter, policy, ("infer connect", rollout, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.infer_calls == 1
+    assert policy.prompt == "把零件放好"  # 已写入策略客户端（下一请求携带）
+
+
+def test_infer_prompt_command_sets_policy_prompt(monkeypatch):
+    """会话内 ``infer prompt <text>``：运行时更新策略 prompt（openpi 动态；运行时可改）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    prompt_cmd = _REGISTRY.parse_argv(["infer", "prompt", "把零件放好"])
+    prompt_cmd.reply_to = replies.append
+    session = _build_session(adapter, policy, ("infer connect", prompt_cmd, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.prompt == "把零件放好"
+    assert replies[0].status == "ok"
+    assert replies[0].data["prompt"] == "把零件放好"
+
+
+def test_infer_prompt_requires_text(monkeypatch):
+    """``infer prompt`` 缺文本 → rejected（不崩溃，不误改 prompt）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    bad = _REGISTRY.parse_argv(["infer", "prompt"])
+    bad.reply_to = replies.append
+    session = _build_session(adapter, policy, ("infer connect", bad, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.prompt is None
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 400
+
+
+def test_infer_endpoint_set_locked_inside_session(monkeypatch):
+    """推理会话内端点锁定：infer ip set / port set 被拒绝（进入会话前经 enter 设置）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    ip_set = _REGISTRY.parse_argv(["infer", "ip", "set", "10.0.0.5"])
+    ip_set.reply_to = replies.append
+    session = _build_session(adapter, policy, ("infer connect", ip_set, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 409
+
+
+def test_infer_session_binds_adapter_layout_to_policy(monkeypatch):
+    """进入推理会话把 adapter 启用的布局（qpos 维数 + 相机名）传给策略（bind_adapter）。
+
+    策略侧无需另读 edge.yml 相机名：相机名单一事实来源 = adapter 运行时配置。
+    """
+    adapter = _FakeAdapter(ready=True, images=["cam_head", "cam_right_wrist"], action_dim=7)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("infer connect", "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.bind_calls == 1  # InferSession 构造即 bind
+    assert policy.bound_action_dim == 7  # 单臂 qpos 维数
+    assert policy.bound_cameras == ["cam_head", "cam_right_wrist"]  # adapter 启用相机
 
 
 def test_infer_robot_reset_replies_ok(monkeypatch):

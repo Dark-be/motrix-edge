@@ -29,6 +29,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_IP_SET,
     CMD_INFER_PORT,
     CMD_INFER_PORT_SET,
+    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -74,6 +75,9 @@ class InferSession(BaseSession):
         # 运行时策略选择：session run infer 携带 policy_type（HTTP / 命令）；由节点校验
         self.policy_type = policy_type
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
+        # 把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端（openpi 据此
+        # 过滤要下发的相机，不另读 edge.yml 相机名；策略无 bind_adapter 则 no-op）
+        self._bind_policy_adapter()
 
         self.state = SessionState.INIT  # 实时状态（供外部查询）
 
@@ -137,6 +141,60 @@ class InferSession(BaseSession):
             self._reply(cmd, CommandResult(status="error", error=f"policy connect failed: {exc}", status_code=502))
             return False
 
+    def _apply_prompt(self, prompt) -> None:
+        """应用推理文本指令（openpi 动态 prompt）：写入策略客户端运行时 ``prompt``。
+
+        ``infer rollout [count|continuous]`` 命令可携带 ``prompt=<text>``（CLI 如
+        ``infer rollout continuous prompt=把零件放好``，HTTP 经 rollout body）；openpi
+        官方每次 infer 请求携带该文本（服务端每帧重新 tokenize，可换），策略无 ``prompt``
+        属性（如 act / 测试替身）时忽略。None = 不改（沿用配置缺省）。
+        """
+        if prompt is None:
+            return
+        policy = getattr(self, "policy", None)
+        if policy is not None and hasattr(policy, "prompt"):
+            policy.prompt = str(prompt)
+            debug_print(self.name, f"Policy prompt set: {prompt!r}", "INFO")
+
+    def _set_prompt_cmd(self, cmd) -> None:
+        """``infer prompt <text>``：会话内运行时更新 openpi 文本指令（下个推理请求携带）。
+
+        主循环（等待命令）与持续推理循环均可处理；缺文本 → rejected（不崩溃）。
+        """
+        text = cmd.params.get("prompt")
+        if text is None or not str(text).strip():
+            self._reply(cmd, CommandResult(status="rejected", error="infer prompt requires <text>", status_code=400))
+            return
+        self._apply_prompt(text)
+        self._reply(cmd, ok_result(state=getattr(self, "state", "ready"), prompt=str(text)))
+
+    def _bind_policy_adapter(self):
+        """把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端。
+
+        布局单一事实来源 = adapter 配置（``adapter config set`` 的 enabled_arms /
+        enabled_cameras）：openpi 客户端据此过滤要下发的相机（**不另读 edge.yml 的相机名**）；
+        策略无 ``bind_adapter``（如 act / 测试替身）→ no-op。adapter 未提供相机名 /
+        绑定失败不致命（observe 本就只含启用相机，仍按观测透传）。
+        """
+        bind = getattr(getattr(self, "policy", None), "bind_adapter", None)
+        adapter = getattr(self, "adapter", None)
+        if bind is None or adapter is None or not callable(bind):
+            return
+        camera_names = list(getattr(adapter, "images", None) or [])
+        if not camera_names:
+            caps = getattr(adapter, "capabilities", None)
+            camera_names = list(getattr(caps, "image_names", None) or [])
+        action_dim = getattr(adapter, "action_dim", None)
+        try:
+            bind(action_dim=action_dim, camera_names=camera_names or None)
+            debug_print(
+                self.name,
+                f"Policy bound to adapter layout: action_dim={action_dim}, cameras={camera_names}",
+                "INFO",
+            )
+        except Exception as exc:  # noqa: BLE001 布局绑定失败不致命
+            debug_print(self.name, f"policy bind_adapter failed: {exc}", "WARNING")
+
     def run(self):
         """阻塞式推理主循环：等待就绪 → 显式 infer connect → 等待 infer rollout 步进闭环。"""
         # 复位（reset() 非阻塞设 home 目标）
@@ -170,6 +228,7 @@ class InferSession(BaseSession):
                     continue
                 if not self._ensure_connected(cmd):  # 惰性自连：未连接则自动连接（失败已回执）
                     continue
+                self._apply_prompt(cmd.params.get("prompt"))  # 动态文本指令（openpi：每请求可换）
                 if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 session quit / estop
                     self._reply(cmd, ok_result(state="continuous", started=True))
                     result = self._run_continuous()
@@ -197,13 +256,25 @@ class InferSession(BaseSession):
                 self._execute_action(cmd)
             elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
                 self._set_teleop(cmd)
-            elif name in (  # 配置级命令：任务态也可用（infer ip / infer ip set / infer port / infer port set）
+            elif name == CMD_INFER_PROMPT:  # 运行时可改文本指令（openpi 动态 prompt）
+                self._set_prompt_cmd(cmd)
+            elif name in (  # 推理端点：查询可用；**设置随会话锁定**（进入会话前经 enter / 前端设置）
                 CMD_INFER_IP,
                 CMD_INFER_IP_SET,
                 CMD_INFER_PORT,
                 CMD_INFER_PORT_SET,
             ):
-                self._reply(cmd, self._on_infer_endpoint(cmd))
+                if name in (CMD_INFER_IP_SET, CMD_INFER_PORT_SET):
+                    self._reply(
+                        cmd,
+                        CommandResult(
+                            status="rejected",
+                            error="推理端点已随推理会话锁定：请退出会话后再设置",
+                            status_code=409,
+                        ),
+                    )
+                else:
+                    self._reply(cmd, self._on_infer_endpoint(cmd))
             elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
                 CMD_CAPTURE_META_LIST,
                 CMD_CAPTURE_META_ADD,
@@ -291,6 +362,15 @@ class InferSession(BaseSession):
                 self._reply(
                     cmd,
                     CommandResult(status="rejected", error="continuous rollout already running", status_code=409),
+                )
+                continue
+            if name == CMD_INFER_PROMPT:  # 持续推理中动态改 prompt（下个推理请求生效）
+                self._set_prompt_cmd(cmd)
+                continue
+            if name in (CMD_INFER_IP_SET, CMD_INFER_PORT_SET):  # 端点已随会话锁定
+                self._reply(
+                    cmd,
+                    CommandResult(status="rejected", error="推理端点已随推理会话锁定", status_code=409),
                 )
                 continue
             if cmd is not None:  # 持续中其它命令：拒绝（避免 submit 挂起）

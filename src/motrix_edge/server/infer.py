@@ -29,6 +29,7 @@ from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
 from motrix_edge.utils.commands import (
     CMD_INFER_CONNECT,
+    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
@@ -38,6 +39,7 @@ from motrix_edge.utils.commands import (
     CommandBus,
     CommandResult,
     get_policy_endpoint,
+    set_policy_endpoint,
 )
 
 
@@ -78,10 +80,19 @@ class InferService:
             "lease_id": self._leases.status()["lease_id"],
         }
 
-    def enter(self, lease_id: str | None = None, policy_type: str | None = None) -> dict:
+    def enter(
+        self,
+        lease_id: str | None = None,
+        policy_type: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+    ) -> dict:
         """进入推理会话（READY → ACTIVE）：session run infer 一步完成选择 + 启动。
 
         policy_type：可选策略类型（缺省用配置 policy.type）；随命令下发。
+        host / port：可选推理节点端点，**进入会话前设置**——写入 ``base_cfg["policy"]``
+        （内存态），创建会话实例化策略时读取生效；会话一旦进入，端点**锁定**（会话内
+        ``infer ip set`` / ``infer port set`` 被拒绝，退出会话后才可改）。
         命令化：submit session run infer（选择 + 启动一步完成，等「任务已启动」回执），
         无需轮询节点状态。须持有 Edge 级活跃租约；节点未就绪 / 已在会话中 / 节点
         ERROR → 409。
@@ -93,6 +104,12 @@ class InferService:
             raise InferError("node in error state")
         if node.state != NodeState.READY or node.session is not None:
             raise InferError("node not ready (adapter not bound) or already in a task session")
+        # 进入会话前应用端点（随会话锁定：本次创建的 InferSession 用它连推理节点）
+        if host is not None or port is not None:
+            try:
+                set_policy_endpoint(node.base_cfg, host=host, port=port)
+            except ValueError as exc:
+                raise InferError(str(exc), status_code=400) from exc
         params: dict = {"session": "infer"}
         if policy_type:
             params["policy_type"] = policy_type
@@ -141,12 +158,14 @@ class InferService:
         lease_id: str | None = None,
         mode: str | None = None,
         count: int | None = None,
+        prompt: str | None = None,
     ) -> dict:
         """推理闭环（infer rollout [count] / continuous / drain），返回最后 action 与 actions 列表。
 
         - mode 缺省 / "count"：连续推理 count 次（缺省 1，1–100），回执 count / action / actions；
         - mode="continuous"：持续推理（启动即回执 started，直到 session quit / estop）；
         - mode="drain"：只消耗当前缓存动作块（不发新推理请求），回执消耗步数。
+        - prompt：可选文本指令（openpi 动态 prompt，每次 rollout 可换；随观测上传）。
 
         须已在推理会话（ACTIVE）且持有活跃租约；未在会话 → 409；未连接推理节点 → 503。
         """
@@ -160,6 +179,8 @@ class InferService:
             params["count"] = mode  # 命令层 parse_rollout_mode 按字符串识别 continuous / drain
         elif count is not None:
             params["count"] = count
+        if prompt is not None:
+            params["prompt"] = prompt  # openpi 动态文本指令（会话侧 set 到策略客户端）
         result = self._submit(Command(CMD_INFER_ROLLOUT, params=params, meta={"lease_id": lease_id}))
         self._raise_on_rejected(result)
         return {
@@ -169,6 +190,23 @@ class InferService:
             "action": result.data.get("action"),
             "actions": result.data.get("actions"),
         }
+
+    def set_prompt(self, lease_id: str | None = None, prompt: str | None = None) -> dict:
+        """运行时更新推理文本指令（openpi 动态 prompt；会话内生效，下个推理请求携带）。
+
+        须已在推理会话（ACTIVE）且持有活跃租约；未在会话 → 409；缺 prompt → 400。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        if prompt is None or not str(prompt).strip():
+            raise InferError("prompt required", status_code=400)
+        prompt = str(prompt)
+        result = self._submit(Command(CMD_INFER_PROMPT, params={"prompt": prompt}, meta={"lease_id": lease_id}))
+        self._raise_on_rejected(result)
+        return {"status": "accepted", "prompt": prompt}
 
     # -- 内部 ---------------------------------------------------------------
     def _adapter_state(self) -> dict:

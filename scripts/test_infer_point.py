@@ -14,12 +14,15 @@
 
 """Test Infer Point —— 独立运行的模拟 openpi 推理服务端（虚拟推理端点）。
 
-**不进行真实推理**：作为联调用的虚拟策略服务端，验证「edge → 推理端」的传输契约
-（见 ``motrix_edge/policy/contract.py`` 与 ``motrix_edge/transport/msgpack_numpy.py``）。运行在指定 ip / 端口：
+**不进行真实推理**：作为联调用虚拟策略服务端，验证「edge → 推理端」的传输契约与
+openpi 客户端布局/契约（见 ``motrix_edge/policy/contract.py`` 的 openpi wire 助手与
+``motrix_edge/transport/msgpack_numpy.py``）。运行在指定 ip / 端口，**模拟官方
+``WebsocketPolicyServer``**：
 
-- 连接建立后**先下发首条 metadata**（msgpack，含 ``action_horizon``）；
-- 每个请求接收 msgpack 观测 ``{"observations/qpos": ndarray, "observations/images/*": ...}``，
-  返回一段**有界随机游走**的 action chunk ``{"action": ndarray}``（``[horizon, dim]``，块间连续），
+- 连接建立后**先下发首条 metadata**（msgpack；官方默认**不含** action_horizon，
+  ``--publish-horizon`` 可选带上，用于测客户端从配置取 horizon 的兜底）；
+- 每个请求接收 msgpack 官方 flat 观测 ``{"state": ndarray, "images": {...}}``，返回一段
+  **有界随机游走**的 action chunk ``{"actions": ndarray}``（``[horizon, dim]``，块间连续），
   供 openpi 策略（``OpenPIClient``，自有动作块缓存）逐帧切片验证。
 
 与 Edge 的耦合**仅限 wire 契约**（``motrix_edge.policy.contract`` / ``msgpack_numpy``），
@@ -29,7 +32,8 @@
 独立运行::
 
     uv run python scripts/test_infer_point.py [--host 0.0.0.0] [--port 8765] \
-        [--action-dim 14] [--action-horizon 16] [--step 0.05] [--range -1 1] [--seed 0]
+        [--action-dim 14] [--action-horizon 16] [--step 0.05] [--range -1 1] \
+        [--seed 0] [--publish-horizon]
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ from websockets.sync.server import serve
 
 # 唯一允许依赖的 Edge 部分：wire 契约（消息 key 常量）+ msgpack-numpy 序列化，
 # 保证与 policy 客户端的收发逻辑统一（见 motrix_edge/policy/contract.py、msgpack_numpy.py）。
-from motrix_edge.policy.contract import KEY_ACTION, KEY_OBS_QPOS
+from motrix_edge.policy.contract import KEY_ACTIONS, OPENPI_KEY_STATE
 from motrix_edge.transport.msgpack_numpy import packb, unpackb
 
 # 默认参数（SimInferCore 类常量与此对齐）
@@ -72,12 +76,14 @@ class SimInferCore:
         step: float = DEFAULT_STEP,
         action_range: tuple[float, float] = DEFAULT_RANGE,
         seed: int | None = DEFAULT_SEED,
+        publish_action_horizon: bool = False,
     ):
         self.action_dim = action_dim
         self.action_horizon = action_horizon
         self.step = step
         self.action_range = tuple(action_range)
         self.seed = seed
+        self.publish_action_horizon = publish_action_horizon  # metadata 是否带 action_horizon（官方默认不带）
         self._rng = np.random.default_rng(seed)
         self._current = np.zeros(action_dim, dtype=np.float64)  # 上一块末步（游走起点）
 
@@ -92,12 +98,12 @@ class SimInferCore:
         return out
 
     def chunk_for(self, obs) -> np.ndarray:
-        """按观测生成下一个动作块；观测携带 ``observations/qpos`` 时按其维数适配 ``action_dim``。"""
-        qpos = obs.get(KEY_OBS_QPOS) if isinstance(obs, dict) else None
-        if qpos is not None:
-            qpos = np.asarray(qpos)
-            if qpos.ndim == 1 and qpos.shape[0] != self.action_dim:
-                self.action_dim = qpos.shape[0]
+        """按观测生成下一个动作块；观测携带 ``state``（openpi 官方 flat 键）时按其维数适配 action_dim。"""
+        state = obs.get(OPENPI_KEY_STATE) if isinstance(obs, dict) else None
+        if state is not None:
+            state = np.asarray(state)
+            if state.ndim == 1 and state.shape[0] != self.action_dim:
+                self.action_dim = state.shape[0]
                 self._current = np.zeros(self.action_dim, dtype=np.float64)  # 维数变化 → 复位游走
         return self.chunk()
 
@@ -113,12 +119,19 @@ class SimInferCore:
 
 
 def build_metadata(core: SimInferCore) -> dict:
-    """连接后下发的首条 metadata（msgpack）：含 ``action_horizon``（客户端必读）。"""
-    return {
+    """连接后下发的首条 metadata（msgpack）。
+
+    对齐官方 ``WebsocketPolicyServer``：默认**不带** ``action_horizon``（官方 metadata 只含
+    如 reset_pose 等模型信息）；``publish_action_horizon=True`` 时带上，供测客户端兜底逻辑
+    （metadata 优先，缺省从 policy_config 取 50）。
+    """
+    meta = {
         "model": core.MODEL,
-        "action_horizon": core.action_horizon,
         "action_dim": core.action_dim,
     }
+    if core.publish_action_horizon:
+        meta["action_horizon"] = core.action_horizon
+    return meta
 
 
 def handle_connection(conn, core: SimInferCore) -> None:
@@ -144,7 +157,7 @@ def handle_connection(conn, core: SimInferCore) -> None:
             conn.send(f"error: failed to unpack observation: {exc}")
             continue
         action = core.chunk_for(obs)
-        conn.send(packb({KEY_ACTION: action}))
+        conn.send(packb({KEY_ACTIONS: action}))
 
 
 def create_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, core: SimInferCore | None = None):
@@ -182,6 +195,11 @@ def main() -> None:
     parser.add_argument("--step", type=float, default=DEFAULT_STEP, help="Random-walk step magnitude")
     parser.add_argument("--range", type=float, nargs=2, default=list(DEFAULT_RANGE), help="Action bounds (min max)")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed (None = random)")
+    parser.add_argument(
+        "--publish-horizon",
+        action="store_true",
+        help="metadata 带 action_horizon（官方默认不带；测客户端从配置兜底用）",
+    )
     args = parser.parse_args()
 
     core = SimInferCore(
@@ -190,6 +208,7 @@ def main() -> None:
         step=args.step,
         action_range=tuple(args.range),
         seed=args.seed,
+        publish_action_horizon=args.publish_horizon,
     )
     run_server(host=args.host, port=args.port, core=core)
 

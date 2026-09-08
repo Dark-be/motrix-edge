@@ -153,18 +153,27 @@ class WebRTCOfferRequest(BaseModel):
 
 
 class InferEnterRequest(BaseModel):
-    """POST /v1/infers 请求体：可选推理策略类型（缺省用配置 policy.type）。"""
+    """POST /v1/infers 请求体：可选推理策略类型 + 进入会话前的推理节点端点（随会话锁定）。"""
 
     policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
+    host: str | None = Field(default=None, description="推理节点 IP（进入会话前设置；会话内锁定）")
+    port: int | None = Field(default=None, ge=1, le=65535, description="推理节点端口（进入会话前设置；会话内锁定）")
 
 
 class InferRolloutRequest(BaseModel):
-    """POST /v1/infers/rollout 请求体：推理模式 + 步数（count 模式）。"""
+    """POST /v1/infers/rollout 请求体：推理模式 + 步数（count 模式）+ 可选 prompt。"""
 
     mode: Literal["count", "continuous", "drain"] | None = Field(
         default=None, description="推理模式：count（缺省）/ continuous / drain"
     )
     count: int | None = Field(default=None, ge=1, le=100, description="连续推理步数（count 模式，缺省 1）")
+    prompt: str | None = Field(default=None, description="文本指令（openpi 动态 prompt，随观测上传；可换）")
+
+
+class InferPromptRequest(BaseModel):
+    """POST /v1/infers/prompt 请求体：运行时文本指令（openpi 动态 prompt，可换）。"""
+
+    prompt: str = Field(..., min_length=1, description="文本指令（下个推理请求携带）")
 
 
 class UploadScanRequest(BaseModel):
@@ -595,7 +604,9 @@ def create_app(
         请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）。
         """
         policy_type = req.policy_type if req is not None else None
-        return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type))
+        host = req.host if req is not None else None
+        port = req.port if req is not None else None
+        return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type, host=host, port=port))
 
     @app.post("/v1/infers/connect")
     async def infers_connect(x_lease_id: str | None = Header(default=None)):
@@ -606,12 +617,22 @@ def create_app(
     async def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
         """推理闭环（infer rollout [count] / continuous / drain）。
 
-        body：``mode``（count 缺省 / continuous / drain）+ ``count``（count 模式，缺省 1，1–100）。
+        body：``mode``（count 缺省 / continuous / drain）+ ``count``（count 模式，缺省 1，1–100）
+        + ``prompt``（可选文本指令，openpi 动态 prompt）。
         须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
         """
         mode = req.mode if req is not None else None
         count = req.count if req is not None else None
-        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode, count=count))
+        prompt = req.prompt if req is not None else None
+        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode, count=count, prompt=prompt))
+
+    @app.post("/v1/infers/prompt")
+    async def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):
+        """运行时更新推理文本指令（openpi 动态 prompt；会话内生效，下个推理请求携带）。
+
+        须已在推理会话且持有租约；连续 / 单步推理中均可修改（下个请求生效）。
+        """
+        return _infer_call(lambda: _infers().set_prompt(lease_id=x_lease_id, prompt=req.prompt))
 
     @app.delete("/v1/infers")
     async def infers_exit(lease_id: str | None = None):
