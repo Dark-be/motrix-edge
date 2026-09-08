@@ -18,5 +18,7 @@
 -   [配置与命令行（config / CLI）](./motrix_edge_config.md)
 -   [HTTP 控制面（server）](./motrix_edge_server.md)
 -   [Edge 级租约（lease）](./motrix_edge_lease.md)
+-   [Edge Web Console（前端）](./motrix_edge_web_console.md)
+-   [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)
 
 <!-- 新增设计文档后在此登记标题链接。 -->
