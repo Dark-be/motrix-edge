@@ -47,6 +47,7 @@ from motrix_edge.lease import BEIJING_TZ, Lease, LeaseError, LeaseManager, Lease
 from motrix_edge.server.capture import CaptureError, CaptureService
 from motrix_edge.server.command import CommandError, CommandService
 from motrix_edge.server.infer import InferError, InferService
+from motrix_edge.server.preview import PreviewError, PreviewService
 from motrix_edge.server.webrtc import WebRTCError, WebRTCService
 from motrix_edge.session.upload_session import UploadError, UploadSession
 from motrix_edge.utils.version import get_package_version
@@ -178,6 +179,13 @@ class CaptureSyncRequest(BaseModel):
     meta: dict = Field(default_factory=dict, description="采集元信息（operator / task_name 等）")
 
 
+class AdapterConfigRequest(BaseModel):
+    """POST /v1/adapters/config 请求体：运行时 adapter 能力配置（可部分更新）。"""
+
+    enabled_arms: list[str] | None = Field(default=None, description="启用的机械臂（right / left）；缺省全部")
+    enabled_cameras: list[str] | None = Field(default=None, description="启用的相机（IMAGES 子集）")
+
+
 class UploadSelectRequest(BaseModel):
     """POST /v1/uploads/select 请求体：按 episode id 替换选择集。"""
 
@@ -193,6 +201,7 @@ def create_app(
     lease_manager: LeaseManager | None = None,
     webrtc: WebRTCService | None = None,
     uploads: UploadSession | None = None,
+    preview: PreviewService | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
@@ -210,6 +219,8 @@ def create_app(
     webrtc: 可选 ``WebRTCService``（aiortc 推流，视频轨道从 FrameManager 取帧）；
             未注入时 ``/v1/webrtc/offer`` 返回 501。
     uploads: 可选 ``UploadSession``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
+    preview: 可选 ``PreviewService``（**独立于采集 / 推理会话**，直接读 node.frame_manager
+             观测缓存）；注入后注册 ``/v1/preview`` 观测预览端点，未注入时返回 501。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
@@ -271,6 +282,54 @@ def create_app(
         from motrix_edge.adapter import adapter_details
 
         return {"adapters": adapter_details()}
+
+    @app.get("/v1/adapters/config")
+    async def adapters_config():
+        """运行时 adapter 能力配置（enabled_arms / enabled_cameras）。
+
+        由 ``adapter config`` 命令 / 前端设置，adapter discover 绑定时应用；此处只读。
+        """
+        if node is None:
+            return {}
+        return node.adapter_config
+
+    @app.get("/v1/adapters/current")
+    async def adapters_current():
+        """当前绑定 adapter **实际生效**的能力配置（启用的臂 / 相机 / 动作维度 / home）。
+
+        只读（无需租约）：读 adapter 实例实际生效值（``configure()`` 应用后），与
+        ``GET /v1/adapters/config``（运行时配置状态）区分。**未绑定 adapter → 回退包内
+        默认 adapter 的默认配置**（``default=True``，前端刷新即可见勾选）；无任何注册
+        adapter → 404。
+        """
+        if node is None:
+            raise HTTPException(status_code=501, detail="node not initialized")
+        cfg = node.adapter_config_effective()
+        if cfg is None:
+            raise HTTPException(status_code=404, detail="no adapter registered")
+        return cfg
+
+    @app.post("/v1/adapters/config")
+    async def adapters_config_set(req: AdapterConfigRequest, x_lease_id: str | None = Header(default=None)):
+        """设置运行时 adapter 能力配置（可部分更新；应用到当前已绑定 adapter）。
+
+        受控操作：须持有有效租约（X-Lease-Id）。非法配置 → 400（状态不更新）。
+        """
+        if node is None:
+            raise HTTPException(status_code=501, detail="node not initialized")
+        try:
+            lease_manager.require(x_lease_id)
+        except LeaseError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        applied = node._apply_adapter_config(
+            {
+                "enabled_arms": req.enabled_arms,
+                "enabled_cameras": req.enabled_cameras,
+            }
+        )
+        if not applied:
+            raise HTTPException(status_code=400, detail="adapter config rejected (invalid arms/cameras)")
+        return node.adapter_config
 
     @app.post("/v1/webrtc/offer")
     def webrtc_offer(req: WebRTCOfferRequest, x_lease_id: str | None = Header(default=None)):
@@ -438,12 +497,18 @@ def create_app(
         return _captures().precheck()
 
     @app.get("/v1/preview")
-    async def captures_preview(x_lease_id: str | None = Header(default=None)):
+    async def preview_endpoint(x_lease_id: str | None = Header(default=None)):
         """最新观测预览：qpos / action 状态 + 摄像头名列表（图像走 WebRTC，不内联）。
 
-        受控操作：须持有有效租约（X-Lease-Id）。
+        独立于采集 / 推理会话（PreviewService 直接读 node.frame_manager 观测缓存）：
+        不要求会话，预览随时可开；受控操作：须持有有效租约（X-Lease-Id）。
         """
-        return _capture_call(lambda: _captures().preview(lease_id=x_lease_id))
+        if preview is None:
+            raise HTTPException(status_code=501, detail="preview not enabled")
+        try:
+            return preview.preview(lease_id=x_lease_id)
+        except PreviewError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.get("/v1/captures/meta")
     async def captures_meta():

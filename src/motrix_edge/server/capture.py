@@ -29,9 +29,6 @@ server 层不持有 / 不创建 / 不运行 EdgeNode：node 由 node 程序主�
 import json
 import shutil
 
-import numpy as np
-
-from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
@@ -235,48 +232,6 @@ class CaptureService:
             "disk": self._disk_info(save_dir),
             "lease_id": lease_id,  # 当前活跃租约（独立于任务，见 /v1/leases/*）
         }
-
-    def preview(self, lease_id: str | None = None) -> dict:
-        """最新观测预览：session state / adapter 身份 / observation（qpos / action + 摄像头名列表）。
-
-        受控操作：须持有有效租约（``X-Lease-Id``）；无会话 → 409。
-        观测来自 ``node.frame_manager``（observe 循环每帧写入的缓存）；**图像不内联**
-        ——HTTP JSON 不承载二进制，图像（jpeg / raw）由 WebRTC（/v1/webrtc/offer）
-        推流到前端，这里只返回摄像头名列表。
-        """
-        self._ensure_node()
-        self._ensure_lease(lease_id)  # 预览属受控操作：须持有有效租约
-        node = self._node
-        frame_manager = getattr(node, "frame_manager", None)
-        if frame_manager is None:
-            raise CaptureError("frame manager not available", status_code=501)
-        session = self._session()
-        if session is None:
-            raise CaptureError("no active session (start a session to preview)", status_code=409)
-        latest = frame_manager.latest() or {}
-        state = getattr(session, "state", SessionState.INIT)
-        return {
-            "state": state,
-            "adapter": self._adapter_ref(),  # 当前节点 active adapter 身份
-            "observation": {
-                "qpos": self._to_float_list(latest.get(KEY_QPOS)),
-                "action": self._to_float_list(latest.get(KEY_ACTION)),
-                "images": self._image_names(latest),  # 摄像头名列表（图像由 WebRTC 推流）
-            },
-        }
-
-    # -- 预览序列化（观测 → JSON 可表达；图像不内联，走 WebRTC）----------------
-    @staticmethod
-    def _to_float_list(value) -> list | None:
-        """ndarray / list → float list（预览用）。"""
-        if value is None:
-            return None
-        return [float(v) for v in np.asarray(value).reshape(-1)]
-
-    @staticmethod
-    def _image_names(obs: dict) -> list[str]:
-        """观测中的摄像头名列表（``observations/images/<name>``；图像内容走 WebRTC）。"""
-        return [k[len(CAMERA_PREFIX) :] for k in obs if k.startswith(CAMERA_PREFIX)]
 
     # -- 内部 ---------------------------------------------------------------
     def _session(self):

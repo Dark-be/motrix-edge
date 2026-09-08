@@ -23,9 +23,11 @@
 - **状态查询**：``health`` 实时查询进程，``data_status`` / ``capture_status`` 查询
   采集状态。
 
-**子类只需声明类常量**（身份 / 能力 / 连接参数 / 动作维度 / 相机布局），本基类提供全部
-通用实现（``__init__`` + 指令 / 观测 / 状态方法）。身份由 discover 解析传入（``name``，
-缺省回退类常量）；能力与连接参数由类级常量定义，不随 discover 传输、不接收 Edge 配置。
+**子类只需声明类常量**（身份 / 能力 / 连接参数 / 臂布局 / 相机布局），本基类提供全部
+通用实现（``__init__`` + 指令 / 观测 / 状态方法）。身份由 discover 解析传入（``name``）；
+能力与连接参数由类级常量定义，不随 discover 传输、不接收 Edge 配置；运行时可由 Edge
+配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 / 相机，未启用臂动作用
+``HOME_QPOS`` 填充。
 """
 
 import cv2
@@ -77,14 +79,15 @@ class HttpShmAdapter(RobotAdapter):
 
         - ``name``：机器人进程 discover 解析出的名称（展示用；缺省回退类常量）。
         - ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（entry point 类型，用于实例化）。
-        - 能力（动作维度 / 相机布局）与连接参数**全部由类级常量定义**，不随 discover 传输、
-          不接收 Edge 配置。
+        - 能力（动作维度 / 相机布局）与连接参数由类级常量定义；运行时经 ``configure()``
+          应用 Edge 配置（启用臂 / 相机 / home_qpos）。
         """
         super().__init__(name=name)
         self.name = name or self.NAME
-        # 能力：类级常量（自包含，不随 discover 传输）
-        self.action_dim = self.ACTION_DIM
-        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键）
+        # 能力：类级常量（自包含，不随 discover 传输）；基类 __init__ 已初始化
+        # enabled_arms / _home_qpos / _full_image_names
+        self.action_dim = self._compute_action_dim()  # 缺省全臂
+        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键；configure 可裁剪）
         self.robot_model_id = self.ROBOT_MODEL_ID
         self.robot_model_version = self.ROBOT_MODEL_VERSION
         self._capabilities = dict(self.CAPABILITIES)
@@ -158,8 +161,12 @@ class HttpShmAdapter(RobotAdapter):
         self._client().post(PATH_RESET)
 
     def execute(self, action: Action) -> None:
-        """直接下发动作指令（raw）：本地记录 + HTTP 转发 SDK 进程。"""
-        target = self._validate_action(action, "execute")
+        """直接下发动作指令（raw）：本地记录 + HTTP 转发 SDK 进程。
+
+        经 ``_expand_action`` 校验维度（启用臂数）并把动作展开回完整空间（未启用臂 home
+        填充）再发送。
+        """
+        target = self._expand_action(action, "execute")
         self.executed.append(target.tolist())
         debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
         self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
@@ -171,8 +178,8 @@ class HttpShmAdapter(RobotAdapter):
         self._client().post(PATH_TELEOP, json={FIELD_TELEOP_ENABLED: self.teleop_enabled})
 
     def rollout(self, action: Action) -> None:
-        """推理闭环：校验动作维度后 HTTP 转发 SDK（SDK 侧设为限速目标并逐帧靠近）。"""
-        target = self._validate_action(action, "rollout")
+        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。"""
+        target = self._expand_action(action, "rollout")
         self.rollout_calls += 1
         self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
 
@@ -186,7 +193,10 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- 采集数据状态 / 回合控制 ------------------------------------------------
     def data_status(self) -> CaptureData | None:
-        """采集数据状态：数据目录 + 本次采集得到的数据列表（查询 SDK 进程）。"""
+        """采集数据状态：数据目录 + 本次采集得到的数据列表（查询 SDK 进程）。
+
+        数据采集（录制写盘）由 SDK 进程自维护；本方法只查询 / 上报结果。
+        """
         try:
             resp = self._client().get(PATH_DATA_STATUS)
             resp.raise_for_status()
@@ -234,30 +244,23 @@ class HttpShmAdapter(RobotAdapter):
     def observe(self) -> dict | None:
         """读取共享内存最新观测帧（SDK 进程产出），图像编码为 JPEG（Edge 契约）。
 
-        SDK 进程把观测填充到共享内存，observe 只读取、不推进 SDK 运行。尚无首帧时
-        返回 ``None``。
+        只返回启用臂 qpos 与启用相机（configure 裁剪）；SDK 进程把观测填充到共享内存，
+        observe 只读取、不推进 SDK 运行。尚无首帧时返回 ``None``。
         """
         if self._shm is None:
             self._shm = ObsShmReader(self.shm_name)  # 惰性 attach（首次观测时）
         frame = self._shm.read()
         if frame is None:
             return None  # SDK 尚未产出首帧：瞬态无帧，不是空观测
-        qpos = np.asarray(frame["qpos"], dtype=np.float32)
+        qpos = self._select_qpos(np.asarray(frame["qpos"], dtype=np.float32))
         obs = {
             KEY_QPOS: qpos,
             KEY_ACTION: qpos.copy(),  # 测试：action = 当前执行位置
         }
-        for image, name in zip(frame["images"], self.images):
-            obs[f"{CAMERA_PREFIX}{name}"] = self._encode_jpeg(image)
+        full = {name: self._encode_jpeg(img) for name, img in zip(self._full_image_names, frame["images"])}
+        for name in self.images:  # 只暴露启用相机
+            obs[f"{CAMERA_PREFIX}{name}"] = full[name]
         return obs
-
-    def _validate_action(self, action: Action, operation: str) -> np.ndarray:
-        """动作转 float64 一维数组并校验完整动作维度。"""
-        target = np.asarray(action, dtype=np.float64)
-        if target.ndim != 1 or target.shape[0] != self.action_dim:
-            actual = target.shape[0] if target.ndim > 0 else 0
-            raise ValueError(f"{operation} action dim {actual} != action_dim {self.action_dim}")
-        return target
 
     @staticmethod
     def _encode_jpeg(rgb: np.ndarray) -> bytes:

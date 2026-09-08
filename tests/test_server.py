@@ -31,6 +31,7 @@ from motrix_edge.server import create_app
 from motrix_edge.server.capture import CaptureService
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.infer import InferService
+from motrix_edge.server.preview import PreviewService
 from motrix_edge.session import UploadSession
 from motrix_edge.session.base import RunResult, SessionState
 from motrix_edge.utils.commands import (
@@ -117,6 +118,62 @@ def test_adapters_info_returns_capabilities():
         caps = info["capabilities"]
         assert caps["action_dim"] == 14
         assert "image_names" in caps and "capabilities" in caps
+
+
+def test_adapters_config_get_set():
+    """GET/POST /v1/adapters/config：运行时 adapter 能力配置（命令 / 前端设置，受控操作）。"""
+    from motrix_edge.node import EdgeNode
+
+    node = EdgeNode(BASE_CFG)
+    client = TestClient(create_app(BASE_CFG, node=node))
+    # GET 初始为空
+    assert client.get("/v1/adapters/config").json() == {}
+    # POST 未持租约 → 409
+    assert client.post("/v1/adapters/config", json={"enabled_arms": ["right"]}).status_code == 409
+    # 签发租约后设置（无 adapter 绑定：存运行时状态）
+    lease = install_lease(client)
+    r = client.post("/v1/adapters/config", json={"enabled_arms": ["right"]}, headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    assert r.json()["enabled_arms"] == ["right"]
+    # GET 反映
+    assert client.get("/v1/adapters/config").json()["enabled_arms"] == ["right"]
+
+
+def test_adapters_current_returns_effective():
+    """GET /v1/adapters/current：未绑定回退默认配置；绑定后返回实际生效能力。"""
+    from motrix_edge.node import EdgeNode
+
+    node = EdgeNode(BASE_CFG)
+    client = TestClient(create_app(BASE_CFG, node=node))
+    # 未绑定 adapter → 回退包内默认 adapter 的默认配置（default=True，前端刷新可见勾选）
+    r = client.get("/v1/adapters/current")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["default"] is True
+    assert body["enabled"]["arms"]  # 默认启用字典非空
+    assert body["enabled"]["cameras"]
+    # 绑定 fake adapter（实际生效能力字典：双臂 + 三相机）
+    node.adapter = SimpleNamespace(
+        action_dim=14,
+        _home_qpos=[0.0] * 14,
+        enabled_map=lambda: {
+            "arms": {"left": True, "right": True},
+            "cameras": {"cam_head": True, "cam_left_wrist": True, "cam_right_wrist": True},
+        },
+    )
+    node.adapter_name = "Test Robot"
+    node.adapter_type = "test_robot"
+    r = client.get("/v1/adapters/current")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["adapter"] == {"name": "Test Robot", "type": "test_robot"}
+    assert body["enabled"] == {
+        "arms": {"left": True, "right": True},
+        "cameras": {"cam_head": True, "cam_left_wrist": True, "cam_right_wrist": True},
+    }
+    assert body["action_dim"] == 14
+    assert body["home_qpos"] == [0.0] * 14
+    assert "default" not in body  # 已绑定 → 无 default 标记
 
 
 def test_health_returns_correlation_header():
@@ -357,13 +414,14 @@ def wait_session_state(node, state, timeout=2.0):
 
 
 def make_captures_client(node):
-    """绑定「正在运行的 fake node」+ 共享 CommandBus + 共享 LeaseManager。"""
+    """绑定「正在运行的 fake node」+ 共享 CommandBus + 共享 LeaseManager + 独立 PreviewService。"""
     bus = CommandBus()
     node.command_source = bus
     leases = LeaseManager()
     service = CaptureService(node, bus, leases=leases)
+    preview_svc = PreviewService(node, leases=leases)
     threading.Thread(target=node.run, name="fake-node", daemon=True).start()
-    return service, TestClient(create_app(BASE_CFG, captures=service, lease_manager=leases))
+    return service, TestClient(create_app(BASE_CFG, captures=service, lease_manager=leases, preview=preview_svc))
 
 
 def test_preview_requires_lease():
@@ -371,6 +429,27 @@ def test_preview_requires_lease():
     node = FakeNode()
     service, client = make_captures_client(node)
     assert client.get("/v1/preview").status_code == 409  # 无活跃租约
+
+
+def test_preview_without_session():
+    """GET /v1/preview：只须持有租约，**不要求会话**（无会话也返回观测缓存，随时可开）。"""
+    node = FakeNode()
+    service, client = make_captures_client(node)
+    lease = install_lease(client)
+    # 注入观测（模拟 observe 缓存）；无会话也应 200
+    node.frame_manager.update(
+        {
+            "observations/qpos": np.array([0.3, 0.4]),
+            "observations/images/cam_head": np.full((8, 8, 3), 64, dtype=np.uint8),
+        }
+    )
+    r = client.get("/v1/preview", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == SessionState.INIT  # 无会话：state=INIT
+    obs = body["observation"]
+    assert obs["qpos"] == [0.3, 0.4]
+    assert obs["images"] == ["cam_head"]
 
 
 def test_preview_returns_latest_observation():

@@ -112,6 +112,18 @@ class LeaseManager:
                 lease.state = LeaseState.REVOKED
             return lease
 
+    def revoke_current(self) -> Lease | None:
+        """撤销当前租约（无需 id；管理员清理幽灵租约用）。无租约 → None；幂等。
+
+        撤销后 ``status()`` 清空当前租约槽位（``leasable=True``），新控制端可重新签发。
+        """
+        with self._lock:
+            if self._lease is None:
+                return None
+            if self._lease.state != LeaseState.REVOKED:
+                self._lease.state = LeaseState.REVOKED
+            return self._lease
+
     def mirror(self, lease_id: str) -> dict:
         """查询本地租约镜像（``GET /v1/leases/{id}``）：返回状态 dict；不存在 →
         ``LeaseError(404)``。"""

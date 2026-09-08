@@ -22,18 +22,24 @@ import copy
 from uvicorn.config import LOGGING_CONFIG
 
 
-def uvicorn_log_config(log_file: str) -> dict:
+def uvicorn_log_config(log_file: str, file_enabled: bool = True) -> dict:
     """构建 uvicorn 日志配置（经 ``uvicorn.Config(log_config=...)`` 生效）。
 
-    - HTTP access（每请求一行，如 OPTIONS/POST）→ **只写文件**，不再刷终端；
-    - uvicorn / uvicorn.error（启动 / 关闭 / 错误）→ 终端 + 文件；
-    - 文件为 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5），与
-      ``debug_print`` 的 ``logs/log_*.txt`` 分开，纯文本无 ANSI 颜色。
+    - ``file_enabled=True``：HTTP access → **只写文件**（``logs/uvicorn.log``，RotatingFileHandler
+      10MB × 5），uvicorn 启动 / 错误 → 终端 + 文件；不刷终端；
+    - ``file_enabled=False``（**默认**，``MOTRIX_LOG_FILE`` 未设 / =0）：uvicorn 日志**全部丢弃**
+      （NullHandler）——不写文件、不占终端（防长期运行塞满磁盘 / 刷屏）。
 
     注意：不能手动 ``logger.addHandler`` —— uvicorn 启动 ``configure_logging()``
     会 ``dictConfig`` 覆盖已有 handler；必须经 ``log_config`` 传入。
     """
     cfg = copy.deepcopy(LOGGING_CONFIG)
+    if not file_enabled:
+        # 默认：uvicorn 日志静默（丢弃，不写文件、不占终端）；MOTRIX_LOG_FILE=1 恢复
+        cfg["handlers"]["null"] = {"class": "logging.NullHandler"}
+        cfg["loggers"]["uvicorn"]["handlers"] = ["null"]
+        cfg["loggers"]["uvicorn.access"]["handlers"] = ["null"]
+        return cfg
     # 纯文本文件 formatter（默认 formatter 带 ANSI 颜色，不适合文件）
     cfg["formatters"]["file"] = {
         "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
