@@ -206,6 +206,23 @@ def test_upload_scan_without_path_returns_bad_request():
     assert response.status_code == 400
 
 
+def test_upload_scan_falls_back_to_adapter_data_dir(tmp_path):
+    """POST /v1/uploads 缺省目录回退链：adapter 数据目录（node.data_status.data_dir）优先。"""
+    from types import SimpleNamespace
+
+    (tmp_path / "episode_0.mcap").write_bytes(b"mcap")
+    (tmp_path / "episode_0.json").write_text("{}", encoding="utf-8")
+    node = SimpleNamespace(data_status=SimpleNamespace(data_dir=str(tmp_path)))
+    client = TestClient(create_app(BASE_CFG, node=node, uploads=UploadSession()))
+
+    response = client.post("/v1/uploads")  # 无 folder_path → 回退 adapter 数据目录
+    assert response.status_code == 200
+    body = response.json()
+    assert body["episode_count"] == 1
+    assert body["folder_path"] == str(tmp_path.resolve())
+    assert body["episodes"][0]["meta"]["robot_name"] is None  # 空 {} json → 字段补 None
+
+
 def test_command_accepted_with_metadata():
     client = TestClient(create_app(BASE_CFG))
     resp = client.post(
@@ -966,7 +983,7 @@ def test_captures_real_node_observes_until_exit(tmp_path):
             {
                 "name": "Test Robot",
                 "type": "test_robot",
-                "save_dir": str(tmp_path),  # 运行时行为参数（适配器特有）；能力由适配器返回
+                "data_dir": str(tmp_path),  # 运行时行为参数（适配器特有）；能力由适配器返回
             }
         ],
         "capture": {"obs_freq": 30},
@@ -977,7 +994,7 @@ def test_captures_real_node_observes_until_exit(tmp_path):
     node = EdgeNode(base_cfg=cfg, command_source=bus, alive_check_interval=0.2)
     # 注入进程内 FakeRobotAdapter 并置 READY（不依赖 SDK 进程 / 探测绑定）；
     # 先 discover 标记就绪，避免 READY 后 _tick 失联检查将其转 ERROR
-    node.adapter = FakeRobotAdapter(config={"save_dir": str(tmp_path)})
+    node.adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
     node.adapter_name = "Test Robot"
     node.adapter_type = "test_robot"
     node.initialize()  # INIT → IDLE（构造后默认 INIT，先完成初始化再置 READY）

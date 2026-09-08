@@ -101,11 +101,11 @@ class CaptureService:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"robot not ready: {exc}")
 
-        save_dir = self._save_dir()
+        data_dir = self._data_dir()
         disk = {}
-        if save_dir is not None:
+        if data_dir is not None:
             try:
-                usage = shutil.disk_usage(save_dir)
+                usage = shutil.disk_usage(data_dir)
                 disk = {"total": usage.total, "used": usage.used, "free": usage.free}
             except OSError as exc:
                 errors.append(f"disk unavailable: {exc}")
@@ -209,7 +209,7 @@ class CaptureService:
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
         data_status = self._data_status()
-        save_dir = getattr(data_status, "save_dir", None) if data_status is not None else None
+        data_dir = getattr(data_status, "data_dir", None) if data_status is not None else None
         capture_status = getattr(node, "capture_status", None) if node is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
@@ -217,7 +217,7 @@ class CaptureService:
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": session_state,
             "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
-            "save_dir": str(save_dir) if save_dir is not None else None,
+            "data_dir": str(data_dir) if data_dir is not None else None,
             "data_files": list(getattr(data_status, "data_files", []) or []) if data_status is not None else [],
             # 采集状态缓存（adapter.capture_status()：采集员 / 任务名等元信息 + 运行位，node 周期刷新）
             "capture_status": (
@@ -229,7 +229,7 @@ class CaptureService:
                 if capture_status is not None
                 else None
             ),
-            "disk": self._disk_info(save_dir),
+            "disk": self._disk_info(data_dir),
             "lease_id": lease_id,  # 当前活跃租约（独立于任务，见 /v1/leases/*）
         }
 
@@ -280,16 +280,17 @@ class CaptureService:
             return None
         return getattr(node, "data_status", None)
 
-    def _save_dir(self):
+    def _data_dir(self):
+        """adapter 报告的数据文件目录（``node.data_status.data_dir``）；未缓存 → None。"""
         data_status = self._data_status()
         if data_status is None:
             return None
-        return getattr(data_status, "save_dir", None)
+        return getattr(data_status, "data_dir", None)
 
     @staticmethod
-    def _disk_info(save_dir) -> dict:
+    def _disk_info(data_dir) -> dict:
         try:
-            usage = shutil.disk_usage(save_dir if save_dir is not None else "/")
+            usage = shutil.disk_usage(data_dir if data_dir is not None else "/")
             return {"total": usage.total, "used": usage.used, "free": usage.free}
         except OSError:
             return {"error": "unavailable"}
