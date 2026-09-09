@@ -19,11 +19,14 @@ import numpy as np
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.policy import get_policy
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_EPISODE_END,
+    CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
     CMD_CAPTURE_META_DELETE,
     CMD_CAPTURE_META_DELETE_KEY,
     CMD_CAPTURE_META_EDIT,
     CMD_CAPTURE_META_LIST,
+    CMD_CAPTURE_SYNC,
     CMD_INFER_CONNECT,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
@@ -37,9 +40,9 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     ROLLOUT_MODE_CONTINUOUS,
-    ROLLOUT_MODE_DRAIN,
     CommandResult,
     ok_result,
+    parse_meta,
     parse_rollout_mode,
 )
 from motrix_edge.utils.data_handler import debug_print
@@ -48,11 +51,14 @@ from .base import BaseSession, RunResult, SessionState, _cmd_name
 
 
 class InferSession(BaseSession):
-    """推理会话 —— 组合 RobotAdapter + 推理策略客户端的推理执行器（无回合概念）。
+    """推理会话 —— 组合 RobotAdapter + 推理策略客户端的推理执行器。
 
-    生命周期由 EdgeNode 管理（session_start → run → session_finish）：会话由外部
-    infer rollout 步进驱动（上传观测 → 推理 → 下发动作）。命令：infer rollout 单步闭环、
-    session quit 退出、robot estop 急停、robot reset 复位。
+    生命周期由 EdgeNode 管理（session_start → run → session_finish）。**无「多步推理」模式**：
+    推理由单步 ``infer rollout`` / 持续 ``infer rollout continuous`` 驱动；**推理时 rollout
+    录制** = 像采集一样经 ``capture episode start/end`` 控制一轮 episode——robot 不关心是
+    推理还是采集（capturing 期间按帧录 mcap，含 action）。推理/录制开始前必须已设置
+    prompt（``infer prompt <text>``，空则拒绝）；录制时由调用方显式 ``capture sync``
+    同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。
     """
 
     def __init__(self, base_cfg, command_source=None, frame_manager=None, adapter=None, policy_type=None):
@@ -80,6 +86,10 @@ class InferSession(BaseSession):
         self._bind_policy_adapter()
 
         self.state = SessionState.INIT  # 实时状态（供外部查询）
+        # 录制状态：推理会话内是否开启了一轮 rollout 录制（capture episode start/end）。
+        # 录制本身由机器人进程自维护（capturing=True 按帧录 mcap）；本标记只作会话侧
+        # 上报（server /v1/infers status 的 recording 字段）。
+        self._recording = False
 
         debug_print(self.name, f"Policy config: {self.policy_config} (type={self.policy_type})", "INFO")
 
@@ -87,6 +97,35 @@ class InferSession(BaseSession):
     def connected(self) -> bool:
         """策略是否已连接推理节点（委托 policy.connected；rollout 可惰性自动连接）。"""
         return bool(getattr(self.policy, "connected", False))
+
+    @property
+    def recording(self) -> bool:
+        """推理会话当前是否开启了一轮 rollout 录制（capture episode start 后为 True）。"""
+        return bool(self._recording)
+
+    @property
+    def prompt(self) -> str | None:
+        """当前推理文本指令（策略客户端 prompt；未设置为 None —— 不能开始推理/录制）。"""
+        return getattr(getattr(self, "policy", None), "prompt", None)
+
+    def _require_prompt(self, cmd) -> bool:
+        """开始推理 / 开始 rollout 录制前门控：prompt 必须已设置（``infer prompt <text>``）。
+
+        空 prompt → 回执 rejected（400）并返回 False（不执行推理 / 不开录制）；
+        prompt 作为录制 episode 的 task_name（operator=policy），故录制也要求已设置。
+        """
+        prompt = self.prompt
+        if not prompt or not str(prompt).strip():
+            self._reply(
+                cmd,
+                CommandResult(
+                    status="rejected",
+                    error="prompt required: set via 'infer prompt <text>' before inference / recording",
+                    status_code=400,
+                ),
+            )
+            return False
+        return True
 
     def session_start(self):
         """进入会话（节点进入 ACTIVE 前调用）：adapter 已由节点 discover 绑定。
@@ -142,12 +181,12 @@ class InferSession(BaseSession):
             return False
 
     def _apply_prompt(self, prompt) -> None:
-        """应用推理文本指令（openpi 动态 prompt）：写入策略客户端运行时 ``prompt``。
+        """应用推理文本指令（统一 prompt 概念）：写入策略客户端运行时 ``prompt``。
 
-        ``infer rollout [count|continuous]`` 命令可携带 ``prompt=<text>``（CLI 如
-        ``infer rollout continuous prompt=把零件放好``，HTTP 经 rollout body）；openpi
-        官方每次 infer 请求携带该文本（服务端每帧重新 tokenize，可换），策略无 ``prompt``
-        属性（如 act / 测试替身）时忽略。None = 不改（沿用配置缺省）。
+        openpi 每次 infer 请求携带该文本（服务端每帧重新 tokenize，可换）；act 作为
+        策略指令下发（raw observation 的 ``task``）。prompt 由 ``infer prompt <text>``
+        会话内预置（不随 rollout 命令传）；推理 / 录制开始前必须非空。``prompt`` 非
+        None 即设置（空文本已在调用方校验）。
         """
         if prompt is None:
             return
@@ -157,7 +196,7 @@ class InferSession(BaseSession):
             debug_print(self.name, f"Policy prompt set: {prompt!r}", "INFO")
 
     def _set_prompt_cmd(self, cmd) -> None:
-        """``infer prompt <text>``：会话内运行时更新 openpi 文本指令（下个推理请求携带）。
+        """``infer prompt <text>``：会话内预置推理文本指令（推理 / 录制前必须非空）。
 
         主循环（等待命令）与持续推理循环均可处理；缺文本 → rejected（不崩溃）。
         """
@@ -220,24 +259,30 @@ class InferSession(BaseSession):
             name = _cmd_name(cmd)
             if name == CMD_INFER_CONNECT:  # 显式连接推理节点（单次尝试，可反复触发重连）
                 self._connect_policy(cmd)
-            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：count 次数 / continuous 持续 / drain 消耗块
+            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步 / continuous 持续（多步 & drain 已取消）
                 try:
-                    mode, count = parse_rollout_mode(cmd.params.get("count"))
+                    mode = parse_rollout_mode(cmd.params.get("mode"))
                 except ValueError as exc:
                     self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
                     continue
+                if not self._require_prompt(cmd):  # prompt 为空不能开始推理
+                    continue
                 if not self._ensure_connected(cmd):  # 惰性自连：未连接则自动连接（失败已回执）
                     continue
-                self._apply_prompt(cmd.params.get("prompt"))  # 动态文本指令（openpi：每请求可换）
                 if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 session quit / estop
                     self._reply(cmd, ok_result(state="continuous", started=True))
                     result = self._run_continuous()
                     self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
                     return result
-                if mode == ROLLOUT_MODE_DRAIN:  # 只消耗当前缓存动作块（不发新推理请求）
-                    self._run_drain(cmd)
+                self._run_single(cmd)  # 单步推理（缺省）
+            elif name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始（robot 不关心模式）
+                if not self._require_prompt(cmd):  # 录制 rollout 需要 task_name=prompt
                     continue
-                self._run_count(cmd, count)  # 推理 N 次（缺省 1）
+                self._start_recording(cmd)
+            elif name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
+                self._end_recording(cmd)
+            elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
+                self._sync_capture_meta_cmd(cmd)
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self.adapter.reset()  # 推理结束回到 home
                 self.state = SessionState.FINISHED
@@ -256,7 +301,7 @@ class InferSession(BaseSession):
                 self._execute_action(cmd)
             elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
                 self._set_teleop(cmd)
-            elif name == CMD_INFER_PROMPT:  # 运行时可改文本指令（openpi 动态 prompt）
+            elif name == CMD_INFER_PROMPT:  # 运行时可改文本指令（会话内预置；推理/录制前必须非空）
                 self._set_prompt_cmd(cmd)
             elif name in (  # 推理端点：查询可用；**设置随会话锁定**（进入会话前经 enter / 前端设置）
                 CMD_INFER_IP,
@@ -288,56 +333,62 @@ class InferSession(BaseSession):
                     self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
                 time.sleep(0.02)  # 无命令时轻量轮询（避免忙等）
 
-    def _run_count(self, cmd, count: int) -> None:
-        """infer rollout <N>：连续执行 N 次 观测 → 推理 → 动作下发，回执动作列表。"""
-        actions = []
-        for _ in range(count):
-            obs = self.adapter.observe()  # 推理输入（显示观测由节点级写入 frame_manager）
-            if obs is None:
-                self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
-                break
-            action = self.policy.infer(obs)
-            if action is not None:
-                self.adapter.rollout(action)  # 解析模型 action 为限速目标并推进一帧
-            actions.append(self._action_repr(action))
-            time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
-        else:
-            debug_print(self.name, f"Rollout executed {count} step(s).", "INFO")
-            self._reply(
-                cmd,
-                ok_result(
-                    state="ready",
-                    count=count,
-                    action=actions[-1] if actions else None,
-                    actions=actions,
-                ),
-            )
-
-    def _run_drain(self, cmd) -> None:
-        """infer rollout drain：只消费当前缓存动作块（不发新推理请求），回执消耗步数。"""
-        actions = []
-        while True:
-            obs = self.adapter.observe()
-            if obs is None:
-                self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
-                return
-            action = self.policy.drain(obs)  # 缓存块耗尽返回 None → 停止
-            if action is None:
-                break
-            self.adapter.rollout(action)
-            actions.append(self._action_repr(action))
-            time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
-        debug_print(self.name, f"Drain consumed {len(actions)} step(s).", "INFO")
+    def _run_single(self, cmd) -> None:
+        """infer rollout：单步推理闭环（一次 观测 → 推理 → 动作下发），回执动作。"""
+        obs = self.adapter.observe()  # 推理输入（显示观测由节点级写入 frame_manager）
+        if obs is None:
+            self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
+            return
+        action = self.policy.infer(obs)
+        if action is not None:
+            self.adapter.rollout(action)  # 解析模型 action 为限速目标并推进一帧
+        repr_action = self._action_repr(action)
+        debug_print(self.name, f"Rollout step executed (action={repr_action}).", "INFO")
         self._reply(
             cmd,
-            ok_result(state="ready", count=len(actions), action=actions[-1] if actions else None, actions=actions),
+            ok_result(state="ready", count=1, action=repr_action, actions=[repr_action]),
         )
 
-    def _run_continuous(self) -> RunResult:
-        """infer rollout continuous：持续推理，每步轮询命令响应退出 / 复位 / 急停。
+    def _start_recording(self, cmd) -> None:
+        """capture episode start：开始一轮推理 rollout 录制（robot 不关心推理/采集）。
 
-        启动命令已回执 started；持续直到 session quit（FINISHED）/ robot estop（ERROR）/
-        node 失联（ERROR）。返回 RunResult（由调用方置会话状态）。
+        通知机器人进程开启录制（``adapter.start_capture``）；录制期间 robot 按帧录 mcap
+        （含 action）。录制元信息（operator=policy、task_name=prompt）由调用方**显式**
+        ``capture sync`` 同步（本会话只负责默认上报）。
+        """
+        self.adapter.start_capture()
+        self._recording = True
+        debug_print(self.name, "Rollout recording started (capture episode start).", "INFO")
+        self._reply(cmd, ok_result(state="recording", episode="start", recording=True))
+
+    def _end_recording(self, cmd) -> None:
+        """capture episode end：结束一轮推理 rollout 录制（机器人进程保存 episode）。"""
+        self.adapter.end_capture()
+        self._recording = False
+        debug_print(self.name, "Rollout recording ended (capture episode end).", "INFO")
+        self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+
+    def _sync_capture_meta_cmd(self, cmd) -> None:
+        """capture sync --meta <json>：同步采集元信息（operator/task_name 等）到机器人进程。
+
+        推理录制时（rollout episode）由调用方显式同步：operator 暂定 "policy"、task_name =
+        prompt（会话默认上报，见 server /v1/infers status 的 capture_meta）。
+        """
+        try:
+            meta = parse_meta(cmd.params.get("meta"))
+        except ValueError as exc:
+            self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+            return
+        self.adapter.sync_capture_meta(meta)
+        self._reply(cmd, ok_result(state=getattr(self, "state", "ready"), meta=meta))
+
+    def _run_continuous(self) -> RunResult:
+        """infer rollout continuous：持续推理，每步轮询命令响应退出 / 复位 / 急停 / 录制。
+
+        启动命令已回执 started（prompt 已在启动前校验非空）；持续直到 session quit
+        （FINISHED）/ robot estop（ERROR）/ node 失联（ERROR）。持续期间接受
+        ``capture episode start/end``（录制 rollout）与 ``capture sync``（同步元信息）——
+        录制与持续推理正交（robot 不关心模式）。返回 RunResult（由调用方置会话状态）。
         """
         debug_print(self.name, "Continuous rollout started (session quit to stop).", "INFO")
         while True:
@@ -366,6 +417,15 @@ class InferSession(BaseSession):
                 continue
             if name == CMD_INFER_PROMPT:  # 持续推理中动态改 prompt（下个推理请求生效）
                 self._set_prompt_cmd(cmd)
+                continue
+            if name == CMD_CAPTURE_EPISODE_START:  # 持续中开始 rollout 录制（prompt 已非空）
+                self._start_recording(cmd)
+                continue
+            if name == CMD_CAPTURE_EPISODE_END:  # 持续中结束 rollout 录制
+                self._end_recording(cmd)
+                continue
+            if name == CMD_CAPTURE_SYNC:  # 持续中同步采集元信息（录制 rollout 附加）
+                self._sync_capture_meta_cmd(cmd)
                 continue
             if name in (CMD_INFER_IP_SET, CMD_INFER_PORT_SET):  # 端点已随会话锁定
                 self._reply(

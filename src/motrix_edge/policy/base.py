@@ -23,6 +23,11 @@ class BasePolicyClient:
     def __init__(self, policy_config: dict) -> None:
         self.policy_config = policy_config or {}
         self.server_metadata: dict = {}
+        # 文本指令（prompt）：统一概念——推理前必须非空（InferSession 门控），录制 rollout
+        # 时作为 episode 的 task_name。各策略读取配置缺省并映射到自身语义：openpi 每次
+        # infer 请求动态携带；act 作为策略指令下发（raw observation 的 ``task``）。
+        # None = 未设置（不能开始推理）；运行时经 ``infer prompt <text>`` 更新。
+        self.prompt = None
 
     @property
     def connected(self) -> bool:

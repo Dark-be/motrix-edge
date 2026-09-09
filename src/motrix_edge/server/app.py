@@ -161,19 +161,28 @@ class InferEnterRequest(BaseModel):
 
 
 class InferRolloutRequest(BaseModel):
-    """POST /v1/infers/rollout 请求体：推理模式 + 步数（count 模式）+ 可选 prompt。"""
+    """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续）。
 
-    mode: Literal["count", "continuous", "drain"] | None = Field(
-        default=None, description="推理模式：count（缺省）/ continuous / drain"
+    多步（count>1）与 drain（缓存推理）模式已取消；prompt 不随 rollout 传——由会话内
+    ``infer prompt`` 预置（为空不能开始推理 / 录制）。
+    """
+
+    mode: Literal["single", "continuous"] | None = Field(
+        default=None, description="推理模式：single（缺省）/ continuous"
     )
-    count: int | None = Field(default=None, ge=1, le=100, description="连续推理步数（count 模式，缺省 1）")
-    prompt: str | None = Field(default=None, description="文本指令（openpi 动态 prompt，随观测上传；可换）")
+    count: int | None = Field(default=None, ge=1, le=1, description="单步推理步数（仅 1）")
 
 
 class InferPromptRequest(BaseModel):
-    """POST /v1/infers/prompt 请求体：运行时文本指令（openpi 动态 prompt，可换）。"""
+    """POST /v1/infers/prompt 请求体：运行时文本指令（统一 prompt；推理/录制前必须非空）。"""
 
-    prompt: str = Field(..., min_length=1, description="文本指令（下个推理请求携带）")
+    prompt: str = Field(..., min_length=1, description="文本指令（推理前必须设置；录制 rollout 作为 task_name）")
+
+
+class InferSyncRequest(BaseModel):
+    """POST /v1/infers/sync 请求体：录制 rollout 时同步的采集元信息（operator / task_name 等）。"""
+
+    meta: dict = Field(default_factory=dict, description="采集元信息（默认 operator=policy、task_name=prompt）")
 
 
 class UploadScanRequest(BaseModel):
@@ -615,22 +624,45 @@ def create_app(
 
     @app.post("/v1/infers/rollout")
     async def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
-        """推理闭环（infer rollout [count] / continuous / drain）。
+        """推理闭环（infer rollout）：单步（缺省）或 continuous 持续。
 
-        body：``mode``（count 缺省 / continuous / drain）+ ``count``（count 模式，缺省 1，1–100）
-        + ``prompt``（可选文本指令，openpi 动态 prompt）。
+        body：``mode``（single 缺省 / continuous）+ ``count``（单步，仅 1）。
+        prompt 不随 rollout 传（会话内 ``infer prompt`` 预置；为空不能开始推理）。
         须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
         """
         mode = req.mode if req is not None else None
         count = req.count if req is not None else None
-        prompt = req.prompt if req is not None else None
-        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode, count=count, prompt=prompt))
+        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode, count=count))
+
+    @app.post("/v1/infers/episode/start")
+    async def infers_episode_start(x_lease_id: str | None = Header(default=None)):
+        """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
+
+        录制 rollout 需要 task_name=prompt → 会话侧门控（prompt 为空 → 400，先 ``infer
+        prompt`` 预置）；录制前由调用方 ``POST /v1/infers/sync`` 显式同步采集元信息
+        （默认 operator=policy、task_name=prompt）。受控操作：须持有租约。
+        """
+        return _infer_call(lambda: _infers().episode_start(lease_id=x_lease_id))
+
+    @app.post("/v1/infers/episode/end")
+    async def infers_episode_end(x_lease_id: str | None = Header(default=None)):
+        """结束一轮推理 rollout 录制（capture episode end）：robot 保存该 episode。受控操作。"""
+        return _infer_call(lambda: _infers().episode_end(lease_id=x_lease_id))
+
+    @app.post("/v1/infers/sync")
+    async def infers_sync(req: InferSyncRequest, x_lease_id: str | None = Header(default=None)):
+        """同步采集元信息（capture sync）：录制 rollout 时把 operator/task_name 同步到进程。
+
+        默认元信息 = ``{operator: "policy", task_name: <prompt>}``（见 GET /v1/infers 的
+        capture_meta），由调用方显式提交（Edge 不自动 sync）。受控操作：须持有租约。
+        """
+        return _infer_call(lambda: _infers().sync(meta=req.meta, lease_id=x_lease_id))
 
     @app.post("/v1/infers/prompt")
     async def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):
-        """运行时更新推理文本指令（openpi 动态 prompt；会话内生效，下个推理请求携带）。
+        """会话内预置/更新推理文本指令（统一 prompt；推理/录制前必须非空）。
 
-        须已在推理会话且持有租约；连续 / 单步推理中均可修改（下个请求生效）。
+        须已在推理会话且持有租约；持续推理中亦可修改（下个请求生效）。
         """
         return _infer_call(lambda: _infers().set_prompt(lease_id=x_lease_id, prompt=req.prompt))
 

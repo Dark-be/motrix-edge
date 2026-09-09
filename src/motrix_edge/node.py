@@ -652,9 +652,12 @@ class EdgeNode:
         elif state in (NodeState.READY, NodeState.ACTIVE):
             self._check_adapter_alive()
             self._observe()  # 持续观测（无需进入会话；显示观测统一归节点，会话不再写）
-        if state == NodeState.ACTIVE and self.session_type == "capture":
-            self._refresh_data_status()  # 采集会话期间 edge 自行周期查询数据状态并缓存
-            self._refresh_capture_status()  # 采集状态（采集员 / 任务名等元信息）同样周期刷新缓存
+        if state == NodeState.ACTIVE and self.session_type in ("capture", "infer"):
+            # 采集会话期间 edge 自行周期查询数据状态并缓存（推理 rollout 录制同样产生 episode）。
+            self._refresh_data_status()
+            # 采集状态（采集员 / 任务名等元信息 + 运行位）：推理会话录制 rollout 时也周期
+            # 刷新缓存（server /v1/infers 的 capture_status / recording 据此上报）。
+            self._refresh_capture_status()
 
     def _observe(self) -> None:
         """节点级持续观测：把最新观测写入 FrameManager（观测不依赖「进入会话」）。
@@ -758,11 +761,11 @@ class EdgeNode:
             self._enter_error(f"adapter health check failed: {exc}")
 
     def _refresh_data_status(self) -> None:
-        """采集会话（ACTIVE + capture）期间周期查询采集数据状态并缓存。
+        """采集会话（ACTIVE + capture / infer）期间周期查询采集数据状态并缓存。
 
         数据状态由 **edge 自行**向 adapter / 机器人进程查询（`data_status()`）并缓存，
         server 的 /v1/captures 只读本缓存——前端轮询状态**不会**触发对 SDK 进程的
-        实时请求（edge 运行不依赖前端）。
+        实时请求（edge 运行不依赖前端）。推理会话录制 rollout 时同样产出 episode。
         """
         if self.adapter is None:
             self._data_status = None
@@ -778,9 +781,10 @@ class EdgeNode:
             self._data_status = None
 
     def _refresh_capture_status(self) -> None:
-        """采集会话（ACTIVE + capture）期间周期查询采集状态并缓存。
+        """采集会话（ACTIVE + capture / infer）期间周期查询采集状态并缓存。
 
         ``capture_status()`` 返回机器人进程当前采集元信息（采集员 / 任务名等）+ 运行位；
+        推理会话录制 rollout 时（running=True）同样刷新，供 server /v1/infers 上报。
         查询 / 缓存语义与 ``data_status`` 一致（edge 自行查询，不依赖前端轮询）。
         """
         if self.adapter is None:

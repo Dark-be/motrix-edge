@@ -73,7 +73,10 @@ class ACTClient(BasePolicyClient):
         # lerobot act 策略参数（edge.yml policy 段）
         self._actions_per_chunk = int(self.policy_config.get("actions_per_chunk", 50))
         self._fps = int(self.policy_config.get("fps", 30))
-        self._task = self.policy_config.get("task", "")
+        # 文本指令（prompt）：与 openpi 统一概念——``infer prompt <text>`` 会话内设置，
+        # 推理前必须非空；作为策略指令下发（raw observation 的 ``task``）。
+        # 配置键：``prompt`` 优先，旧 ``task`` 键向后兼容（缺省 None）。
+        self.prompt = self.policy_config.get("prompt") or self.policy_config.get("task") or None
         self._rename_cameras = dict(self.policy_config.get("rename_cameras") or {})
         # 策略输入相机子集（edge 观测图像名；None = 全部）：只下发这些相机，其余过滤——
         # 避免把策略 image_features 里没有的相机（如 cam_left_wrist）发给服务端导致
@@ -251,8 +254,8 @@ class ACTClient(BasePolicyClient):
         for edge, dataset_cam in self._policy_cameras(observation):
             value = observation[f"{KEY_OBS_IMAGE_PREFIX}{edge}"]
             raw[dataset_cam] = resize_with_pad(to_rgb_uint8(value), *self._image_size)
-        if self._task:
-            raw["task"] = self._task
+        if self.prompt:
+            raw["task"] = self.prompt
         return raw
 
     def _send_observation(self, raw: dict, timestep: int) -> None:

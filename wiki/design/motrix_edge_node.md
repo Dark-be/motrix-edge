@@ -47,10 +47,12 @@ stateDiagram-v2
 -   **READY / ACTIVE**：节点级**持续观测**（`adapter.observe()` → `frame_manager`），观测
     **不依赖进入会话**——已绑定 adapter 即可预览 / 推流；**显示观测统一归节点**，会话不再
     写 frame_manager（采集会话不 observe；推理会话 observe 仅作推理输入）。
--   **ACTIVE + capture**：周期刷新采集数据状态缓存（`adapter.data_status()`），server 状态只读缓存，
-    **不因前端轮询而实时请求 SDK**（edge 运行不依赖前端）。
--   **ACTIVE + capture**：周期刷新采集状态缓存（`adapter.capture_status()`，采集员 / 任务名等元信息 + 运行位），
-    server 状态只读缓存，**不因前端轮询而实时请求 SDK**。
+-   **ACTIVE + capture / infer**：周期刷新采集数据状态缓存（`adapter.data_status()`），server
+    状态只读缓存，**不因前端轮询而实时请求 SDK**（edge 运行不依赖前端）。推理会话录制 rollout
+    （`capture episode start/end`）同样产出 episode，故推理期间也刷新。
+-   **ACTIVE + capture / infer**：周期刷新采集状态缓存（`adapter.capture_status()`，采集员 /
+    任务名等元信息 + 运行位），server 状态只读缓存，**不因前端轮询而实时请求 SDK**——推理录制
+    rollout 时 `running=True`，`/v1/infers` status 的 `capture_status` / `recording` 据此上报。
 
 ## 命令分发
 

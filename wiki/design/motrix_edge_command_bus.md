@@ -54,31 +54,32 @@ class CommandResult:
 
 ## 命令清单（build_command_registry）
 
-| 命令名                  | 位置参数  | 层级   | 语义                                                           | auth |
-| ----------------------- | --------- | ------ | -------------------------------------------------------------- | ---- |
-| `session run`           | `session` | 任务级 | 启动会话（选择 + 启动一步完成；capture / infer）               | none |
-| `session quit`          | —         | 任务级 | 退出当前会话（→ READY）                                        | none |
-| `robot reset`           | —         | 机器人 | 复位机器人（仅 adapter 可用）                                  | none |
-| `robot estop`           | —         | 全局   | 急停（安全停止 + 转 ERROR）                                    | none |
-| `robot execute`         | `qpos`    | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点）              | none |
-| `robot teleop`          | `enabled` | 机器人 | 遥操作开关（true/false）                                       | none |
-| `capture episode start` | —         | 任务级 | 开始一轮采集（adapter.start_capture）                          | none |
-| `capture episode end`   | —         | 任务级 | 结束一轮采集（adapter.end_capture）                            | none |
-| `node reset`            | —         | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                   | none |
-| `infer rollout`         | —         | 任务级 | 单步推理闭环（上传观测 → 下发动作）                            | none |
-| `infer connect`         | —         | 任务级 | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）        | none |
-| `infer ip`              | —         | 配置级 | 查询推理节点 IP（内存态 `policy.host`）                        | none |
-| `infer ip set`          | `ip`      | 配置级 | 设置推理节点 IP（下次 `session run infer` 生效）               | none |
-| `infer port`            | —         | 配置级 | 查询推理节点端口（内存态 `policy.port`）                       | none |
-| `infer port set`        | `port`    | 配置级 | 设置推理节点端口（下次 `session run infer` 生效）              | none |
-| `capture sync`          | `meta`    | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集会话内消费） | none |
-| `capture meta list`     | `key`     | 配置级 | 列出采集元信息选项（可拓展分类 → 选项数组，`capture.yml`） | none |
-| `capture meta add`      | `key, value` | 配置级 | 新增元信息选项（分类不存在则创建）                          | none |
-| `capture meta edit`     | `key, old, new` | 配置级 | 编辑元信息选项（`old` → `new` 重命名）                  | none |
-| `capture meta delete`   | `key, value` | 配置级 | 删除元信息选项（分类清空则删除分类）                        | none |
-| `capture meta delete-key` | `key`    | 配置级 | 删除整个元信息分类                                        | none |
-| `adapter config`        | —         | 配置级 | 查询运行时 adapter 能力配置（enabled_arms / cameras / home）| none |
-| `adapter config set`    | `json`    | 配置级 | 设置运行时 adapter 能力配置（JSON；应用到当前已绑定 adapter，discover 绑定时生效）| none |
+| 命令名                    | 位置参数        | 层级   | 语义                                                                               | auth |
+| ------------------------- | --------------- | ------ | ---------------------------------------------------------------------------------- | ---- |
+| `session run`             | `session`       | 任务级 | 启动会话（选择 + 启动一步完成；capture / infer）                                   | none |
+| `session quit`            | —               | 任务级 | 退出当前会话（→ READY）                                                            | none |
+| `robot reset`             | —               | 机器人 | 复位机器人（仅 adapter 可用）                                                      | none |
+| `robot estop`             | —               | 全局   | 急停（安全停止 + 转 ERROR）                                                        | none |
+| `robot execute`           | `qpos`          | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点）                                  | none |
+| `robot teleop`            | `enabled`       | 机器人 | 遥操作开关（true/false）                                                           | none |
+| `capture episode start`   | —               | 任务级 | 开始一轮录制（采集 / 推理 rollout 共用；robot 不关心模式）                         | none |
+| `capture episode end`     | —               | 任务级 | 结束一轮录制（采集 / 推理 rollout 共用；保存该 episode）                           | none |
+| `node reset`              | —               | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                                       | none |
+| `infer rollout`           | `mode`          | 任务级 | 单步（缺省）/ `continuous` 持续推理；**prompt 为空不能开始**                       | none |
+| `infer connect`           | —               | 任务级 | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）                            | none |
+| `infer prompt`            | `prompt`        | 任务级 | 预置推理文本指令（推理/录制前必须非空）                                            | none |
+| `infer ip`                | —               | 配置级 | 查询推理节点 IP（内存态 `policy.host`）                                            | none |
+| `infer ip set`            | `ip`            | 配置级 | 设置推理节点 IP（下次 `session run infer` 生效）                                   | none |
+| `infer port`              | —               | 配置级 | 查询推理节点端口（内存态 `policy.port`）                                           | none |
+| `infer port set`          | `port`          | 配置级 | 设置推理节点端口（下次 `session run infer` 生效）                                  | none |
+| `capture sync`            | `meta`          | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集 / 推理录制会话内消费）          | none |
+| `capture meta list`       | `key`           | 配置级 | 列出采集元信息选项（可拓展分类 → 选项数组，`capture.yml`）                         | none |
+| `capture meta add`        | `key, value`    | 配置级 | 新增元信息选项（分类不存在则创建）                                                 | none |
+| `capture meta edit`       | `key, old, new` | 配置级 | 编辑元信息选项（`old` → `new` 重命名）                                             | none |
+| `capture meta delete`     | `key, value`    | 配置级 | 删除元信息选项（分类清空则删除分类）                                               | none |
+| `capture meta delete-key` | `key`           | 配置级 | 删除整个元信息分类                                                                 | none |
+| `adapter config`          | —               | 配置级 | 查询运行时 adapter 能力配置（enabled_arms / cameras / home）                       | none |
+| `adapter config set`      | `json`          | 配置级 | 设置运行时 adapter 能力配置（JSON；应用到当前已绑定 adapter，discover 绑定时生效） | none |
 
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
 `node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`、`capture meta`、

@@ -68,7 +68,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 
 ## InferSession（推理会话）
 
-基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无回合概念，由 rollout 步进驱动）**：
+基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无「多步推理」模式）**：
 
 -   `run()`：`adapter.reset()` + `policy.reset()` → 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
 -   **连接内聚到 policy、rollout 惰性自连**：进入会话**不连接**推理节点。`infer rollout`
@@ -77,11 +77,22 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 -   `infer connect`（**可选**）：显式预连 + 预热 —— `policy.connect()` 成功回执含服务端 metadata，
     随后尝试 `adapter.observe()` 一帧调 `policy.prepare(obs)`（act：提前下发策略指令、服务端加载
     模型到 device，避免首次 rollout 卡模型加载；openpi：no-op）。失败回执 error，可重试。
--   `infer rollout [count]`：连续执行 `count` 次（缺省 1，范围 1–100）`obs = adapter.observe()` →
-    `action = policy.infer(obs)` → `adapter.rollout(action)`；回执包含最后动作与动作列表。
-    （`observe` 是**推理输入**；显示观测由节点级写入 `frame_manager`，会话不写。）
--   命令：`infer connect`（可选预连/预热）、`infer rollout [count]`、`session quit`（退出回 home）、
-    `robot estop`、`robot reset`、`robot execute`、`robot teleop`。
+-   `infer rollout`（**单步**）/ `infer rollout continuous`（**持续**）：一次 / 持续执行
+    `obs = adapter.observe()` → `action = policy.infer(obs)` → `adapter.rollout(action)`。
+    **prompt 为空不能开始推理**：两个入口都要求会话内已 `infer prompt <text>` 预置非空文本
+    （空 → rejected 400，不推理）。`infer rollout <N>`（多步）与 `infer rollout drain`
+    （缓存推理）**已取消**（多步/缓存不再作为独立命令模式）。（`observe` 是**推理输入**；
+    显示观测由节点级写入 `frame_manager`，会话不写。）
+-   **推理时 rollout 录制（同采集）**：robot 本身不关心推理还是采集——`capture episode start`
+    通知进程开启录制（capturing 期间按帧录 mcap，含 action），`capture episode end` 结束并保存。
+    开始录制同样要求 prompt 非空（录制 rollout 的 task_name = prompt）。录制元信息由调用方
+    **显式** `capture sync --meta <json>` 同步（默认 `operator="policy"`、`task_name=prompt`
+    由会话 / server 状态上报，不自动 sync）。录制与单步 / 持续推理正交：持续推理中亦可
+    episode start/end 与 sync（robot 不关心谁在驱动）。
+-   命令：`infer prompt <text>`（预置文本指令，推理/录制前必须非空）、`infer connect`（可选预连/
+    预热）、`infer rollout` / `infer rollout continuous`、`capture episode start/end`（rollout 录制）、
+    `capture sync --meta <json>`（录制元信息）、`session quit`（退出回 home）、`robot estop`、
+    `robot reset`、`robot execute`、`robot teleop`。
 
 ## 相关文档
 

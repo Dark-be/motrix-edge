@@ -60,7 +60,7 @@ CMD_ADAPTER_CONFIG_SET = "adapter config set"  # 设置运行时 adapter 能力�
 CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adapter 实际生效的能力配置（启用臂 / 相机）
 CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
-CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（参数 count，连续执行多步）
+CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；多步/drain 已取消）
 CMD_INFER_CONNECT = "infer connect"  # 单次尝试连接推理节点（推理会话内消费）
 CMD_INFER_IP = "infer ip"  # 查询推理节点 IP（内存态 policy.host）
 CMD_INFER_IP_SET = "infer ip set"  # 设置推理节点 IP（位置参数 ip；下次 session run infer 生效）
@@ -241,36 +241,34 @@ def parse_bool(raw) -> bool:
     raise ValueError(f"invalid boolean: {raw!r}")
 
 
-def parse_rollout_count(raw, default: int = 1, maximum: int = 100) -> int:
-    """解析 ``infer rollout`` 连续执行次数；缺省 1，合法范围 ``1..maximum``。"""
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        count = int(raw)
-    except (TypeError, ValueError):
-        raise ValueError(f"invalid rollout count: {raw!r}") from None
-    if not 1 <= count <= maximum:
-        raise ValueError(f"rollout count must be between 1 and {maximum}")
-    return count
-
-
-ROLLOUT_MODE_COUNT = "count"  # 推理 N 次（infer rollout <N>）
+ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
 ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 session quit / estop）
-ROLLOUT_MODE_DRAIN = "drain"  # 只消耗当前缓存动作块（不发新推理请求）
 
 
-def parse_rollout_mode(raw, default: int = 1, maximum: int = 100) -> tuple[str, int]:
-    """解析 ``infer rollout`` 参数 → ``(mode, count)``。
+def parse_rollout_mode(raw) -> str:
+    """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续）。
 
-    - 空 / 数字 → ``("count", N)``：推理 N 次（缺省 1，范围 1..maximum）；
-    - ``"continuous"`` → 持续推理（启动即回执，直到 session quit / estop）；
-    - ``"drain"`` → 只消费当前已缓存的 action chunk（不发新推理请求）。
+    - 空 / ``"1"`` → ``single``：单步推理（一次 观测 → 推理 → 动作 闭环）；
+    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 session quit / estop）；
+    - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 + ``capture
+      episode start/end`` 录制 rollout 回合，见 wiki/design/motrix_edge_session.md）；
+    - ``"drain"`` → ``ValueError``（**缓存推理已取消**：动作块只作策略内部缓存，
+      不再提供「只消费缓存块」的命令模式）。
     非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
     """
     text = str(raw or "").strip().lower()
-    if text in (ROLLOUT_MODE_CONTINUOUS, ROLLOUT_MODE_DRAIN):
-        return (text, 0)
-    return (ROLLOUT_MODE_COUNT, parse_rollout_count(raw, default=default, maximum=maximum))
+    if text in ("", "1"):
+        return ROLLOUT_MODE_SINGLE
+    if text == ROLLOUT_MODE_CONTINUOUS:
+        return ROLLOUT_MODE_CONTINUOUS
+    if text == "drain":
+        raise ValueError("rollout drain mode removed: use capture episode start/end to record a rollout")
+    if text.isdigit():
+        count = int(text)
+        if count > 1:
+            raise ValueError(f"multi-step rollout removed: use single-step or continuous (got {raw!r})")
+        raise ValueError(f"invalid rollout: {raw!r}")
+    raise ValueError(f"invalid rollout: {raw!r}")
 
 
 def parse_meta(raw) -> dict:
@@ -440,7 +438,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ADAPTER_CONFIG_CURRENT),  # adapter config current：当前生效能力（启用臂 / 相机）
         CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
-        CommandSpec(name=CMD_INFER_ROLLOUT, positional=("count",)),  # infer rollout [count]
+        CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：单次尝试连接推理节点
         CommandSpec(name=CMD_INFER_IP),  # infer ip：查询推理节点 IP（无参）
         CommandSpec(name=CMD_INFER_IP_SET, positional=("ip",)),  # infer ip set <ip>

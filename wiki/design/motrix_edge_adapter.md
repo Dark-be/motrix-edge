@@ -34,11 +34,11 @@ adapter/
 **动作布局**（`ARM_NAMES` / `ARM_QPOS_SLICES` / `ACTION_DIM_PER_ARM` / `HOME_QPOS` /
 `DEFAULT_ENABLED_ARMS` / `IMAGES`），基类提供 `configure` / `_select_qpos` / `_expand_action`：
 
-- `enabled_arms`（right / left）：只启用部分臂时，`action_dim = 启用臂数 × 7`，`execute` 按启用臂数
-  接收动作，**未启用臂动作用 `HOME_QPOS` 填充**（类常量，可用 `home_qpos` 覆盖）；`observe()` 只返回
-  启用臂 qpos（物理顺序 left → right 拼接）。
-- `enabled_cameras`：从 `IMAGES` 中挑选要暴露的相机（影响 `observe()` 与 `capabilities`）。
-- `home_qpos`：未启用臂 home 位姿（完整动作维度；缺省全 0）。
+-   `enabled_arms`（right / left）：只启用部分臂时，`action_dim = 启用臂数 × 7`，`execute` 按启用臂数
+    接收动作，**未启用臂动作用 `HOME_QPOS` 填充**（类常量，可用 `home_qpos` 覆盖）；`observe()` 只返回
+    启用臂 qpos（物理顺序 left → right 拼接）。
+-   `enabled_cameras`：从 `IMAGES` 中挑选要暴露的相机（影响 `observe()` 与 `capabilities`）。
+-   `home_qpos`：未启用臂 home 位姿（完整动作维度；缺省全 0）。
 
 **运行时配置（不写 edge.yml）**：`enabled_arms` / `enabled_cameras` / `home_qpos` 由命令
 `adapter config set <json>` 或前端 `POST /v1/adapters/config`（受控操作，须租约）设置，存于
@@ -51,21 +51,21 @@ adapter/
 
 职责面与「角色」一一对应：
 
-| 职责面          | 方法                                | 说明                                                                         |
-| --------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
-| discover/health | `health()`                          | 健康检查；实时 `GET /v1/health`（SDK 型无后台心跳线程），缓存 `running`      |
-|                 | `release()`                         | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                              |
-| capabilities    | `capabilities`（属性）              | 声明能力：动作维度 / 观测键布局 / 能力 dict                                  |
-| observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行** |
-| execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                |
-| teleop          | `set_teleop(enabled)`               | 设置遥操作开关（true=遥操作 / false=程控）；默认 no-op                       |
-| data_status     | `data_status()`                     | 采集数据状态：数据目录 + 数据列表（采集会话预留）                            |
-| capture status  | `capture_status()`                  | 采集状态：机器人进程当前采集元信息（采集员 / 任务名等）+ 运行位（默认 None） |
-| capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                     |
-| capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                           |
-| rollout         | `rollout(action)`                   | 推理闭环：接收模型 action，经 HTTP 转发进程限速靠近                          |
-| safe_stop       | `safe_stop()`                       | 安全停止（幂等、失败安全）                                                   |
-| 生命周期辅助    | `reset()`                           | 程序复位到 home（非阻塞）                                                    |
+| 职责面          | 方法                                | 说明                                                                                          |
+| --------------- | ----------------------------------- | --------------------------------------------------------------------------------------------- |
+| discover/health | `health()`                          | 健康检查；实时 `GET /v1/health`（SDK 型无后台心跳线程），缓存 `running`                       |
+|                 | `release()`                         | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                                               |
+| capabilities    | `capabilities`（属性）              | 声明能力：动作维度 / 观测键布局 / 能力 dict                                                   |
+| observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行**                  |
+| execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                                 |
+| teleop          | `set_teleop(enabled)`               | 设置遥操作开关（true=遥操作 / false=程控）；默认 no-op                                        |
+| data_status     | `data_status()`                     | 采集数据状态：数据目录 + 数据列表（采集会话预留）                                             |
+| capture status  | `capture_status()`                  | 采集状态：机器人进程当前采集元信息（采集员 / 任务名等）+ 运行位（默认 None）                  |
+| capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                      |
+| capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮录制（episode）；采集与推理 rollout 共用，robot 不关心模式；默认 no-op |
+| rollout         | `rollout(action)`                   | 推理闭环：接收模型 action，经 HTTP 转发进程限速靠近                                           |
+| safe_stop       | `safe_stop()`                       | 安全停止（幂等、失败安全）                                                                    |
+| 生命周期辅助    | `reset()`                           | 程序复位到 home（非阻塞）                                                                     |
 
 ### 观测键契约（standard_obs 键名）
 

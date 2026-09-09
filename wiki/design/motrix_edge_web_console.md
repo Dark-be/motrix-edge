@@ -25,30 +25,32 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 4. **机器人命令卡片**：estop / reset / execute / teleop 命令控制（不再显示适配器，也不提供「查看全部适配器」；匹配到的适配器见状态栏）。
 5. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项。
 6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；**采集元信息**（采集员 / 任务名）从 `GET /v1/captures/meta`（`capture.yml`，`capture meta` 命令维护）下拉选择，再 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加），并展示 `GET /v1/captures` 返回的 `capture_status`（采集员 / 任务名 / 运行位）。
-7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）；推理按钮对应推理会话的三种模式：
-    **推理一步 / 推理多步**（`infer rollout [count]`，1–100 次）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）、**消耗缓存**（`infer rollout drain`，只消费已缓存动作块）；退出推理后结束会话，连接成功时展示策略服务器 metadata。
+7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后先「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态），并在「文本指令 Prompt」输入框 `infer prompt` **预置非空文本**（`POST /v1/infers/prompt`，推理/录制前必须）。推理按钮：**推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）；**推理时 rollout 录制** = 「开始录制 / 结束录制」（`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy", task_name: prompt}`）。多步推理与「消耗缓存」模式已取消。退出推理后结束会话，连接成功时展示策略服务器 metadata。
 8. **视频面板**：WebRTC `<video>` 播放 + 连接状态 + 连接 / 断开按钮。
 9. **观测预览面板**：`GET /v1/preview` 的 qpos / action 数值 + 摄像头名列表（与 WebRTC 并存）。**观测无需进入会话**（节点级持续观测）；面板常驻，头部「预览显示」开关控制收起 / 显示（关闭时停止轮询与推流）。
 
 ## 动作 → 命令映射
 
-| HTTP 动作                                 | 底层命令              |
-| ----------------------------------------- | --------------------- |
-| `POST /v1/captures`（enter）              | `session run capture` |
-| `DELETE /v1/captures?lease_id=`           | `session quit`        |
-| `POST /v1/infers`（必填 `policy_type`）   | `session run infer`   |
-| `POST /v1/infers/rollout`（body `count`） | `infer rollout count` |
+| HTTP 动作                                           | 底层命令                   |
+| --------------------------------------------------- | -------------------------- |
+| `POST /v1/captures`（enter）                        | `session run capture`      |
+| `DELETE /v1/captures?lease_id=`                     | `session quit`             |
+| `POST /v1/infers`（必填 `policy_type`）             | `session run infer`        |
+| `POST /v1/infers/rollout`（缺省）                   | `infer rollout`（单步）    |
 | `POST /v1/infers/rollout`（body `mode=continuous`） | `infer rollout continuous` |
-| `POST /v1/infers/rollout`（body `mode=drain`） | `infer rollout drain` |
-| `DELETE /v1/infers?lease_id=`             | `session quit`        |
-| `POST /v1/commands`（`capability=estop`） | `robot estop`         |
+| `POST /v1/infers/episode/start`                     | `capture episode start`    |
+| `POST /v1/infers/episode/end`                       | `capture episode end`      |
+| `POST /v1/infers/sync`                              | `capture sync`             |
+| `POST /v1/infers/prompt`                            | `infer prompt <text>`      |
+| `DELETE /v1/infers?lease_id=`                       | `session quit`             |
+| `POST /v1/commands`（`capability=estop`）           | `robot estop`              |
 
 ## 契约要点（前端实现，单点定义）
 
 -   受控请求封装：统一注入 `X-Lease-Id`；非 2xx 抛出 `{ status, detail }`。
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
--   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；推理状态额外返回连接成功后的 `metadata`，前端按 JSON 展示。
--   推理面板提供 rollout 次数输入（1–100）；一次请求携带 `{count}`，展示响应中的最后动作及 `actions` 列表。
+-   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；推理状态额外返回连接成功后的 `metadata`、当前 `prompt` / `recording` / `capture_meta`（默认 operator=policy、task_name=prompt），前端按 JSON 展示。
+-   推理面板提供 Prompt 输入（`POST /v1/infers/prompt` 预置，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
 -   WebRTC：`RTCPeerConnection` recvonly 视频轨 → `createOffer` → `setLocalDescription` →
     `POST /v1/webrtc/offer`（body `{sdp: pc.localDescription.sdp, type}`）→ `setRemoteDescription(answer)`；
     **必须发送含 ICE 候选的 `localDescription.sdp`**。

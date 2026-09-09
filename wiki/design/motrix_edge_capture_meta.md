@@ -24,8 +24,8 @@
 ```yaml
 # 采集元信息选项（capture meta 命令维护；可拓展任意分类 → 选项数组）
 meta:
-  operator: [张三, 李四]        # 采集人员
-  task_name: [桌面前移, 双臂搬运]  # 采集任务
+    operator: [张三, 李四] # 采集人员
+    task_name: [桌面前移, 双臂搬运] # 采集任务
 ```
 
 `meta` 为顶层映射：分类名 → 选项字符串数组。文件不存在时视为空（命令自动创建）；写回保留
@@ -35,13 +35,13 @@ meta:
 
 命令词沿用仓库「空格分隔、不用点」约定，注册为 `capture meta <sub>` 多词命令：
 
-| 命令                           | 位置参数           | 语义                                                       |
-| ------------------------------ | ------------------ | ---------------------------------------------------------- |
-| `capture meta list [key]`      | `key`（可选）      | 列出全部「分类 → 选项」或某分类选项                        |
-| `capture meta add <key> <val>` | `key, value`       | 新增选项（分类不存在则创建）；重复 → rejected              |
-| `capture meta edit <key> <o> <n>` | `key, old, new` | 编辑选项（`old` → `new` 重命名）；不存在 → rejected        |
-| `capture meta delete <key> <v>` | `key, value`      | 删除某分类下选项（分类清空则删除分类）；不存在 → rejected  |
-| `capture meta delete-key <key>` | `key`              | 删除整个分类；不存在 → rejected                            |
+| 命令                              | 位置参数        | 语义                                                      |
+| --------------------------------- | --------------- | --------------------------------------------------------- |
+| `capture meta list [key]`         | `key`（可选）   | 列出全部「分类 → 选项」或某分类选项                       |
+| `capture meta add <key> <val>`    | `key, value`    | 新增选项（分类不存在则创建）；重复 → rejected             |
+| `capture meta edit <key> <o> <n>` | `key, old, new` | 编辑选项（`old` → `new` 重命名）；不存在 → rejected       |
+| `capture meta delete <key> <v>`   | `key, value`    | 删除某分类下选项（分类清空则删除分类）；不存在 → rejected |
+| `capture meta delete-key <key>`   | `key`           | 删除整个分类；不存在 → rejected                           |
 
 示例：
 
@@ -58,12 +58,18 @@ capture meta delete-key operator
 
 ## HTTP 暴露
 
-| 方法 | 路径                  | 租约 | 说明                                             |
-| ---- | --------------------- | ---- | ------------------------------------------------ |
-| GET  | `/v1/captures/meta`   | 无   | 返回 `{meta: {分类: [选项,...]}}`（前端选择列表） |
+| 方法 | 路径                | 租约 | 说明                                              |
+| ---- | ------------------- | ---- | ------------------------------------------------- |
+| GET  | `/v1/captures/meta` | 无   | 返回 `{meta: {分类: [选项,...]}}`（前端选择列表） |
 
-`capture sync`（`POST /v1/captures/sync` / `capability=capture_sync`）不变：只负责把选中的
-元信息（`{operator, task_name, ...}`）同步到机器人进程；选项**管理**经 CLI `capture meta`。
+`capture sync`（`POST /v1/captures/sync` / `POST /v1/infers/sync` / `capability=capture_sync`）
+不变：只负责把选中的元信息（`{operator, task_name, ...}`）同步到机器人进程；选项**管理**经
+CLI `capture meta`。
+
+**推理时 rollout 录制**同样经显式 `capture sync` 同步元信息：InferSession（含持续推理循环）
+消费 `capture sync`，录制 rollout 的**默认元信息** = `{operator: "policy", task_name: <prompt>}`
+（由 `GET /v1/infers` status 的 `capture_meta` 字段上报；Edge **不自动 sync**，调用方显式提交）。
+推理 / 录制开始前必须已 `infer prompt` 预置非空文本（见 [会话（session）](./motrix_edge_session.md)）。
 
 ## 分发与状态可用性
 

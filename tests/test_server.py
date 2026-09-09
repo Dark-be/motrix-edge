@@ -14,6 +14,7 @@
 
 """server HTTP API 单元测试 —— FastAPI TestClient，无硬件、无网络可跑。"""
 
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,7 @@ from motrix_edge.session.base import RunResult, SessionState
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
+    CMD_CAPTURE_SYNC,
     CMD_INFER_CONNECT,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
@@ -47,6 +49,7 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
+    ROLLOUT_MODE_CONTINUOUS,
     CommandBus,
     ok_result,
     parse_rollout_mode,
@@ -298,8 +301,10 @@ class FakeInferSession:
         self.command_source = command_source
         self.pulled = []
         self.adapter = FakeRobot()
-        self.policy = SimpleNamespace(name="fake-policy", server_metadata={})
+        self.policy = SimpleNamespace(name="fake-policy", server_metadata={}, prompt=None)
         self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
+        self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
+        self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
 
     def run(self):
         while True:
@@ -313,25 +318,28 @@ class FakeInferSession:
                 self.connected = True
                 self.policy.server_metadata = {"action_horizon": 16}
                 self._reply(cmd, ok_result(state="ready", connected=True, metadata={"action_horizon": 16}))
-            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：按 count 参数解析模式回执
-                mode, count = parse_rollout_mode((cmd.params or {}).get("count"))
-                if mode == "continuous":
+            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步（缺省）/ continuous 持续
+                mode = parse_rollout_mode((cmd.params or {}).get("mode"))
+                if mode == ROLLOUT_MODE_CONTINUOUS:
                     self._reply(cmd, ok_result(state="continuous", started=True, count=0, actions=[]))
-                elif mode == "drain":
-                    self._reply(cmd, ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]))
                 else:
                     self._reply(
                         cmd,
-                        ok_result(
-                            state="ready",
-                            count=count,
-                            action=[1.0, 2.0],
-                            actions=[[1.0, 2.0]] * count,
-                        ),
+                        ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]),
                     )
-            elif name == CMD_INFER_PROMPT:  # 运行时改文本指令（openpi 动态 prompt）
-                self.policy.prompt = (cmd.params or {}).get("prompt")
-                self._reply(cmd, ok_result(state="ready", prompt=self.policy.prompt))
+            elif name == CMD_INFER_PROMPT:  # 会话内预置文本指令（prompt）
+                self.prompt = (cmd.params or {}).get("prompt")
+                self.policy.prompt = self.prompt
+                self._reply(cmd, ok_result(state="ready", prompt=self.prompt))
+            elif name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始
+                self.recording = True
+                self._reply(cmd, ok_result(state="recording", episode="start", recording=True))
+            elif name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+            elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
+                meta = json.loads((cmd.params or {}).get("meta") or "{}")
+                self._reply(cmd, ok_result(state="ready", meta=meta))
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
@@ -1154,32 +1162,105 @@ def test_infers_rollout_steps_inference():
     wait_node_state(node, NodeState.READY)
 
 
-def test_infers_rollout_modes():
-    """推理闭环模式：body count / mode=continuous / mode=drain → 命令层解析并回执。"""
+def test_infers_rollout_single_and_continuous():
+    """推理闭环模式：单步（缺省）/ continuous 持续；多步与 drain 已取消 → 拒绝。"""
     node = FakeNode()
     service, client = make_infers_client(node)
     lease = install_lease(client)
     assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
-    # count 模式：body count=3 → infer rollout 3
-    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 3})
+    # 单步（缺省 body）→ 回执 count=1 / action / actions
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease})
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] == 3
-    assert len(body["actions"]) == 3
+    assert body["status"] == "accepted"
+    assert body["count"] == 1
+    assert body["action"] == [1.0, 2.0]
     # continuous 模式：mode=continuous → 启动即回执 started
     r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "continuous"})
     assert r.status_code == 200
     body = r.json()
     assert body["state"] == "continuous"
-    # drain 模式：mode=drain → 只消耗缓存动作块
-    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "drain"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["count"] == 1
-    assert body["action"] == [1.0, 2.0]
-    # 非法 count → 400（pydantic 校验）
+    # 多步（count=3）已取消：pydantic 只允许 count=1 → 422
+    assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 3}).status_code == 422
+    # drain（缓存推理）已取消：mode 只允许 single/continuous → 422
+    assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "drain"}).status_code == 422
+    # 非法 count=0 → 422（pydantic 校验）
     assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 0}).status_code == 422
     # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_status_exposes_prompt_and_recording_defaults():
+    """status 携带 prompt / recording / capture_meta（operator=policy、task_name=prompt）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    snap = client.get("/v1/infers").json()
+    assert snap["prompt"] is None
+    assert snap["recording"] is False
+    assert snap["capture_meta"] == {"operator": "policy", "task_name": None}
+    # 会话内设置 prompt → status.prompt / capture_meta.task_name 同步
+    assert (
+        client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
+        == 200
+    )
+    snap = client.get("/v1/infers").json()
+    assert snap["prompt"] == "把零件放好"
+    assert snap["capture_meta"] == {"operator": "policy", "task_name": "把零件放好"}
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_episode_recording_start_end():
+    """推理时 rollout 录制：episode start/end → capture episode 命令 → recording 状态翻转。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入推理会话：episode → 409
+    assert client.post("/v1/infers/episode/start", headers={"X-Lease-Id": lease}).status_code == 409
+    assert client.post("/v1/infers/episode/end", headers={"X-Lease-Id": lease}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 开始录制
+    r = client.post("/v1/infers/episode/start", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["episode"] == "start"
+    assert body["recording"] is True
+    assert node.session.recording is True
+    assert client.get("/v1/infers").json()["recording"] is True
+    # 结束录制
+    r = client.post("/v1/infers/episode/end", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    assert r.json()["episode"] == "end"
+    assert r.json()["recording"] is False
+    assert node.session.recording is False
+    assert CMD_CAPTURE_EPISODE_START in [getattr(c, "name", None) for c in node.session.pulled]
+    assert CMD_CAPTURE_EPISODE_END in [getattr(c, "name", None) for c in node.session.pulled]
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_sync_syncs_capture_meta():
+    """推理录制同步采集元信息：POST /v1/infers/sync → capture sync 命令 → 回执 meta。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post(
+        "/v1/infers/sync",
+        headers={"X-Lease-Id": lease},
+        json={"meta": {"operator": "policy", "task_name": "把零件放好"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["meta"] == {"operator": "policy", "task_name": "把零件放好"}
+    assert CMD_CAPTURE_SYNC in [getattr(c, "name", None) for c in node.session.pulled]
+    # 缺租约头（已有活跃租约）→ 403
+    assert client.post("/v1/infers/sync", json={"meta": {}}).status_code == 403
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
 

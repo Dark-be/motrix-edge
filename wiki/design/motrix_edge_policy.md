@@ -10,10 +10,10 @@
 
 策略与 wire 形态（各策略自持动作块缓存，**无通用 broker**）：
 
-| 类型  | 传输            | 消息格式         | 动作语义                          | 动作缓存              |
-| ----- | --------------- | ---------------- | --------------------------------- | --------------------- |
-| openpi | WebSocket       | msgpack（契约）  | `[horizon, dim]` 动作块逐帧消费   | openpi 自有（块切片） |
-| act   | lerobot gRPC    | pickle（lerobot）| 流式 `TimedAction` 按 timestep 消费 | act 自有（timestep→动作） |
+| 类型   | 传输         | 消息格式          | 动作语义                            | 动作缓存                   |
+| ------ | ------------ | ----------------- | ----------------------------------- | -------------------------- |
+| openpi | WebSocket    | msgpack（契约）   | `[horizon, dim]` 动作块逐帧消费     | openpi 自有（块切片）      |
+| act    | lerobot gRPC | pickle（lerobot） | 流式 `TimedAction` 按 timestep 消费 | act 自有（timestep→ 动作） |
 
 ## 目标与原则
 
@@ -75,10 +75,10 @@ lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保�
 
 仅 openpi 使用（act 走 lerobot wire，见 act 节）。消息 schema（msgpack）**单点定义**：
 
-| 方向                        | 消息                                                                             | 说明                                                                                                                 |
-| --------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 方向                        | 消息                                                                             | 说明                                                                                                                     |
+| --------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | 客户端 → 服务端（每步一次） | `{"observations/qpos": ndarray, "observations/images/<name>": ndarray \| bytes}` | 图像统一解码 → `resize_with_pad` 等比缩放补零到 `policy.image_size`（默认 224×224）→ 按 `image_format` 编码（jpeg 默认） |
-| 服务端 → 客户端             | `{"action": ndarray}`                                                            | `[horizon, dim]` 动作块或 `[dim]` 单步；含 `error` 键视为异常                                                         |
+| 服务端 → 客户端             | `{"action": ndarray}`                                                            | `[horizon, dim]` 动作块或 `[dim]` 单步；含 `error` 键视为异常                                                            |
 
 `build_observation` / `extract_action` / `resize_with_pad`（复刻 openpi `tf.image.resize_with_pad`）。
 
@@ -157,15 +157,30 @@ policy:
     pretrained_name_or_path: <ACT checkpoint> # 必填：服务端据此加载策略
     actions_per_chunk: 50 # 动作块长 K
     fps: 30 # 训练/环境频率（动作块时间标定）
-    task: "" # 指令（任务描述）随观测上传
+    task:
+        "" # 指令（任务描述）：旧 act 配置键——**统一为 prompt**（见下「文本指令（prompt）」），
+        # prompt 配置优先、task 向后兼容，随策略指令下发
     rename_cameras: {} # edge 相机名 → 策略图像特征名重命名
-    image_cameras: null # 策略输入相机子集（edge 观测图像名）；缺省全部。多余相机（策略
-                        # image_features 没有的）不下发，避免服务端 KeyError
+    image_cameras:
+        null # 策略输入相机子集（edge 观测图像名）；缺省全部。多余相机（策略
+        # image_features 没有的）不下发，避免服务端 KeyError
     smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭（edge 侧参数，默认开启）
     aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
-    infer_freq: 10 # 推理会话步进频率（Hz，edge 侧参数）：会话「观测→推理→下发动作」的节奏，
-                   # 间隔 = 1/infer_freq（默认 10Hz ≈ 0.1s/步）；调高则更密（如 0.33≈3Hz 旧值）
+    infer_freq:
+        10 # 推理会话步进频率（Hz，edge 侧参数）：会话「观测→推理→下发动作」的节奏，
+        # 间隔 = 1/infer_freq（默认 10Hz ≈ 0.1s/步）；调高则更密（如 0.33≈3Hz 旧值）
 ```
+
+### 文本指令（prompt，统一概念）
+
+`prompt` 是推理会话内**统一的文本指令**概念（openpi / act 共用）：
+
+-   `BasePolicyClient.prompt`（缺省 None）；openpi 每次 infer 请求动态携带（服务端每帧重新
+    tokenize）；act 映射为策略指令下发（raw observation 的 `task`，配置旧键 `task` 向后兼容）。
+-   会话内经 `infer prompt <text>` 预置；**prompt 为空不能开始推理**（单步 / 持续 rollout 与
+    rollout 录制开始均门控拒绝）——录制 rollout 时作为 episode 的 `task_name`（`operator=policy`）。
+-   `drain`（缓存推理）与多步 rollout（count>1）**命令模式已取消**；策略客户端的 `drain()` 方法
+    保留为内部缓存消费原语（块耗尽前不额外推理），不再暴露为独立命令。
 
 单臂任务：`policy.type` 用 `act`（通用 ACT，按启用臂数直通）；`enabled_arms` / `enabled_cameras` /
 `home_qpos` 为**运行时配置**（见 [机器人适配器（adapter）](./motrix_edge_adapter.md)）。
@@ -202,7 +217,7 @@ act 的联调（fake gRPC 服务端 + 真实 lerobot `policy_server`）见
 
 ## 相关文档
 
--   推理会话（消费 policy，驱动 connect / rollout / drain）：[会话（session）](./motrix_edge_session.md)
+-   推理会话（消费 policy，驱动 connect / rollout）：[会话（session）](./motrix_edge_session.md)
 -   命令总线（infer ip/port 命令）：[命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   vendored lerobot 与 transport 包说明：见本文件「包结构」「传输层」；代码入口：
     `src/motrix_edge/policy/`、`src/motrix_edge/transport/`、`src/lerobot/`

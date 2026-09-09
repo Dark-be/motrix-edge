@@ -14,27 +14,37 @@
 
 """InferService —— /v1/infers/* 控制器：桥接 HTTP 请求到「正在运行的 EdgeNode」。
 
-推理会话（InferSession）**无回合概念**：enter 进入后持续推理，直到 exit 退出。
-与采集（CaptureService）共用同一命令总线与租约语义：
+推理会话（InferSession）**无「多步推理」模式**：单步 / 持续推理由 ``infer rollout`` 驱动，
+推理时 **rollout 录制** = 经 ``capture episode start/end`` 控制一轮 episode（robot 不关心
+推理/采集）。与采集（CaptureService）共用同一命令总线与租约语义：
   - ``enter`` → submit ``session run infer``（选择 + 启动推理会话一步完成）；
   - ``exit``  → submit ``session quit``（结束推理，节点回 READY）；
-  - ``rollout`` → submit ``infer rollout``（单步闭环）；
-  - ``status`` 只读 node（node_state / adapter / policy），不另起会话 run。
+  - ``rollout`` → submit ``infer rollout``（单步 / continuous 持续）；
+  - ``episode_start`` / ``episode_end`` → submit ``capture episode start/end``（rollout 录制）；
+  - ``sync`` → submit ``capture sync``（录制时同步采集元信息 operator/task_name）；
+  - ``status`` 只读 node（node_state / adapter / policy / prompt / recording），不另起会话 run。
 
-受控操作（enter / exit）须持有 Edge 级活跃租约（``X-Lease-Id``，经 ``LeaseManager`` 校验）。
+受控操作（enter / exit / rollout / episode / sync）须持有 Edge 级活跃租约（``X-Lease-Id``，
+经 ``LeaseManager`` 校验）。推理 / 录制开始前必须已 ``infer prompt`` 预置非空文本
+（prompt 为空不能开始推理；录制 rollout 的默认 task_name = prompt）。
 """
+
+import json
 
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_EPISODE_END,
+    CMD_CAPTURE_EPISODE_START,
+    CMD_CAPTURE_SYNC,
     CMD_INFER_CONNECT,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     ROLLOUT_MODE_CONTINUOUS,
-    ROLLOUT_MODE_DRAIN,
+    ROLLOUT_MODE_SINGLE,
     Command,
     CommandBus,
     CommandResult,
@@ -61,10 +71,18 @@ class InferService:
 
     def status(self) -> dict:
         """状态快照（只读）：node_state / 会话类型 / session state / adapter / policy /
-        connected / metadata / 端点 / 租约。"""
+        connected / metadata / 端点 / prompt / 录制 / 采集状态 / 租约。
+
+        ``prompt`` = 当前推理文本指令（推理 / 录制前必须非空）；``recording`` = 推理会话
+        当前是否开启 rollout 录制；``capture_meta`` = 推理录制时 sync 的**默认采集元信息**
+        （operator 暂定 ``"policy"``、task_name = prompt，供前端/调用方显式 ``capture sync``）；
+        ``capture_status`` = 机器人进程实际采集状态缓存（running / operator / task_name）。
+        """
         node = self._node
         session = self._session()
         connected = bool(getattr(session, "connected", False)) if session is not None else False
+        recording = bool(getattr(session, "recording", False)) if session is not None else False
+        prompt = getattr(session, "prompt", None) if session is not None else None
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
@@ -77,6 +95,14 @@ class InferService:
                 dict(getattr(getattr(session, "policy", None), "server_metadata", None) or {}) if connected else None
             ),
             "endpoint": self._policy_endpoint(),  # 当前配置的推理节点 host / port（前端推理卡片设置）
+            # 推理文本指令（推理 / 录制前必须非空；会话内 infer prompt 预置）
+            "prompt": prompt,
+            # 推理会话当前是否开启 rollout 录制（capture episode start 后为 True）
+            "recording": recording,
+            # 推理录制时 sync 的默认采集元信息（operator 暂定 "policy"、task_name = prompt）
+            "capture_meta": {"operator": "policy", "task_name": prompt},
+            # 机器人进程实际采集状态缓存（node 周期刷新；录制时 running=True + 已同步元信息）
+            "capture_status": self._capture_status(),
             "lease_id": self._leases.status()["lease_id"],
         }
 
@@ -158,29 +184,29 @@ class InferService:
         lease_id: str | None = None,
         mode: str | None = None,
         count: int | None = None,
-        prompt: str | None = None,
     ) -> dict:
-        """推理闭环（infer rollout [count] / continuous / drain），返回最后 action 与 actions 列表。
+        """推理闭环（infer rollout）：单步（缺省）或 continuous 持续推理。
 
-        - mode 缺省 / "count"：连续推理 count 次（缺省 1，1–100），回执 count / action / actions；
-        - mode="continuous"：持续推理（启动即回执 started，直到 session quit / estop）；
-        - mode="drain"：只消耗当前缓存动作块（不发新推理请求），回执消耗步数。
-        - prompt：可选文本指令（openpi 动态 prompt，每次 rollout 可换；随观测上传）。
+        - mode 缺省 / "single"：单步推理（一次 观测 → 推理 → 动作下发），回执 count=1 /
+          action / actions；
+        - mode="continuous"：持续推理（启动即回执 started，直到 session quit / estop；
+          期间可 ``capture episode start/end`` 录制 rollout）。
 
-        须已在推理会话（ACTIVE）且持有活跃租约；未在会话 → 409；未连接推理节点 → 503。
+        **多步（count>1）与 drain（缓存推理）模式已取消**（改用单步 / 持续 + 录制）：
+        传入 → 400。prompt 不随 rollout 传：由会话内 ``infer prompt`` 预置，会话侧门控
+        （为空不能开始推理）。须已在推理会话（ACTIVE）且持有活跃租约；未在会话 → 409。
         """
         self._ensure_node()
         self._ensure_lease(lease_id)
         node = self._node
         if node.session is None or node.state != NodeState.ACTIVE:
             raise InferError("not in a task session")
-        params: dict = {}
-        if mode in (ROLLOUT_MODE_CONTINUOUS, ROLLOUT_MODE_DRAIN):
-            params["count"] = mode  # 命令层 parse_rollout_mode 按字符串识别 continuous / drain
-        elif count is not None:
-            params["count"] = count
-        if prompt is not None:
-            params["prompt"] = prompt  # openpi 动态文本指令（会话侧 set 到策略客户端）
+        mode = mode or ROLLOUT_MODE_SINGLE
+        if mode not in (ROLLOUT_MODE_SINGLE, ROLLOUT_MODE_CONTINUOUS):
+            raise InferError(f"unsupported rollout mode: {mode} (single / continuous)", status_code=400)
+        if count is not None and int(count) > 1:
+            raise InferError("multi-step rollout removed: use single-step or continuous", status_code=400)
+        params: dict = {} if mode == ROLLOUT_MODE_SINGLE else {"mode": mode}
         result = self._submit(Command(CMD_INFER_ROLLOUT, params=params, meta={"lease_id": lease_id}))
         self._raise_on_rejected(result)
         return {
@@ -190,6 +216,56 @@ class InferService:
             "action": result.data.get("action"),
             "actions": result.data.get("actions"),
         }
+
+    def episode_start(self, lease_id: str | None = None) -> dict:
+        """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
+
+        录制 rollout 需要 task_name=prompt → 会话侧门控（prompt 为空 → rejected 400，
+        前端应在开始录制前 ``infer prompt`` 预置）。受控操作：须持有活跃租约。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        result = self._submit(Command(CMD_CAPTURE_EPISODE_START, meta={"lease_id": lease_id}))
+        self._raise_on_rejected(result)
+        return {
+            "status": "accepted",
+            "episode": result.data.get("episode"),
+            "recording": bool(result.data.get("recording", False)),
+        }
+
+    def episode_end(self, lease_id: str | None = None) -> dict:
+        """结束一轮推理 rollout 录制（capture episode end）：robot 保存该 episode。"""
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        result = self._submit(Command(CMD_CAPTURE_EPISODE_END, meta={"lease_id": lease_id}))
+        self._raise_on_rejected(result)
+        return {
+            "status": "accepted",
+            "episode": result.data.get("episode"),
+            "recording": bool(result.data.get("recording", False)),
+        }
+
+    def sync(self, meta: dict, lease_id: str | None = None) -> dict:
+        """同步采集元信息（capture sync）：推理录制 rollout 时把 operator/task_name 同步到进程。
+
+        录制 rollout 的默认元信息 = ``{operator: "policy", task_name: <prompt>}``（见 status
+        的 capture_meta），由调用方显式提交本端点（Edge 不自动 sync）。"""
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        result = self._submit(
+            Command(CMD_CAPTURE_SYNC, params={"meta": json.dumps(meta or {})}, meta={"lease_id": lease_id})
+        )
+        self._raise_on_rejected(result)
+        return {"status": "accepted", "meta": result.data.get("meta")}
 
     def set_prompt(self, lease_id: str | None = None, prompt: str | None = None) -> dict:
         """运行时更新推理文本指令（openpi 动态 prompt；会话内生效，下个推理请求携带）。
@@ -229,6 +305,22 @@ class InferService:
         return {
             "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
             "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
+        }
+
+    def _capture_status(self) -> dict | None:
+        """机器人进程实际采集状态缓存（node 周期刷新；录制时 running=True + 已同步元信息）。
+
+        推理会话录制 rollout 时 node 同样周期刷新 ``capture_status``；此处只读缓存，
+        不因前端轮询实时请求 SDK 进程。
+        """
+        node = self._node
+        capture_status = getattr(node, "capture_status", None) if node is not None else None
+        if capture_status is None:
+            return None
+        return {
+            "running": bool(getattr(capture_status, "running", False)),
+            "operator": getattr(capture_status, "operator", None),
+            "task_name": getattr(capture_status, "task_name", None),
         }
 
     def _policy_ref(self):
