@@ -16,11 +16,12 @@
 
 **发现 + 实例化一步完成**：Edge 配置不声明 adapter 身份（id / name / type），只配置
 「在哪里找」（``adapter`` 段 host/port）；``discover_adapter(host, port)`` 向固定端口
-发 ``POST /v1/discover`` 主动寻找机器人进程（响应**只含身份** id / name / type），找到则
+发 ``POST /v1/discover`` 主动寻找机器人进程（响应含身份 id / name / type 与**进程自报的
+连接参数** endpoint / shm_name），找到则
 按 ``type`` 经 **Python entry points**（``motrix_edge.adapters``，名 = adapter 类型）
-懒加载并实例化——解析出的 ``name`` / ``id`` / ``type`` 传入构造函数，能力与连接参数由
-adapter **内部类常量**定义。node 只解析 host/port 并调用，不接触 ``DiscoveredRobot`` /
-``get_adapter``。
+懒加载并实例化——解析出的 ``name`` / ``endpoint`` / ``shm_name`` 传入构造函数（缺省回退
+类常量），能力由 adapter **内部类常量**定义。node 只解析 host/port 并调用，不接触
+``DiscoveredRobot`` / ``get_adapter``。
 
 本包不内置任何具体机器人实现；具体机器人由外部 SDK / 包实现 RobotAdapter 并按同一机制
 注册接入（adapter 只负责把 Edge 指令转发给进程、读取进程观测）。
@@ -38,7 +39,6 @@ from .base import (
     KEY_QPOS,
     Action,
     AdapterCapability,
-    CaptureData,
     CaptureStatus,
     DiscoveredRobot,
     HealthStatus,
@@ -46,9 +46,11 @@ from .base import (
     RobotCapabilities,
 )
 from .http_contract import (
+    FIELD_ENDPOINT,
     FIELD_NAME,
     FIELD_ROBOT,
     FIELD_RUNNING,
+    FIELD_SHM_NAME,
     FIELD_TYPE,
     PATH_DISCOVER,
 )
@@ -92,10 +94,15 @@ def discover_adapter(
 
 
 def _robot_from_mapping(robot: dict) -> DiscoveredRobot:
-    """discover 响应 ``robot`` 块 → ``DiscoveredRobot``（只取身份 name / type）。"""
+    """discover 响应 ``robot`` 块 → ``DiscoveredRobot``（身份 + 进程自报连接参数）。
+
+    ``endpoint`` / ``shm_name`` 缺失或为空 → None，adapter 实例化时回退类常量。
+    """
     return DiscoveredRobot(
         name=str(robot.get(FIELD_NAME, "")),
         type=str(robot.get(FIELD_TYPE, "")),
+        endpoint=robot.get(FIELD_ENDPOINT) or None,
+        shm_name=robot.get(FIELD_SHM_NAME) or None,
     )
 
 
@@ -111,11 +118,11 @@ def get_adapter(
     """工厂：按机器人进程身份的 ``type`` 懒加载并实例化 adapter（**只做实例化**）。
 
     **发现与实例化分离**：discover 由调用方完成（``discover_adapter`` 发 ``POST
-    /v1/discover`` 返回 ``DiscoveredRobot``，只含身份）；此处按 ``discovered.type``
-    （entry point 名）``load()`` 实例化，并把 discover 解析出的名称
-    ``cls(name=...)`` 传入构造函数——``type`` 由 adapter 类常量 ``ADAPTER_TYPE``
-    确定（实例化类名 = entry point 名），不随 discover 传入；能力与连接参数由 adapter
-    **内部类常量**定义，**不接收 Edge 配置**。
+    /v1/discover`` 返回 ``DiscoveredRobot``，含身份与进程自报连接参数）；此处按
+    ``discovered.type`` （entry point 名）``load()`` 实例化，并把 discover 解析出的
+    ``name`` / ``endpoint`` / ``shm_name`` 传入构造函数——``type`` 由 adapter 类常量
+    ``ADAPTER_TYPE`` 确定（实例化类名 = entry point 名），不随 discover 传入；能力由
+    adapter **内部类常量**定义，**不接收 Edge 配置**。
     - 仅在被选中时才 import 对应类（连带其硬件 SDK），避免导入 motrix_edge 时因缺少
       未选中适配器的 SDK 而报 ModuleNotFoundError。
 
@@ -129,7 +136,12 @@ def get_adapter(
         raise ValueError(f"Can't find adapter type '{discovered.type}'. Available types are: {available}")
 
     adapter_cls = eps[discovered.type].load()  # 此刻才 import，加载该适配器及其 SDK
-    adapter = adapter_cls(name=discovered.name)
+    # 连接参数取进程自报值（None → 子类类常量回退）：discover 可达即指令可达
+    adapter = adapter_cls(
+        name=discovered.name,
+        endpoint=discovered.endpoint,
+        shm_name=discovered.shm_name,
+    )
     if required_capability is not None and not adapter.capabilities.supports(required_capability):
         raise ValueError(
             f"Adapter '{discovered.type}' does not support capability '{required_capability.value}'. "
@@ -207,7 +219,6 @@ __all__ = [
     "KEY_QPOS",
     "Action",
     "AdapterCapability",
-    "CaptureData",
     "CaptureStatus",
     "DiscoveredRobot",
     "HealthStatus",

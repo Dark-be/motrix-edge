@@ -31,14 +31,16 @@
 | POST | ``/v1/rollout``          | ``{action: [dim]}``    | ``{status}``                                   |
 | POST | ``/v1/teleop``           | ``{enabled}``          | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
-| GET  | ``/v1/data_status``      | —                      | ``{data_dir, data_files, running}``            |
-| GET  | ``/v1/capture/status``   | —                      | ``{running, operator, task_name, meta}``       |
+| GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录与列表）      |
 | POST | ``/v1/capture/sync``     | ``{meta}``             | ``{status}``                                   |
 | POST | ``/v1/capture/start``    | —                      | ``{status}``                                   |
 | POST | ``/v1/capture/end``      | —                      | ``{status}``                                   |
 
 - ``/v1/discover``：机器人进程**自描述探活**（不初始化）——声明身份与它支持被哪些
   adapter 类型操作（``supported_adapters``），edge 据此把 adapter 标记为可用并选择。
+- ``/v1/capture/status`` 响应字段：``running``（进程是否正在采集）/ ``operator`` /
+  ``task_name`` / ``meta`` / ``data_dir`` / ``data_files``——**合并**原 ``/v1/data_status``
+  （数据目录与列表），避免两处状态不一致。
 - ``status`` 取值 ``accepted`` 表示指令已被 SDK 接受。
 """
 
@@ -51,9 +53,8 @@ PATH_RESET = "/v1/reset"  # 程序复位到 home
 PATH_EXECUTE = "/v1/execute"  # 直接下发 raw 动作
 PATH_ROLLOUT = "/v1/rollout"  # 推理闭环：模型 action
 PATH_TELEOP = "/v1/teleop"  # 设置遥操作开关（true=遥操作 / false=程控）
-PATH_SAFE_STOP = "/v1/safe_stop"  # 安全停止
-PATH_DATA_STATUS = "/v1/data_status"  # 采集数据状态查询（数据由进程自维护）
-PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态查询（采集员 / 任务名等元信息）
+PATH_SAFE_STOP = "/v1/safe_stop"  # 安全停止（软停：停发指令并保持位姿，不断电）
+PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态（运行位 / 元信息 / 数据目录与列表）
 PATH_CAPTURE_SYNC = "/v1/capture/sync"  # 同步采集元信息到进程（保存数据时附加）
 PATH_CAPTURE_START = "/v1/capture/start"  # 开始一轮采集（episode 开始）
 PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
@@ -61,7 +62,7 @@ PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
 # ---- 请求 body 字段 ----
 FIELD_ACTION = "action"  # execute / rollout：动作数据
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
-FIELD_DATA_DIR = "data_dir"  # data_status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
+FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
 FIELD_META = "meta"  # capture sync：采集元信息（dict，保存数据时附加）
 FIELD_OPERATOR = "operator"  # capture status：采集员姓名
 FIELD_TASK_NAME = "task_name"  # capture status：任务名称
@@ -83,8 +84,8 @@ FIELD_SENSORS = "sensors"  # robot：传感器列表
 FIELD_CAPABILITIES = "capabilities"  # robot：能力 dict（capture / execute / streaming）
 FIELD_ENDPOINT = "endpoint"  # robot：SDK HTTP 指令地址
 FIELD_SHM_NAME = "shm_name"  # robot：观测共享内存通道名
-FIELD_RUNNING = "running"  # connect / data_status / robot：SDK 是否运行
-FIELD_DATA_FILES = "data_files"  # data_status：本次采集得到的数据列表
+FIELD_RUNNING = "running"  # discover / capture status / robot：是否运行（语义随端点：进程运行 / 采集进行中）
+FIELD_DATA_FILES = "data_files"  # capture status：本次采集得到的数据列表
 
 # ---- 状态值 ----
 VALUE_STATUS_ACCEPTED = "accepted"
@@ -118,7 +119,6 @@ __all__ = [
     "PATH_CAPTURE_START",
     "PATH_CAPTURE_STATUS",
     "PATH_CAPTURE_SYNC",
-    "PATH_DATA_STATUS",
     "PATH_DISCOVER",
     "PATH_EXECUTE",
     "PATH_HEALTH",

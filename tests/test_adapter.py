@@ -49,7 +49,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_TELEOP,
 )
 
-# 一个标准的机器人进程 discover 响应 robot 块（**只含身份** name / type）
+# 一个标准的机器人进程 discover 响应 robot 块（身份 name / type + 自报连接参数）
 _ROBOT_DICT = {
     "name": "Test Robot",
     "type": "test_robot",
@@ -61,7 +61,7 @@ _ROBOT_DICT = {
 
 
 def make_discovered(**overrides) -> DiscoveredRobot:
-    """构造一个机器人进程身份（DiscoveredRobot，只含 name / type）。"""
+    """构造一个机器人进程 discover 结果（name / type + 可选自报连接参数）。"""
     base = {
         "name": "Test Robot",
         "type": "test_robot",
@@ -116,6 +116,26 @@ def test_discover_adapter_instantiates_adapter(monkeypatch):
     assert isinstance(adapter, test_adapter_mod.TestRobotAdapter)
     assert adapter.name == "Test Robot"  # 身份来自 discover（name 展示 / type 实例化）
     assert adapter.type == "test_robot"
+
+
+def test_discover_adapter_uses_reported_connection_params(monkeypatch):
+    """进程自报的 endpoint / shm_name 进 adapter 构造（类常量退化为缺省值）。
+
+    回归：曾只取 name / type，导致换端口后「discover 成功、指令仍发往写死的 8090」。
+    """
+    robot = dict(_ROBOT_DICT, endpoint="http://127.0.0.1:8091", shm_name="reported_obs")
+    _patch_discover_client(monkeypatch, payload={"status": "accepted", "robot": robot})
+    adapter = discover_adapter(host="127.0.0.1", port=8091)
+    assert adapter is not None
+    assert adapter.sdk_url == "http://127.0.0.1:8091"  # 不是类常量缺省 8090
+    assert adapter.shm_name == "reported_obs"
+
+
+def test_adapter_falls_back_to_class_constants():
+    """无 discover 上报（如进程内测试 / 老进程）：连接参数回退 adapter 类常量。"""
+    adapter = get_adapter(make_discovered())
+    assert adapter.sdk_url == test_adapter_mod.TestRobotAdapter.SDK_URL.rstrip("/")
+    assert adapter.shm_name == test_adapter_mod.TestRobotAdapter.SHM_NAME
 
 
 def test_discover_adapter_none_when_not_running(monkeypatch):
@@ -230,7 +250,7 @@ def test_fallback_when_no_discovered():
 
 def test_robot_adapters_lists_entry_points():
     names = {t for t, _, _ in robot_adapters()}
-    assert names >= {"test_robot"}
+    assert names >= {"test_robot", "dual_piper"}
 
 
 def test_get_adapter_with_required_capability():
@@ -242,7 +262,7 @@ def test_get_adapter_with_required_capability():
 
 
 def test_robot_adapters_filters_by_capability():
-    expected = {"test_robot"}
+    expected = {"test_robot", "dual_piper"}
     assert expected <= {t for t, _, _ in robot_adapters(AdapterCapability.CAPTURE)}
     assert expected <= {t for t, _, _ in robot_adapters(AdapterCapability.EXECUTE)}
     assert expected <= {t for t, _, _ in robot_adapters(AdapterCapability.STREAMING)}

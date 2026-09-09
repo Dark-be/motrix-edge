@@ -153,8 +153,8 @@ class FakeRobot:
         self.ready = True
         self.name = "Test Robot"  # 适配器展示名（preview / enter 回显）
 
-    def data_status(self):
-        """采集数据状态：未启用 → None（适配器决定保存路径 / 数据列表）。"""
+    def capture_status(self):
+        """采集状态：未启用 → None（适配器决定运行位 / 元信息 / 数据目录）。"""
         return None
 
     def safe_stop(self):

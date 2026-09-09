@@ -23,7 +23,7 @@
   capabilities    声明能力（动作维度 / 观测布局 / 相机）
   observe         读取最新观测缓存（JPEG 图像 + qpos；**不推进 / 不影响适配器运行**）
   execute         执行动作指令（直接下发）
-  data_status     采集数据状态（数据目录 + 本次采集得到的数据列表；采集会话预留）
+  capture_status  采集状态（运行位 + 元信息 + 数据目录/列表；进程自维护）
   rollout         推理闭环（被推理任务消费）
   safe_stop       安全停止（幂等、失败安全）
 
@@ -34,9 +34,9 @@
   - **观测图像为 JPEG**：观测缓存中的摄像头帧为 **JPEG 编码**（adapter 提供，如 640x480）；
     Edge 侧可解码 / 降采样后用于预览与 WebRTC 推流。
   - **采集下沉、无回合控制**：数据采集（录制写盘）由适配器 / 机器人进程自维护——Edge
-    进入采集会话后只读共享内存观测并展示，**不驱动回合**。adapter 只预留一个**数据状态**
-    接口（``data_status()``）返回数据目录 + 本次采集得到的数据列表，供 server 状态
-    上报。观测键契约（KEY_QPOS / KEY_ACTION / CAMERA_PREFIX）在此单点定义。
+    进入采集会话后只读共享内存观测并展示，**不驱动回合**。adapter 只预留一个**采集状态**
+    接口（``capture_status()``）返回运行位（进程是否正在采集）+ 元信息 + 数据目录 / 列表，
+    供 server 状态上报。观测键契约（KEY_QPOS / KEY_ACTION / CAMERA_PREFIX）在此单点定义。
 """
 
 from __future__ import annotations
@@ -77,30 +77,21 @@ class HealthStatus:
 
 
 @dataclass
-class CaptureData:
-    """采集数据状态（采集会话预留）：数据目录 + 本次采集得到的数据列表。
+class CaptureStatus:
+    """采集状态（合并原「采集数据状态」+「采集元信息」）：运行位 + 元信息 + 数据落盘。
 
     数据采集（录制写盘）由适配器 / 机器人进程自维护（Edge **不承担保存职责**，只负责
-    收集 / 上传）；adapter 通过 ``data_status()`` 返回本状态，供 server 状态上报。
+    收集 / 上传）；元信息（采集员 / 任务名等）由 ``capture sync --meta`` 从 console /
+    web 同步到进程，进程保存一轮数据时附加。Edge 周期查询（``capture_status()``）并缓存，
+    供 server 状态上报与前端展示。
     """
 
-    data_dir: str | None = None  # 数据目录（未启用 / 未知 → None）
-    data_files: list[str] = field(default_factory=list)  # 本次采集得到的数据列表
-
-
-@dataclass
-class CaptureStatus:
-    """采集状态（采集会话预留）：机器人进程当前采集元信息 + 运行位。
-
-    元信息（采集员姓名 / 任务名称等）由 ``capture sync --meta`` 从 console / web 同步到
-    机器人进程，进程保存一轮数据时附加；Edge 在采集会话期间周期查询（``capture_status()``）
-    并缓存，供 server 状态上报。
-    """
-
-    running: bool = False  # 进程当前是否在采集（录制中）
+    running: bool = False  # 进程当前是否正在采集（episode 开→关）
     operator: str | None = None  # 采集员姓名
     task_name: str | None = None  # 任务名称
     meta: dict = field(default_factory=dict)  # 通用元信息（保存数据时附加）
+    save_dir: str | None = None  # 数据保存目录（进程自维护；edge 只读）
+    data_files: list[str] = field(default_factory=list)  # 本次采集得到的数据列表
 
 
 @dataclass
@@ -127,23 +118,27 @@ class RobotCapabilities:
 
 @dataclass
 class DiscoveredRobot:
-    """机器人进程 discover 结果 —— 只保留身份（name / type）。
+    """机器人进程 discover 结果 —— 身份 + 进程自报的连接参数。
 
     身份用于实例化 adapter：``type`` 为 adapter 类 entry point 名（加载并实例化），
-    ``name`` 供展示。能力（动作维度 / 相机 / capabilities）与连接参数（SDK 地址 /
-    共享内存名）**全部由 adapter 内部类常量定义**，不随 discover 传输——discover 只
-    回答「找到了哪个类型的机器人进程」。
+    ``name`` 供展示；``endpoint`` / ``shm_name`` 是**进程自报**的连接参数（HTTP 指令
+    地址 / 观测共享内存名），adapter 优先采用（None = 无 discover，回退类常量）——
+    避免「改了服务端端口后 discover 成功、指令仍发往下写死的地址」。能力（动作维度 /
+    相机 / capabilities）仍由 adapter 内部类常量定义。
     """
 
     name: str
     type: str  # adapter 类型（entry point 名，用于加载 adapter 类）
+    endpoint: str | None = None  # 进程自报的 SDK HTTP 指令地址（None = 用 adapter 类常量）
+    shm_name: str | None = None  # 进程自报的观测共享内存名（None = 用 adapter 类常量）
 
 
 class RobotAdapter(ABC):
     """机器人硬件抽象层接口。
 
-    由 **身份参数**（discover 解析出的 ``name`` / ``id``，`type` 由类常量确定）参数化；
-    能力与连接参数（SDK 地址 / 共享内存名）由 adapter 内部类常量定义。adapter 只负责
+    由 **discover 参数**（进程解析出的 ``name`` / ``endpoint`` / ``shm_name``；``type``
+    由类常量确定）参数化；能力（动作维度 / 相机 / capabilities）由 adapter 内部类常量定义，
+    连接参数缺省回退类常量（``SDK_URL`` / ``SHM_NAME``）。adapter 只负责
     **连接进程**并转发指令 / 读取观测——不接收 Edge 配置、不自带 discover / probe（发现
     由 ``discover_adapter`` 完成）。
     """
@@ -155,14 +150,17 @@ class RobotAdapter(ABC):
     # 实例 ``capabilities`` 属性把本声明并入 RobotCapabilities.capabilities。
     CAPABILITIES: dict[AdapterCapability, bool] = {}
 
-    def __init__(self, name: str = ""):
-        """身份参数化：``name`` 由 discover 赋予（缺省为空 = 进程内测试）。
+    def __init__(self, name: str = "", *, endpoint: str | None = None, shm_name: str | None = None):
+        """身份与连接参数由 discover 赋予（缺省为空 = 进程内测试，回退类常量）。
 
-        ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（不随 discover 传输）；能力与连接参数
-        由子类类常量定义，不在此接收。
+        ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（不随 discover 传输）；能力由子类类常量
+        定义；``endpoint`` / ``shm_name`` 为进程自报的连接参数（指令地址 / 共享内存名），
+        子类缺省回退自己的类常量（``SDK_URL`` / ``SHM_NAME``）。
         """
         self.name = name
         self.type = self.ADAPTER_TYPE
+        self.endpoint = endpoint
+        self.shm_name = shm_name
 
     # ---- health / release（硬件由 SDK 进程自维护，Edge 只查询 / 释放本地资源）-----
     def release(self) -> None:
@@ -214,24 +212,14 @@ class RobotAdapter(ABC):
         """
         pass
 
-    # ---- 采集数据状态（采集会话预留：数据由适配器 / 进程自维护，无回合控制）-----
+    # ---- 采集状态（进程自维护：运行位 + 元信息 + 数据落盘）-----------------------
     # Edge 进入采集会话后只读共享内存观测并展示，不驱动回合；adapter 只预留一个
-    # data_status() 接口返回数据目录 + 本次采集得到的数据列表（供 server 上报）。
-    def data_status(self) -> CaptureData | None:
-        """采集数据状态：数据目录 + 本次采集得到的数据列表。
-
-        数据采集（录制写盘）由适配器 / 机器人进程自维护（Edge **不承担保存职责**）；
-        本方法只查询 / 上报结果。未启用采集 / 数据未知 → 返回 ``None``。子类按需覆盖。
-        """
-        return None
-
-    # ---- 采集状态（采集会话预留：采集员 / 任务名等元信息，进程自维护）----------
+    # capture_status() 接口（供 server 周期轮询上报）。
     def capture_status(self) -> CaptureStatus | None:
-        """采集状态：机器人进程当前采集元信息（采集员 / 任务名等）+ 运行位。
+        """采集状态：运行位（是否正在采集）+ 元信息（采集员 / 任务名等）+ 数据目录 / 列表。
 
-        元信息由 ``capture sync --meta`` 从 console / web 同步到进程，进程保存一轮
-        数据时附加；本方法只查询 / 上报结果。未启用采集 / 未知 → 返回 ``None``。
-        子类按需覆盖。
+        数据采集与元信息均由适配器 / 机器人进程自维护，本方法只查询 / 上报结果。
+        未启用采集 / 未知 → 返回 ``None``。子类按需覆盖。
         """
         return None
 
@@ -269,7 +257,11 @@ class RobotAdapter(ABC):
     # ---- safe_stop（安全停止）-------------------------------------------------
     @abstractmethod
     def safe_stop(self) -> None:
-        """安全停止（幂等、失败安全）。"""
+        """安全停止（幂等、失败安全）：停发指令并保持位姿——**软停，不断电**。
+
+        「断电急停」（硬件 e-stop）不属本契约：由现场急停按钮 / 作业流程负责，详见
+        wiki/design/motrix_edge_adapter.md。
+        """
         raise NotImplementedError
 
     # ---- 生命周期辅助 ----------------------------------------------------------
