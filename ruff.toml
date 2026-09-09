@@ -2,6 +2,9 @@
 line-length = 120
 output-format = "concise"
 
+# vendored 第三方包（lerobot，Apache-2.0，含生成物 pb2）：不套用项目 lint / format 规则
+extend-exclude = ["src/lerobot"]
+
 [lint]
 # Enable isort (I), Pyflakes (`F`) and pycodestyle (E, W)
 select = ["I", "E", "F", "W"]
