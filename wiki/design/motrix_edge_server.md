@@ -52,19 +52,20 @@ correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动�
 
 采集为**观测会话**，端点经 `CaptureService` 桥接：
 
-| 方法   | 路径                     | 租约          | 说明                                                                               |
-| ------ | ------------------------ | ------------- | ---------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                  |
-| GET    | `/v1/captures`           | 无            | 状态快照：node_state / session / adapter / save_dir / data_files / disk / lease_id |
-| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                    |
-| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                     |
-| GET    | `/v1/preview`            | 必需          | 最新观测预览（见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）    |
+| 方法   | 路径                     | 租约          | 说明                                                                                                 |
+| ------ | ------------------------ | ------------- | ---------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                    |
+| GET    | `/v1/captures`           | 无            | 状态快照：node_state / session / adapter / capture_running / save_dir / data_files / disk / lease_id |
+| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                      |
+| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                       |
+| GET    | `/v1/preview`            | 必需          | 最新观测预览（见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）                      |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 
-> **采集数据归属（边界）**：`save_dir` / `data_files` 为适配器 / SDK 进程自维护的
-> **状态上报占位**——Edge 不驱动落盘、不校验、不上传。实际数据落盘 / 校验 / 上传
-> **待完成**：后续按 hardware adapter 契约（`data_status()` 返回的数据文件夹）完成
+> **采集数据归属（边界）**：`capture_running` / `save_dir` / `data_files` 来自 `adapter.capture_status()`
+> （适配器 / SDK 进程自维护的**状态上报**：是否正在采集 + 数据目录与列表）——Edge 不驱动落盘、
+> 不校验、不上传。实际数据落盘 / 校验 / 上传
+> **待完成**：后续按 hardware adapter 契约完成
 > **CaptureBundle**（manifest / checksum → Local Spool → Uploader，服务端确认后才删），
 > 属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
 

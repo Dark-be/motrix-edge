@@ -40,6 +40,7 @@ motrix-edge = "motrix_edge.__main__:main"
 # 外部 SDK / 包同样在此 group 下注册自己的 RobotAdapter，核心无需改动。
 [project.entry-points."motrix_edge.adapters"]
 test_robot = "motrix_edge.adapter.test_adapter:TestRobotAdapter"
+dual_piper = "motrix_edge.adapter.dual_piper_adapter:DualPiperAdapter"
 
 [[tool.uv.index]]
 name = "motphys"

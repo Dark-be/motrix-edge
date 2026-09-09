@@ -142,7 +142,7 @@ class EdgeNode:
         frame_manager=None,
         probe_interval=2.0,
         alive_check_interval=2.0,
-        data_status_interval=2.0,
+        capture_status_interval=2.0,
         observe_interval=0.05,
     ):
         self.base_cfg = base_cfg
@@ -163,21 +163,18 @@ class EdgeNode:
         self.adapter = None
         self.adapter_name = None  # 绑定 adapter 的展示名称（discover 赋予 name）
         self.adapter_type = None  # 绑定 adapter 的类型（entry point 名，用于实例化）
-        # 周期任务参数（_tick）：探测间隔 / 失联检查间隔 / 采集数据状态刷新间隔 / 观测间隔（秒）
+        # 周期任务参数（_tick）：探测间隔 / 失联检查间隔 / 采集状态刷新间隔 / 观测间隔（秒）
         self.probe_interval = probe_interval
         self.alive_check_interval = alive_check_interval
-        self.data_status_interval = data_status_interval
+        self.capture_status_interval = capture_status_interval
         self.observe_interval = observe_interval
         self._last_probe = 0.0
         self._last_alive_check = 0.0
-        self._last_data_status = 0.0
         self._last_capture_status = 0.0
         self._last_observe = 0.0
-        # 采集数据状态缓存（adapter.data_status()）：由主循环在采集会话期间周期刷新，
-        # server /v1/captures 只读缓存，**不因前端轮询而实时请求 SDK**。
-        self._data_status = None
-        # 采集状态缓存（adapter.capture_status()）：采集员 / 任务名等元信息 + 运行位；
-        # 主循环在采集会话期间周期刷新，server /v1/captures 只读缓存。
+        # 采集状态缓存（adapter.capture_status()）：运行位 + 采集员 / 任务名等元信息 +
+        # 数据目录 / 列表。由主循环在 READY / ACTIVE 期间周期刷新（与 health 同节奏，
+        # **不限采集会话**），server /v1/captures 只读缓存——不因前端轮询而实时请求 SDK。
         self._capture_status = None
 
         # 状态进入日志钩子（INIT/IDLE/READY/ACTIVE/ERROR 统一注册到 _log_state）
@@ -189,20 +186,12 @@ class EdgeNode:
         return self.lifecycle.state
 
     @property
-    def data_status(self):
-        """采集数据状态缓存（adapter.data_status()；主循环周期刷新，server 只读）。
-
-        Edge 主循环在采集会话（ACTIVE + capture）期间自行周期查询并缓存，前端轮询
-        /v1/captures 只读本缓存——**edge 运行不依赖前端，前端只是命令下发 / 状态
-        显示的辅助页面**。
-        """
-        return self._data_status
-
-    @property
     def capture_status(self):
         """采集状态缓存（adapter.capture_status()；主循环周期刷新，server 只读）。
 
-        采集员 / 任务名等元信息 + 运行位；查询 / 缓存语义同 ``data_status``。
+        含运行位（进程是否正在采集）+ 采集员 / 任务名等元信息 + 数据目录 / 列表。
+        Edge 主循环在 READY / ACTIVE 期间自行周期查询并缓存（**不限采集会话**），前端
+        轮询 /v1/captures 只读本缓存——edge 运行不依赖前端。
         """
         return self._capture_status
 
@@ -522,7 +511,7 @@ class EdgeNode:
     # 周期任务（_tick）：adapter 探测 / 失联检查
     # ------------------------------------------------------------------
     def _tick(self) -> None:
-        """主循环周期任务：任务线程收尾 + IDLE 探测 + 失联检查 + 持续观测 + 采集数据状态刷新。"""
+        """主循环周期任务：任务线程收尾 + IDLE 探测 + 失联检查 + 持续观测 + 采集状态刷新。"""
         self._finish_task_thread()
         state = self.lifecycle.state
         if state == NodeState.IDLE:
@@ -530,9 +519,9 @@ class EdgeNode:
         elif state in (NodeState.READY, NodeState.ACTIVE):
             self._check_adapter_alive()
             self._observe()  # 持续观测（无需进入会话；显示观测统一归节点，会话不再写）
-        if state == NodeState.ACTIVE and self.session_type == "capture":
-            self._refresh_data_status()  # 采集会话期间 edge 自行周期查询数据状态并缓存
-            self._refresh_capture_status()  # 采集状态（采集员 / 任务名等元信息）同样周期刷新缓存
+            # 采集状态与 health 同节奏周期刷新（**不限采集会话**）：进会话前也要能看到
+            # 进程是否在采集（可能由现场直接启动的采集）、元信息与数据目录。
+            self._refresh_capture_status()
 
     def _observe(self) -> None:
         """节点级持续观测：把最新观测写入 FrameManager（观测不依赖「进入会话」）。
@@ -604,37 +593,18 @@ class EdgeNode:
         except Exception as exc:  # noqa: BLE001
             self._enter_error(f"adapter health check failed: {exc}")
 
-    def _refresh_data_status(self) -> None:
-        """采集会话（ACTIVE + capture）期间周期查询采集数据状态并缓存。
-
-        数据状态由 **edge 自行**向 adapter / 机器人进程查询（`data_status()`）并缓存，
-        server 的 /v1/captures 只读本缓存——前端轮询状态**不会**触发对 SDK 进程的
-        实时请求（edge 运行不依赖前端）。
-        """
-        if self.adapter is None:
-            self._data_status = None
-            return
-        now = time.monotonic()
-        if now - self._last_data_status < self.data_status_interval:
-            return
-        self._last_data_status = now
-        try:
-            self._data_status = self.adapter.data_status()
-        except Exception as exc:  # noqa: BLE001 查询失败 → 缓存置空，不中断
-            debug_print("EdgeNode", f"data_status refresh failed: {exc}", "WARNING")
-            self._data_status = None
-
     def _refresh_capture_status(self) -> None:
-        """采集会话（ACTIVE + capture）期间周期查询采集状态并缓存。
+        """周期查询采集状态并缓存（READY / ACTIVE 期间，与 health 同节奏）。
 
-        ``capture_status()`` 返回机器人进程当前采集元信息（采集员 / 任务名等）+ 运行位；
-        查询 / 缓存语义与 ``data_status`` 一致（edge 自行查询，不依赖前端轮询）。
+        ``capture_status()`` 返回运行位（进程是否正在采集）+ 采集员 / 任务名等元信息 +
+        数据目录 / 列表；查询 / 缓存语义与 ``health`` 一致（edge 自行查询，不依赖前端轮询，
+        也不限于采集会话——未进会话时同样能看到进程状态）。
         """
         if self.adapter is None:
             self._capture_status = None
             return
         now = time.monotonic()
-        if now - self._last_capture_status < self.data_status_interval:
+        if now - self._last_capture_status < self.capture_status_interval:
             return
         self._last_capture_status = now
         try:

@@ -633,7 +633,10 @@ def test_init_tick_does_not_probe(monkeypatch):
 
 
 def test_tick_refreshes_capture_status_cache():
-    """ACTIVE + capture 下 _tick 周期刷新采集状态缓存（采集员 / 任务名等元信息）。"""
+    """READY / ACTIVE 下 _tick 周期刷新采集状态缓存（运行位 + 采集员 / 任务名等元信息）。
+
+    回归：曾经只在「ACTIVE + capture」刷新，进会话前完全看不到进程是否在采集。
+    """
     from motrix_edge.adapter.base import CaptureStatus
 
     class _StatusAdapter(_FakeAdapter):
@@ -645,13 +648,11 @@ def test_tick_refreshes_capture_status_cache():
             return self.status
 
     adapter = _StatusAdapter()
-    node = EdgeNode({}, command_source=lambda: None, probe_interval=0.0, data_status_interval=0.0)
+    node = EdgeNode({}, command_source=lambda: None, probe_interval=0.0, capture_status_interval=0.0)
     node.initialize()  # INIT → IDLE
     node.adapter = adapter
     node.lifecycle.transition(NodeState.READY)
-    node.lifecycle.transition(NodeState.ACTIVE)
-    node.session_type = "capture"
-    node._tick()  # ACTIVE + capture：刷新采集状态缓存
+    node._tick()  # READY：不依赖采集会话也刷新采集状态缓存
     assert node.capture_status is adapter.status
 
 

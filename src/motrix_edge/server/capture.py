@@ -183,20 +183,21 @@ class CaptureService:
         return {"status": "accepted"}
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集数据。"""
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。"""
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
-        data_status = self._data_status()
-        save_dir = getattr(data_status, "save_dir", None) if data_status is not None else None
+        capture = self._capture_status()
+        save_dir = getattr(capture, "save_dir", None) if capture is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": session_state,
             "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
+            "capture_running": bool(getattr(capture, "running", False)) if capture is not None else False,
             "save_dir": str(save_dir) if save_dir is not None else None,
-            "data_files": list(getattr(data_status, "data_files", []) or []) if data_status is not None else [],
+            "data_files": list(getattr(capture, "data_files", []) or []) if capture is not None else [],
             "disk": self._disk_info(save_dir),
             "lease_id": lease_id,  # 当前活跃租约（独立于任务，见 /v1/leases/*）
         }
@@ -279,22 +280,23 @@ class CaptureService:
             code = result.status_code or 409
             raise CaptureError(result.error or "command rejected", status_code=code)
 
-    def _data_status(self):
-        """node 缓存的采集数据状态（``node.data_status``）；无会话 / 未缓存 → None。
+    def _capture_status(self):
+        """node 缓存的采集状态（``node.capture_status``）；未绑定 adapter / 未缓存 → None。
 
-        数据状态由 **EdgeNode 主循环在采集会话期间自行周期查询并缓存**，此处只读缓存
-        ——前端轮询 /v1/captures **不会**实时请求 SDK 进程（edge 运行不依赖前端）。
+        采集状态由 **EdgeNode 主循环在 READY / ACTIVE 期间自行周期查询并缓存**（与 health
+        同节奏，不限采集会话），此处只读缓存——前端轮询 /v1/captures **不会**实时请求
+        SDK 进程（edge 运行不依赖前端）。
         """
         node = self._node
         if node is None:
             return None
-        return getattr(node, "data_status", None)
+        return getattr(node, "capture_status", None)
 
     def _save_dir(self):
-        data_status = self._data_status()
-        if data_status is None:
+        capture = self._capture_status()
+        if capture is None:
             return None
-        return getattr(data_status, "save_dir", None)
+        return getattr(capture, "save_dir", None)
 
     @staticmethod
     def _disk_info(save_dir) -> dict:

@@ -27,7 +27,6 @@ from motrix_edge.adapter.base import (
     KEY_ACTION,
     KEY_QPOS,
     AdapterCapability,
-    CaptureData,
     CaptureStatus,
     HealthStatus,
     RobotAdapter,
@@ -39,7 +38,7 @@ class FakeRobotAdapter(RobotAdapter):
     """内存态假适配器：模拟观测缓存 / 数据状态 / 健康状态，无硬件无网络。
 
     - ``observe`` 返回有限 qpos / action（含图像键，JPEG bytes）；
-    - ``data_status`` 返回采集数据状态（数据目录 + 本次采集得到的数据列表；数据由
+    - ``capture_status`` 返回采集状态（运行位 + 元信息 + 数据目录 / 列表；数据由
       SDK 自维护，无回合控制）；
     - ``health`` / ``ready`` / ``release`` 反映进程可用性（SDK 自维护硬件与连接）。
     """
@@ -131,22 +130,19 @@ class FakeRobotAdapter(RobotAdapter):
 
     # -- 采集状态 / 元信息同步（进程自维护；供测试断言）--------------------------
     def capture_status(self):
-        """采集状态：进程当前采集元信息（采集员 / 任务名等）+ 运行位。"""
+        """采集状态：运行位 + 采集员 / 任务名等元信息 + 数据目录 / 列表。"""
         return CaptureStatus(
             running=self.capture_running,
             operator=self.capture_meta.get("operator"),
             task_name=self.capture_meta.get("task_name"),
             meta=dict(self.capture_meta),
+            save_dir=self._data_dir,
+            data_files=list(self._data_files),
         )
 
     def sync_capture_meta(self, meta) -> None:
         """同步采集元信息到进程（保存一轮数据时附加）。"""
         self.capture_meta = dict(meta or {})
-
-    # -- 采集数据状态（数据由 SDK 自维护，无回合控制）----------------------------
-    def data_status(self):
-        """采集数据状态：数据目录 + 本次采集得到的数据列表。"""
-        return CaptureData(data_dir=self._data_dir, data_files=list(self._data_files))
 
     # -- 复位 / 安全停止 -------------------------------------------------------
     def reset(self) -> None:
