@@ -125,13 +125,16 @@ def test_control_and_capture_commands_forward():
 def test_health_and_data_status():
     http = _FakeHttp(
         {
-            "/v1/health": {"ok": True},
+            "/v1/health": {"ok": True, "detail": "", "control_hz": 30.0, "measured_hz": 29.8},
             "/v1/data_status": {"data_dir": "/data/task", "data_files": ["a.hdf5", "b.json"]},
         }
     )
     adapter = _adapter(http)
 
-    assert adapter.health().ok is True
+    h = adapter.health()
+    assert h.ok is True
+    assert h.control_hz == 30.0  # 名义控制频率（robot env HZ）
+    assert h.measured_hz == 29.8  # 实测主循环帧率
     assert adapter.running is True
     data = adapter.data_status()
     assert data is not None

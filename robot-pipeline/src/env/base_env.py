@@ -30,6 +30,7 @@ env 收到启动遥操作请求后，robot就会进入遥操作模式，robot会
 import queue
 import threading
 import time
+from collections import deque
 
 from collector import get_collector
 from utils.base.data_handler import debug_print
@@ -64,6 +65,10 @@ class BaseEnv:
             )
         self._episode_open = False  # 当前是否有未关闭的 episode
         self._episodes: list[str] = []  # 已保存的 episode 文件路径
+
+        # 实测帧率统计：主循环最近周期窗口（帧间隔秒），health 上报倒推实测 Hz
+        self._frame_periods: deque[float] = deque(maxlen=30)
+        self._frame_prev_t = 0.0
 
     # ---- 控制方法（HTTP 线程调用：只入队，不直接碰 robot；主循环统一执行）---------
     def _check_action_dim(self, flat_action):
@@ -119,13 +124,31 @@ class BaseEnv:
         self.commands.put(("capture_sync", dict(meta or {})))
 
     def health(self) -> dict:
-        """健康检查：就绪（硬件 + 主循环存活 + 无错误）+ 最近错误。"""
+        """健康检查：就绪（硬件 + 主循环存活 + 无错误）+ 最近错误 + 控制频率。
+
+        ``control_hz`` = 名义控制频率（env 主循环 ``HZ``）；``measured_hz`` = 最近
+        窗口实测帧率（含 step 耗时与 sleep 抖动，更能反映真实控制节奏）。
+        """
         err = self.last_error or self.robot.last_error
         return {
             "ready": self.robot.ready and self.loop_alive and err is None,
             "loop_alive": self.loop_alive,
             "last_error": err,
+            "control_hz": self.control_hz,
+            "measured_hz": self.measured_hz,
         }
+
+    @property
+    def control_hz(self) -> float:
+        """名义控制频率（env 主循环 ``HZ``，sleep 补偿逼近）。"""
+        return float(self.HZ)
+
+    @property
+    def measured_hz(self) -> float:
+        """实测主循环帧率（最近窗口平均周期倒推）；无样本时回退名义 HZ。"""
+        if not self._frame_periods:
+            return float(self.HZ)
+        return 1.0 / (sum(self._frame_periods) / len(self._frame_periods))
 
     def data_status(self) -> dict:
         """采集数据状态：数据保存目录（绝对路径）+ 已保存 episode 文件列表。"""
@@ -179,6 +202,7 @@ class BaseEnv:
         interval = 1.0 / self.HZ
         self.loop_alive = True
         debug_print(self.robot.name, f"env loop started @ {self.HZ:.1f}Hz", "INFO")
+        self._frame_prev_t = time.perf_counter()
         try:
             while self._running:
                 t0 = time.perf_counter()
@@ -187,7 +211,11 @@ class BaseEnv:
                 except Exception as exc:  # noqa: BLE001 单帧异常不拖垮循环
                     # self.last_error = exc
                     debug_print(self.robot.name, f"env step error: {exc}", "ERROR")
-                dt = time.perf_counter() - t0
+                now = time.perf_counter()
+                # 帧间隔（含 step + sleep 补偿，首帧仅 step 无 sleep，窗口平均可忽略）
+                self._frame_periods.append(now - self._frame_prev_t)
+                self._frame_prev_t = now
+                dt = now - t0
                 sleep = interval - dt
                 if sleep > 0:
                     time.sleep(sleep)

@@ -161,13 +161,16 @@ class CaptureService:
         }
 
     def _adapter_state(self) -> dict:
-        """当前节点 active adapter 状态（身份 + 心跳缓存）。"""
+        """当前节点 active adapter 状态（身份 + 心跳缓存 + 控制频率）。"""
         node = self._node
         adapter = getattr(node, "adapter", None)
+        health = getattr(node, "adapter_health", None)
         return {
             "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
             "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
             "running": getattr(adapter, "running", None) if adapter is not None else None,
+            "control_hz": getattr(health, "control_hz", None) if health is not None else None,
+            "measured_hz": getattr(health, "measured_hz", None) if health is not None else None,
         }
 
     def exit(self, lease_id: str | None = None) -> dict:

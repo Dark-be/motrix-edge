@@ -60,9 +60,11 @@ from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION_DIM,
     FIELD_CAPABILITIES,
+    FIELD_CONTROL_HZ,
     FIELD_DATA_FILES,
     FIELD_DETAIL,
     FIELD_ENDPOINT,
+    FIELD_MEASURED_HZ,
     FIELD_META,
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
@@ -296,11 +298,16 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 健康检查
     @app.get(PATH_HEALTH)
     def health():
-        """健康检查 {ok, detail}：Edge adapter.health 消费。"""
+        """健康检查 {ok, detail, control_hz, measured_hz}：Edge adapter.health 消费。"""
         h = env.health()
         ok = bool(h.get("ready") and h.get("loop_alive"))
         detail = "" if ok else (h.get("last_error") or "robot not ready")
-        return {FIELD_OK: ok, FIELD_DETAIL: detail}
+        return {
+            FIELD_OK: ok,
+            FIELD_DETAIL: detail,
+            FIELD_CONTROL_HZ: h.get("control_hz"),
+            FIELD_MEASURED_HZ: h.get("measured_hz"),
+        }
 
     # ---------------------------------------------------------------- 指令
     @app.post(PATH_RESET)

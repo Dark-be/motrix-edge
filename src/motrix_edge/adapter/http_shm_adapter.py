@@ -47,8 +47,11 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
     FIELD_DATA_FILES,
+    FIELD_DETAIL,
+    FIELD_MEASURED_HZ,
     FIELD_META,
     FIELD_OK,
     FIELD_OPERATOR,
@@ -69,6 +72,14 @@ from motrix_edge.adapter.http_contract import (
 )
 from motrix_edge.adapter.shm_contract import ObsShmReader
 from motrix_edge.utils.data_handler import debug_print
+
+
+def _as_opt_float(value) -> float | None:
+    """health 频率字段：缺失 / 非数值 → None。"""
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class HttpShmAdapter(RobotAdapter):
@@ -144,15 +155,25 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- health（实时查询 SDK 进程状态）-----------------------------------------
     def health(self) -> HealthStatus:
-        """健康检查：实时 ``GET /v1/health``（SDK 自维护硬件；Edge 只查询）。"""
+        """健康检查：实时 ``GET /v1/health``（SDK 自维护硬件；Edge 只查询）。
+
+        附带 robot 名义 / 实测控制频率（control_hz / measured_hz，robot env 上报）。
+        """
+        data = {}
         try:
             resp = self._client().get(PATH_HEALTH)
-            ok = resp.status_code == 200 and bool(resp.json().get(FIELD_OK, False))
+            data = resp.json() if resp.status_code == 200 else {}
+            ok = resp.status_code == 200 and bool(data.get(FIELD_OK, False))
         except Exception as exc:  # noqa: BLE001 进程失联
             debug_print(self.name, f"health check failed: {exc}", "WARNING")
             ok = False
         self._running = ok
-        return HealthStatus(ok=ok)
+        return HealthStatus(
+            ok=ok,
+            detail=str(data.get(FIELD_DETAIL) or ""),
+            control_hz=_as_opt_float(data.get(FIELD_CONTROL_HZ)),
+            measured_hz=_as_opt_float(data.get(FIELD_MEASURED_HZ)),
+        )
 
     # ---- 指令（经 HTTP 转发 SDK 进程）-------------------------------------------
     def reset(self) -> None:

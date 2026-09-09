@@ -194,6 +194,9 @@ class EdgeNode:
         self._last_data_status = 0.0
         self._last_capture_status = 0.0
         self._last_observe = 0.0
+        # adapter.health() 缓存（含 robot 名义/实测控制频率）：由 _check_adapter_alive 周期刷新，
+        # server /v1/captures|infers 只读缓存，**不因前端轮询而实时请求 SDK**。
+        self.adapter_health = None
         # 采集数据状态缓存（adapter.data_status()）：由主循环在采集会话期间周期刷新，
         # server /v1/captures 只读缓存，**不因前端轮询而实时请求 SDK**。
         self._data_status = None
@@ -747,9 +750,11 @@ class EdgeNode:
             return
         self._last_alive_check = now
         try:
-            if not self.adapter.health().ok:
+            self.adapter_health = self.adapter.health()  # 缓存整个 HealthStatus（含频率）
+            if not self.adapter_health.ok:
                 self._enter_error("robot process unreachable")
         except Exception as exc:  # noqa: BLE001
+            self.adapter_health = None
             self._enter_error(f"adapter health check failed: {exc}")
 
     def _refresh_data_status(self) -> None:

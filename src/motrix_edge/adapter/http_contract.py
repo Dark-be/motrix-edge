@@ -25,7 +25,7 @@
 | 方法 | 路径                     | 请求 body              | 响应 body                                      |
 | ---- | ------------------------ | ---------------------- | ---------------------------------------------- |
 | POST | ``/v1/discover``         | —                      | ``{status, robot}``（robot 自描述见下）    |
-| GET  | ``/v1/health``           | —                      | ``{ok, detail}``                               |
+| GET  | ``/v1/health``           | —                      | ``{ok, detail, control_hz, measured_hz}``      |
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
 | POST | ``/v1/execute``          | ``{action}``           | ``{status}``                                   |
 | POST | ``/v1/rollout``          | ``{action: [dim]}``    | ``{status}``                                   |
@@ -70,6 +70,8 @@ FIELD_TASK_NAME = "task_name"  # capture status：任务名称
 FIELD_STATUS = "status"  # 指令是否被接受（accepted）
 FIELD_OK = "ok"  # health：是否健康
 FIELD_DETAIL = "detail"  # health：详情
+FIELD_CONTROL_HZ = "control_hz"  # health：名义控制频率（robot env 主循环 HZ，Hz）
+FIELD_MEASURED_HZ = "measured_hz"  # health：实测主循环帧率（最近窗口，Hz）
 FIELD_ROBOT = "robot"  # discover：机器人自描述块
 FIELD_NAME = "name"  # robot：名称（展示）
 FIELD_TYPE = "type"  # robot：adapter 类型（entry point 名，用于实例化）
@@ -93,11 +95,13 @@ __all__ = [
     "FIELD_ACTION",
     "FIELD_ACTION_DIM",
     "FIELD_CAPABILITIES",
+    "FIELD_CONTROL_HZ",
     "FIELD_CONTROLLERS",
     "FIELD_DATA_DIR",
     "FIELD_DATA_FILES",
     "FIELD_DETAIL",
     "FIELD_ENDPOINT",
+    "FIELD_MEASURED_HZ",
     "FIELD_META",
     "FIELD_NAME",
     "FIELD_OBSERVATION_KEYS",
