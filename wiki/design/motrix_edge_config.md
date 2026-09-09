@@ -2,24 +2,36 @@
 
 ## 摘要
 
-`config/` 提供**全局路径常量**（`_GLOBAL_CONFIG.py`，基于包内固定位置推导仓库根，不依赖 CWD）与
-**yaml 配置加载**；CLI 入口统一在 `__main__.py`（console script `motrix-edge` 与
+`src/motrix_edge/config/` 是**配置子包**：外界配置优先（环境变量 `MOTRIX_CONFIG_DIR`），否则用
+包内 **package data** 只读兜底（`edge.yml`）；日志 / 可写状态目录遵循 XDG（`XDG_STATE_HOME`，
+缺省回退 CWD）。CLI 入口统一在 `__main__.py`（console script `motrix-edge` 与
 `python -m motrix_edge` 共用同一 `main()`）。
 
-## 全局路径常量
+> 迁移（issue #10）：仓库根顶层 `config/` 目录与 `_GLOBAL_CONFIG.py`（`ROOT_DIR` / `CONFIG_DIR` /
+> `DATA_PATH` / `LOG_PATH` 仓库根推导常量）已删除——顶层 `config/` 与 robot-pipeline 顶层
+> `config` 包同名会干扰 ruff isort 的 first-party 分类；`edge.yml` 移入包内作 package data。
 
-| 常量         | 含义                                                                |
-| ------------ | ------------------------------------------------------------------- |
-| `ROOT_DIR`   | 仓库根目录（本文件向上 4 级推导）                                   |
-| `CONFIG_DIR` | 配置目录（`ROOT_DIR/config`）                                       |
-| `DATA_PATH`  | 数据目录（采集产物）                                                |
-| `LOG_PATH`   | 日志目录（`debug_print` 的 `logs/log_*.txt` 与 `logs/uvicorn.log`） |
+## 配置路径与加载
 
-## 配置加载
+-   **优先级**：① 外界配置目录 `MOTRIX_CONFIG_DIR`（可写，同名 `yml` 覆盖包内默认）；
+    ② 包内默认 `src/motrix_edge/config/edge.yml`（`importlib.resources` 只读访问，不可写）。
+-   `load_config(name)`：外界文件存在 → 读取；否则若 `name ∈ DEFAULT_CONFIG_FILES`
+    （`("edge.yml",)`）读包内默认；均缺失 → `{}`（兜底不抛错）。
+-   `run --config <path>`：指定任意 yaml 路径（如 `/etc/motrix-edge/edge.yaml`）；
+    **路径不存在 → `SystemExit("error: File ... does not exist.")`**（干净报错，不回显 traceback）。
 
--   运行时加载 `config/<name>.yml`（默认 `edge`），`run --config <path>` 可指定文件路径
-    （缺省 `config/edge.yml`）。
--   配置段：
+路径助手（`config/__init__.py`，模块级 `CONFIG_DIR` / `LOG_PATH` 在 import 时按已设环境变量计算）：
+
+| 函数 / 常量                  | 说明                                                             |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `get_config_dir()`           | 外界配置目录（`MOTRIX_CONFIG_DIR`）；未设置 → `None`（包内默认） |
+| `config_path(name)`          | 配置文件真实路径（外界目录存在时）；无外界目录 → `None`          |
+| `writable_config_path(name)` | 可写配置路径：外界目录优先，否则落到状态目录（包内默认只读）     |
+| `get_log_dir()`              | 日志目录：`XDG_STATE_HOME/motrix`，缺省 `CWD/logs`               |
+| `get_state_dir()`            | 可写状态目录：`XDG_STATE_HOME/motrix`，缺省 `CWD`                |
+| `CONFIG_DIR` / `LOG_PATH`    | 模块级导出（`LOG_PATH` 供 `debug_print` 与 uvicorn 日志使用）    |
+
+配置段：
 
 | 段           | 说明                                                                                               | 消费方                |
 | ------------ | -------------------------------------------------------------------------------------------------- | --------------------- |

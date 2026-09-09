@@ -90,7 +90,7 @@ def _start_web(app, host: str, port: int):
 
     import uvicorn
 
-    from motrix_edge.config._GLOBAL_CONFIG import LOG_PATH
+    from motrix_edge.config import LOG_PATH
     from motrix_edge.utils.logging import uvicorn_log_config
 
     log_dir = LOG_PATH
@@ -111,14 +111,19 @@ def _run_node(args) -> None:
     """
     import os
 
-    from motrix_edge.config._GLOBAL_CONFIG import CONFIG_DIR
+    from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_state_dir, load_config
     from motrix_edge.utils.load_file import load_yaml
 
-    config_path = getattr(args, "config", None) or os.path.join(CONFIG_DIR, "edge.yml")
-    try:
-        base_cfg = load_yaml(config_path)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"error: {exc}") from exc
+    explicit = getattr(args, "config", None)
+    if explicit:
+        try:
+            base_cfg = load_yaml(explicit)
+        except FileNotFoundError as exc:  # 显式 --config 路径不存在：干净报错退出，不回显 traceback
+            raise SystemExit(f"error: {exc}") from exc
+        config_source = explicit
+    else:
+        base_cfg = load_config("edge.yml")
+        config_source = config_path("edge.yml") or "packaged default (config/edge.yml)"
 
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
@@ -129,7 +134,15 @@ def _run_node(args) -> None:
     from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.utils.data_handler import debug_print
 
-    debug_print("EdgeNode", f"Loaded config: {config_path}", "INFO")
+    config_dir = get_config_dir()
+    debug_print(
+        "EdgeNode",
+        f"Loaded config: {config_source}"
+        f" | config_dir={config_dir or 'packaged default (read-only)'}"
+        f" | state_dir={get_state_dir()}"
+        f" | log_dir={get_log_dir()}",
+        "INFO",
+    )
     os.environ["INFO_LEVEL"] = base_cfg.get("INFO_LEVEL", "DEBUG")
 
     server_cfg = base_cfg.get("server", {})

@@ -21,7 +21,7 @@ npm run format    # ruff format + prettier
 
 ```
 src/motrix_edge/     # 主包（当前为最小包骨架，完整结构随任务运行时 / 控制面 MR 落地）
-config/edge.yml      # 边缘节点配置
+  config/edge.yml    # 边缘节点配置（package data；MOTRIX_CONFIG_DIR 同名文件可覆盖）
 wiki/design/         # 设计文档（架构 / 契约）
 wiki/plan/           # 实施计划
 tests/               # 测试

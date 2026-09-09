@@ -16,7 +16,7 @@ import datetime
 import os
 import sys
 
-from motrix_edge.config._GLOBAL_CONFIG import LOG_PATH
+from motrix_edge.config import LOG_PATH
 
 # 进程内缓存日志文件路径：首次 debug_print 时确定（含时间戳），之后固定复用——
 # 避免每次写日志都重新 makedirs + 生成新文件名（旧实现跨秒产生海量日志文件）。
