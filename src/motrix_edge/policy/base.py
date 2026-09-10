@@ -18,15 +18,21 @@ class BasePolicyClient:
 
     与 RobotAdapter 基类一致：以 NotImplementedError 定义抽象接口，
     生命周期由 InferSession（会话）驱动：session_start 时 connect，session_finish 时 disconnect。
+
+    ``requires_prompt``：该策略是否**需要文本指令（prompt）**——语言条件策略（openpi）为
+    ``True``，推理前必须已 ``infer prompt <text>`` 预置非空文本（会话据此门控）；
+    非语言条件策略（act：ACT 不接受文本条件）为 ``False``，不参与 prompt 门控。
     """
+
+    requires_prompt: bool = False  # 是否需要 prompt（语言条件策略子类覆盖为 True）
 
     def __init__(self, policy_config: dict) -> None:
         self.policy_config = policy_config or {}
         self.server_metadata: dict = {}
-        # 文本指令（prompt）：统一概念——推理前必须非空（InferSession 门控），录制 rollout
-        # 时作为 episode 的 task_name。各策略读取配置缺省并映射到自身语义：openpi 每次
-        # infer 请求动态携带；act 作为策略指令下发（raw observation 的 ``task``）。
-        # None = 未设置（不能开始推理）；运行时经 ``infer prompt <text>`` 更新。
+        # 文本指令（prompt）：**仅语言条件策略（``requires_prompt=True``，如 openpi）使用**——
+        # 推理前必须非空（InferSession 门控），录制 rollout 时作 episode 的 task_name。
+        # 非语言条件策略（act）不使用 prompt：保持 None，不参与门控、不下发。
+        # 运行时经 ``infer prompt <text>`` 更新。
         self.prompt = None
 
     @property

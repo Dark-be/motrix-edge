@@ -14,6 +14,7 @@
 
 """server HTTP API 单元测试 —— FastAPI TestClient，无硬件、无网络可跑。"""
 
+import copy
 import json
 import threading
 import time
@@ -39,7 +40,11 @@ from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_SYNC,
+    CMD_INFER_CONFIG,
+    CMD_INFER_CONFIG_SET,
     CMD_INFER_CONNECT,
+    CMD_INFER_MODEL,
+    CMD_INFER_MODEL_SET,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_RTC,
@@ -53,8 +58,10 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_RUN,
     ROLLOUT_MODE_CONTINUOUS,
     CommandBus,
+    handle_policy_config,
     ok_result,
     parse_rollout_mode,
+    policy_config_status,
 )
 
 BASE_CFG = {
@@ -81,6 +88,15 @@ def _no_discover(monkeypatch):
     monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_base_cfg():
+    """隔离共享 BASE_CFG：推理端点 / 策略配置项等内存态写入不串测（用例按序变动）。"""
+    original = copy.deepcopy(BASE_CFG)
+    yield
+    BASE_CFG.clear()
+    BASE_CFG.update(original)
+
+
 def test_health_returns_identity_and_version():
     """/v1/health：版本 / identity / node 已绑定适配器 / 磁盘 / 时钟（不实时 discover）。"""
     node = FakeNode()  # 已绑定 adapter（adapter_id/type=test_robot, name=Test Robot）
@@ -98,6 +114,14 @@ def test_health_returns_identity_and_version():
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
     assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act"]
+    # 每个策略携带自己的配置项 schema（前端选择策略后动态渲染表单，进入会话前即可填）
+    by_type = {p["type"]: p for p in body["adapters"]["policies"]}
+    assert [item["key"] for item in by_type["openpi"]["config_items"]] == ["prompt"]
+    assert [item["key"] for item in by_type["act"]["config_items"]] == [
+        "pretrained_name_or_path",
+        "device",
+        "actions_per_chunk",
+    ]
 
 
 def test_health_without_node_returns_empty_robot():
@@ -298,7 +322,7 @@ class FakeCaptureSession:
 class FakeInferSession:
     """仿 InferSession：推理无回合概念，run 循环消费命令直到 session quit 退出。"""
 
-    def __init__(self, command_source=None):
+    def __init__(self, command_source=None, policy_type=None):
         self.state = SessionState.READY
         self.command_source = command_source
         self.pulled = []
@@ -307,7 +331,14 @@ class FakeInferSession:
         self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
         self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
         self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
+        self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；act=False 不门控）
+        # 会话使用的策略类型（决定配置项 schema）；缺省取配置 policy.type
+        self.policy_config_type = policy_type or BASE_CFG.get("policy", {}).get("type", "openpi")
         self._rtc_params = {"enabled": True, "suffix_len": 10}  # RTC 参数（infer rtc set 可改）
+
+    def policy_config_status(self):
+        """仿 InferSession.policy_config_status（server /v1/infers 的 policy_config 字段）。"""
+        return policy_config_status(BASE_CFG, self.policy_config_type)
 
     def rtc_status(self):
         """仿 RTCManager.status（server /v1/infers 的 rtc 字段）。"""
@@ -341,10 +372,20 @@ class FakeInferSession:
                         cmd,
                         ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]),
                     )
-            elif name == CMD_INFER_PROMPT:  # 会话内预置文本指令（prompt）
-                self.prompt = (cmd.params or {}).get("prompt")
-                self.policy.prompt = self.prompt
-                self._reply(cmd, ok_result(state="ready", prompt=self.prompt))
+            elif name in (  # 策略配置项：infer config(set) / infer model(set)（按策略 schema 校验）
+                CMD_INFER_CONFIG,
+                CMD_INFER_CONFIG_SET,
+                CMD_INFER_MODEL,
+                CMD_INFER_MODEL_SET,
+            ):
+                self._reply(cmd, handle_policy_config(BASE_CFG, cmd, policy_type=self.policy_config_type))
+            elif name == CMD_INFER_PROMPT:  # 会话内预置文本指令（prompt；经策略配置校验 + 写入内存态）
+                result = handle_policy_config(BASE_CFG, cmd, policy_type=self.policy_config_type)
+                if result.status == "ok":
+                    self.prompt = (cmd.params or {}).get("prompt")
+                    self.policy.prompt = self.prompt
+                    result = ok_result(state="ready", prompt=self.prompt)
+                self._reply(cmd, result)
             elif name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始
                 self.recording = True
                 self._reply(cmd, ok_result(state="recording", episode="start", recording=True))
@@ -409,7 +450,9 @@ class FakeNode:
                     if session_type == "capture":
                         self.session = FakeCaptureSession(command_source=self.command_source)
                     elif session_type == "infer":
-                        self.session = FakeInferSession(command_source=self.command_source)
+                        self.session = FakeInferSession(
+                            command_source=self.command_source, policy_type=(cmd.params or {}).get("policy_type")
+                        )
                     else:
                         self._reply(cmd, ok_result(status="rejected", error=f"unknown session: {session_type}"))
                         continue
@@ -1229,6 +1272,101 @@ def test_infers_status_exposes_prompt_and_recording_defaults():
     assert snap["capture_meta"] == {"operator": "policy", "task_name": "把零件放好"}
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
+
+
+def test_infers_status_exposes_policy_config():
+    """status 携带 policy_config（每个策略独立配置项的 schema + 当前值 + 缺失必填项）。
+
+    前端据此动态渲染表单，并在 ``missing`` 非空时门控推理 / 录制按钮。
+    """
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    snap = client.get("/v1/infers").json()
+    cfg = snap["policy_config"]
+    assert cfg["policy_type"] == "openpi"
+    assert cfg["requires_prompt"] is True  # 语言条件策略：prompt 必填
+    assert cfg["missing"] == ["prompt"]  # 尚未预置 → 缺失
+    assert [item["key"] for item in cfg["items"]] == ["prompt"]
+    assert cfg["items"][0]["type"] == "text"
+    # 会话内设置 prompt（走 infer prompt 快捷命令）→ 写入内存态 → 缺失清空
+    assert (
+        client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
+        == 200
+    )
+    assert client.get("/v1/infers").json()["policy_config"]["missing"] == []
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_config_sets_policy_config():
+    """POST /v1/infers/config（infer config set）：按当前策略 schema 校验并写入配置项。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入会话：受控操作 → 409
+    assert (
+        client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}}).status_code
+        == 409
+    )
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "把零件放好"}})
+    assert r.status_code == 200
+    assert r.json()["policy_config"]["missing"] == []
+    assert r.json()["policy_config"]["values"]["prompt"] == "把零件放好"
+    # 非本策略的配置项（act 的模型路径）→ 400（不静默写入）
+    bad = client.post(
+        "/v1/infers/config",
+        headers={"X-Lease-Id": lease},
+        json={"config": {"pretrained_name_or_path": "/tmp/x"}},
+    )
+    assert bad.status_code == 400
+    assert "unknown openpi config key" in bad.json()["detail"]
+    # 缺租约 → 403
+    assert client.post("/v1/infers/config", json={"config": {"prompt": "y"}}).status_code == 403
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_enter_applies_policy_config():
+    """POST /v1/infers 携带 config：进入会话前写入策略配置项（act 的模型路径运行时给定）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    r = client.post(
+        "/v1/infers",
+        headers={"X-Lease-Id": lease},
+        json={"policy_type": "act", "config": {"pretrained_name_or_path": "/tmp/pretrained_model"}},
+    )
+    assert r.status_code == 200
+    assert BASE_CFG["policy"]["pretrained_name_or_path"] == "/tmp/pretrained_model"
+    assert node.session.policy_config_type == "act"  # 会话按所选策略渲染配置项
+    # 会话内设置非本策略的配置项（act 无 prompt）→ 400
+    bad_key = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}})
+    assert bad_key.status_code == 400
+    assert "unknown act config key" in bad_key.json()["detail"]
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+    # 进入会话前下发非法键 → 400（且不进入会话）
+    bad = client.post(
+        "/v1/infers", headers={"X-Lease-Id": lease}, json={"policy_type": "act", "config": {"prompt": "x"}}
+    )
+    assert bad.status_code == 400
+    assert "unknown act config key" in bad.json()["detail"]
+    assert node.session is None  # 校验失败不进入会话
+
+
+def test_infers_config_available_before_session():
+    """未进入会话时 status.policy_config 由 base_cfg 计算（前端 enter 前即可渲染表单）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    assert client.get("/v1/infers").json()["policy_config"]["policy_type"] == "openpi"
+    BASE_CFG["policy"] = {"type": "act", "pretrained_name_or_path": "/tmp/m", "device": "cuda"}
+    cfg = client.get("/v1/infers").json()["policy_config"]
+    assert cfg["policy_type"] == "act"
+    assert cfg["requires_model_path"] is True
+    assert cfg["missing"] == []
 
 
 def test_infers_episode_recording_start_end():

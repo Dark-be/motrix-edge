@@ -38,10 +38,13 @@ policy:
   host: 127.0.0.1
   port: 8080
   type: act # 默认策略类型（会话显式选择时覆盖）
-  # --- act（lerobot gRPC）可选键（缺省用客户端默认，见 wiki/design/motrix_edge_policy.md）---
-  device: cuda # 下发给服务端的推理设备；GPU 部署填 cuda / cuda:0（勿缺省 cpu 以免策略跑 CPU）
-  pretrained_name_or_path: /home/pc16/project/lerobot/outputs/train/act_shred_scrap_paper_32/checkpoints/020000/pretrained_model # 必填：服务端据此加载 ACT 模型
-  actions_per_chunk: 50 # 动作块长 K（须匹配模型 chunk）
+  # --- 策略配置项（**每个策略有自己的独立配置项**：prompt / 模型路径 / 设备 / 块长…）---
+  # 声明见 policy.POLICY_CONFIG_ITEMS；查询 `infer config`，设置 `infer config set <json>`
+  # 或 POST /v1/infers/config（会话内）/ POST /v1/infers body `config`（进入会话前）。
+  # **运行时给定，不在此维护**：模型路径（act 的 pretrained_name_or_path，`infer model set`）
+  # 与文本指令（openpi 的 prompt，`infer prompt`）由调用方 / 前端按所选策略动态填写。
+  device: cuda # act：下发给服务端的推理设备（GPU 部署填 cuda / cuda:0）
+  actions_per_chunk: 50 # act：动作块长 K（须匹配模型 chunk）
   # --- RTC（实时动作块管理：三元切分 + 时序平滑；见 wiki/design/motrix_edge_rtc.md）---
   # 策略只返回原始动作块（openpi/act 通用）；块缓存 / 切分 / 平滑 / 预取由 rtc 统一负责。
   # 运行期可经 `infer rtc`（查询）/ `infer rtc set <json>`（设置）或 POST /v1/infers/rtc 修改。
@@ -52,6 +55,6 @@ policy:
     suffix_len: 20 # 过渡后缀 S（步）= 与下一块的重叠窗口；0 = 关闭平滑
     inference_delay: 0 # 前缀步数 D（信息性：预期块前部已失效的步数）
     aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
-  # 其余策略参数（openpi 的 action_horizon/image_size/rename_cameras/prompt 等）
+  # 其余策略参数（openpi 的 action_horizon/image_size/rename_cameras 等）
   # **一律用代码缺省值**，不在 yaml 维护；布局（单臂/双相机）由 adapter 运行时配置决定
   # 并自动传入策略（bind_adapter），openpi 侧无相机配置。

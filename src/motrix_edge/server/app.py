@@ -73,10 +73,11 @@ def _adapters(node) -> dict:
 
     - robots：node 当前绑定的唯一机器人（``[{name, type}]``，单 adapter 包；只读
       node 内存状态，**不实时 discover**）。
-    - policies：全部已注册策略适配器（``[{type, class, module}]``，前端策略选择用；
-      不触发第三方包导入）。
+    - policies：全部已注册策略适配器（``[{type, class, module, config_items}]``，前端策略
+      选择用；``config_items`` 为该策略的配置项 schema——前端选择策略后**动态渲染表单**、
+      进入会话前即可填写；不触发第三方包导入）。
     """
-    from motrix_edge.policy import policy_adapters
+    from motrix_edge.policy import policy_adapters, policy_config_items
 
     robots = []
     adapter = getattr(node, "adapter", None) if node is not None else None
@@ -88,7 +89,9 @@ def _adapters(node) -> dict:
             }
         ]
 
-    policies = [{"type": t, "class": c, "module": m} for t, c, m in policy_adapters()]
+    policies = [
+        {"type": t, "class": c, "module": m, "config_items": policy_config_items(t)} for t, c, m in policy_adapters()
+    ]
 
     return {"robots": robots, "policies": policies}
 
@@ -153,11 +156,18 @@ class WebRTCOfferRequest(BaseModel):
 
 
 class InferEnterRequest(BaseModel):
-    """POST /v1/infers 请求体：可选推理策略类型 + 进入会话前的推理节点端点（随会话锁定）。"""
+    """POST /v1/infers 请求体：可选推理策略类型 + 进入会话前的推理节点端点、策略配置项。
+
+    ``config`` 为**该策略自己的配置项**（openpi → prompt；act → pretrained_name_or_path /
+    device / actions_per_chunk），见 ``policy.POLICY_CONFIG_ITEMS``；前端按 ``/v1/health``
+    的 ``policy_config_items``（或在会话内按 ``GET /v1/infers`` 的 ``policy_config.items``）
+    动态渲染表单，提交时随本字段下发。
+    """
 
     policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
     host: str | None = Field(default=None, description="推理节点 IP（进入会话前设置；会话内锁定）")
     port: int | None = Field(default=None, ge=1, le=65535, description="推理节点端口（进入会话前设置；会话内锁定）")
+    config: dict | None = Field(default=None, description="策略配置项（按所选策略 schema 校验；如 act 的模型路径）")
 
 
 class InferRolloutRequest(BaseModel):
@@ -174,9 +184,9 @@ class InferRolloutRequest(BaseModel):
 
 
 class InferPromptRequest(BaseModel):
-    """POST /v1/infers/prompt 请求体：运行时文本指令（统一 prompt；推理/录制前必须非空）。"""
+    """POST /v1/infers/prompt 请求体：文本指令（仅需要 prompt 的策略，如 openpi）。"""
 
-    prompt: str = Field(..., min_length=1, description="文本指令（推理前必须设置；录制 rollout 作为 task_name）")
+    prompt: str = Field(..., min_length=1, description="文本指令（需要 prompt 的策略推理前必须设置）")
 
 
 class InferSyncRequest(BaseModel):
@@ -200,6 +210,17 @@ class InferRTCRequest(BaseModel):
     aggregate_fn: str | None = Field(
         default=None, description="重叠聚合：weighted_average/latest_only/average/conservative"
     )
+
+
+class InferConfigRequest(BaseModel):
+    """POST /v1/infers/config 请求体：策略配置项（可部分更新）。
+
+    对应命令 ``infer config set <json>``；按**当前策略**的配置项 schema 白名单校验并写入
+    内存态 ``policy`` 段 + 应用到运行中的策略客户端（下一请求生效）。未知键 / 类型不符 /
+    必填为空 → 400。仅需 prompt 的策略也可用 ``POST /v1/infers/prompt`` 快捷入口。
+    """
+
+    config: dict = Field(default_factory=dict, description="策略配置项（按当前策略 schema 校验）")
 
 
 class UploadScanRequest(BaseModel):
@@ -620,19 +641,28 @@ def create_app(
 
     @app.get("/v1/infers")
     async def infers_status():
-        """状态快照：node_state / adapter / policy / prompt / recording / rtc / lease_id。"""
+        """状态快照：node_state / adapter / policy / prompt / recording / rtc / policy_config / lease_id。
+
+        ``policy_config`` = 当前策略的配置项（schema 项 + 当前值 + ``missing`` 缺失必填项），
+        前端据此动态渲染表单并门控推理 / 录制按钮。
+        """
         return _infers().status()
 
     @app.post("/v1/infers")
     async def infers_enter(req: InferEnterRequest | None = None, x_lease_id: str | None = Header(default=None)):
         """进入推理会话（READY → ACTIVE）：连接推理会话并启动任务循环，需先持有有效租约。
 
-        请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）。
+        请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）、``host`` / ``port``
+        指定推理端点、``config`` 指定**该策略的配置项**（如 act 的模型路径 / openpi 的 prompt）；
+        非法键或必填项为空 → 400。
         """
         policy_type = req.policy_type if req is not None else None
         host = req.host if req is not None else None
         port = req.port if req is not None else None
-        return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type, host=host, port=port))
+        config = req.config if req is not None else None
+        return _infer_call(
+            lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type, host=host, port=port, config=config)
+        )
 
     @app.post("/v1/infers/connect")
     async def infers_connect(x_lease_id: str | None = Header(default=None)):
@@ -644,7 +674,7 @@ def create_app(
         """推理闭环（infer rollout）：单步（缺省）或 continuous 持续。
 
         body：``mode``（single 缺省 / continuous）+ ``count``（单步，仅 1）。
-        prompt 不随 rollout 传（会话内 ``infer prompt`` 预置；为空不能开始推理）。
+        需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（会话内 ``infer prompt`` 预置）；act 不需要。
         须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
         """
         mode = req.mode if req is not None else None
@@ -655,9 +685,9 @@ def create_app(
     async def infers_episode_start(x_lease_id: str | None = Header(default=None)):
         """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
 
-        录制 rollout 需要 task_name=prompt → 会话侧门控（prompt 为空 → 400，先 ``infer
-        prompt`` 预置）；录制前由调用方 ``POST /v1/infers/sync`` 显式同步采集元信息
-        （默认 operator=policy、task_name=prompt）。受控操作：须持有租约。
+        需要 prompt 的策略（如 openpi）：prompt 为空 → 400（先 ``infer prompt`` 预置）；act 不需要。
+        录制前由调用方 ``POST /v1/infers/sync`` 显式同步采集元信息（默认 operator=policy、
+        task_name=prompt）。受控操作：须持有租约。
         """
         return _infer_call(lambda: _infers().episode_start(lease_id=x_lease_id))
 
@@ -686,11 +716,24 @@ def create_app(
         params = {key: value for key, value in req.model_dump().items() if value is not None}
         return _infer_call(lambda: _infers().configure_rtc(params=params, lease_id=x_lease_id))
 
+    @app.post("/v1/infers/config")
+    async def infers_config(req: InferConfigRequest, x_lease_id: str | None = Header(default=None)):
+        """运行期设置**策略配置项**（``infer config set``）。
+
+        body 为配置项对象（可部分：openpi → prompt；act → pretrained_name_or_path / device /
+        actions_per_chunk）→ 按当前策略 schema 白名单校验并写入内存态 ``policy`` 段，同时
+        应用到运行中的策略客户端（下一请求生效）；未知键 / 类型不符 / 必填为空 → 400。
+        受控操作：须已在推理会话且持有租约。
+        """
+        return _infer_call(lambda: _infers().configure_policy_config(params=dict(req.config), lease_id=x_lease_id))
+
     @app.post("/v1/infers/prompt")
     async def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):
         """会话内预置/更新推理文本指令（统一 prompt；推理/录制前必须非空）。
 
-        须已在推理会话且持有租约；持续推理中亦可修改（下个请求生效）。
+        须已在推理会话且持有租约；持续推理中亦可修改（下个请求生效）。仅对声明 prompt
+        配置项的策略（语言条件，如 openpi）有效；等价于 ``POST /v1/infers/config``
+        提交 ``{"prompt": ...}``。
         """
         return _infer_call(lambda: _infers().set_prompt(lease_id=x_lease_id, prompt=req.prompt))
 

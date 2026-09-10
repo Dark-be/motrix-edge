@@ -27,6 +27,9 @@ from motrix_edge.transport import WsTransport
 class OpenPIClient(BasePolicyClient):
     """openpi 策略客户端：**官方 openpi WebSocket 契约** + msgpack-over-ws 传输。
 
+    语言条件策略（``requires_prompt = True``）：推理前必须已 ``infer prompt <text>`` 预置
+    非空文本指令，openpi 每次请求动态携带（服务端每帧重新 tokenize）。
+
     与官方 ``WebsocketPolicyServer``（openpi 仓 ``serve_policy.py``）互通，服务端零改动：
       connect(): websocket 连接，接收服务端 metadata（官方**不含** action_horizon，
                  action_horizon 以 policy_config 为准，缺省 50）
@@ -37,6 +40,8 @@ class OpenPIClient(BasePolicyClient):
     **策略只负责取推理结果**：动作块缓存 / 三元切分 / 时序平滑 / 预取时机由
     ``motrix_edge.rtc``（RTCManager）统一负责（见 wiki/design/motrix_edge_rtc.md）。
     """
+
+    requires_prompt = True  # 语言条件策略：推理前必须已 infer prompt 预置非空文本
 
     def __init__(self, policy_config: dict):
         super().__init__(policy_config=policy_config)

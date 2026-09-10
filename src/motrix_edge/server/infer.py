@@ -26,8 +26,9 @@
   - ``status`` 只读 node（node_state / adapter / policy / prompt / recording / rtc），不另起会话 run。
 
 受控操作（enter / exit / rollout / episode / sync / rtc）须持有 Edge 级活跃租约（``X-Lease-Id``，
-经 ``LeaseManager`` 校验）。推理 / 录制开始前必须已 ``infer prompt`` 预置非空文本
-（prompt 为空不能开始推理；录制 rollout 的默认 task_name = prompt）。
+经 ``LeaseManager`` 校验）。**prompt 仅对需要它的策略（语言条件，如 openpi）必需**：该类策略
+推理 / 录制开始前必须已 ``infer prompt`` 预置非空文本（prompt_required=True）；act 不需要 prompt。
+录制 rollout 的默认 task_name = prompt。
 """
 
 import json
@@ -39,6 +40,7 @@ from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_SYNC,
+    CMD_INFER_CONFIG_SET,
     CMD_INFER_CONNECT,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
@@ -51,6 +53,8 @@ from motrix_edge.utils.commands import (
     CommandBus,
     CommandResult,
     get_policy_endpoint,
+    policy_config_status,
+    set_policy_config,
     set_policy_endpoint,
 )
 
@@ -75,8 +79,9 @@ class InferService:
         """状态快照（只读）：node_state / 会话类型 / session state / adapter / policy /
         connected / metadata / 端点 / prompt / 录制 / 采集状态 / 租约。
 
-        ``prompt`` = 当前推理文本指令（推理 / 录制前必须非空）；``recording`` = 推理会话
-        当前是否开启 rollout 录制；``capture_meta`` = 推理录制时 sync 的**默认采集元信息**
+        ``prompt`` = 当前推理文本指令（**仅需要 prompt 的策略**：推理 / 录制前必须非空，
+        ``prompt_required=True`` 由策略声明，如 openpi；act 不需要 prompt）；``recording`` = 推理
+        会话当前是否开启 rollout 录制；``capture_meta`` = 推理录制时 sync 的**默认采集元信息**
         （operator 暂定 ``"policy"``、task_name = prompt，供前端/调用方显式 ``capture sync``）；
         ``capture_status`` = 机器人进程实际采集状态缓存（running / operator / task_name）。
         """
@@ -97,8 +102,10 @@ class InferService:
                 dict(getattr(getattr(session, "policy", None), "server_metadata", None) or {}) if connected else None
             ),
             "endpoint": self._policy_endpoint(),  # 当前配置的推理节点 host / port（前端推理卡片设置）
-            # 推理文本指令（推理 / 录制前必须非空；会话内 infer prompt 预置）
+            # 推理文本指令（需要 prompt 的策略：openpi；act 不需要 → None）
             "prompt": prompt,
+            # 该策略是否需要 prompt（openpi=True 门控；act=False 不参与门控）
+            "prompt_required": bool(getattr(session, "prompt_required", False)) if session is not None else False,
             # 推理会话当前是否开启 rollout 录制（capture episode start 后为 True）
             "recording": recording,
             # 推理录制时 sync 的默认采集元信息（operator 暂定 "policy"、task_name = prompt）
@@ -107,6 +114,9 @@ class InferService:
             "capture_status": self._capture_status(),
             # RTC（实时动作块）运行状态：enabled / params / index / remaining / last_chunk
             "rtc": self._rtc_status(),
+            # 策略配置项（**每个策略有自己的独立配置项**：prompt / 模型路径 / 设备 / 块长…）：
+            # items = schema 项 + 当前值，missing = 缺失必填项（前端据此动态渲染表单并门控按钮）
+            "policy_config": self._policy_config_status(),
             "lease_id": self._leases.status()["lease_id"],
         }
 
@@ -116,6 +126,7 @@ class InferService:
         policy_type: str | None = None,
         host: str | None = None,
         port: int | None = None,
+        config: dict | None = None,
     ) -> dict:
         """进入推理会话（READY → ACTIVE）：session run infer 一步完成选择 + 启动。
 
@@ -123,6 +134,10 @@ class InferService:
         host / port：可选推理节点端点，**进入会话前设置**——写入 ``base_cfg["policy"]``
         （内存态），创建会话实例化策略时读取生效；会话一旦进入，端点**锁定**（会话内
         ``infer ip set`` / ``infer port set`` 被拒绝，退出会话后才可改）。
+        config：可选**策略配置项**（每个策略独立：openpi → prompt，act →
+        pretrained_name_or_path / device / actions_per_chunk…）：同样在**进入会话前**写入
+        ``base_cfg["policy"]``（内存态），创建会话 / 策略客户端时读取生效；非法键或
+        必填项为空 → 400（校验按所选策略的 schema，见 ``policy.POLICY_CONFIG_ITEMS``）。
         命令化：submit session run infer（选择 + 启动一步完成，等「任务已启动」回执），
         无需轮询节点状态。须持有 Edge 级活跃租约；节点未就绪 / 已在会话中 / 节点
         ERROR → 409。
@@ -140,6 +155,13 @@ class InferService:
                 set_policy_endpoint(node.base_cfg, host=host, port=port)
             except ValueError as exc:
                 raise InferError(str(exc), status_code=400) from exc
+        # 进入会话前应用策略配置项（会话创建时读取，如 act 的模型路径 / openpi 的 prompt）
+        if config:
+            target = policy_type or getattr(node, "policy_type", None) or node.base_cfg.get("policy", {}).get("type")
+            try:
+                set_policy_config(node.base_cfg, target, dict(config))
+            except ValueError as exc:
+                raise InferError(str(exc), status_code=400) from exc
         params: dict = {"session": "infer"}
         if policy_type:
             params["policy_type"] = policy_type
@@ -150,6 +172,7 @@ class InferService:
             "lease_id": self._leases.status()["lease_id"],  # 当前租约（回显）
             "adapter": self._adapter_ref(),  # 当前节点 active adapter 身份
             "policy": policy_type,  # 回显本次选用的策略类型（None = 配置默认）
+            "policy_config": self._policy_config_status(policy_type),  # 生效后的配置项状态
         }
 
     def exit(self, lease_id: str | None = None) -> dict:
@@ -292,6 +315,28 @@ class InferService:
             "rtc": result.data.get("rtc"),
         }
 
+    def configure_policy_config(self, params: dict, lease_id: str | None = None) -> dict:
+        """运行期设置**策略配置项**（``infer config set``）：写内存态 + 应用到运行中的策略客户端。
+
+        body 为策略配置项对象（按当前策略 schema 白名单校验，可部分：openpi → prompt；
+        act → pretrained_name_or_path / device / actions_per_chunk）；未知键 / 类型不符 /
+        必填为空 → 400。须已在推理会话（ACTIVE）且持有活跃租约（与 RTC 等受控操作一致）。
+        设置后下一推理请求生效；缺失必填项（prompt / 模型路径）时前端应门控推理按钮。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        result = self._submit(
+            Command(CMD_INFER_CONFIG_SET, params={"json": json.dumps(params or {})}, meta={"lease_id": lease_id})
+        )
+        self._raise_on_rejected(result)
+        return {
+            "status": "accepted",
+            "policy_config": result.data.get("policy_config") or self._policy_config_status(),
+        }
+
     def set_prompt(self, lease_id: str | None = None, prompt: str | None = None) -> dict:
         """运行时更新推理文本指令（openpi 动态 prompt；会话内生效，下个推理请求携带）。
 
@@ -347,6 +392,25 @@ class InferService:
             "operator": getattr(capture_status, "operator", None),
             "task_name": getattr(capture_status, "task_name", None),
         }
+
+    def _policy_config_status(self, policy_type: str | None = None) -> dict:
+        """策略配置项状态（schema + 当前值 + 缺失必填项）。
+
+        会话内优先取会话快照（含**已应用**的运行值）；无会话（进入会话前）则由
+        ``base_cfg["policy"]`` 直接计算——前端据此在选择策略后即渲染配置表单。
+        """
+        if policy_type is None:
+            session = self._session()
+            session_status = getattr(session, "policy_config_status", None)
+            if callable(session_status):
+                return session_status()
+        base_cfg = getattr(self._node, "base_cfg", None) if self._node is not None else None
+        if base_cfg is None:
+            return {}
+        try:
+            return policy_config_status(base_cfg, policy_type=policy_type)
+        except ValueError:  # 未知策略类型（配置异常）：不阻断状态查询
+            return {}
 
     def _rtc_status(self) -> dict | None:
         """RTC（实时动作块）运行状态（读会话的 RTCManager；无会话 → None）。

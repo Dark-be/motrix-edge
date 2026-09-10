@@ -28,9 +28,13 @@ from motrix_edge.utils.commands import (
     CMD_CAPTURE_META_EDIT,
     CMD_CAPTURE_META_LIST,
     CMD_CAPTURE_SYNC,
+    CMD_INFER_CONFIG,
+    CMD_INFER_CONFIG_SET,
     CMD_INFER_CONNECT,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
+    CMD_INFER_MODEL,
+    CMD_INFER_MODEL_SET,
     CMD_INFER_PORT,
     CMD_INFER_PORT_SET,
     CMD_INFER_PROMPT,
@@ -45,9 +49,11 @@ from motrix_edge.utils.commands import (
     ROLLOUT_MODE_CONTINUOUS,
     CommandResult,
     handle_infer_rtc,
+    handle_policy_config,
     ok_result,
     parse_meta,
     parse_rollout_mode,
+    policy_config_status,
 )
 from motrix_edge.utils.data_handler import debug_print
 
@@ -61,9 +67,10 @@ class InferSession(BaseSession):
     推理由单步 ``infer rollout`` / 持续 ``infer rollout continuous`` 驱动；**动作块切分与
     时序平滑由 RTCManager 负责**（策略只提供原始动作块：``policy.infer_chunk``）。**推理时
     rollout 录制** = 像采集一样经 ``capture episode start/end`` 控制一轮 episode——robot 不关心
-    是推理还是采集（capturing 期间按帧录 mcap，含 action）。推理/录制开始前必须已设置
-    prompt（``infer prompt <text>``，空则拒绝）；录制时由调用方显式 ``capture sync``
-    同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。RTC 参数经
+    是推理还是采集（capturing 期间按帧录 mcap，含 action）。**prompt 仅语言条件策略需要**：
+    需要 prompt 的策略（openpi）在推理/录制开始前必须已 ``infer prompt <text>`` 预置非空文本，
+    否则拒绝；非语言条件策略（act）不需要 prompt，不参与门控。录制时由调用方显式
+    ``capture sync`` 同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。RTC 参数经
     ``infer rtc`` / ``infer rtc set <json>`` 查询与运行期修改（见 wiki/design/motrix_edge_rtc.md）。
     """
 
@@ -87,6 +94,9 @@ class InferSession(BaseSession):
         # 运行时策略选择：session run infer 携带 policy_type（HTTP / 命令）；由节点校验
         self.policy_type = policy_type
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
+        # 会话创建即应用内存态已预置的配置项：如 prompt（进入会话前经 `infer prompt` /
+        # POST /v1/infers body 的 config 预置）；不声明该项的策略无此入口（no-op）。
+        self._apply_prompt(self.policy_config.get("prompt"))
         # 把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端（openpi 据此
         # 过滤要下发的相机，不另读 edge.yml 相机名；策略无 bind_adapter 则 no-op）
         self._bind_policy_adapter()
@@ -114,15 +124,28 @@ class InferSession(BaseSession):
 
     @property
     def prompt(self) -> str | None:
-        """当前推理文本指令（策略客户端 prompt；未设置为 None —— 不能开始推理/录制）。"""
+        """当前推理文本指令（策略客户端 prompt；未设置为 None）。
+
+        仅语言条件策略（``requires_prompt=True``，如 openpi）必需；act 等非语言条件策略
+        不需要（保持 None，不参与门控、不下发）。
+        """
         return getattr(getattr(self, "policy", None), "prompt", None)
 
-    def _require_prompt(self, cmd) -> bool:
-        """开始推理 / 开始 rollout 录制前门控：prompt 必须已设置（``infer prompt <text>``）。
+    @property
+    def prompt_required(self) -> bool:
+        """当前策略是否需要 prompt（委托 ``policy.requires_prompt``）。"""
+        return bool(getattr(getattr(self, "policy", None), "requires_prompt", False))
 
-        空 prompt → 回执 rejected（400）并返回 False（不执行推理 / 不开录制）；
-        prompt 作为录制 episode 的 task_name（operator=policy），故录制也要求已设置。
+    def _require_prompt(self, cmd) -> bool:
+        """推理 / rollout 录制前门控：**仅对需要 prompt 的策略**（``policy.requires_prompt``）。
+
+        语言条件策略（openpi）要求会话内已 ``infer prompt <text>`` 预置非空文本——空 →
+        回执 rejected（400）并返回 False（不执行推理 / 不开录制）；prompt 同时作为录制
+        episode 的 task_name。非语言条件策略（act：ACT 不接受文本条件）**不需要 prompt**，
+        不门控、直接放行。
         """
+        if not self.prompt_required:
+            return True
         prompt = self.prompt
         if not prompt or not str(prompt).strip():
             self._reply(
@@ -190,12 +213,12 @@ class InferSession(BaseSession):
             return False
 
     def _apply_prompt(self, prompt) -> None:
-        """应用推理文本指令（统一 prompt 概念）：写入策略客户端运行时 ``prompt``。
+        """应用推理文本指令（语言条件策略的配置项）：写入策略客户端运行时 ``prompt``。
 
-        openpi 每次 infer 请求携带该文本（服务端每帧重新 tokenize，可换）；act 作为
-        策略指令下发（raw observation 的 ``task``）。prompt 由 ``infer prompt <text>``
-        会话内预置（不随 rollout 命令传）；推理 / 录制开始前必须非空。``prompt`` 非
-        None 即设置（空文本已在调用方校验）。
+        openpi 每次 infer 请求携带该文本（服务端每帧重新 tokenize，可换）；不声明 prompt
+        配置项的策略（如 act）无 ``prompt`` 属性，此处 no-op。prompt 由 ``infer prompt <text>``
+        会话内预置（不随 rollout 命令传）；需要 prompt 的策略在推理 / 录制开始前必须非空。
+        ``prompt`` 非 None 即设置（空文本已在调用方校验）。
         """
         if prompt is None:
             return
@@ -204,17 +227,53 @@ class InferSession(BaseSession):
             policy.prompt = str(prompt)
             debug_print(self.name, f"Policy prompt set: {prompt!r}", "INFO")
 
+    def _on_policy_config(self, cmd):
+        """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
+        ``infer model(set)``（**每个策略有自己的独立配置项**，见 ``policy.POLICY_CONFIG_ITEMS``）。
+
+        先经 ``handle_policy_config`` 按**当前策略的配置项 schema** 校验并持久化到内存态
+        ``base_cfg["policy"]``（下次会话生效）；设置类命令再应用到运行中的策略客户端（下一请求生效）。
+        参数缺失 / 非法键 / 类型不符 → rejected（400，不崩溃）。
+        """
+        result = handle_policy_config(self.base_cfg, cmd, policy_type=self.policy_type)
+        if result.status != "ok":
+            return result
+        written = result.data.get("written") or {}
+        if written:
+            self._apply_policy_config(written)
+        if cmd.name == CMD_INFER_PROMPT:  # 保持既有回执形状（prompt=...）
+            return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
+        return ok_result(state=getattr(self, "state", "ready"), **result.data)
+
+    def _apply_policy_config(self, written: dict) -> None:
+        """把设置项应用到运行中的策略客户端（下一请求生效）。
+
+        ``prompt`` → 策略 prompt（语言条件策略每次请求携带）；其余键 → ``policy.policy_config``
+        （策略自读，如 act 的 ``pretrained_name_or_path`` 在首次下发策略指令时读取）。
+        """
+        if written.get("prompt") is not None:
+            self._apply_prompt(written["prompt"])
+        policy_config = getattr(getattr(self, "policy", None), "policy_config", None)
+        if isinstance(policy_config, dict):
+            for key, value in written.items():
+                if key != "prompt":
+                    policy_config[key] = value
+
+    def policy_config_status(self) -> dict:
+        """策略配置项状态（schema + 当前值 + 缺失必填项；server ``/v1/infers`` 上报 / 前端表单）。"""
+        return policy_config_status(self.base_cfg, policy_type=self.policy_type)
+
     def _set_prompt_cmd(self, cmd) -> None:
         """``infer prompt <text>``：会话内预置推理文本指令（推理 / 录制前必须非空）。
 
         主循环（等待命令）与持续推理循环均可处理；缺文本 → rejected（不崩溃）。
+        仅对**声明了 prompt 配置项**的策略（语言条件，如 openpi）可用。
         """
         text = cmd.params.get("prompt")
         if text is None or not str(text).strip():
             self._reply(cmd, CommandResult(status="rejected", error="infer prompt requires <text>", status_code=400))
             return
-        self._apply_prompt(text)
-        self._reply(cmd, ok_result(state=getattr(self, "state", "ready"), prompt=str(text)))
+        self._reply(cmd, self._on_policy_config(cmd))
 
     def _bind_policy_adapter(self):
         """把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端。
@@ -275,7 +334,7 @@ class InferSession(BaseSession):
                 except ValueError as exc:
                     self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
                     continue
-                if not self._require_prompt(cmd):  # prompt 为空不能开始推理
+                if not self._require_prompt(cmd):  # 需要 prompt 的策略：为空不能开始推理
                     continue
                 if not self._ensure_connected(cmd):  # 惰性自连：未连接则自动连接（失败已回执）
                     continue
@@ -286,7 +345,7 @@ class InferSession(BaseSession):
                     return result
                 self._run_single(cmd)  # 单步推理（缺省）
             elif name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始（robot 不关心模式）
-                if not self._require_prompt(cmd):  # 录制 rollout 需要 task_name=prompt
+                if not self._require_prompt(cmd):  # 需要 prompt 的策略：录制 task_name=prompt
                     continue
                 self._start_recording(cmd)
             elif name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
@@ -311,8 +370,17 @@ class InferSession(BaseSession):
                 self._execute_action(cmd)
             elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
                 self._set_teleop(cmd)
-            elif name == CMD_INFER_PROMPT:  # 运行时可改文本指令（会话内预置；推理/录制前必须非空）
-                self._set_prompt_cmd(cmd)
+            elif name in (  # 策略配置项：查询 / 设置（每个策略有独立配置项，见 policy.POLICY_CONFIG_ITEMS）
+                CMD_INFER_PROMPT,
+                CMD_INFER_CONFIG,
+                CMD_INFER_CONFIG_SET,
+                CMD_INFER_MODEL,
+                CMD_INFER_MODEL_SET,
+            ):
+                if name == CMD_INFER_PROMPT:  # 文本指令：会话内预置（推理/录制前必须非空）
+                    self._set_prompt_cmd(cmd)
+                else:
+                    self._reply(cmd, self._on_policy_config(cmd))
             elif name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数：查询 / 设置（应用到运行中 manager）
                 self._reply(cmd, self._on_infer_rtc(cmd))
             elif name in (  # 推理端点：查询可用；**设置随会话锁定**（进入会话前经 enter / 前端设置）
@@ -449,8 +517,12 @@ class InferSession(BaseSession):
                     CommandResult(status="rejected", error="continuous rollout already running", status_code=409),
                 )
                 continue
-            if name == CMD_INFER_PROMPT:  # 持续推理中动态改 prompt（下个推理请求生效）
-                self._set_prompt_cmd(cmd)
+            if name in (CMD_INFER_PROMPT, CMD_INFER_CONFIG, CMD_INFER_CONFIG_SET, CMD_INFER_MODEL, CMD_INFER_MODEL_SET):
+                # 持续推理中动态改策略配置项（prompt / model path 等，下个推理请求生效）
+                if name == CMD_INFER_PROMPT:
+                    self._set_prompt_cmd(cmd)
+                else:
+                    self._reply(cmd, self._on_policy_config(cmd))
                 continue
             if name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # 持续中查询 / 设置 RTC 参数
                 self._reply(cmd, self._on_infer_rtc(cmd))

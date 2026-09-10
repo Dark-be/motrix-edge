@@ -45,13 +45,14 @@ def make_signals(*seq):
 
 
 class _FakePolicy:
-    def __init__(self):
+    def __init__(self, requires_prompt=False):
+        self.requires_prompt = requires_prompt  # 是否语言条件策略（openpi=True 门控；act=False 不门控）
         self.infer_calls = 0
         self.reset_calls = 0
         self.disconnect_calls = 0
         self.prepare_calls = 0
         self.connect_calls = 0
-        self.prompt = None  # 统一文本指令（会话内 infer prompt 预置；推理/录制前必须非空）
+        self.prompt = None  # 语言条件策略的配置项（会话内 infer prompt 预置；推理/录制前必须非空）
         self.bind_calls = 0  # bind_adapter（adapter 布局传入）
         self.bound_cameras = None
         self.bound_action_dim = None
@@ -189,9 +190,9 @@ def test_infer_rollout_single_step_replies_action(monkeypatch):
 
 
 def test_infer_rollout_requires_prompt(monkeypatch):
-    """prompt 为空不能开始推理：infer rollout（未设 prompt）→ rejected（不推理）。"""
+    """prompt 为空不能开始推理：语言条件策略（openpi）infer rollout（未设 prompt）→ rejected。"""
     adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
+    policy = _FakePolicy(requires_prompt=True)
     _patch(monkeypatch, policy)
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
@@ -206,9 +207,9 @@ def test_infer_rollout_requires_prompt(monkeypatch):
 
 
 def test_infer_rollout_continuous_requires_prompt(monkeypatch):
-    """prompt 为空不能开始推理：infer rollout continuous（未设 prompt）→ rejected。"""
+    """prompt 为空不能开始推理：语言条件策略 infer rollout continuous（未设 prompt）→ rejected。"""
     adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
+    policy = _FakePolicy(requires_prompt=True)
     _patch(monkeypatch, policy)
     replies = []
     cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
@@ -329,9 +330,9 @@ def test_infer_capture_episode_recording_toggles(monkeypatch):
 
 
 def test_infer_capture_episode_start_requires_prompt(monkeypatch):
-    """录制 rollout 需要 task_name=prompt：prompt 为空时 capture episode start → rejected。"""
+    """录制 rollout 需要 task_name=prompt：语言条件策略 prompt 为空时 capture episode start → rejected。"""
     adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
+    policy = _FakePolicy(requires_prompt=True)
     _patch(monkeypatch, policy)
     replies = []
     start = _REGISTRY.parse_argv(["capture", "episode", "start"])
@@ -344,6 +345,103 @@ def test_infer_capture_episode_start_requires_prompt(monkeypatch):
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
     assert "prompt required" in replies[0].error
+
+
+def test_infer_non_language_policy_needs_no_prompt(monkeypatch):
+    """非语言条件策略（act：requires_prompt=False）**不需要 prompt**：不门控推理 / 录制。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()  # requires_prompt=False（act 语义）
+    _patch(monkeypatch, policy)
+    replies = []
+    rollout = _REGISTRY.parse_argv(["infer", "rollout"])
+    start = _REGISTRY.parse_argv(["capture", "episode", "start"])
+    rollout.reply_to = replies.append
+    start.reply_to = replies.append
+    session = _build_session(adapter, policy, (start, rollout, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert session.prompt_required is False
+    assert adapter.start_capture_calls == 1  # 无 prompt 也可开录制
+    assert policy.infer_calls == 1  # 无 prompt 也可推理
+    assert replies[0].status == "ok"
+
+
+def test_infer_config_command_queries_policy_items(monkeypatch):
+    """``infer config``：返回当前策略的配置项（schema + 当前值 + 缺失必填项）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=True)
+    _patch(monkeypatch, policy)
+    replies = []
+    config = _REGISTRY.parse_argv(["infer", "config"])
+    config.reply_to = replies.append
+    session = _build_session(adapter, policy, (config, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "ok"
+    snapshot = replies[0].data["policy_config"]
+    assert snapshot["policy_type"] == "openpi"  # 未显式选策略 → 配置缺省类型
+    assert snapshot["requires_prompt"] is True
+    assert snapshot["missing"] == ["prompt"]  # 未预置 → 缺失必填项
+    assert [item["key"] for item in snapshot["items"]] == ["prompt"]
+
+
+def test_infer_config_set_applies_to_running_policy(monkeypatch):
+    """``infer config set <json>``：写内存态 + 应用到运行中的策略客户端（下一请求生效）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=True)
+    config = {"policy": {"infer_freq": 1000, "type": "openpi"}}
+    _patch(monkeypatch, policy)
+    replies = []
+    set_cmd = _REGISTRY.parse_argv(["infer", "config", "set", '{"prompt": "把零件放好"}'])
+    set_cmd.reply_to = replies.append
+    session = infer_session.InferSession(config, command_source=make_signals(set_cmd, "session quit"), adapter=adapter)
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "ok"
+    assert replies[0].data["written"] == {"prompt": "把零件放好"}
+    assert policy.prompt == "把零件放好"  # 立刻应用到策略客户端
+    assert config["policy"]["prompt"] == "把零件放好"  # 同时写入内存态（下次会话生效）
+    assert session.policy_config_status()["missing"] == []
+
+
+def test_infer_config_set_rejects_unknown_key(monkeypatch):
+    """``infer config set`` 非本策略配置项 / 类型不符 → rejected（400，不崩溃）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=True)
+    _patch(monkeypatch, policy)
+    replies = []
+    bad_key = _REGISTRY.parse_argv(["infer", "config", "set", '{"pretrained_name_or_path": "/tmp/x"}'])
+    bad_type = _REGISTRY.parse_argv(["infer", "config", "set", '{"prompt": ""}'])
+    bad_key.reply_to = replies.append
+    bad_type.reply_to = replies.append
+    session = _build_session(adapter, policy, (bad_key, bad_type, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 400
+    assert "unknown openpi config key" in replies[0].error
+    assert replies[1].status == "rejected"
+    assert policy.prompt is None  # 空文本不生效
+
+
+def test_infer_model_set_applies_to_policy_config(monkeypatch):
+    """``infer model set <path>``：lerobot 类策略（act）的模型路径运行时给定。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    config = {"policy": {"infer_freq": 1000, "type": "act", "device": "cuda"}}
+    _patch(monkeypatch, policy)
+    replies = []
+    set_model = _REGISTRY.parse_argv(["infer", "model", "set", "/tmp/pretrained_model"])
+    set_model.reply_to = replies.append
+    session = infer_session.InferSession(
+        config, command_source=make_signals(set_model, "session quit"), adapter=adapter
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "ok"
+    assert replies[0].data["written"] == {"pretrained_name_or_path": "/tmp/pretrained_model"}
+    assert config["policy"]["pretrained_name_or_path"] == "/tmp/pretrained_model"
+    assert session.policy_config_status()["requires_model_path"] is True
 
 
 def test_infer_capture_sync_syncs_meta(monkeypatch):

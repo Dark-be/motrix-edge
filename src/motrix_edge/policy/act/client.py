@@ -31,6 +31,8 @@ from motrix_edge.transport.grpc import AsyncInferenceGrpcTransport
 class ACTClient(BasePolicyClient):
     """ACT 策略客户端：与 lerobot 官方 AsyncInference gRPC policy_server 互通（流式动作块）。
 
+    **非语言条件策略（``requires_prompt = False``）**：ACT 不接受文本条件，**不需要设置
+    prompt**——不参与会话的 prompt 门控，也不会向服务端下发 ``task`` / prompt 字段。
     与 openpi（WebSocket + MsgPack 一问一答）不同，act 走 **lerobot 原生流式**
     （edge = Robot 侧 gRPC 客户端）：
       connect()  建立 gRPC channel + ``Ready`` 握手（策略指令延后到首次 infer，
@@ -49,6 +51,8 @@ class ACTClient(BasePolicyClient):
         TimedObservation / TimedAction）: vendored ``lerobot``（``src/lerobot``）
     """
 
+    requires_prompt = False  # 非语言条件策略：不需要 prompt，不参与会话门控
+
     def __init__(self, policy_config: dict):
         super().__init__(policy_config=policy_config)
         self._transport = AsyncInferenceGrpcTransport(
@@ -59,10 +63,6 @@ class ACTClient(BasePolicyClient):
         # lerobot act 策略参数（edge.yml policy 段）
         self._actions_per_chunk = int(self.policy_config.get("actions_per_chunk", 50))
         self._fps = int(self.policy_config.get("fps", 30))
-        # 文本指令（prompt）：与 openpi 统一概念——``infer prompt <text>`` 会话内设置，
-        # 推理前必须非空；作为策略指令下发（raw observation 的 ``task``）。
-        # 配置键：``prompt`` 优先，旧 ``task`` 键向后兼容（缺省 None）。
-        self.prompt = self.policy_config.get("prompt") or self.policy_config.get("task") or None
         self._rename_cameras = dict(self.policy_config.get("rename_cameras") or {})
         # 策略输入相机子集（edge 观测图像名；None = 全部）：只下发这些相机，其余过滤——
         # 避免把策略 image_features 里没有的相机（如 cam_left_wrist）发给服务端导致
@@ -201,8 +201,6 @@ class ACTClient(BasePolicyClient):
         for edge, dataset_cam in self._policy_cameras(observation):
             value = observation[f"{KEY_OBS_IMAGE_PREFIX}{edge}"]
             raw[dataset_cam] = resize_with_pad(to_rgb_uint8(value), *self._image_size)
-        if self.prompt:
-            raw["task"] = self.prompt
         return raw
 
     def _send_observation(self, raw: dict, timestep: int) -> None:
