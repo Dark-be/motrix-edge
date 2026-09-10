@@ -17,7 +17,11 @@ import time
 import numpy as np
 
 from motrix_edge.adapter import AdapterCapability
-from motrix_edge.policy import get_policy
+from motrix_edge.policy import (
+    get_policy,
+    policy_config_connect_locked_keys,
+    validate_policy_type,
+)
 from motrix_edge.rtc import build_rtc
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
@@ -100,9 +104,19 @@ class InferSession(BaseSession):
         # 把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端（openpi 据此
         # 过滤要下发的相机，不另读 edge.yml 相机名；策略无 bind_adapter 则 no-op）
         self._bind_policy_adapter()
-        # 实时动作块管理器（RTC）：策略只提供原始动作块（infer_chunk），块缓存 / 三元切分 /
-        # 时序平滑 / 预取时机由 RTCManager 统一负责（参数 = base_cfg policy.rtc，运行期可改）。
-        self.rtc = build_rtc(self.policy, self.policy_config.get("rtc") or {})
+        # 实时动作块管理器（RTC）：策略只提供原始动作块（infer_chunk），块长上限 H / 三元切分
+        # （前置段 P 跳过 + 执行段 + 后缀段）/ 时序平滑 / 预取时机由 RTCManager 负责
+        # （参数 = base_cfg policy.rtc，运行期可改）。control_hz = 控制频率：把实测推理耗时折算成
+        # 步数上报（供人工设定前置段 P）。配置非法（P+E+S>H / S<=P）不应到此——命令层已拦截。
+        try:
+            self.rtc = build_rtc(
+                self.policy,
+                self.policy_config.get("rtc") or {},
+                control_hz=(1.0 / self.step_interval) if self.step_interval > 0 else None,
+            )
+        except ValueError as exc:  # 兜底：内存态配置非法时退回代码缺省，保证会话可进入
+            debug_print(self.name, f"RTC config invalid ({exc}); falling back to defaults", "WARNING")
+            self.rtc = build_rtc(self.policy, control_hz=(1.0 / self.step_interval) if self.step_interval > 0 else None)
 
         self.state = SessionState.INIT  # 实时状态（供外部查询）
         # 录制状态：推理会话内是否开启了一轮 rollout 录制（capture episode start/end）。
@@ -229,12 +243,26 @@ class InferSession(BaseSession):
 
     def _on_policy_config(self, cmd):
         """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
-        ``infer model(set)``（**每个策略有自己的独立配置项**，见 ``policy.POLICY_CONFIG_ITEMS``）。
+        ``infer model(set)``（**公共项 host / port + 每个策略自己的配置项**，见 ``policy.POLICY_CONFIG_ITEMS``）。
 
         先经 ``handle_policy_config`` 按**当前策略的配置项 schema** 校验并持久化到内存态
         ``base_cfg["policy"]``（下次会话生效）；设置类命令再应用到运行中的策略客户端（下一请求生效）。
         参数缺失 / 非法键 / 类型不符 → rejected（400，不崩溃）。
+
+        **策略已连接后锁定的项**（``locked_when_connected``，如端点 host / port）：连接目标不能热改
+        （否则与实际连接不一致）→ rejected（409）。**未连接时与其它配置项同层级**：可改，
+        并同步到运行中的策略客户端（下次 ``infer connect`` 用新端点）。
         """
+        if cmd.name in (CMD_INFER_CONFIG_SET, CMD_INFER_MODEL_SET):  # 仅设置类命令需门控
+            locked = self._connect_locked_config_keys(cmd)
+            if locked:
+                return CommandResult(
+                    status="rejected",
+                    error=(
+                        f"策略已连接，端点已锁定：{locked}（连接目标不能热改：请先退出推理会话 / 断开连接后再修改）"
+                    ),
+                    status_code=409,
+                )
         result = handle_policy_config(self.base_cfg, cmd, policy_type=self.policy_type)
         if result.status != "ok":
             return result
@@ -245,18 +273,50 @@ class InferSession(BaseSession):
             return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
         return ok_result(state=getattr(self, "state", "ready"), **result.data)
 
+    def _connect_locked_config_keys(self, cmd) -> list[str]:
+        """本次设置里属于「策略已连接后禁改」的配置键（``locked_when_connected``，如端点）。
+
+        未连接 → 返回空列表（与其它配置项一样可改）；只统计**本策略 schema 内**的键，
+        不在 schema 内的键不算锁定（留给主处理回执「unknown config key」）。
+        """
+        if not self.connected:
+            return []
+        if cmd.name == CMD_INFER_MODEL_SET:
+            params = {"pretrained_name_or_path": cmd.params.get("path")}
+        else:
+            try:
+                params = parse_meta(cmd.params.get("json"), what="infer config set")
+            except ValueError:
+                return []
+        policy_type = self._effective_policy_type()
+        locked_keys = policy_config_connect_locked_keys(policy_type)
+        return sorted(key for key in params if key in locked_keys)
+
+    def _effective_policy_type(self) -> str:
+        """本会话实际使用的策略类型（显式选择优先，否则配置 ``policy.type``；非法 → 空串）。"""
+        try:
+            return validate_policy_type(self.policy_type or self.policy_config.get("type", "openpi"))
+        except ValueError:
+            return ""
+
     def _apply_policy_config(self, written: dict) -> None:
         """把设置项应用到运行中的策略客户端（下一请求生效）。
 
+        ``host`` / ``port`` → ``policy.set_endpoint``（重建传输层连接目标，下次 connect 生效）；
         ``prompt`` → 策略 prompt（语言条件策略每次请求携带）；其余键 → ``policy.policy_config``
         （策略自读，如 act 的 ``pretrained_name_or_path`` 在首次下发策略指令时读取）。
         """
+        endpoint = {key: written[key] for key in ("host", "port") if key in written}
+        if endpoint:
+            set_endpoint = getattr(getattr(self, "policy", None), "set_endpoint", None)
+            if callable(set_endpoint):
+                set_endpoint(host=endpoint.get("host"), port=endpoint.get("port"))
         if written.get("prompt") is not None:
             self._apply_prompt(written["prompt"])
         policy_config = getattr(getattr(self, "policy", None), "policy_config", None)
         if isinstance(policy_config, dict):
             for key, value in written.items():
-                if key != "prompt":
+                if key not in ("prompt", "host", "port"):
                     policy_config[key] = value
 
     def policy_config_status(self) -> dict:

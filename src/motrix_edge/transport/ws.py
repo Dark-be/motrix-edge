@@ -34,14 +34,20 @@ class WsTransport(BaseTransport):
 
     def __init__(self, host="0.0.0.0", port=None, api_key=None, connect_timeout=5.0):
         super().__init__(host=host, port=port, api_key=api_key, connect_timeout=connect_timeout)
-        self._uri = host if str(host).startswith("ws") else f"ws://{host}"
-        if port is not None:
-            self._uri += f":{port}"
         self._api_key = api_key
         self._connect_timeout = connect_timeout  # 单次连接尝试超时（open + metadata 接收）
         self._packer = msgpack_numpy.Packer()
         self._ws = None
         self.server_metadata = None
+        self._rebuild_target()  # URI 由 host / port 派生（端点变更后重建）
+
+    def _rebuild_target(self) -> None:
+        """按 ``config`` 的 host / port 重建 websocket URI（端点变更后调用）。"""
+        host = self.config.get("host")
+        port = self.config.get("port")
+        self._uri = host if str(host).startswith("ws") else f"ws://{host}"
+        if port is not None:
+            self._uri += f":{port}"
 
     @property
     def connected(self) -> bool:

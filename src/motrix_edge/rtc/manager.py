@@ -18,16 +18,24 @@
 本管理器负责：
 
   - **块队列**：``{绝对步号: 动作}``（消费过的步弹出）；``_index`` 单调递增（reset 归零）；
-  - **三元切分**：新块按当前步号切 ``prefix``（过去已失效，丢弃）/ ``execution``（实际执行段，
-    ``execution_horizon`` 步）/ ``suffix``（过渡后缀，留在队列）；
-  - **时序平滑**：块重叠步（同一绝对步号）按 ``aggregate_fn`` 融合，块边界由此平滑衔接；
-  - **预取时机**：队列剩余 ``<= suffix_len`` 时**同步**拉下一块，保证不断流；
+  - **块长上限 H**：一次推理只取策略块的前 ``action_horizon`` 步（如 10 步 = 10Hz × 1s）；
+  - **三元切分**：把这块按 ``prefix_len``（前置段 P，**推理期间已被执行** → 跳过）/ 执行段（E）/
+    ``suffix_len``（后缀 S，过渡到下一块）切开；默认 ``E = H - P - S``；
+  - **时序平滑**：块重叠步（同一绝对步号）按 ``aggregate_fn`` 融合——新块执行段与前一块后缀
+    重叠的部分加权平均，未重叠部分直接执行；
+  - **预取时机**：队列剩余 ``<= prefix_len + suffix_len``（= 执行段还剩 P 步）时拉下一块——
+    推理耗时的 P 步正好吃掉**执行段的尾巴**，响应回来时后缀段还没被消费 → 新块执行段与
+    后缀段完整重叠融合；
   - **运行期参数**：``configure``（``infer rtc set`` / ``POST /v1/infers/rtc``）；``status`` 上报。
 
-``enabled=False`` → 无 RTC 退化：每步请求一次、只取块首步（无块缓存 / 无平滑）。
+关键关系：``P + E + S = H``（三段把一块切开）、``E > P``（执行段要长于推理耗时，否则每步都触发
+推理）、重叠步数 = ``min(S, E)``。``enabled=False`` → 无 RTC 退化：每步请求一次、只取块首步
+（无块缓存 / 无平滑 / 无跳过）。
 """
 
 from __future__ import annotations
+
+import time
 
 import numpy as np
 
@@ -36,14 +44,14 @@ from motrix_edge.rtc.base import as_action_chunk, get_aggregate_fn
 # 代码缺省参数（edge.yml ``policy.rtc`` 段可覆盖；运行期 ``infer rtc set`` 可改）。
 DEFAULT_RTC_CONFIG = {
     "enabled": True,  # 关闭 → 每步一次推理只取块首步（无块缓存 / 无平滑）
-    "action_horizon": 50,  # 块长 H（信息性；缺省取策略 metadata / 客户端默认）
-    "execution_horizon": None,  # 实际执行段 E；None = H - suffix_len
-    "suffix_len": 10,  # 过渡后缀 S（= 与下一块重叠窗口）；0 = 关闭平滑
-    "inference_delay": 0,  # 前缀步数 D（信息性：预期块前部已失效的步数）
+    "action_horizon": 50,  # 块长上限 H：一次推理只取策略块的前 H 步（<=0 = 用整块）
+    "prefix_len": 0,  # 前置段 P：推理期间已被执行的前 P 步（跳过）——也是提前发请求的提前量
+    "execution_horizon": None,  # 执行段 E；None = 实际块长 - P - S
+    "suffix_len": 10,  # 后缀段 S（= 与下一块重叠窗口）；0 = 关闭平滑
     "aggregate_fn": "weighted_average",  # 重叠聚合：weighted_average/latest_only/average/conservative
 }
 
-_RTC_INT_KEYS = ("action_horizon", "execution_horizon", "suffix_len", "inference_delay")
+_RTC_INT_KEYS = ("action_horizon", "prefix_len", "execution_horizon", "suffix_len")
 
 
 def validate_params(params: dict) -> dict:
@@ -67,7 +75,7 @@ def validate_params(params: dict) -> dict:
         if key not in params:
             continue
         raw = params[key]
-        if raw is None:  # execution_horizon 允许显式 None（= 由 H - suffix_len 推导）
+        if raw is None:  # execution_horizon 允许显式 None（= 由 H - P - S 推导）
             if key != "execution_horizon":
                 raise ValueError(f"rtc param {key} must be an integer")
             out[key] = None
@@ -80,10 +88,41 @@ def validate_params(params: dict) -> dict:
             raise ValueError("rtc action_horizon must be >= 1")
         if key == "execution_horizon" and value < 1:
             raise ValueError("rtc execution_horizon must be >= 1")
-        if key in ("suffix_len", "inference_delay") and value < 0:
+        if key in ("prefix_len", "suffix_len") and value < 0:
             raise ValueError(f"rtc {key} must be >= 0")
         out[key] = value
     return out
+
+
+def validate_config(config: dict) -> dict:
+    """校验**合并后**的完整 RTC 参数（交叉约束）→ 规范化 ``dict``；非法 → ``ValueError``。
+
+    约束（见 wiki/design/motrix_edge_rtc.md）：
+
+    - ``P + E + S = H``（三段就是把这一块切开；H 是块长上限、E 缺省推导）；
+    - ``P + S < H``（块内必须有可执行段），``P + E + S <= H``（E 显式设置时）；
+    - ``E > P``（执行段要长于前置段，否则新块响应当步就满足预取条件 → 每步都推理）。
+    """
+    horizon = int(config["action_horizon"])
+    prefix_len = int(config["prefix_len"])
+    suffix_len = int(config["suffix_len"])
+    execution = config["execution_horizon"]
+    if prefix_len + suffix_len >= horizon:
+        raise ValueError(
+            f"rtc prefix_len + suffix_len must be < action_horizon (P={prefix_len} + S={suffix_len} >= H={horizon})"
+        )
+    if execution is not None and prefix_len + int(execution) + suffix_len > horizon:
+        raise ValueError(
+            f"rtc prefix_len + execution_horizon + suffix_len must be <= action_horizon "
+            f"(P={prefix_len} + E={int(execution)} + S={suffix_len} > H={horizon})"
+        )
+    derived_e = horizon - prefix_len - suffix_len if execution is None else int(execution)
+    if derived_e <= prefix_len:
+        raise ValueError(
+            f"rtc execution_horizon must be > prefix_len (E={derived_e} <= P={prefix_len}): "
+            "执行段要长于推理耗时，否则每步都会触发推理"
+        )
+    return dict(config)
 
 
 class RTCManager:
@@ -93,15 +132,18 @@ class RTCManager:
     ``infer(observation)`` 驱动每步动作（会话主循环调用），``status()`` 供 server 上报。
     """
 
-    def __init__(self, policy, config: dict | None = None):
+    def __init__(self, policy, config: dict | None = None, control_hz: float | None = None):
         self._policy = policy
         self._config = dict(DEFAULT_RTC_CONFIG)
+        # 控制频率（Hz）：仅用于把实测推理耗时折算成步数**上报**（供人工设定前置段 P）
+        self._control_hz = float(control_hz) if control_hz else None
         self._aggregate = get_aggregate_fn(self._config["aggregate_fn"])
         # 运行状态
         self._index = 0  # 下一个待下发步号（单调；reset 归零）
         self._queue: dict[int, np.ndarray] = {}  # 绝对步号 -> 动作（已聚合）
         self._last_chunk: dict | None = None  # 最近一块的切分 / 块长（status 上报）
         self._fetches = 0  # 拉块次数（会话内累计）
+        self._last_delay = 0.0  # 最近一次实测推理耗时（秒；供调 P 参考，不参与切分）
         if config:
             self.configure(**{k: v for k, v in config.items() if k in DEFAULT_RTC_CONFIG})
 
@@ -112,21 +154,37 @@ class RTCManager:
 
     @property
     def params(self) -> dict:
-        """当前参数（``execution_horizon=None`` = 由 ``H - suffix_len`` 推导）。"""
+        """当前参数（``execution_horizon=None`` = 由 ``H - P - S`` 推导）。"""
         return dict(self._config)
 
     def configure(self, **params) -> dict:
-        """运行期更新参数（校验后生效，下一块起用新参数）；返回更新后的参数。"""
-        self._config.update(validate_params(params))
+        """运行期更新参数（校验后生效，下一块起用新参数）；返回更新后的参数。
+
+        先逐键校验（``validate_params``），再把新旧合并后做交叉约束校验（``validate_config``）；
+        不满足交叉约束（``P + E + S <= H``、``E > P``）→ ``ValueError``（调用方回执 rejected 400）。
+        """
+        merged = {**self._config, **validate_params(params)}
+        validate_config(merged)
+        self._config = merged
         self._aggregate = get_aggregate_fn(self._config["aggregate_fn"])
         return self.params
 
     def _execution_horizon(self, height: int) -> int:
-        """实际执行段步数：显式配置优先，否则 ``H - suffix_len``（至少 1）。"""
+        """执行段 E：显式配置优先，否则 ``实际块长 - P - S``（至少 1）；仅用于切分上报。"""
         configured = self._config["execution_horizon"]
         if configured is not None:
             return int(configured)
-        return max(1, int(height) - int(self._config["suffix_len"]))
+        return max(1, int(height) - int(self._config["prefix_len"]) - int(self._config["suffix_len"]))
+
+    def _prefix_len(self, chunk) -> int:
+        """本块要跳过的前置段 P：**手工配置**的 P 与「块起点已落后当前步号的差」取大（后者不可避免）。
+
+        P 之所以要人工设定：推理本身耗时，返回时块首步对应的时刻已经过去（那几步机器人已经
+        执行过）——如果照下发，机械臂会往回走一小段；实际耗时可用 ``status().last_delay_steps``
+        （实测推理耗时折算的控制步数）作为定 P 的参考。
+        """
+        configured = int(self._config["prefix_len"])
+        return max(configured, max(0, self._index - chunk.start_index))
 
     # ---- 生命周期 ------------------------------------------------------------
     def reset(self) -> None:
@@ -135,19 +193,22 @@ class RTCManager:
         self._queue = {}
         self._last_chunk = None
         self._fetches = 0
+        self._last_delay = 0.0
 
     # ---- 步进（会话消费）------------------------------------------------------
     def infer(self, observation) -> np.ndarray | None:
-        """取本步应下发的动作：必要时拉新块 → 切分 → 入队聚合 → 弹出当前步动作。
+        """取本步应下发的动作：必要时拉新块 → 切分 → 跳过前置段 → 入队聚合 → 弹出当前步动作。
 
-        - 队列剩余 ``<= suffix_len``（含 0）→ **同步预取**下一块（块重叠步融合 = 时序平滑）；
+        - ``remaining <= prefix_len + suffix_len``（执行段还剩 P 步）→ **同步拉下一块**：推理耗时的
+          P 步正好吃掉执行段尾巴，后缀段完整保留给下一块做重叠融合（预取不断流）；
         - 拉块失败 / 空（``None``）→ 返回 ``None``（会话跳过本步，不升级为任务错误）；
         - ``enabled=False`` → 退化：每步请求一次、只取块首步。
         """
         if not self.enabled:
             return self._infer_direct(observation)
         remaining = self._remaining()
-        if remaining == 0 or remaining <= int(self._config["suffix_len"]):
+        trigger = int(self._config["prefix_len"]) + int(self._config["suffix_len"])
+        if remaining == 0 or remaining <= trigger:
             if not self._fetch(observation):
                 return None
         action = self._queue.pop(self._index, None)
@@ -157,7 +218,7 @@ class RTCManager:
         return action
 
     def _infer_direct(self, observation) -> np.ndarray | None:
-        """无 RTC 退化模式：请求一次、只执行块首步（不做块缓存 / 重叠）。"""
+        """无 RTC 退化模式：请求一次、只执行块首步（不做块缓存 / 平滑 / 跳过）。"""
         chunk = as_action_chunk(self._policy.infer_chunk(observation, index=self._index), start_index=self._index)
         if chunk is None or chunk.height == 0:
             return None
@@ -172,19 +233,35 @@ class RTCManager:
         return action
 
     def _fetch(self, observation) -> bool:
-        """拉取并落一块（切分：prefix 丢弃 / execution+suffix 入队聚合）；无块 → False。"""
+        """拉取并落一块：**取前 H 步** → 跳过前置段 P → 执行段 + 后缀段入队（重叠步融合）。
+
+        一次推理只取策略块的前 ``action_horizon``（H）步（如 H=10、控制 10Hz → 1s 预测），
+        再按绝对步号切三段：
+
+          - ``prefix``（前置段 P）：推理期间机器人已经执行过，跳过——否则会往回走一小段；
+          - 执行段（E）：与前一块后缀重叠的部分加权平均，未重叠部分直接执行；
+          - ``suffix``（后缀段 S）：留在队列，与下一块执行段重叠融合（时序平滑）。
+
+        跳过后同步推进 ``_index``（步号 = 物理时刻，不再落后）并丢弃队列中已过期步，
+        保证本轮立即从**未过期**的块首步继续下发（不断流）。
+        """
+        started = time.monotonic()
         chunk = as_action_chunk(self._policy.infer_chunk(observation, index=self._index), start_index=self._index)
+        self._last_delay = time.monotonic() - started
         if chunk is None:
             return False
-        # 三元切分（按当前步号对齐：块前部落在过去步号上 = prefix，已失效）
-        prefix_len = max(0, self._index - chunk.start_index)
+        chunk = chunk.head(int(self._config["action_horizon"]))  # 块长上限 H
+        prefix_len = self._prefix_len(chunk)
         execution_len = self._execution_horizon(chunk.height)
         suffix_len = int(self._config["suffix_len"])
         split = chunk.slice(prefix_len, execution_len, suffix_len)
-        # 入队：丢弃 prefix；execution + suffix 入队，重叠步按 aggregate_fn 融合（时序平滑）
+        # 步号对齐物理时刻：跳过前置段（已被执行过的步），丢弃过期队列项
+        self._index = max(self._index, chunk.start_index + prefix_len)
+        self._queue = {index: action for index, action in self._queue.items() if index >= self._index}
+        # 入队：执行段 + 后缀段；与上一块后缀重叠的步按 aggregate_fn 融合（时序平滑）
         for index, action in chunk.steps():
             if index < self._index:
-                continue  # prefix：过去时刻，已失效
+                continue  # 前置段：已被执行过，跳过
             old = self._queue.get(index)
             self._queue[index] = action if old is None else self._aggregate(old, action)
         self._last_chunk = {
@@ -206,7 +283,7 @@ class RTCManager:
 
     # ---- 状态上报 ------------------------------------------------------------
     def status(self) -> dict:
-        """运行状态（server ``/v1/infers`` 的 ``rtc`` 字段）：参数 + 步号 + 剩余 + 最近切分。"""
+        """运行状态（server ``/v1/infers`` 的 ``rtc`` 字段）：参数 + 步号 + 剩余 + 最近切分 + 实测耗时。"""
         return {
             "enabled": self.enabled,
             "params": self.params,
@@ -214,4 +291,9 @@ class RTCManager:
             "remaining": self._remaining(),
             "fetches": self._fetches,
             "last_chunk": self._last_chunk,
+            "last_delay": round(self._last_delay, 4),  # 最近一次推理耗时（秒）
+            # 实测耗时折算的控制步数（定前置段 P 的参考；无 control_hz → None）
+            "last_delay_steps": (
+                int(round(self._last_delay * self._control_hz)) if self._control_hz and self._last_delay else 0
+            ),
         }

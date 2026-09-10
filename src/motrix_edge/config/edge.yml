@@ -50,10 +50,10 @@ policy:
   # 运行期可经 `infer rtc`（查询）/ `infer rtc set <json>`（设置）或 POST /v1/infers/rtc 修改。
   rtc:
     enabled: true # 关闭 → 每步一次推理只取块首步（无块缓存 / 无平滑）
-    action_horizon: 50 # 块长 H（信息性；缺省取策略 metadata / 客户端默认）
-    execution_horizon: 30 # 实际执行段 E（步）；缺省 = H - suffix_len
-    suffix_len: 20 # 过渡后缀 S（步）= 与下一块的重叠窗口；0 = 关闭平滑
-    inference_delay: 0 # 前缀步数 D（信息性：预期块前部已失效的步数）
+    action_horizon: 50 # 块长上限 H：一次推理只取策略块的前 H 步（如 10 = 10Hz × 1s 预测）
+    prefix_len: 0 # 前置段 P：推理期间已被执行的前 P 步（跳过，避免机械臂往回走）；查 rtc.last_delay_steps 估算
+    execution_horizon: 30 # 执行段 E：与前一块后缀重叠部分加权平均 + 未重叠部分直接执行（缺省 = H - P - S）
+    suffix_len: 20 # 后缀段 S（与下一块执行段的重叠窗口）；**须 > P**，否则平滑失效
     aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
   # 其余策略参数（openpi 的 action_horizon/image_size/rename_cameras 等）
   # **一律用代码缺省值**，不在 yaml 维护；布局（单臂/双相机）由 adapter 运行时配置决定

@@ -98,6 +98,17 @@ class ActionChunk:
         """动作维度。"""
         return int(self.actions.shape[1])
 
+    def head(self, steps: int) -> ActionChunk:
+        """取前 ``steps`` 步（块长上限 H）：``steps <= 0`` 或超过块长 → 原块。
+
+        用于「edge 每次只用块的前 H 步」（如块长 10 = 10Hz × 1s 预测）；
+        ``start_index`` 不变（首步绝对步号不动）。
+        """
+        steps = int(steps)
+        if steps <= 0 or steps >= self.height:
+            return self
+        return ActionChunk(actions=self.actions[:steps].copy(), start_index=self.start_index)
+
     def slice(self, prefix_len: int, execution_len: int, suffix_len: int) -> ChunkSlice:
         """按步数切三段（长度按实际块长截断：``prefix + execution + suffix <= H``）。"""
         prefix_len = max(0, min(int(prefix_len), self.height))

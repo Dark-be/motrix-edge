@@ -21,7 +21,7 @@
 
 
 class BaseTransport:
-    """传输层基类：connect / close / server_metadata。子类实现具体媒介。"""
+    """传输层基类：connect / close / server_metadata / set_endpoint。子类实现具体媒介。"""
 
     def __init__(self, **kwargs) -> None:
         self.config: dict = kwargs or {}
@@ -31,6 +31,30 @@ class BaseTransport:
     def connected(self) -> bool:
         """是否已建立连接（子类覆盖）。"""
         return False
+
+    @property
+    def endpoint(self) -> dict:
+        """当前目标端点（``{"host", "port"}``；来自构造参数）。"""
+        return {"host": self.config.get("host"), "port": self.config.get("port")}
+
+    def set_endpoint(self, host=None, port=None) -> dict:
+        """更新目标端点（**仅未连接时**）：写入 ``config`` 并重建连接目标。
+
+        已连接 → ``ValueError``（连接目标不能热改；由上层先断开或重建传输）。子类用
+        ``_rebuild_target()`` 重建 URI / target（默认 no-op，无目标缓存的传输无需覆盖）。
+        """
+        if self.connected:
+            raise ValueError("transport already connected: close it before changing endpoint")
+        if host is not None:
+            self.config["host"] = host
+        if port is not None:
+            self.config["port"] = port
+        self._rebuild_target()
+        return self.endpoint
+
+    def _rebuild_target(self) -> None:
+        """重建连接目标（URI / target）：在端点变更后调用。默认 no-op。"""
+        return None
 
     def connect(self):
         """建立连接（初始化传输并读取服务端 metadata）；失败应清理半开连接后抛异常。"""

@@ -49,6 +49,33 @@ class BasePolicyClient:
         if not self.connected:
             self.connect()
 
+    def set_endpoint(self, host=None, port=None) -> dict:
+        """更新推理节点端点（**仅未连接时**）：写 ``policy_config`` 并同步传输层连接目标。
+
+        会话内也可调（与其它策略配置项同级），但**策略已连接时禁止**（连接目标不能热改，
+        否则与实际连接不一致）——连接后如需换端点，先退出会话（``session quit`` 会
+        ``disconnect()``）再进。已连接 → ``ValueError``（调用方回执 rejected / 409）。
+        """
+        if self.connected:
+            raise ValueError("policy already connected: disconnect before changing endpoint")
+        if host is not None:
+            self.policy_config["host"] = host
+        if port is not None:
+            self.policy_config["port"] = port
+        self._apply_transport_endpoint(host, port)
+        return {"host": self.policy_config.get("host"), "port": self.policy_config.get("port")}
+
+    def _apply_transport_endpoint(self, host=None, port=None) -> None:
+        """把端点变更同步到传输层（默认 no-op；持有 ``_transport`` 的客户端复用）。
+
+        传输层在构造时把 host / port 固化成 URI / gRPC target，故改了 ``policy_config``
+        必须同步重建，否则下次 connect 仍连旧地址。
+        """
+        transport = getattr(self, "_transport", None)
+        setter = getattr(transport, "set_endpoint", None)
+        if callable(setter):
+            setter(host=host, port=port)
+
     def prepare(self, observation=None):
         """可选预热：下发策略指令 / 触发服务端模型加载（act 覆盖）；其余策略 no-op。
 

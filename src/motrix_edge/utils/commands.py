@@ -33,12 +33,14 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from motrix_edge.policy import (
+    policy_config_connect_locked_keys,
     policy_config_items,
     policy_config_keys,
+    policy_config_runtime_keys,
     policy_features,
     validate_policy_type,
 )
-from motrix_edge.rtc import DEFAULT_RTC_CONFIG, validate_params
+from motrix_edge.rtc import DEFAULT_RTC_CONFIG, validate_config, validate_params
 
 # ===== 命令名（空格分隔，单点定义）===========================================
 # 命令词统一**空格分隔、不用点**。分层：
@@ -387,9 +389,10 @@ def handle_infer_rtc(base_cfg, cmd) -> CommandResult:
         return ok_result(rtc=get_rtc_params(base_cfg))
     try:
         patch = validate_params(parse_meta(cmd.params.get("json"), what="infer rtc set"))
+        merged = {**get_rtc_params(base_cfg), **patch}
+        validate_config(merged)  # 交叉约束（P+E+S<=H、S>P）：配置错误在设置时就拦住
     except ValueError as exc:
         return CommandResult(status="rejected", error=str(exc), status_code=400)
-    merged = {**get_rtc_params(base_cfg), **patch}
     base_cfg.setdefault("policy", {})["rtc"] = merged
     return ok_result(rtc=merged)
 
@@ -398,7 +401,12 @@ def policy_config_status(base_cfg, policy_type=None) -> dict:
     """策略配置项状态：schema 清单 + 当前值 + 缺失必填项（供 CLI ``infer config`` / 前端表单）。
 
     返回 ``{"policy_type", "items": [schema 项 + value], "values": {...}, "missing": [...],
-    "requires_prompt", "requires_model_path", "lerobot"}``。
+    "requires_prompt", "requires_model_path", "lerobot", "runtime_keys": [...],
+    "connect_locked_keys": [...]}``。
+
+    ``items`` 含**公共项**（推理端点 ``host`` / ``port``，``group="endpoint"``、
+    ``locked_when_connected=True``）与策略自身配置项；前端按同一张表单渲染，端点仅在
+    「策略已连接」时置灰。
     """
     policy_cfg = base_cfg.get("policy", {})
     policy_type = validate_policy_type(policy_type or policy_cfg.get("type", "openpi"))
@@ -416,6 +424,8 @@ def policy_config_status(base_cfg, policy_type=None) -> dict:
         "items": items,
         "values": values,
         "missing": missing,
+        "runtime_keys": sorted(policy_config_runtime_keys(policy_type)),
+        "connect_locked_keys": sorted(policy_config_connect_locked_keys(policy_type)),
         **policy_features(policy_type),
     }
 
@@ -424,6 +434,8 @@ def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
     """按策略 schema 校验并写入内存态 ``base_cfg["policy"]``（不写回 yaml）；返回写入项。
 
     未知键（不在该策略的配置项清单内）/ 类型不符 / 必填为空 → ``ValueError``。
+    公共项 ``host`` / ``port``（推理端点）复用 ``set_policy_endpoint`` 校验（地址非空、端口 1-65535），
+    与 ``infer ip`` / ``infer port`` 同一写入路径。
     """
     allowed = policy_config_keys(policy_type)
     unknown = [key for key in params if key not in allowed]
@@ -432,7 +444,11 @@ def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
     items = {item["key"]: item for item in policy_config_items(policy_type)}
     policy_cfg = base_cfg.setdefault("policy", {})
     written: dict = {}
+    endpoint_params: dict = {}
     for key, raw in params.items():
+        if key in ("host", "port"):  # 推理端点：交给 set_policy_endpoint 统一校验 / 写入
+            endpoint_params[key] = raw
+            continue
         item = items[key]
         kind = item.get("type", "text")
         if kind == "int":
@@ -450,6 +466,16 @@ def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
                 raise ValueError(f"{key} is required (non-empty)")
         policy_cfg[key] = value
         written[key] = value
+    if endpoint_params:
+        host = endpoint_params.get("host")
+        port = endpoint_params.get("port")
+        endpoint = set_policy_endpoint(
+            base_cfg,
+            host=None if host is None or str(host).strip() == "" else host,
+            port=None if port is None or str(port).strip() == "" else port,
+        )
+        for key in endpoint_params:
+            written[key] = endpoint.get(key)
     return written
 
 
@@ -457,11 +483,11 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
     """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
     ``infer model`` / ``infer model set <path>``。
 
-    每个策略有自己的独立配置项（prompt / 模型路径 / 设备 / 块长…，见
-    ``policy.POLICY_CONFIG_ITEMS``）：``infer config`` 返回清单 + 当前值 + 缺失必填项；
-    ``infer config set <json>`` 按当前策略 schema 校验并写入（可部分）；``infer prompt`` /
-    ``infer model(set)`` 是 ``prompt`` / ``pretrained_name_or_path`` 两个内置项的**快捷命令**
-    （同一校验与写入路径）。
+    每个策略有自己的独立配置项（prompt / 模型路径 / 设备 / 块长…）+ **公共项**（推理端点
+    host / port，`group="endpoint"`、会话内锁定），见 ``policy.POLICY_CONFIG_ITEMS``：
+    ``infer config`` 返回清单 + 当前值 + 缺失必填项；``infer config set <json>`` 按当前策略 schema
+    校验并写入（可部分）；``infer prompt`` / ``infer model(set)`` 是 ``prompt`` /
+    ``pretrained_name_or_path`` 两个内置项的**快捷命令**（同一校验与写入路径）。
 
     配置写入内存态 ``base_cfg["policy"]``（**不写回 yaml**），下次 ``session run infer`` 生效；
     会话内由 InferSession 额外写入运行中的策略客户端（下一请求生效）。节点主循环（非任务态）

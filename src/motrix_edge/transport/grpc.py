@@ -29,11 +29,15 @@ class AsyncInferenceGrpcTransport(BaseTransport):
 
     def __init__(self, host="127.0.0.1", port=None, connect_timeout=5.0):
         super().__init__(host=host, port=port, connect_timeout=connect_timeout)
-        self._host = host
-        self._port = port
         self._connect_timeout = connect_timeout
         self._channel = None
         self.stub = None  # AsyncInferenceStub（connect 后可用）
+        self._rebuild_target()  # target 由 host / port 派生（端点变更后重建）
+
+    def _rebuild_target(self) -> None:
+        """按 ``config`` 的 host / port 重建 gRPC target（端点变更后调用）。"""
+        self._host = self.config.get("host") or "127.0.0.1"
+        self._port = self.config.get("port")
 
     @property
     def connected(self) -> bool:

@@ -21,7 +21,7 @@
 import numpy as np
 import pytest
 
-from motrix_edge.rtc import ActionChunk, RTCManager, build_rtc, validate_params
+from motrix_edge.rtc import ActionChunk, RTCManager, build_rtc, validate_config, validate_params
 from motrix_edge.rtc.base import ChunkSlice
 
 DIM = 2
@@ -101,7 +101,7 @@ def test_validate_params_ok_and_unknown_key():
     "params",
     [
         {"suffix_len": -1},
-        {"inference_delay": -3},
+        {"prefix_len": -3},
         {"action_horizon": 0},
         {"execution_horizon": 0},
         {"aggregate_fn": "bogus"},
@@ -176,6 +176,119 @@ def test_rtc_discards_prefix_actions():
     assert status["last_chunk"]["lens"]["prefix"] == 2  # 前 2 步为过去时刻，已失效
 
 
+# ---- 前置段跳过（P）/ 块长上限（H）-----------------------------------------
+
+
+def test_rtc_skips_configured_prefix_len():
+    """前置段 P：**手工设置**跳过的前 P 步（已被执行过，再下发会往回走）。"""
+    policy = _FakePolicy([[float(i) for i in range(1, 21)], [float(i) for i in range(101, 121)]])
+    rtc = _rtc(policy, action_horizon=20, prefix_len=2, suffix_len=4)  # E = 20 - 2 - 4 = 14
+    obs = {"observations/qpos": np.zeros(DIM, dtype=np.float32)}
+
+    # 每步值 = 绝对步号 + 1；首块跳过前 2 步（索引 0/1 已执行过）→ 本步直接下发第 3 步
+    values = [float(rtc.infer(obs)[0]) for _ in range(3)]
+    assert values == [3.0, 4.0, 5.0]
+    status = rtc.status()
+    assert status["index"] == 5  # 步号按物理时刻推进（不滞后）
+    assert status["last_chunk"]["lens"] == {"prefix": 2, "execution": 14, "suffix": 4}
+
+
+def test_rtc_action_horizon_caps_chunk(monkeypatch):
+    """块长上限 H：策略返回 20 步，只取前 10 步（10Hz × 1s 预测）。"""
+    policy = _FakePolicy([[float(i) for i in range(1, 21)]])
+    rtc = _rtc(policy, action_horizon=10, prefix_len=2, suffix_len=4)  # E = 10 - 2 - 4 = 4
+    rtc.infer({"observations/qpos": np.zeros(DIM, dtype=np.float32)})
+    last = rtc.status()["last_chunk"]
+    assert last["height"] == 10  # 只取前 10 步
+    assert last["lens"] == {"prefix": 2, "execution": 4, "suffix": 4}
+    assert rtc.status()["remaining"] == 7  # 队列只剩 10 - 2 步，本步已消费 1 步
+
+
+def test_rtc_execution_overlaps_previous_suffix():
+    """**执行段还剩 P 步时发请求**：推理耗时的 P 步吃掉执行段尾巴，后缀段与下一块重叠加权平均。
+
+    H=10 / P=2 / S=4（E = 4），块值 = 块号×100 + 块内步号（块 1/2/3 = 100s/200s/300s，起始下标 0/4/8）：
+
+    - 块 1：跳 P=2 → 执行段 = 下标 2..5（102..105），后缀段 = 下标 6..9（106..109）留在队列；
+    - 下标 4（执行段还剩 P=2 步，队列剩 P+S=6 步）→ 发请求；
+    - 块 2 到达：跳 P=2 → 从下标 6 入队 → 与块 1 后缀段重叠的 4 步（= S）加权平均，
+      其中下标 6/7 由本循环下发、下标 8/9 在**下一次推理期间被机器人执行**（故不出现在 infer 回值里）；
+    - 下个请求在下标 8（块 2 执行段还剩 P=2 步）→ 如此每 E-P=2 步一个块。
+    """
+    policy = _FakePolicy([[100 + i for i in range(10)], [200 + i for i in range(10)], [300 + i for i in range(10)]])
+    rtc = _rtc(policy, action_horizon=10, prefix_len=2, suffix_len=4)  # E = 10 - 2 - 4 = 4
+    obs = {"observations/qpos": np.zeros(DIM, dtype=np.float32)}
+
+    values = [float(rtc.infer(obs)[0]) for _ in range(6)]
+    assert values[0:2] == [102.0, 103.0]  # 块 1 执行段未重叠部分：直接执行
+    assert values[2:4] == [pytest.approx(0.3 * 106 + 0.7 * 202), pytest.approx(0.3 * 107 + 0.7 * 203)]
+    assert values[4:6] == [pytest.approx(0.3 * 206 + 0.7 * 302), pytest.approx(0.3 * 207 + 0.7 * 303)]
+    assert policy.indices == [0, 4, 8]  # 每次都在「执行段还剩 P=2 步」时请求
+    assert rtc.status()["last_chunk"]["lens"] == {"prefix": 2, "execution": 4, "suffix": 4}
+
+
+def test_rtc_prefetch_trigger_is_prefix_plus_suffix():
+    """预取触发点 = 「执行段还剩 P 步」→ ``remaining <= P + S``（不是后缀段开始）。"""
+    policy = _FakePolicy([[float(i) for i in range(1, 21)], [float(i) for i in range(101, 121)]])
+    rtc = _rtc(policy, action_horizon=20, prefix_len=2, suffix_len=4)  # E = 20 - 2 - 4 = 14
+    obs = {"observations/qpos": np.zeros(DIM, dtype=np.float32)}
+
+    for _ in range(12):  # 下标 2..13：remaining 18..7 > P+S=6 → 不拉块
+        rtc.infer(obs)
+    assert policy.calls == 1
+    rtc.infer(obs)  # 下标 14：remaining = 6 <= P+S → 执行段（下标 2..15）还剩 P=2 步时拉下一块
+    assert policy.calls == 2
+    assert policy.indices == [0, 14]
+
+
+def test_rtc_reports_measured_delay_steps(monkeypatch):
+    """实测推理耗时折算的控制步数只作**上报**（供人工定 P）；不自动改变跳过步数。"""
+    policy = _FakePolicy([[float(i) for i in range(1, 21)]])
+    rtc = build_rtc(policy, {"action_horizon": 20, "prefix_len": 0, "suffix_len": 4}, control_hz=10.0)
+    ticks = iter([0.0, 0.3])  # 实测 0.3s × 10Hz = 3 步
+    monkeypatch.setattr("motrix_edge.rtc.manager.time.monotonic", lambda: next(ticks))
+
+    assert float(rtc.infer({"observations/qpos": np.zeros(DIM, dtype=np.float32)})[0]) == 1.0  # P=0 → 不跳
+    status = rtc.status()
+    assert status["last_delay"] == 0.3
+    assert status["last_delay_steps"] == 3  # 参考值：P 建议设为 3
+    assert status["last_chunk"]["lens"]["prefix"] == 0
+
+
+def test_rtc_late_chunk_prefix_is_unavoidable(monkeypatch):
+    """块起点已落后当前步号（异步 / 延迟）→ 那部分必在“过去”，仍会跳过（P 与之取大）。"""
+    policy = _FakePolicy([[9, 9, 9, 9, 9]], start_offset=-2)  # 块从 index-2 起
+    rtc = _rtc(policy, prefix_len=0, suffix_len=4)
+    rtc.infer({"observations/qpos": np.zeros(DIM, dtype=np.float32)})
+    assert rtc.status()["last_chunk"]["lens"]["prefix"] == 2
+
+
+def test_validate_config_rejects_inconsistent_segments():
+    """交叉约束：P+S<H、P+E+S<=H、E>P。"""
+    base = {
+        "enabled": True,
+        "action_horizon": 10,
+        "prefix_len": 2,
+        "execution_horizon": 4,
+        "suffix_len": 4,
+        "aggregate_fn": "weighted_average",
+    }
+    assert validate_config(dict(base)) == base  # 2 + 4 + 4 = 10 ✓；E=4 > P=2 ✓
+    with pytest.raises(ValueError, match="must be < action_horizon"):
+        validate_config({**base, "suffix_len": 8})  # P + S = 10 >= H
+    with pytest.raises(ValueError, match="must be <= action_horizon"):
+        validate_config({**base, "execution_horizon": 6})  # 2 + 6 + 4 > 10
+    with pytest.raises(ValueError, match="must be > prefix_len"):
+        validate_config({**base, "execution_horizon": 2})  # E = 2 <= P = 2
+
+
+def test_rtc_configure_rejects_inconsistent_merge():
+    """运行期单键设置也做合并后校验（不会把配置改成自相矛盾的状态）。"""
+    rtc = _rtc(_FakePolicy([[1] * 10]), action_horizon=10, prefix_len=2, suffix_len=4)
+    with pytest.raises(ValueError, match="must be < action_horizon"):
+        rtc.configure(suffix_len=18)
+
+
 def test_rtc_slices_execution_and_suffix_lengths():
     """切分步数入 status：execution = E、suffix = S（供前端观测块结构）。"""
     policy = _FakePolicy([[1] * 6])
@@ -248,9 +361,9 @@ def test_rtc_status_shape():
     assert set(status["params"]) == {
         "enabled",
         "action_horizon",
+        "prefix_len",
         "execution_horizon",
         "suffix_len",
-        "inference_delay",
         "aggregate_fn",
     }
     assert status["index"] == 0

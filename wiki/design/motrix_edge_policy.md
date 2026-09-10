@@ -127,37 +127,66 @@ edge = lerobot `Robot` 侧客户端，与官方 `async_inference/policy_server.p
 policy:
     host: 0.0.0.0 # 推理节点默认地址
     port: 8765 # 推理节点默认端口
-    # openpi 专用
-    image_size: [224, 224]
-    image_format: jpeg
-    # act（lerobot gRPC）专用
-    pretrained_name_or_path: <ACT checkpoint> # 必填：服务端据此加载策略
-    actions_per_chunk: 50 # 动作块长 K
-    fps: 30 # 训练/环境频率（动作块时间标定）
-    prompt: "" # 文本指令：推理前必须非空（act 旧 task 键向后兼容，见下「文本指令（prompt）」）
-    rename_cameras: {} # edge 相机名 → 策略图像特征名重命名
-    image_cameras: null # 策略输入相机子集（edge 观测图像名）；缺省全部
+    type: act # 默认策略类型（会话显式选择时覆盖）
+    # 策略配置项（**每个策略有自己的独立配置项**；运行时给定，见「策略配置项」）
+    device: cuda # act：服务端推理设备
+    actions_per_chunk: 50 # act：动作块长 K（须匹配模型 chunk）
     infer_freq: 10 # 推理会话步进频率（Hz，edge 侧参数）；间隔 = 1/infer_freq
-    # RTC（实时动作块：策略只返回原始块；块缓存 / 三元切分 / 时序平滑 / 预取由 rtc 负责）
+    # RTC（实时动作块：策略只返回原始块；块缓存 / 三元切分 / 时序平滑 / 预取 / prefix 跳过由 rtc 负责）
     rtc:
         enabled: true # 关闭 → 每步一次推理只取块首步（无块缓存 / 无平滑）
-        action_horizon: 50 # 块长 H（信息性；缺省取策略 metadata / 客户端默认）
-        execution_horizon: 30 # 实际执行段 E（步）；缺省 = H - suffix_len
-        suffix_len: 20 # 过渡后缀 S（步）= 与下一块重叠窗口；0 = 关闭平滑
-        inference_delay: 0 # 前缀步数 D（信息性）
-        aggregate_fn: weighted_average # 重叠聚合
+        action_horizon: 50 # 块长上限 H（一次推理只取策略块的前 H 步）
+        prefix_len: 2 # 前置段 P（推理期间已被执行的前 P 步，跳过）
+        execution_horizon: 28 # 执行段 E（缺省 = 实际块长 - P - S）
+        suffix_len: 20 # 后缀段 S（与下一块的重叠窗口）
+        aggregate_fn: weighted_average # 重叠聚合  # P + E + S = 50 = H
 ```
 
-### 文本指令（prompt，统一概念）
+### 策略配置项（每个策略独立，前端按 schema 动态渲染）
 
-`prompt` 是推理会话内**统一的文本指令**概念（openpi / act 共用）：
+**每个策略有自己的独立配置项**（prompt / 模型路径 / 设备 / 块长…），外加所有策略共有的**推理端点**
+（`host` / `port`）；全部由策略包**静态声明**，CLI 与前端共用同一声明——前端**按所选策略动态渲染
+表单**（端点项、会话内锁定项都由 schema 标记，不需写死输入框）：
 
--   `BasePolicyClient.prompt`（缺省 None）；openpi 每次 infer 请求动态携带（服务端每帧重新
-    tokenize）；act 映射为策略指令下发（raw observation 的 `task`，配置旧键 `task` 向后兼容）。
--   会话内经 `infer prompt <text>` 预置；**prompt 为空不能开始推理**（单步 / 持续 rollout 与
+| 分组                 | 配置项                                                                                             | 适用范围 | 会话内可改       |
+| -------------------- | -------------------------------------------------------------------------------------------------- | -------- | ---------------- |
+| `endpoint`（公共项） | `host`（推理节点 IP）/ `port`（端口 1-65535）                                                      | 所有策略 | 否（随会话锁定） |
+| 策略项               | `openpi`：`prompt`（文本指令，必填）                                                               | openpi   | 是               |
+| 策略项               | `act`：`pretrained_name_or_path`（模型路径，**运行时给定**，必填）/ `device` / `actions_per_chunk` | act      | 是               |
+
+声明结构（`policy.POLICY_COMMON_CONFIG_ITEMS` + `policy.POLICY_CONFIG_ITEMS`）：`key` / `label` /
+`type`（text / int / bool）/ `required` / `runtime`（`false` = 会话内锁定）/ `group`（`endpoint` = 推理
+端点）/ `default` / `placeholder` / `help`；派生便捷标志 `requires_prompt` / `requires_model_path`，
+以及 `policy_config_status()` 的 `runtime_keys`（会话内可改键清单）。
+
+推理端点与 `infer ip` / `infer port` **同一写入实现**（`set_policy_endpoint`，非空 host / 端口范围校验），
+只是现在也能从策略配置表单 / `infer config set` / `POST /v1/infers` body 的 `config` 一起改。
+
+运行时通道（均写内存态 `policy` 段，**不写回 yaml**；下次 `session run infer` 或当前会话下一请求生效）：
+
+| 命令                      | 位置参数 | 语义                                                       |
+| ------------------------- | -------- | ---------------------------------------------------------- |
+| `infer config`            | —        | 查询当前策略的配置项（schema + 当前值 + `missing` 缺失项） |
+| `infer config set <json>` | `json`   | 按当前策略 schema 白名单校验并设置（可部分）               |
+| `infer prompt <text>`     | `text`   | `prompt` 项的快捷命令（语言条件策略）                      |
+| `infer model(set) <path>` | `path`   | `pretrained_name_or_path` 项的快捷命令（lerobot 类）       |
+
+未知键 / 类型不符 / 必填为空 → `rejected`（400）。**策略已连接时设置端点（host / port）→
+`rejected`（409）**：连接目标不能热改（否则与实际连接不一致），需断开连接 / 退出会话后再改。
+端点与其它配置项均为 `runtime=True`（未连接时会话内可改，并同步到运行中的策略客户端：
+`policy.set_endpoint` → 传输层重建 URI / gRPC target，下次 `infer connect` 用新地址）。
+会话内设置其余项会同时应用到**正在运行的**策略客户端（下一请求生效）；会话外只影响下次进入会话。
+
+### 文本指令（prompt，**仅语言条件策略**）
+
+`prompt` 是**声明了 prompt 配置项的策略**（当前为 openpi）的文本指令：
+
+-   `BasePolicyClient.prompt`（缺省 None；`requires_prompt` 类属性由策略声明）；openpi 每次 infer 请求
+    动态携带（服务端每帧重新 tokenize）。
+-   会话内经 `infer prompt <text>` 预置；对该类策略 **prompt 为空不能开始推理**（单步 / 持续 rollout 与
     rollout 录制开始均门控拒绝）——录制 rollout 时作为 episode 的 `task_name`（`operator=policy`）。
--   `drain`（缓存推理）与多步 rollout（count>1）**命令模式已取消**；策略客户端的 `drain()` 方法
-    保留为内部缓存消费原语（块耗尽前不额外推理），不再暴露为独立命令。
+-   **act 不需要 prompt**（ACT 不接受文本条件）：不门控、不下发；录制 rollout 只同步 `operator=policy`。
+-   多种策略共用一条通道：均经 `handle_policy_config` / `set_policy_config` 校验与写入（见上表）。
 
 单臂任务：`policy.type` 用 `act`（通用 ACT，按启用臂数直通）；`enabled_arms` / `enabled_cameras` /
 `home_qpos` 为**运行时配置**（见 [机器人适配器（adapter）](./motrix_edge_adapter.md)）。
@@ -165,18 +194,24 @@ policy:
 ## 运行时端点配置（infer ip / infer port）
 
 推理节点地址（`policy.host` / `policy.port`）可由 `edge.yml` 静态配置，也可运行期经命令总线动态
-设置（前端推理卡片设置后，edge 下次启动推理会话生效）：
+设置（前端「策略配置」卡片的端点项，或进入会话时随 `config` 一并写入）：
 
-| 命令                 | 位置参数 | 语义                                                    | 状态可用性 |
-| -------------------- | -------- | ------------------------------------------------------- | ---------- |
-| `infer ip`           | —        | 查询当前推理节点 IP                                     | 全局       |
-| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）             | 全局       |
-| `infer port`         | —        | 查询当前推理节点端口                                    | 全局       |
-| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`）            | 全局       |
-| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内     |
+| 命令                 | 位置参数 | 语义                                                    | 状态可用性     |
+| -------------------- | -------- | ------------------------------------------------------- | -------------- |
+| `infer ip`           | —        | 查询当前推理节点 IP                                     | 全局           |
+| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）             | 未连接策略即可 |
+| `infer port`         | —        | 查询当前推理节点端口                                    | 全局           |
+| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`）            | 未连接策略即可 |
+| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内         |
 
 配置为**内存态**（写入 `base_cfg["policy"]`，不写回 yaml），下次 `session run infer` 实例化策略
-客户端时生效。端点是 Edge 级配置，任何状态可用；HTTP 经 `/v1/commands` capability 走同一命令总线。
+客户端时生效。端点是 Edge 级配置；HTTP 经 `/v1/commands` capability 走同一命令总线。
+
+端点同时是**策略配置的公共项**（`host` / `port`，见上「策略配置项」）：`infer config` /
+`infer config set`（或 `POST /v1/infers` 的 `config`）走 `set_policy_endpoint` 同一校验与写入。
+端点与其它配置项**同层级**（未连接时随时可改，含会话内）：会话内改会同步到运行中的策略客户端
+（`policy.set_endpoint` → 传输层重建 URI / gRPC target，下次 `infer connect` 用新地址）；
+**策略已连接后改为 409**（连接目标不能热改）——断开连接 / 退出会话后再改。
 
 ## 虚拟推理端点（scripts/test_infer_point.py）
 

@@ -298,7 +298,8 @@ class InferService:
         """运行期设置 RTC 参数（``infer rtc set``）：写内存态 + 应用到正在运行的 RTCManager。
 
         body 为 RTC 参数对象（可部分：enabled / action_horizon / execution_horizon /
-        suffix_len / inference_delay / aggregate_fn）；非法参数 → 400。须已在推理会话
+        suffix_len / prefix_len / aggregate_fn）；非法参数或交叉约束不满足（P+E+S<=H、E>P）
+        → 400。须已在推理会话
         （ACTIVE）且持有活跃租约（与其它受控操作一致）。
         """
         self._ensure_node()

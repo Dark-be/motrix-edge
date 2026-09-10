@@ -25,24 +25,28 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 4. **机器人命令卡片**：estop / reset / execute / teleop 命令控制（不再显示适配器，也不提供「查看全部适配器」；匹配到的适配器见状态栏）。
 5. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项。
 6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；**采集元信息**（采集员 / 任务名）从 `GET /v1/captures/meta`（`capture.yml`，`capture meta` 命令维护）下拉选择，再 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加），并展示 `GET /v1/captures` 返回的 `capture_status`（采集员 / 任务名 / 运行位）。
-7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后先「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态），并在「文本指令 Prompt」输入框 `infer prompt` **预置非空文本**（`POST /v1/infers/prompt`，推理/录制前必须）。推理按钮：**推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）；**推理时 rollout 录制** = 「开始录制 / 结束录制」（`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy", task_name: prompt}`）。多步推理与「消耗缓存」模式已取消。退出推理后结束会话，连接成功时展示策略服务器 metadata。
-8. **视频面板**：WebRTC `<video>` 播放 + 连接状态 + 连接 / 断开按钮。
-9. **观测预览面板**：`GET /v1/preview` 的 qpos / action 数值 + 摄像头名列表（与 WebRTC 并存）。**观测无需进入会话**（节点级持续观测）；面板常驻，头部「预览显示」开关控制收起 / 显示（关闭时停止轮询与推流）。
+7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后先「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）。**策略配置卡片按所选策略动态渲染**（schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers` 的 `policy_config`）：先是**公共项推理端点** `host` / `port`（与其它项同层级、同一张表单；仅在**策略已连接**时置灰锁定，未连接时（含会话内）可改，另有「保存端点」按钮直接写内存态），随后是策略项——openpi → 文本指令 `prompt`（必填，`POST /v1/infers/prompt`，推理/录制前必须）；act → 模型路径 `pretrained_name_or_path`（必填，可选 `/path/to/pretrained_model`）/ `device` / `actions_per_chunk`——**未进入会话时随「进入推理」一并下发**（`POST /v1/infers` body 的 `config`），会话内经 `POST /v1/infers/config`（`infer config set`）运行时应用（端点项仅在策略已连接时置灰）；必填项缺失（`missing` 非空）或端点未配置时推理 / 录制按钮禁用。推理按钮：**推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）；**推理时 rollout 录制** = 「开始录制 / 结束录制」（`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带 `task_name=prompt`）。多步推理与「消耗缓存」模式已取消。退出推理后结束会话，连接成功时展示策略服务器 metadata。
+8. **RTC 卡片（推理面板内）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考），并可输入 H / P / S / E / 聚合函数后「应用 RTC 参数」（`POST /v1/infers/rtc`）；参数会话内即时生效（下一块起）。
+9. **视频面板**：WebRTC `<video>` 播放 + 连接状态 + 连接 / 断开按钮。
+10. **观测预览面板**：`GET /v1/preview` 的 qpos / action 数值 + 摄像头名列表（与 WebRTC 并存）。**观测无需进入会话**（节点级持续观测）；面板常驻，头部「预览显示」开关控制收起 / 显示（关闭时停止轮询与推流）。
 
 ## 动作 → 命令映射
 
-| HTTP 动作                                           | 底层命令                   |
-| --------------------------------------------------- | -------------------------- | --- | --------------------- | ---------------------- | --- | ----------------------------- | -------------- |
-| `POST /v1/captures`（enter）                        | `session run capture`      |
-| `DELETE /v1/captures?lease_id=`                     | `session quit`             |
-| `POST /v1/infers`（必填 `policy_type`）             | `session run infer`        |
-| `POST /v1/infers/rollout`（缺省）                   | `infer rollout`（单步）    |
-| `POST /v1/infers/rollout`（body `mode=continuous`） | `infer rollout continuous` |
-| `POST /v1/infers/episode/start`                     | `capture episode start`    |
-| `POST /v1/infers/episode/end`                       | `capture episode end`      |
-| `POST /v1/infers/sync`                              | `capture sync`             |
-| `POST /v1/infers/prompt`                            | `infer prompt <text>`      |     | `POST /v1/infers/rtc` | `infer rtc set <json>` |     | `DELETE /v1/infers?lease_id=` | `session quit` |
-| `POST /v1/commands`（`capability=estop`）           | `robot estop`              |
+| HTTP 动作                                              | 底层命令                   |
+| ------------------------------------------------------ | -------------------------- |
+| `POST /v1/captures`（enter）                           | `session run capture`      |
+| `DELETE /v1/captures?lease_id=`                        | `session quit`             |
+| `POST /v1/infers`（必填 `policy_type`；可选 `config`） | `session run infer`        |
+| `POST /v1/infers/rollout`（缺省）                      | `infer rollout`（单步）    |
+| `POST /v1/infers/rollout`（body `mode=continuous`）    | `infer rollout continuous` |
+| `POST /v1/infers/episode/start`                        | `capture episode start`    |
+| `POST /v1/infers/episode/end`                          | `capture episode end`      |
+| `POST /v1/infers/sync`                                 | `capture sync`             |
+| `POST /v1/infers/config`                               | `infer config set <json>`  |
+| `POST /v1/infers/prompt`                               | `infer prompt <text>`      |
+| `POST /v1/infers/rtc`                                  | `infer rtc set <json>`     |
+| `DELETE /v1/infers?lease_id=`                          | `session quit`             |
+| `POST /v1/commands`（`capability=estop`）              | `robot estop`              |
 
 ## 契约要点（前端实现，单点定义）
 

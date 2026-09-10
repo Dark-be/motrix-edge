@@ -14,24 +14,28 @@
 
 """rtc 子包 —— 策略无关的实时动作块管理器（Real-Time Chunking）。
 
-策略（``policy.infer_chunk``）只负责**拿到一次推理的原始动作块**；本子包统一负责动作块
-**三元切分**（``prefix_actions`` 过去已失效 / ``execution_actions`` 实际执行 / ``suffix_actions``
-过渡到下一块）、**时序平滑**（块重叠加权融合）、**预取时机**与**绝对步号推进**。
+策略（``policy.infer_chunk``）只负责**拿到一次推理的原始动作块**；本子包统一负责：
+
+  - **块长上限 H**（一次推理只取块的前 H 步，如 10 步 = 10Hz × 1s）；
+  - **三元切分**：``prefix``（前置段 P，推理期间**已被执行** → 跳过）/ 执行段（E）/ ``suffix``
+    （后缀段 S，与下一块执行段重叠融合）；
+  - **时序平滑**（重叠步加权平均）、**预取时机**与**绝对步号推进**。
 
 设计见 wiki/design/motrix_edge_rtc.md。
 """
 
 from motrix_edge.rtc.base import AGGREGATE_FUNCTIONS, ActionChunk, ChunkSlice, as_action_chunk, get_aggregate_fn
-from motrix_edge.rtc.manager import DEFAULT_RTC_CONFIG, RTCManager, validate_params
+from motrix_edge.rtc.manager import DEFAULT_RTC_CONFIG, RTCManager, validate_config, validate_params
 
 
-def build_rtc(policy, config: dict | None = None) -> RTCManager:
+def build_rtc(policy, config: dict | None = None, control_hz: float | None = None) -> RTCManager:
     """工厂：为一个策略客户端构造 RTCManager（推理会话进入时调用）。
 
     ``config`` = ``policy.rtc`` 配置段（缺省用 ``DEFAULT_RTC_CONFIG``）；非法参数会抛
-    ``ValueError``（由调用方回执 rejected）。
+    ``ValueError``（由调用方回执 rejected）。``control_hz`` = 会话控制频率（Hz），仅用于把
+    **实测推理耗时**折算成步数上报（供人工设定前置段 P）。
     """
-    return RTCManager(policy=policy, config=config)
+    return RTCManager(policy=policy, config=config, control_hz=control_hz)
 
 
 __all__ = [
@@ -43,5 +47,6 @@ __all__ = [
     "as_action_chunk",
     "build_rtc",
     "get_aggregate_fn",
+    "validate_config",
     "validate_params",
 ]

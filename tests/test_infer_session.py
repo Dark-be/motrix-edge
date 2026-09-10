@@ -53,12 +53,19 @@ class _FakePolicy:
         self.prepare_calls = 0
         self.connect_calls = 0
         self.prompt = None  # 语言条件策略的配置项（会话内 infer prompt 预置；推理/录制前必须非空）
+        self.endpoint_calls: list[tuple] = []  # set_endpoint 调用记录（host, port）
         self.bind_calls = 0  # bind_adapter（adapter 布局传入）
         self.bound_cameras = None
         self.bound_action_dim = None
         self.action = np.arange(14, dtype=float)
         self.connected = False
         self.server_metadata = {}
+
+    def set_endpoint(self, host=None, port=None):
+        """仿策略客户端端点更新（未连接时可改；连接后由会话层拦截）。"""
+        if self.connected:
+            raise ValueError("policy already connected: disconnect before changing endpoint")
+        self.endpoint_calls.append((host, port))
 
     def bind_adapter(self, action_dim=None, camera_names=None):
         self.bind_calls += 1
@@ -382,7 +389,53 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
     assert snapshot["policy_type"] == "openpi"  # 未显式选策略 → 配置缺省类型
     assert snapshot["requires_prompt"] is True
     assert snapshot["missing"] == ["prompt"]  # 未预置 → 缺失必填项
-    assert [item["key"] for item in snapshot["items"]] == ["prompt"]
+    # 公共项（推理端点 host / port）= group=endpoint、连接后锁定（locked_when_connected）；策略项紧随其后
+    assert [item["key"] for item in snapshot["items"]] == ["host", "port", "prompt"]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint", "endpoint", None]
+    assert snapshot["runtime_keys"] == ["host", "port", "prompt"]  # 端点与其它项同级：会话内可改
+    assert snapshot["connect_locked_keys"] == ["host", "port"]  # 但**连接策略后**锁定
+
+
+def test_infer_config_set_endpoint_editable_when_not_connected(monkeypatch):
+    """会话内（**未连接**）修改推理端点：与其它配置项同级，写内存态 + 同步到策略客户端。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=True)  # connected=False
+    base_cfg = {"policy": {"infer_freq": 1000, "type": "openpi", "host": "127.0.0.1", "port": 8000}}
+    _patch(monkeypatch, policy)
+    replies = []
+    set_cmd = _REGISTRY.parse_argv(["infer", "config", "set", '{"host": "10.0.0.9", "port": 9000}'])
+    set_cmd.reply_to = replies.append
+    session = infer_session.InferSession(
+        base_cfg, command_source=make_signals(set_cmd, "session quit"), adapter=adapter
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "ok"
+    assert replies[0].data["written"] == {"host": "10.0.0.9", "port": 9000}
+    assert base_cfg["policy"]["host"] == "10.0.0.9"  # 写内存态
+    assert base_cfg["policy"]["port"] == 9000
+    assert policy.endpoint_calls == [("10.0.0.9", 9000)]  # 同步到策略客户端（下次 connect 用新端点）
+
+
+def test_infer_config_set_endpoint_locked_when_connected(monkeypatch):
+    """策略**已连接**后端点锁定：``infer config set {"host"...}`` → rejected（409）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=True)
+    policy.connected = True  # 已连接策略服务器
+    base_cfg = {"policy": {"infer_freq": 1000, "type": "openpi", "host": "127.0.0.1", "port": 8000}}
+    _patch(monkeypatch, policy)
+    replies = []
+    locked = _REGISTRY.parse_argv(["infer", "config", "set", '{"host": "10.0.0.9", "prompt": "x"}'])
+    locked.reply_to = replies.append
+    session = infer_session.InferSession(base_cfg, command_source=make_signals(locked, "session quit"), adapter=adapter)
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 409
+    assert "host" in replies[0].error
+    assert base_cfg["policy"]["host"] == "127.0.0.1"  # 锁定项未被改写（同批次的 prompt 也不生效）
+    assert base_cfg["policy"].get("prompt") is None
+    assert policy.endpoint_calls == []
 
 
 def test_infer_config_set_applies_to_running_policy(monkeypatch):

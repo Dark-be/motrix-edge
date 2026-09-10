@@ -82,18 +82,25 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     **动作块缓存 / 三元切分 / 时序平滑 / 预取由 [RTCManager](./motrix_edge_rtc.md) 负责**
     （策略只提供原始动作块：`policy.infer_chunk`；会话持有 `self.rtc = build_rtc(...)`，
     `reset` / `session_finish` 同步复位）。
-    **prompt 为空不能开始推理**：两个入口都要求会话内已 `infer prompt <text>` 预置非空文本
-    （空 → rejected 400，不推理）。`infer rollout <N>`（多步）与 `infer rollout drain`
+    **prompt 为空不能开始推理（仅对声明 prompt 配置项的策略）**：openpi 等语言条件策略要求
+    会话内已 `infer prompt <text>` 预置非空文本（空 → rejected 400，不推理）；act 不需要 prompt
+    （`requires_prompt=False`，不门控、不下发）。`infer rollout <N>`（多步）与 `infer rollout drain`
     （缓存推理）**已取消**（多步/缓存不再作为独立命令模式）。（`observe` 是**推理输入**；
     显示观测由节点级写入 `frame_manager`，会话不写。）
 -   **推理时 rollout 录制（同采集）**：robot 本身不关心推理还是采集——`capture episode start`
     通知进程开启录制（capturing 期间按帧录 mcap，含 action），`capture episode end` 结束并保存。
-    开始录制同样要求 prompt 非空（录制 rollout 的 task_name = prompt）。录制元信息由调用方
-    **显式** `capture sync --meta <json>` 同步（默认 `operator="policy"`、`task_name=prompt`
-    由会话 / server 状态上报，不自动 sync）。录制与单步 / 持续推理正交：持续推理中亦可
-    episode start/end 与 sync（robot 不关心谁在驱动）。
--   命令：`infer prompt <text>`（预置文本指令，推理/录制前必须非空）、`infer connect`（可选预连/
-    预热）、`infer rollout` / `infer rollout continuous`、`capture episode start/end`（rollout 录制）、
+    需要 prompt 的策略开始录制同样要求 prompt 非空（录制 rollout 的 task_name = prompt）。
+    录制元信息由调用方**显式** `capture sync --meta <json>` 同步（默认 `operator="policy"`、
+    `task_name=prompt` 由会话 / server 状态上报，不自动 sync）。录制与单步 / 持续推理正交：持续
+    推理中亦可 episode start/end 与 sync（robot 不关心谁在驱动）。
+-   **策略配置项**：`infer config` / `infer config set <json>` / `infer prompt <text>` /
+    `infer model(set) <path>`（见 [推理策略客户端（policy）](./motrix_edge_policy.md)）；会话内设置
+    会同时应用到正在运行的策略客户端（下一请求生效）。公共项**推理端点** `host` / `port` 与其
+    它项同级（会话内未连接时可改，改后同步传输层连接目标）；**策略已连接后禁用**（409：连接目标
+    不能热改）。
+-   命令：`infer prompt <text>`（文本指令，需要 prompt 的策略推理/录制前必须非空）、`infer config` /
+    `infer model`（策略配置项查询 / 设置）、`infer connect`（可选预连/预热）、`infer rollout` /
+    `infer rollout continuous`、`capture episode start/end`（rollout 录制）、
     `capture sync --meta <json>`（录制元信息）、`infer rtc` / `infer rtc set <json>`（RTC 参数
     查询 / 运行期设置）、`session quit`（退出回 home）、`robot estop`、`robot reset`、`robot execute`、
     `robot teleop`。

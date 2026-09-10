@@ -114,10 +114,12 @@ def test_health_returns_identity_and_version():
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
     assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act"]
-    # 每个策略携带自己的配置项 schema（前端选择策略后动态渲染表单，进入会话前即可填）
+    # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 策略自身项）
     by_type = {p["type"]: p for p in body["adapters"]["policies"]}
-    assert [item["key"] for item in by_type["openpi"]["config_items"]] == ["prompt"]
+    assert [item["key"] for item in by_type["openpi"]["config_items"]] == ["host", "port", "prompt"]
     assert [item["key"] for item in by_type["act"]["config_items"]] == [
+        "host",
+        "port",
         "pretrained_name_or_path",
         "device",
         "actions_per_chunk",
@@ -1288,8 +1290,10 @@ def test_infers_status_exposes_policy_config():
     assert cfg["policy_type"] == "openpi"
     assert cfg["requires_prompt"] is True  # 语言条件策略：prompt 必填
     assert cfg["missing"] == ["prompt"]  # 尚未预置 → 缺失
-    assert [item["key"] for item in cfg["items"]] == ["prompt"]
-    assert cfg["items"][0]["type"] == "text"
+    assert [item["key"] for item in cfg["items"]] == ["host", "port", "prompt"]  # 端点公共项在前
+    assert cfg["runtime_keys"] == ["host", "port", "prompt"]  # 端点与其它项同级（会话内可改）
+    assert cfg["connect_locked_keys"] == ["host", "port"]  # 但连接策略后锁定
+    assert cfg["items"][2]["type"] == "text"
     # 会话内设置 prompt（走 infer prompt 快捷命令）→ 写入内存态 → 缺失清空
     assert (
         client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
@@ -1327,6 +1331,29 @@ def test_infers_config_sets_policy_config():
     assert client.post("/v1/infers/config", json={"config": {"prompt": "y"}}).status_code == 403
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
+
+
+def test_infers_enter_config_applies_endpoint():
+    """POST /v1/infers 的 config 含公共项 host / port → 进入会话前写入推理端点（随会话锁定）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    r = client.post(
+        "/v1/infers",
+        headers={"X-Lease-Id": lease},
+        json={"policy_type": "openpi", "config": {"host": "10.0.0.7", "port": 9000, "prompt": "把零件放好"}},
+    )
+    assert r.status_code == 200
+    assert BASE_CFG["policy"]["host"] == "10.0.0.7"
+    assert BASE_CFG["policy"]["port"] == 9000
+    assert BASE_CFG["policy"]["prompt"] == "把零件放好"
+    assert r.json()["policy_config"]["values"]["host"] == "10.0.0.7"  # 回执含端点当前值
+    # 非法端口 → 400（且不进入会话）
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+    bad = client.post("/v1/infers", headers={"X-Lease-Id": lease}, json={"config": {"port": 70000}})
+    assert bad.status_code == 400
+    assert node.session is None
 
 
 def test_infers_enter_applies_policy_config():

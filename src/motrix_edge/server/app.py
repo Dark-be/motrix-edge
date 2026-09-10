@@ -203,10 +203,10 @@ class InferRTCRequest(BaseModel):
     """
 
     enabled: bool | None = Field(default=None, description="是否启用 RTC（关闭 → 每步一次推理只取块首步）")
-    action_horizon: int | None = Field(default=None, ge=1, description="块长 H（信息性）")
-    execution_horizon: int | None = Field(default=None, ge=1, description="实际执行段步数 E（缺省 = H - suffix_len）")
-    suffix_len: int | None = Field(default=None, ge=0, description="过渡后缀步数 S（= 与下一块重叠窗口）")
-    inference_delay: int | None = Field(default=None, ge=0, description="前缀步数 D（信息性：预期已失效步数）")
+    action_horizon: int | None = Field(default=None, ge=1, description="块长上限 H（一次推理只取块的前 H 步）")
+    prefix_len: int | None = Field(default=None, ge=0, description="前置段 P（推理期间已被执行的前 P 步，跳过）")
+    execution_horizon: int | None = Field(default=None, ge=1, description="执行段 E（缺省 = H - P - S）")
+    suffix_len: int | None = Field(default=None, ge=0, description="后缀段 S（与下一块的重叠窗口；须 > P）")
     aggregate_fn: str | None = Field(
         default=None, description="重叠聚合：weighted_average/latest_only/average/conservative"
     )
@@ -709,9 +709,10 @@ def create_app(
     async def infers_rtc(req: InferRTCRequest, x_lease_id: str | None = Header(default=None)):
         """运行期设置 RTC（实时动作块）参数（``infer rtc set``）。
 
-        body 为参数对象（可部分：enabled / action_horizon / execution_horizon / suffix_len /
-        inference_delay / aggregate_fn）→ 写入内存态 ``policy.rtc`` 并应用到正在运行的
-        RTCManager（下一块起生效）；非法参数 → 400。受控操作：须持有租约。
+        body 为参数对象（可部分：enabled / action_horizon / prefix_len / execution_horizon /
+        suffix_len / aggregate_fn）→ 写入内存态 ``policy.rtc`` 并应用到正在运行的
+        RTCManager（下一块起生效）；非法参数或违反交叉约束（P+E+S<=H、S>P）→ 400。
+        受控操作：须持有租约。
         """
         params = {key: value for key, value in req.model_dump().items() if value is not None}
         return _infer_call(lambda: _infers().configure_rtc(params=params, lease_id=x_lease_id))

@@ -19,20 +19,20 @@
 
 ## 端点总览
 
-| 方法            | 路径                                                                                                     | 说明                                           | 服务           |
-| --------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------- |
-| GET             | `/v1/health`                                                                                             | 版本 / identity / 已绑定 adapter / 磁盘 / 时钟 | —（内建）      |
-| GET             | `/v1/adapters`                                                                                           | 静态列出全部注册适配器（不 discover / 不探活） | —（内建）      |
-| POST            | `/v1/commands`                                                                                           | 受控命令（capability 映射，须租约）            | CommandService |
-| POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}`                                          | Edge 级租约（Console 签发镜像）                | LeaseManager   |
-| GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                                                                 | 采集会话控制                                   | CaptureService |
-| POST            | `/v1/infers` + `/v1/infers/rollout`、`/v1/infers/episode/start·end`、`/v1/infers/sync`、`/v1/infers/rtc` | 推理会话控制（单步/持续 + rollout 录制 + RTC） | InferService   |
-| GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                                                          | 采集文件扫描、选择与上传队列                   | UploadSession  |
-| GET             | `/v1/preview`                                                                                            | 最新观测预览（须租约）                         | CaptureService |
-| POST            | `/v1/webrtc/offer`                                                                                       | WebRTC 推流信令（须租约）                      | WebRTCService  |
-| GET             | `/v1/captures/meta`                                                                                      | 采集元信息选项（前端选择列表，免租约）         | CaptureService |
-| POST            | `/v1/captures/sync`                                                                                      | 同步采集元信息到机器人进程（须租约）           | CaptureService |
-| POST            | `/v1/infers/connect`                                                                                     | 单次尝试连接推理节点（须租约）                 | InferService   |
+| 方法            | 路径                                                                                                                          | 说明                                                                                                                               | 服务           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| GET             | `/v1/health`                                                                                                                  | 版本 / identity / 已绑定 adapter / 磁盘 / 时钟；`adapters.policies[].config_items` = 各策略的配置项 schema（前端据此动态渲染表单） | —（内建）      |
+| GET             | `/v1/adapters`                                                                                                                | 静态列出全部注册适配器（不 discover / 不探活）                                                                                     | —（内建）      |
+| POST            | `/v1/commands`                                                                                                                | 受控命令（capability 映射，须租约）                                                                                                | CommandService |
+| POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}`                                                               | Edge 级租约（Console 签发镜像）                                                                                                    | LeaseManager   |
+| GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                                                                                      | 采集会话控制                                                                                                                       | CaptureService |
+| POST            | `/v1/infers` + `/v1/infers/rollout`、`/v1/infers/episode/start·end`、`/v1/infers/sync`、`/v1/infers/rtc`、`/v1/infers/config` | 推理会话控制（单步/持续 + rollout 录制 + RTC + 策略配置项）                                                                        | InferService   |
+| GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                                                                               | 采集文件扫描、选择与上传队列                                                                                                       | UploadSession  |
+| GET             | `/v1/preview`                                                                                                                 | 最新观测预览（须租约）                                                                                                             | CaptureService |
+| POST            | `/v1/webrtc/offer`                                                                                                            | WebRTC 推流信令（须租约）                                                                                                          | WebRTCService  |
+| GET             | `/v1/captures/meta`                                                                                                           | 采集元信息选项（前端选择列表，免租约）                                                                                             | CaptureService |
+| POST            | `/v1/captures/sync`                                                                                                           | 同步采集元信息到机器人进程（须租约）                                                                                               | CaptureService |
+| POST            | `/v1/infers/connect`                                                                                                          | 单次尝试连接推理节点（须租约）                                                                                                     | InferService   |
 
 correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动生成）。
 
@@ -98,27 +98,28 @@ UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 
 | 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                   |
 | ------ | -------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/infers`               | 必需          | `enter`：body 必须提供已注册的 `policy_type`，再执行 `session run infer`                                                                                                               |
-| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / metadata / endpoint / prompt / recording / capture_meta / rtc / lease_id                                               |
+| POST   | `/v1/infers`               | 必需          | `enter`：body 提供已注册的 `policy_type`、可选 `host` / `port`（快捷字段）与 `config`（**整份策略配置**：公共项端点 host/port + 该策略配置项，如 act 的模型路径）→ `session run infer` |
+| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / metadata / endpoint / prompt / prompt_required / recording / capture_meta / rtc / policy_config / lease_id             |
 | POST   | `/v1/infers/connect`       | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）                                                                                                                           |
 | POST   | `/v1/infers/rollout`       | 必需          | 单步（缺省）或 `mode: continuous` 持续；多步（count>1）/ drain 已取消 → 400；prompt 不随本端点传（会话内 `infer prompt` 预置）                                                         |
-| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`；prompt 为空 → 400）                                                                                                                    |
+| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`；**需要 prompt 的策略**为空 → 400）                                                                                                     |
 | POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`；robot 保存该 episode）                                                                                                                   |
 | POST   | `/v1/infers/sync`          | 必需          | body `{meta}`：录制 rollout 时同步采集元信息（默认 operator=policy、task_name=prompt，显式提交）                                                                                       |
-| POST   | `/v1/infers/rtc`           | 必需          | body 为 RTC 参数（可部分：enabled / action_horizon / execution_horizon / suffix_len / inference_delay / aggregate_fn）→ `infer rtc set`（写入 `policy.rtc` 并应用到运行中 RTCManager） |
-| POST   | `/v1/infers/prompt`        | 必需          | 会话内预置推理文本指令（prompt；推理 / 录制前必须非空）                                                                                                                                |
+| POST   | `/v1/infers/rtc`           | 必需          | body 为 RTC 参数（可部分：enabled / action_horizon / prefix_len / execution_horizon / suffix_len / aggregate_fn）→ `infer rtc set`（写入 `policy.rtc` 并应用到运行中 RTCManager）      |
+| POST   | `/v1/infers/config`        | 必需          | body `{config}`：运行期设置**策略配置项**（按当前策略 schema 白名单校验）→ `infer config set`；回执含生效后的 `policy_config`                                                          |
+| POST   | `/v1/infers/prompt`        | 必需          | 会话内设置文本指令（`prompt` 项快捷入口；**仅声明 prompt 项的策略**如 openpi）                                                                                                         |
 | DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                               |
 
 ## 错误语义
 
-| 状态码 | 含义                                                                              |
-| ------ | --------------------------------------------------------------------------------- |
-| `400`  | 进入推理未选择 `policy_type` / 策略类型未注册 / prompt 为空（不能开始推理或录制） |
-| `409`  | 非法状态转移（已在会话再 enter / 未在会话 exit / 节点未就绪 / 无活跃租约）        |
-| `403`  | `X-Lease-Id` 缺失或不匹配（异租约）                                               |
-| `410`  | 租约已过期                                                                        |
-| `501`  | 服务未注入（create_app 未启用对应模块）                                           |
-| `500`  | 内部异常                                                                          |
+| 状态码 | 含义                                                                                                                              |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | 进入推理未选择 `policy_type` / 策略类型未注册 / prompt 为空（需要 prompt 的策略不能开始推理或录制）/ 策略配置项非法键或必填项为空 |
+| `409`  | 非法状态转移（已在会话再 enter / 未在会话 exit / 节点未就绪 / 无活跃租约）                                                        |
+| `403`  | `X-Lease-Id` 缺失或不匹配（异租约）                                                                                               |
+| `410`  | 租约已过期                                                                                                                        |
+| `501`  | 服务未注入（create_app 未启用对应模块）                                                                                           |
+| `500`  | 内部异常                                                                                                                          |
 
 ## 相关文档
 
