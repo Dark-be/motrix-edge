@@ -34,8 +34,8 @@ def test_load_config_falls_back_to_packaged_default(monkeypatch):
     monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
     cfg = load_config("edge.yml")
     assert cfg["INFO_LEVEL"] == "INFO"
-    assert cfg["discover"]["host"] == "127.0.0.1"
-    assert cfg["policy"]["type"] == "openpi"
+    assert cfg["adapter"]["host"] == "127.0.0.1"
+    assert cfg["policy"]["type"] == "act"
 
 
 def test_load_config_unknown_name_returns_empty(monkeypatch):
