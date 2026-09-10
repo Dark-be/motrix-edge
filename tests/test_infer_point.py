@@ -177,11 +177,13 @@ def test_openpi_client_e2e_official_flat_wire():
         assert client._action_horizon == 50  # 配置兜底
 
         obs = {"observations/qpos": np.zeros(14, dtype=np.float32)}
-        actions = [client.infer(obs) for _ in range(20)]  # 跨动作块逐帧消费（每块 4 步）
-        assert all(a is not None and np.ndim(a) == 1 and len(a) == 14 for a in actions)
+        # 策略只取推理结果：每次 infer_chunk 返回整块（[H, dim]）；块缓存 / 切分 / 平滑归 RTC。
+        chunks = [client.infer_chunk(obs, index=i * 4) for i in range(5)]
+        assert all(c.height == 4 and c.dim == 14 for c in chunks)  # 每块 4 步
+        assert [c.start_index for c in chunks] == [0, 4, 8, 12, 16]  # 回填绝对步号
 
         client.prompt = "now do a different task"  # 动态 prompt 可换
-        assert np.ndim(client.infer(obs)) == 1
+        assert client.infer_chunk(obs, index=20).dim == 14
     finally:
         client.disconnect()
         server.shutdown()

@@ -61,24 +61,22 @@ class BasePolicyClient:
         """
         pass
 
-    def infer(self, observation: dict):
-        """输入观测，返回动作。
+    def infer_chunk(self, observation: dict, index: int | None = None):
+        """输入观测，返回**一次推理的原始动作块**（策略唯一职责：取推理结果）。
 
-        动作格式由策略契约决定（如 openpi 返回单步 action 数组）；异常时返回 None 供上层跳过。
+        返回 ``ActionChunk``（``[H, dim]`` + 首步绝对步号）或裸 ndarray（``[H, dim]`` /
+        单步 ``[dim]``），空 / 失败返回 ``None`` 供上层跳过。
+
+        ``index`` = 当前**绝对步号**（``RTCManager`` 传入）：需要按步号组织请求的流式策略
+        （act 的 ``TimedObservation.timestep``）使用；其余策略（openpi）忽略。
+
+        **块缓存 / 三元切分 / 时序平滑 / 预取时机由 ``motrix_edge.rtc`` 统一负责**，策略
+        实现里不再有游标、timestep 缓存与重叠聚合（见 wiki/design/motrix_edge_rtc.md）。
         """
         raise NotImplementedError("Subclasses should implement this method.")
 
-    def drain(self, observation=None):
-        """只消费当前缓存的 action chunk，不发新推理请求；无缓存返回 None。
-
-        observation 可选：需要按策略映射（完整动作空间映射由 adapter 负责，见
-        DualPiperAdapter.configure）时传入当前观测。动作块缓存由**各策略自有**实现
-        （openpi/act 各自管理），基类无缓存消费逻辑，返回 None。
-        """
-        return None
-
     def reset(self):
-        """复位策略状态（如清空 action chunk 缓存）。"""
+        """复位策略状态（如服务端会话状态）。动作块缓存由 RTCManager 负责，不在此。"""
         pass
 
     def disconnect(self):

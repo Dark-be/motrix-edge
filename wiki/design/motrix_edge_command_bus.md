@@ -68,6 +68,8 @@ class CommandResult:
 | `infer rollout`           | `mode`          | 任务级 | 单步（缺省）/ `continuous` 持续推理；**prompt 为空不能开始**                       | none |
 | `infer connect`           | —               | 任务级 | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）                            | none |
 | `infer prompt`            | `prompt`        | 任务级 | 预置推理文本指令（推理/录制前必须非空）                                            | none |
+| `infer rtc`               | —               | 配置级 | 查询 RTC（实时动作块）参数与运行状态                                               | none |
+| `infer rtc set`           | `json`          | 配置级 | 设置 RTC 参数（JSON 对象，可部分；会话内即时应用到 manager）                       | none |
 | `infer ip`                | —               | 配置级 | 查询推理节点 IP（内存态 `policy.host`）                                            | none |
 | `infer ip set`            | `ip`            | 配置级 | 设置推理节点 IP（下次 `session run infer` 生效）                                   | none |
 | `infer port`              | —               | 配置级 | 查询推理节点端口（内存态 `policy.port`）                                           | none |

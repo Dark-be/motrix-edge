@@ -78,7 +78,10 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     随后尝试 `adapter.observe()` 一帧调 `policy.prepare(obs)`（act：提前下发策略指令、服务端加载
     模型到 device，避免首次 rollout 卡模型加载；openpi：no-op）。失败回执 error，可重试。
 -   `infer rollout`（**单步**）/ `infer rollout continuous`（**持续**）：一次 / 持续执行
-    `obs = adapter.observe()` → `action = policy.infer(obs)` → `adapter.rollout(action)`。
+    `obs = adapter.observe()` → `action = rtc.infer(obs)` → `adapter.rollout(action)`。
+    **动作块缓存 / 三元切分 / 时序平滑 / 预取由 [RTCManager](./motrix_edge_rtc.md) 负责**
+    （策略只提供原始动作块：`policy.infer_chunk`；会话持有 `self.rtc = build_rtc(...)`，
+    `reset` / `session_finish` 同步复位）。
     **prompt 为空不能开始推理**：两个入口都要求会话内已 `infer prompt <text>` 预置非空文本
     （空 → rejected 400，不推理）。`infer rollout <N>`（多步）与 `infer rollout drain`
     （缓存推理）**已取消**（多步/缓存不再作为独立命令模式）。（`observe` 是**推理输入**；
@@ -91,8 +94,9 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     episode start/end 与 sync（robot 不关心谁在驱动）。
 -   命令：`infer prompt <text>`（预置文本指令，推理/录制前必须非空）、`infer connect`（可选预连/
     预热）、`infer rollout` / `infer rollout continuous`、`capture episode start/end`（rollout 录制）、
-    `capture sync --meta <json>`（录制元信息）、`session quit`（退出回 home）、`robot estop`、
-    `robot reset`、`robot execute`、`robot teleop`。
+    `capture sync --meta <json>`（录制元信息）、`infer rtc` / `infer rtc set <json>`（RTC 参数
+    查询 / 运行期设置）、`session quit`（退出回 home）、`robot estop`、`robot reset`、`robot execute`、
+    `robot teleop`。
 
 ## 相关文档
 

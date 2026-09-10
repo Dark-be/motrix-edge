@@ -185,6 +185,23 @@ class InferSyncRequest(BaseModel):
     meta: dict = Field(default_factory=dict, description="采集元信息（默认 operator=policy、task_name=prompt）")
 
 
+class InferRTCRequest(BaseModel):
+    """POST /v1/infers/rtc 请求体：RTC（实时动作块）参数（可部分更新）。
+
+    对应命令 ``infer rtc set <json>``；参数写入内存态 ``policy.rtc`` 并应用到正在运行的
+    RTCManager（下一块起生效）；见 wiki/design/motrix_edge_rtc.md。
+    """
+
+    enabled: bool | None = Field(default=None, description="是否启用 RTC（关闭 → 每步一次推理只取块首步）")
+    action_horizon: int | None = Field(default=None, ge=1, description="块长 H（信息性）")
+    execution_horizon: int | None = Field(default=None, ge=1, description="实际执行段步数 E（缺省 = H - suffix_len）")
+    suffix_len: int | None = Field(default=None, ge=0, description="过渡后缀步数 S（= 与下一块重叠窗口）")
+    inference_delay: int | None = Field(default=None, ge=0, description="前缀步数 D（信息性：预期已失效步数）")
+    aggregate_fn: str | None = Field(
+        default=None, description="重叠聚合：weighted_average/latest_only/average/conservative"
+    )
+
+
 class UploadScanRequest(BaseModel):
     """POST /v1/uploads 请求体：可覆盖配置的默认采集目录。"""
 
@@ -603,7 +620,7 @@ def create_app(
 
     @app.get("/v1/infers")
     async def infers_status():
-        """状态快照：node_state / adapter / policy / running / lease_id。"""
+        """状态快照：node_state / adapter / policy / prompt / recording / rtc / lease_id。"""
         return _infers().status()
 
     @app.post("/v1/infers")
@@ -657,6 +674,17 @@ def create_app(
         capture_meta），由调用方显式提交（Edge 不自动 sync）。受控操作：须持有租约。
         """
         return _infer_call(lambda: _infers().sync(meta=req.meta, lease_id=x_lease_id))
+
+    @app.post("/v1/infers/rtc")
+    async def infers_rtc(req: InferRTCRequest, x_lease_id: str | None = Header(default=None)):
+        """运行期设置 RTC（实时动作块）参数（``infer rtc set``）。
+
+        body 为参数对象（可部分：enabled / action_horizon / execution_horizon / suffix_len /
+        inference_delay / aggregate_fn）→ 写入内存态 ``policy.rtc`` 并应用到正在运行的
+        RTCManager（下一块起生效）；非法参数 → 400。受控操作：须持有租约。
+        """
+        params = {key: value for key, value in req.model_dump().items() if value is not None}
+        return _infer_call(lambda: _infers().configure_rtc(params=params, lease_id=x_lease_id))
 
     @app.post("/v1/infers/prompt")
     async def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):

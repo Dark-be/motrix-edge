@@ -18,6 +18,7 @@ import numpy as np
 
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.policy import get_policy
+from motrix_edge.rtc import build_rtc
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
@@ -34,6 +35,8 @@ from motrix_edge.utils.commands import (
     CMD_INFER_PORT_SET,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_RTC,
+    CMD_INFER_RTC_SET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
@@ -41,6 +44,7 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_QUIT,
     ROLLOUT_MODE_CONTINUOUS,
     CommandResult,
+    handle_infer_rtc,
     ok_result,
     parse_meta,
     parse_rollout_mode,
@@ -54,11 +58,13 @@ class InferSession(BaseSession):
     """推理会话 —— 组合 RobotAdapter + 推理策略客户端的推理执行器。
 
     生命周期由 EdgeNode 管理（session_start → run → session_finish）。**无「多步推理」模式**：
-    推理由单步 ``infer rollout`` / 持续 ``infer rollout continuous`` 驱动；**推理时 rollout
-    录制** = 像采集一样经 ``capture episode start/end`` 控制一轮 episode——robot 不关心是
-    推理还是采集（capturing 期间按帧录 mcap，含 action）。推理/录制开始前必须已设置
+    推理由单步 ``infer rollout`` / 持续 ``infer rollout continuous`` 驱动；**动作块切分与
+    时序平滑由 RTCManager 负责**（策略只提供原始动作块：``policy.infer_chunk``）。**推理时
+    rollout 录制** = 像采集一样经 ``capture episode start/end`` 控制一轮 episode——robot 不关心
+    是推理还是采集（capturing 期间按帧录 mcap，含 action）。推理/录制开始前必须已设置
     prompt（``infer prompt <text>``，空则拒绝）；录制时由调用方显式 ``capture sync``
-    同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。
+    同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。RTC 参数经
+    ``infer rtc`` / ``infer rtc set <json>`` 查询与运行期修改（见 wiki/design/motrix_edge_rtc.md）。
     """
 
     def __init__(self, base_cfg, command_source=None, frame_manager=None, adapter=None, policy_type=None):
@@ -84,6 +90,9 @@ class InferSession(BaseSession):
         # 把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端（openpi 据此
         # 过滤要下发的相机，不另读 edge.yml 相机名；策略无 bind_adapter 则 no-op）
         self._bind_policy_adapter()
+        # 实时动作块管理器（RTC）：策略只提供原始动作块（infer_chunk），块缓存 / 三元切分 /
+        # 时序平滑 / 预取时机由 RTCManager 统一负责（参数 = base_cfg policy.rtc，运行期可改）。
+        self.rtc = build_rtc(self.policy, self.policy_config.get("rtc") or {})
 
         self.state = SessionState.INIT  # 实时状态（供外部查询）
         # 录制状态：推理会话内是否开启了一轮 rollout 录制（capture episode start/end）。
@@ -236,9 +245,10 @@ class InferSession(BaseSession):
 
     def run(self):
         """阻塞式推理主循环：等待就绪 → 显式 infer connect → 等待 infer rollout 步进闭环。"""
-        # 复位（reset() 非阻塞设 home 目标）
+        # 复位（reset() 非阻塞设 home 目标；RTC 块队列 / 步号归零）
         self.adapter.reset()
         self.policy.reset()
+        self.rtc.reset()
         # 等待机器人就绪（期间可 session quit 退出 / robot estop 急停 / robot reset 复位）
         result = self._wait_ready(CMD_SESSION_QUIT)
         if result is not None:
@@ -303,6 +313,8 @@ class InferSession(BaseSession):
                 self._set_teleop(cmd)
             elif name == CMD_INFER_PROMPT:  # 运行时可改文本指令（会话内预置；推理/录制前必须非空）
                 self._set_prompt_cmd(cmd)
+            elif name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数：查询 / 设置（应用到运行中 manager）
+                self._reply(cmd, self._on_infer_rtc(cmd))
             elif name in (  # 推理端点：查询可用；**设置随会话锁定**（进入会话前经 enter / 前端设置）
                 CMD_INFER_IP,
                 CMD_INFER_IP_SET,
@@ -334,12 +346,12 @@ class InferSession(BaseSession):
                 time.sleep(0.02)  # 无命令时轻量轮询（避免忙等）
 
     def _run_single(self, cmd) -> None:
-        """infer rollout：单步推理闭环（一次 观测 → 推理 → 动作下发），回执动作。"""
+        """infer rollout：单步推理闭环（一次 观测 → 推理（RTC 取块）→ 动作下发），回执动作。"""
         obs = self.adapter.observe()  # 推理输入（显示观测由节点级写入 frame_manager）
         if obs is None:
             self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
             return
-        action = self.policy.infer(obs)
+        action = self.rtc.infer(obs)  # RTC：必要时拉新块（三元切分 + 重叠融合）→ 取本步动作
         if action is not None:
             self.adapter.rollout(action)  # 解析模型 action 为限速目标并推进一帧
         repr_action = self._action_repr(action)
@@ -382,6 +394,28 @@ class InferSession(BaseSession):
         self.adapter.sync_capture_meta(meta)
         self._reply(cmd, ok_result(state=getattr(self, "state", "ready"), meta=meta))
 
+    def _on_infer_rtc(self, cmd):
+        """``infer rtc`` / ``infer rtc set <json>``：查询 / 设置 RTC 参数（应用到运行中 manager）。
+
+        先经 ``handle_infer_rtc`` 校验并写入内存态 ``base_cfg["policy"]["rtc"]``（下次会话
+        生效）；设置成功时额外 ``self.rtc.configure`` 应用到当前会话的 manager（下一块起生效）。
+        参数非法 → rejected（400，不崩溃）。
+        """
+        result = handle_infer_rtc(self.base_cfg, cmd)
+        if result.status != "ok":
+            return result
+        if cmd.name == CMD_INFER_RTC_SET:
+            try:
+                self.rtc.configure(**result.data["rtc"])
+            except ValueError as exc:  # 理论上 handle_infer_rtc 已校验，双保险
+                return CommandResult(status="rejected", error=str(exc), status_code=400)
+        return ok_result(state=getattr(self, "state", "ready"), rtc=self.rtc.status())
+
+    def rtc_status(self) -> dict | None:
+        """RTC 运行状态（server ``/v1/infers`` 的 ``rtc`` 字段）；无 manager → None。"""
+        rtc = getattr(self, "rtc", None)
+        return rtc.status() if rtc is not None else None
+
     def _run_continuous(self) -> RunResult:
         """infer rollout continuous：持续推理，每步轮询命令响应退出 / 复位 / 急停 / 录制。
 
@@ -418,6 +452,9 @@ class InferSession(BaseSession):
             if name == CMD_INFER_PROMPT:  # 持续推理中动态改 prompt（下个推理请求生效）
                 self._set_prompt_cmd(cmd)
                 continue
+            if name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # 持续中查询 / 设置 RTC 参数
+                self._reply(cmd, self._on_infer_rtc(cmd))
+                continue
             if name == CMD_CAPTURE_EPISODE_START:  # 持续中开始 rollout 录制（prompt 已非空）
                 self._start_recording(cmd)
                 continue
@@ -446,7 +483,7 @@ class InferSession(BaseSession):
             if obs is None:  # 观测未就绪：按步进间隔轮询
                 time.sleep(self.step_interval)
                 continue
-            action = self.policy.infer(obs)
+            action = self.rtc.infer(obs)  # RTC：必要时拉新块（三元切分 + 重叠融合）→ 本步动作
             if action is not None:
                 self.adapter.rollout(action)
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏

@@ -22,9 +22,10 @@
   - ``rollout`` → submit ``infer rollout``（单步 / continuous 持续）；
   - ``episode_start`` / ``episode_end`` → submit ``capture episode start/end``（rollout 录制）；
   - ``sync`` → submit ``capture sync``（录制时同步采集元信息 operator/task_name）；
-  - ``status`` 只读 node（node_state / adapter / policy / prompt / recording），不另起会话 run。
+  - ``configure_rtc`` → submit ``infer rtc set``（运行期改 RTC 参数，见 wiki/design/motrix_edge_rtc.md）；
+  - ``status`` 只读 node（node_state / adapter / policy / prompt / recording / rtc），不另起会话 run。
 
-受控操作（enter / exit / rollout / episode / sync）须持有 Edge 级活跃租约（``X-Lease-Id``，
+受控操作（enter / exit / rollout / episode / sync / rtc）须持有 Edge 级活跃租约（``X-Lease-Id``，
 经 ``LeaseManager`` 校验）。推理 / 录制开始前必须已 ``infer prompt`` 预置非空文本
 （prompt 为空不能开始推理；录制 rollout 的默认 task_name = prompt）。
 """
@@ -41,6 +42,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_CONNECT,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_RTC_SET,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     ROLLOUT_MODE_CONTINUOUS,
@@ -103,6 +105,8 @@ class InferService:
             "capture_meta": {"operator": "policy", "task_name": prompt},
             # 机器人进程实际采集状态缓存（node 周期刷新；录制时 running=True + 已同步元信息）
             "capture_status": self._capture_status(),
+            # RTC（实时动作块）运行状态：enabled / params / index / remaining / last_chunk
+            "rtc": self._rtc_status(),
             "lease_id": self._leases.status()["lease_id"],
         }
 
@@ -267,6 +271,27 @@ class InferService:
         self._raise_on_rejected(result)
         return {"status": "accepted", "meta": result.data.get("meta")}
 
+    def configure_rtc(self, params: dict, lease_id: str | None = None) -> dict:
+        """运行期设置 RTC 参数（``infer rtc set``）：写内存态 + 应用到正在运行的 RTCManager。
+
+        body 为 RTC 参数对象（可部分：enabled / action_horizon / execution_horizon /
+        suffix_len / inference_delay / aggregate_fn）；非法参数 → 400。须已在推理会话
+        （ACTIVE）且持有活跃租约（与其它受控操作一致）。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        result = self._submit(
+            Command(CMD_INFER_RTC_SET, params={"json": json.dumps(params or {})}, meta={"lease_id": lease_id})
+        )
+        self._raise_on_rejected(result)
+        return {
+            "status": "accepted",
+            "rtc": result.data.get("rtc"),
+        }
+
     def set_prompt(self, lease_id: str | None = None, prompt: str | None = None) -> dict:
         """运行时更新推理文本指令（openpi 动态 prompt；会话内生效，下个推理请求携带）。
 
@@ -322,6 +347,18 @@ class InferService:
             "operator": getattr(capture_status, "operator", None),
             "task_name": getattr(capture_status, "task_name", None),
         }
+
+    def _rtc_status(self) -> dict | None:
+        """RTC（实时动作块）运行状态（读会话的 RTCManager；无会话 → None）。
+
+        含 enabled / params / index / remaining / fetches / last_chunk（最近一块的三元切分
+        步数），供前端展示（见 wiki/design/motrix_edge_rtc.md）。
+        """
+        session = self._session()
+        rtc_status = getattr(session, "rtc_status", None)
+        if not callable(rtc_status):
+            return None
+        return rtc_status()
 
     def _policy_ref(self):
         """当前推理会话的策略客户端标识（无会话为 None）。"""

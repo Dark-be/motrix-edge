@@ -14,9 +14,9 @@
 
 """policy/act（lerobot gRPC 流式客户端）测试 —— 进程内 fake AsyncInference 服务端，无 lerobot 官方 server。
 
-覆盖：connect（Ready 握手 + 延迟下发 PolicyInstructions）、动作块流式消费（块内不
-重复上传观测 / 块耗尽才再上传）、must_go 语义、时序平滑（重叠预取 + 加权聚合）、
-drain / reset / disconnect。
+覆盖：connect（Ready 握手 + 延迟下发 PolicyInstructions）、`infer_chunk` 按绝对步号取回整块
+（策略只负责取推理结果；块缓存 / 三元切分 / 时序平滑由 motrix_edge.rtc 负责，见
+tests/test_rtc.py）、must_go 语义、disconnect。
 """
 
 import pickle
@@ -53,6 +53,7 @@ class _FakeAsyncInferenceServicer(services_pb2_grpc.AsyncInferenceServicer):
         self.obs_calls = 0
         self.policy_data: bytes | None = None
         self.last_raw: dict | None = None
+        self.last_obs_timestep: int | None = None
         self._obs_queue: "queue.Queue[int]" = queue.Queue()
         self._block_values = iter(block_values) if block_values is not None else None
 
@@ -69,6 +70,7 @@ class _FakeAsyncInferenceServicer(services_pb2_grpc.AsyncInferenceServicer):
         data = receive_bytes_in_chunks(request_iterator, None, threading.Event())
         timed = pickle.loads(data)  # noqa: S301 测试用（vendored 类）
         self.last_raw = timed.get_observation()
+        self.last_obs_timestep = timed.get_timestep()
         self._obs_queue.put(timed.get_timestep())
         self.obs_calls += 1
         return services_pb2.Empty()
@@ -102,13 +104,11 @@ def act_server():
 
 
 def _make_client(port, **overrides):
-    # 默认关闭时序平滑（smooth_overlap=0 → 纯「块耗尽才推理」），平滑语义由单独测试开启。
     cfg = {
         "host": "127.0.0.1",
         "port": port,
         "pretrained_name_or_path": "fake/act",
         "actions_per_chunk": 3,
-        "smooth_overlap": 0,
     }
     cfg.update(overrides)
     return ACTClient(cfg)
@@ -125,48 +125,45 @@ def test_act_grpc_handshake_and_lazy_policy(act_server):
     client.disconnect()
 
 
-def test_act_grpc_streams_action_chunks(act_server):
-    """动作块流式：一个块（3 步）内不重复上传观测，块耗尽（第 4 步）才再上传。"""
+def test_act_grpc_infer_chunk_returns_whole_block(act_server):
+    """infer_chunk：按绝对步号上传观测一次，返回**整块**（含首步绝对步号）——不做缓存 / 切片。"""
     port, servicer = act_server
     client = _make_client(port)
     client.connect()
     obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
 
-    actions = [client.infer(obs) for _ in range(4)]
-    assert all(a.shape == (2,) for a in actions)
-    assert all(np.allclose(a, [1.0, 1.0]) for a in actions)
-    assert servicer.obs_calls == 2  # ts0 上传一次，ts3 再上传一次
-    assert servicer.policy_calls == 1  # 仅首次 infer 下发策略指令
+    chunk = client.infer_chunk(obs, index=0)
+    assert chunk.height == 3  # 一次推理返回 actions_per_chunk 步
+    assert chunk.dim == 2
+    assert chunk.start_index == 0  # 首步绝对步号 = 请求的 index
+    assert np.allclose(chunk.actions, 1.0)
+    assert servicer.obs_calls == 1  # 每次调用真实上传一次观测
+    assert servicer.policy_calls == 1  # 仅首次下发策略指令
     assert servicer.policy_data is not None
-
-    # drain：消费缓存动作（不发新推理请求 / 不再上传观测）
-    drained = client.drain()
-    assert drained is not None and np.allclose(drained, [1.0, 1.0])
-    assert servicer.obs_calls == 2
     client.disconnect()
 
 
-def test_act_grpc_reset_clears_cache(act_server):
-    """reset：清空缓存动作（随后 infer 需再上传观测取新块）。"""
+def test_act_grpc_infer_chunk_uses_index_as_timestep(act_server):
+    """infer_chunk：``index``（RTCManager 的绝对步号）作为 TimedObservation.timestep 上报。"""
     port, servicer = act_server
     client = _make_client(port)
     client.connect()
     obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
-    client.infer(obs)  # 块 {0,1,2}，缓存 1,2
-    client.reset()
-    assert client._actions == {}
-    client.infer(obs)  # 需新观测（ts1）→ 再上传
-    assert servicer.obs_calls == 2
+
+    chunk = client.infer_chunk(obs, index=7)
+    assert servicer.last_obs_timestep == 7  # 服务端收到的观测 timestep = index
+    assert chunk.start_index == 7
+    assert servicer.obs_calls == 1
     client.disconnect()
 
 
 def test_act_grpc_requires_pretrained_model(act_server):
-    """缺 pretrained_name_or_path：首次 infer 拒绝（策略指令需要模型标识）。"""
+    """缺 pretrained_name_or_path：首次 infer_chunk 拒绝（策略指令需要模型标识）。"""
     port, _ = act_server
     client = _make_client(port, pretrained_name_or_path=None)
     client.connect()
     with pytest.raises(ValueError, match="pretrained_name_or_path"):
-        client.infer({"observations/qpos": np.zeros(2, dtype=np.float32)})
+        client.infer_chunk({"observations/qpos": np.zeros(2, dtype=np.float32)})
     client.disconnect()
 
 
@@ -179,7 +176,7 @@ def test_act_grpc_image_letterboxed(act_server):
     img = np.zeros((360, 640, 3), dtype=np.uint8)
     img[:, :, 2] = 255  # R
     obs = {"observations/qpos": np.zeros(2, dtype=np.float32), "observations/images/cam": img}
-    client.infer(obs)
+    client.infer_chunk(obs)
 
     got = servicer.last_raw["cam"]
     assert got.shape == (224, 224, 3)
@@ -188,39 +185,6 @@ def test_act_grpc_image_letterboxed(act_server):
     # 中部内容行（等比缩放后内容区高 126，居中于 [49, 175)）保持纯红
     assert np.all(got[112, :, 2] == 255)
     client.disconnect()
-
-
-def test_act_grpc_smoothing_weighted_sequence(act_server):
-    """平滑完整序列：K=3、overlap=1、块值 1..N，断言重叠步 = 0.3*旧 + 0.7*新。"""
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    servicer = _FakeAsyncInferenceServicer(actions_per_chunk=3, dim=2, block_values=[1, 2, 3, 4, 5, 6])
-    services_pb2_grpc.add_AsyncInferenceServicer_to_server(servicer, server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    server.start()
-    try:
-        client = _make_client(port, smooth_overlap=1)
-        client.connect()
-        obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
-        actions = [client.infer(obs) for _ in range(8)]
-        expected = [1.0, 1.0, 1.7, 2.0, 2.7, 3.0, 3.7, 4.0]
-        assert all(np.allclose(a, [v, v]) for a, v in zip(actions, expected))
-        # 预取请求发生在 ts0/2/4/6（每 K-overlap=2 步一次），非每步
-        assert servicer.obs_calls == 4
-        # drain 只消费已平滑缓存，不再触发推理
-        drained = []
-        while (a := client.drain()) is not None:
-            drained.append(a)
-        assert drained  # 消费了块3剩余 ts7→后…
-        assert servicer.obs_calls == 4
-        client.disconnect()
-    finally:
-        server.stop(0)
-
-
-def test_act_grpc_unknown_aggregate_fn():
-    """未知 aggregate_fn：构造即拒绝（配置错误尽早暴露）。"""
-    with pytest.raises(ValueError, match="aggregate_fn"):
-        ACTClient({"host": "127.0.0.1", "port": 1, "aggregate_fn": "bogus"})
 
 
 def test_act_grpc_image_cameras_subset(act_server):
@@ -234,7 +198,7 @@ def test_act_grpc_image_cameras_subset(act_server):
         "observations/images/cam_head": np.zeros((64, 64, 3), dtype=np.uint8),
         "observations/images/cam_left_wrist": np.zeros((64, 64, 3), dtype=np.uint8),
     }
-    client.infer(obs)
+    client.infer_chunk(obs)
     raw = servicer.last_raw
     assert "cam_front" in raw  # 策略相机（rename 后）
     assert raw["cam_front"].shape == (224, 224, 3)

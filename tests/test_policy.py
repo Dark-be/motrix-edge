@@ -162,27 +162,28 @@ def test_openpi_exposes_server_metadata():
     assert client.server_metadata == {}
 
 
-def test_openpi_infer_requests_only_when_chunk_empty():
-    """OpenPIClient.infer：**仅当缓存块耗尽时才向推理端请求**（其余步骤消耗缓存块）。
+def test_openpi_infer_chunk_returns_raw_chunk():
+    """OpenPIClient.infer_chunk：每次调用真实请求一次，返回**原始动作块**（不做缓存 / 切片）。
 
-    一个动作块（[horizon, dim]）应支撑 horizon 步推理，期间不再访问推理端。
+    块缓存 / 三元切分 / 时序平滑由 RTCManager 负责（见 tests/test_rtc.py）——策略只取结果。
     """
     from motrix_edge.policy.openpi.client import OpenPIClient
 
     client = OpenPIClient({"action_horizon": 2})
     transport = _FakeTransport(horizon=2, dim=2)
     client._transport = transport
-    client.connect()  # 以 config action_horizon=2 初始化空缓存
+    client.connect()
 
     obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
-    # 第 1 步：块为空 → 请求 1 次，消耗缓存第 1 步
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    chunk = client.infer_chunk(obs)
+    assert chunk.height == 2  # 整块返回（[horizon, dim]）
+    assert chunk.dim == 2
+    assert chunk.start_index == 0  # 未传 index → 0
+    assert np.allclose(chunk.actions, 1.0)
     assert transport.calls == 1
-    # 第 2 步：块未耗尽 → **不请求**，直接消耗缓存第 2 步
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
-    assert transport.calls == 1
-    # 第 3 步：块耗尽（empty）→ 再请求 1 次
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    # 再次调用仍真实请求（不再「块内不请求」——缓存归 RTCManager）
+    chunk2 = client.infer_chunk(obs, index=5)
+    assert chunk2.start_index == 5  # 回填 RTCManager 的绝对步号
     assert transport.calls == 2
 
 
@@ -221,7 +222,7 @@ def test_openpi_sends_official_flat_observation():
         "observations/images/cam_left_wrist": _jpeg_bytes(rgb),  # 未启用（不在 bind 相机集）→ 过滤
         "observations/images/cam_right_wrist": rgb,  # 数组直传
     }
-    assert client.infer(obs) is not None
+    assert client.infer_chunk(obs) is not None
 
     payload = transport.last_payload
     assert np.array_equal(payload[OPENPI_KEY_STATE], obs["observations/qpos"])
@@ -248,11 +249,11 @@ def test_openpi_camera_layout_comes_from_bind_adapter_not_config():
         "observations/images/cam_head": np.zeros((4, 4, 3), dtype=np.uint8),
         "observations/images/cam_left_wrist": np.zeros((4, 4, 3), dtype=np.uint8),
     }
-    client.infer(obs)  # 未绑定 → 透传观测内全部相机
+    client.infer_chunk(obs)  # 未绑定 → 透传观测内全部相机
     assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head", "cam_left_wrist"}
 
     client.bind_adapter(action_dim=7, camera_names=["cam_head"])  # adapter 只启用 cam_head（双相机→单相机）
-    client.infer(obs)  # 上一块（horizon=1）已耗尽 → 再请求
+    client.infer_chunk(obs)  # 上一块（horizon=1）已耗尽 → 再请求
     assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head"}
 
 
@@ -266,11 +267,11 @@ def test_openpi_prompt_dynamic_per_request():
     client.connect()
     obs = {"observations/qpos": np.zeros(1, dtype=np.float32)}
 
-    client.infer(obs)  # 块为空 → 请求
+    client.infer_chunk(obs)  # 块为空 → 请求
     assert "prompt" not in transport.last_payload  # 缺省 prompt=None → 不发（服务端 default_prompt 兜底）
 
     client.prompt = "switch tasks now"
-    client.infer(obs)  # 块已耗尽（horizon=1）→ 再请求
+    client.infer_chunk(obs)  # 块已耗尽（horizon=1）→ 再请求
     assert transport.last_payload["prompt"] == "switch tasks now"
 
 

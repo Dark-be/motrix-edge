@@ -42,6 +42,8 @@ from motrix_edge.utils.commands import (
     CMD_INFER_CONNECT,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_RTC,
+    CMD_INFER_RTC_SET,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -305,6 +307,18 @@ class FakeInferSession:
         self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
         self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
         self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
+        self._rtc_params = {"enabled": True, "suffix_len": 10}  # RTC 参数（infer rtc set 可改）
+
+    def rtc_status(self):
+        """仿 RTCManager.status（server /v1/infers 的 rtc 字段）。"""
+        return {
+            "enabled": bool(self._rtc_params.get("enabled", True)),
+            "params": dict(self._rtc_params),
+            "index": 0,
+            "remaining": 0,
+            "fetches": 0,
+            "last_chunk": None,
+        }
 
     def run(self):
         while True:
@@ -340,6 +354,10 @@ class FakeInferSession:
             elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
                 meta = json.loads((cmd.params or {}).get("meta") or "{}")
                 self._reply(cmd, ok_result(state="ready", meta=meta))
+            elif name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数：查询 / 设置
+                if name == CMD_INFER_RTC_SET:
+                    self._rtc_params.update(json.loads((cmd.params or {}).get("json") or "{}"))
+                self._reply(cmd, ok_result(state="ready", rtc=self.rtc_status()))
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
@@ -1261,6 +1279,36 @@ def test_infers_sync_syncs_capture_meta():
     assert CMD_CAPTURE_SYNC in [getattr(c, "name", None) for c in node.session.pulled]
     # 缺租约头（已有活跃租约）→ 403
     assert client.post("/v1/infers/sync", json={"meta": {}}).status_code == 403
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_rtc_configure_and_status():
+    """RTC 参数：POST /v1/infers/rtc → infer rtc set → 应用到会话并反映在 status。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入推理会话：rtc → 409
+    assert client.post("/v1/infers/rtc", headers={"X-Lease-Id": lease}, json={"suffix_len": 5}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 设置 RTC 参数（部分更新）：回执生效后的状态
+    r = client.post(
+        "/v1/infers/rtc",
+        headers={"X-Lease-Id": lease},
+        json={"suffix_len": 5, "aggregate_fn": "latest_only"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["rtc"]["params"]["suffix_len"] == 5
+    assert body["rtc"]["params"]["aggregate_fn"] == "latest_only"
+    # status 同步暴露 rtc（enabled / params / index / remaining / last_chunk）
+    snap = client.get("/v1/infers").json()
+    assert snap["rtc"]["params"]["suffix_len"] == 5
+    assert snap["rtc"]["enabled"] is True
+    assert CMD_INFER_RTC_SET in [getattr(c, "name", None) for c in node.session.pulled]
+    # 非法参数（负数）→ pydantic 422
+    assert client.post("/v1/infers/rtc", headers={"X-Lease-Id": lease}, json={"suffix_len": -1}).status_code == 422
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
 

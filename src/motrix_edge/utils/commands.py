@@ -32,6 +32,8 @@ import queue
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motrix_edge.rtc import DEFAULT_RTC_CONFIG, validate_params
+
 # ===== 命令名（空格分隔，单点定义）===========================================
 # 命令词统一**空格分隔、不用点**。分层：
 #   session run <type>  启动会话（选择 + 启动一步完成；type = capture / infer，参数）
@@ -40,6 +42,7 @@ from typing import Callable
 #   node reset          节点复位 / ERROR 恢复 → IDLE
 #   infer rollout       单步推理闭环（会话内消费）
 #   infer connect       显式连接推理节点（会话内消费）
+#   infer rtc           查询 / 设置 RTC 参数（实时动作块管理器；配置级，任何状态可用）
 #   capture sync        同步采集元信息到机器人进程（会话内消费）
 CMD_SESSION_RUN = "session run"  # 启动会话（参数 session = capture / infer；一步完成）
 CMD_SESSION_QUIT = "session quit"  # 退出当前会话
@@ -66,7 +69,9 @@ CMD_INFER_IP = "infer ip"  # 查询推理节点 IP（内存态 policy.host）
 CMD_INFER_IP_SET = "infer ip set"  # 设置推理节点 IP（位置参数 ip；下次 session run infer 生效）
 CMD_INFER_PORT = "infer port"  # 查询推理节点端口（内存态 policy.port）
 CMD_INFER_PORT_SET = "infer port set"  # 设置推理节点端口（位置参数 port；下次 session run infer 生效）
-CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；openpi 会话内运行时可改）
+CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；会话内运行时可改）
+CMD_INFER_RTC = "infer rtc"  # 查询 RTC 参数与运行状态（内存态 policy.rtc）
+CMD_INFER_RTC_SET = "infer rtc set"  # 设置 RTC 参数（位置参数 json，JSON 对象；内存态 policy.rtc）
 
 
 class CommandError(Exception):
@@ -271,14 +276,15 @@ def parse_rollout_mode(raw) -> str:
     raise ValueError(f"invalid rollout: {raw!r}")
 
 
-def parse_meta(raw) -> dict:
-    """解析 ``capture sync`` 的 meta 参数（JSON 字符串）→ ``dict``。
+def parse_meta(raw, what: str = "capture sync") -> dict:
+    """解析 JSON 对象参数（``capture sync --meta`` / ``infer rtc set`` / ``adapter config set``）。
 
-    缺失 / 非法 / 非对象 JSON → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+    ``what`` 仅用于错误信息（默认 ``capture sync``）。缺失 / 非法 / 非对象 JSON →
+    ``ValueError``（命令处理器回执 rejected，不崩溃）。
     """
     text = str(raw or "").strip()
     if not text:
-        raise ValueError("capture sync requires meta (JSON object)")
+        raise ValueError(f"{what} requires a JSON object")
     try:
         meta = json.loads(text)
     except (TypeError, ValueError):
@@ -349,6 +355,31 @@ def handle_infer_endpoint(base_cfg, cmd):
         return ok_result(**endpoint)
     # infer ip / infer port：查询当前配置端点
     return ok_result(**get_policy_endpoint(base_cfg))
+
+
+def get_rtc_params(base_cfg) -> dict:
+    """读取 RTC 参数（``base_cfg["policy"]["rtc"]`` 覆盖代码缺省）。"""
+    policy = base_cfg.get("policy", {})
+    return {**DEFAULT_RTC_CONFIG, **(policy.get("rtc") or {})}
+
+
+def handle_infer_rtc(base_cfg, cmd) -> CommandResult:
+    """处理 RTC 配置命令（``infer rtc`` / ``infer rtc set <json>``）。
+
+    写内存态 ``base_cfg["policy"]["rtc"]``（不写回 yaml），下次 ``session run infer``
+    实例化 RTCManager 时生效；会话内由 InferSession 额外应用到**正在运行的** manager
+    （下一块起生效）。节点主循环（非任务态）与会话循环（任务态）**共用**本函数，保证
+    配置命令「任何状态可用」（与 ``infer ip`` 同款）。参数非法 → rejected（400）。
+    """
+    if cmd.name != CMD_INFER_RTC_SET:
+        return ok_result(rtc=get_rtc_params(base_cfg))
+    try:
+        patch = validate_params(parse_meta(cmd.params.get("json"), what="infer rtc set"))
+    except ValueError as exc:
+        return CommandResult(status="rejected", error=str(exc), status_code=400)
+    merged = {**get_rtc_params(base_cfg), **patch}
+    base_cfg.setdefault("policy", {})["rtc"] = merged
+    return ok_result(rtc=merged)
 
 
 def handle_capture_meta(cmd, store=None) -> CommandResult:
@@ -445,6 +476,8 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_INFER_PORT),  # infer port：查询推理节点端口（无参）
         CommandSpec(name=CMD_INFER_PORT_SET, positional=("port",)),  # infer port set <port>
         CommandSpec(name=CMD_INFER_PROMPT, positional=("prompt",)),  # infer prompt <text>：运行时改文本指令
+        CommandSpec(name=CMD_INFER_RTC),  # infer rtc：查询 RTC 参数 / 运行状态
+        CommandSpec(name=CMD_INFER_RTC_SET, positional=("json",)),  # infer rtc set <json>：设置 RTC 参数
     ]:
         registry.register(spec)
     return registry

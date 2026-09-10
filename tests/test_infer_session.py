@@ -14,8 +14,8 @@
 
 """InferSession 推理循环测试 —— fake adapter + fake policy + fake signal source。
 
-覆盖：单步 / 持续推理、prompt 门控（为空不能推理/录制）、推理时 rollout 录制
-（capture episode start/end + capture sync）、多步 & drain 已取消、急停安全停止、
+覆盖：单步 / 持续推理（经 RTCManager 步进）、prompt 门控（为空不能推理/录制）、推理时
+rollout 录制（capture episode start/end + capture sync）、多步 & drain 已取消、急停安全停止、
 ready 前退出，无网络无硬件可跑。
 """
 
@@ -82,9 +82,13 @@ class _FakePolicy:
     def reset(self):
         self.reset_calls += 1
 
-    def infer(self, obs):
+    def infer_chunk(self, observation, index=None):
+        """策略只负责取推理结果：返回**原始动作块**（RTCManager 负责缓存 / 切分 / 平滑）。
+
+        给足 50 步，避免 RTC 在短块上频繁预取（与真实策略块长一致）。
+        """
         self.infer_calls += 1
-        return self.action
+        return np.tile(np.asarray(self.action, dtype=float), (50, 1))
 
 
 class _FakeAdapter:

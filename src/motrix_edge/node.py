@@ -51,6 +51,8 @@ from motrix_edge.utils.commands import (
     CMD_INFER_IP_SET,
     CMD_INFER_PORT,
     CMD_INFER_PORT_SET,
+    CMD_INFER_RTC,
+    CMD_INFER_RTC_SET,
     CMD_LEASE_REVOKE,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
@@ -62,6 +64,7 @@ from motrix_edge.utils.commands import (
     CommandResult,
     handle_capture_meta,
     handle_infer_endpoint,
+    handle_infer_rtc,
     ok_result,
     parse_bool,
     parse_meta,
@@ -299,6 +302,13 @@ class EdgeNode:
             self._reply(cmd, self._on_infer_endpoint(cmd))
             return
 
+        # RTC 配置（infer rtc / infer rtc set <json>）：配置级命令，任何状态均可用；写内存态
+        # base_cfg["policy"]["rtc"]，下次 session run infer 实例化 RTCManager 时生效
+        # （会话内由 InferSession 额外应用到正在运行的 manager，下一块起生效）。
+        if cmd.name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):
+            self._reply(cmd, self._on_infer_rtc(cmd))
+            return
+
         # 采集元信息选项（capture meta list/add/edit/delete/delete-key）：配置级命令，任何状态
         # 均可用（读写 config/capture.yml 的 meta 段；与 infer ip 同一语义，与会话状态机解耦）。
         if cmd.name in (
@@ -392,6 +402,14 @@ class EdgeNode:
         配置命令由节点主循环（非任务态）与会话循环（任务态）共用，保证「任何状态可用」。
         """
         return handle_infer_endpoint(self.base_cfg, cmd)
+
+    def _on_infer_rtc(self, cmd):
+        """infer rtc / infer rtc set <json>：读写 RTC（实时动作块）参数配置。
+
+        委托给 ``utils.commands.handle_infer_rtc``（写内存态 ``base_cfg["policy"]["rtc"]``）；
+        与 ``infer ip`` 同为配置级命令（任何状态可用），下次 ``session run infer`` 生效。
+        """
+        return handle_infer_rtc(self.base_cfg, cmd)
 
     def _on_adapter_config(self, cmd):
         """adapter config / adapter config set <json> / adapter config current：查询 / 设置 / 查询当前生效。

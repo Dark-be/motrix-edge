@@ -8,12 +8,13 @@
 由 `get_policy(base_cfg, policy_type=...)` **懒加载**实例化（避免导入 `motrix_edge` 时因缺
 第三方依赖报错）。
 
-策略与 wire 形态（各策略自持动作块缓存，**无通用 broker**）：
+策略与 wire 形态（**策略只负责「取一次推理的原始动作块」**；块缓存 / 三元切分 / 时序平滑 /
+预取时机统一由 [实时动作块（rtc）](./motrix_edge_rtc.md) 负责）：
 
-| 类型   | 传输         | 消息格式          | 动作语义                            | 动作缓存                   |
-| ------ | ------------ | ----------------- | ----------------------------------- | -------------------------- |
-| openpi | WebSocket    | msgpack（契约）   | `[horizon, dim]` 动作块逐帧消费     | openpi 自有（块切片）      |
-| act    | lerobot gRPC | pickle（lerobot） | 流式 `TimedAction` 按 timestep 消费 | act 自有（timestep→ 动作） |
+| 类型   | 传输         | 消息格式          | 推理结果                          |
+| ------ | ------------ | ----------------- | --------------------------------- |
+| openpi | WebSocket    | msgpack（契约）   | `[horizon, dim]` 原始动作块       |
+| act    | lerobot gRPC | pickle（lerobot） | `TimedAction` 整块（含 timestep） |
 
 ## 目标与原则
 
@@ -21,8 +22,11 @@
     `connect()` 幂等可重连；`ensure_connected()` 惰性（未连则单次限时连接，供 rollout 自动触发）；
     `prepare(obs)` 可选**预热**（act：提前下发策略指令 / 服务端加载模型；openpi：no-op）；
     `session_finish` 时 `disconnect`。进入推理会话不自动连接（首个 rollout 惰性自连）。
--   `infer(obs)` 输入观测返回单步动作；异常返回 `None` 供上层跳过。动作块缓存**策略自有**
-    （openpi 块切片 / act timestep 键控），不共享通用缓存器——不同策略的块语义与平滑需求不同。
+-   `infer_chunk(obs, index)` 输入观测返回**一次推理的原始动作块**（`ActionChunk` / ndarray）；
+    异常 / 空块返回 `None` 供上层跳过；`index` = 当前绝对步号（流式策略 act 用作
+    `TimedObservation.timestep`，openpi 仅回填 `start_index`）。**块缓存 / 三元切分 /
+    时序平滑 / 预取时机不属策略职责**（统一在 `motrix_edge.rtc`，见
+    [实时动作块（rtc）](./motrix_edge_rtc.md)）。
 -   注册式懒加载：`POLICY_REGISTRY` 登记类型，`get_policy()` 选中时才 `import`。
 
 ## 包结构
@@ -37,10 +41,10 @@ src/motrix_edge/
 │   └── msgpack_numpy.py# numpy 安全 msgpack 序列化
 └── policy/
     ├── __init__.py     # POLICY_REGISTRY + get_policy 工厂 + policy_adapters()
-    ├── base.py         # BasePolicyClient 抽象（connect / infer / drain / reset / disconnect）
+    ├── base.py         # BasePolicyClient 抽象（connect / infer_chunk / reset / disconnect）
     ├── contract.py     # 格式契约（openpi wire）：key 常量 + build_observation/extract_action/图像编码
-    ├── openpi/         # OpenPIClient（ws + msgpack + 自有块切片缓存）
-    └── act/            # ACTClient（lerobot gRPC 流式 + 自有 timestep 缓存 + 时序平滑）
+    ├── openpi/         # OpenPIClient（ws + msgpack：请求一次返回原始动作块）
+    └── act/            # ACTClient（lerobot gRPC 流式：按绝对步号取回整块）
 ```
 
 lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保留）提供 wire 最小件：
@@ -62,10 +66,10 @@ lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保�
 
 最小接口：`connect()`（幂等/可重连：初始化传输、读取服务端 metadata）、`connected`（只读：是否已连）、
 `ensure_connected()`（未连则 `connect()`，已连 no-op——**惰性自连**入口）、`prepare(observation=None)`
-（可选预热，默认 no-op；act 覆盖为首次下发策略指令/触发服务端加载）、`infer(observation)`（返回单步动作）、
-`drain(observation=None)`（只消费缓存动作块，不发新推理请求；无缓存返回 `None`）、`reset()`（清策略
-状态）、`disconnect()`。基类默认无缓存消费逻辑、无连接判断（`connected` 默认 False，子类覆盖）。
-动作块缓存为**各策略自有**（见下）。
+（可选预热，默认 no-op；act 覆盖为首次下发策略指令/触发服务端加载）、
+`infer_chunk(observation, index=None)`（返回**原始动作块**；策略唯一职责）、`bind_adapter(...)`
+（绑定 adapter 启用布局：相机名 / qpos 维数）、`reset()`（清策略状态）、`disconnect()`。
+基类无连接判断（`connected` 默认 False，子类覆盖）。**块缓存 / 切分 / 平滑不属基类**——见 rtc。
 
 > 连接语义（旧版由 `InferSession` 维护 `_connected` + 强制先 `infer connect`，act 引入后
 > connect 只轻握手、真正就绪=服务端加载模型 → 该硬编码已删除）：策略自行管理连接状态；
@@ -85,10 +89,9 @@ lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保�
 ## OpenPIClient（ws + msgpack）
 
 -   `connect()`：建 ws 连接，收 metadata（含 `action_horizon`）→ `server_metadata`；失败清理半开连接。
--   **动作块缓存为 openpi 自有**（`_chunk` + `_cursor`）：`[horizon, dim]` 块逐帧切片消费，单步
-    `[dim]` 透传；短/长块按实际块长耗尽，不越界、不静默丢弃。
--   `infer(obs)`：**仅当缓存块耗尽时** `build_observation` → `request` 取新块；其余步骤直接消费缓存。
--   `drain`：只消费缓存；`reset`：清块缓存。
+-   返回**原始动作块**（`[horizon, dim]` 或单步 `[dim]`）；**不做缓存 / 切片**——块消费由 rtc 负责。
+-   `infer_chunk(obs, index)`：`build_observation` → `request` → 返回整块（每次调用都真实请求）。
+-   `prepare(obs)`：预热（发一帧观测触发模型加载，丢弃结果）；`reset`：无本地状态（连接保持）。
 
 ## ACTClient（lerobot gRPC 流式）
 
@@ -96,53 +99,27 @@ edge = lerobot `Robot` 侧客户端，与官方 `async_inference/policy_server.p
 原生流式语义**（对照官方 `robot_client.py`）：
 
 -   `connect()`：gRPC channel + `Ready` 握手（服务端 `_reset_server` 清状态）。策略指令
-    `SendPolicyInstructions` 延后到首次 `infer`（此时才知 state 维度 / 相机）。
+    `SendPolicyInstructions` 延后到首次 `infer_chunk`（此时才知 state 维度 / 相机）。
 -   wire：观测 `pickle(TimedObservation)` **分块** `SendObservations`（`must_go=True` 强制推理）；
     服务端每 `GetActions` 对队列最新观测推理并**返回整个动作块**（不缓存）；edge `GetActions`
-    轮询取回 `pickle(list[TimedAction])` 落入本地缓存按 timestep 消费。服务端无动作缓存
-    （详见 act 时序平滑节）。
--   **动作缓存为 act 自有**（`_actions: {timestep: action}`，`_next_timestep` 单调递增、reset 不回退，
-    避免服务端按「timestep 已预测」过滤新观测）。
+    轮询取回 `pickle(list[TimedAction])`，转成 `ActionChunk`（首步绝对步号）返回。服务端无动作缓存。
+-   **无本地动作缓存**：`infer_chunk(obs, index)` 每次上传观测（`timestep=index`）、取回整块；
+    块重叠 / 平滑由 rtc 负责（见 [实时动作块（rtc）](./motrix_edge_rtc.md)）。
 -   图像：edge 侧直接 `resize_with_pad` **letterbox 到 `policy.image_size`（默认 224×224，横向图
     上下留黑边）** 后以 uint8 RGB 上传——服务端 ACT 按 `image_features(224×224)` 处理时 resize
     为 no-op、不变形。
--   `drain`：只消费缓存（`pop(_next_timestep)`）；`infer`：缓存耗尽才请求新块（块内不重复上传）。
 -   服务端观测过滤：丢弃「timestep 已预测」或「与上次处理观测过于相似」的观测，除非 `must_go=True`；
     edge 恒置 `must_go=True` 规避。
 
-### ACT 时序平滑（edge 同步重叠 + 加权聚合）
+### 时序平滑（移交 rtc）
 
-**问题与目标**：edge 同步按需下动作块**不重叠**——块边界处直接从旧块末步跳到新块首步，可能跳变
-（机械冲击）。lerobot 官方在**客户端**做时序平滑（服务端每次 `GetActions` 只对最新观测推理并
-返回整块、**无动作缓存**，见上「ACTClient」wire；平滑职责在客户端
-`robot_client._aggregate_action_queues`），机制 = 让相邻动作块在 timestep 上**重叠**，对重叠步做
-**加权平均**（默认 `weighted_average = 0.3*old + 0.7*new`）。edge 在**保持同步按需（无后台线程）**
-的前提下实现同一语义。
+动作块的**重叠预取 + 加权聚合**（重叠窗口 / 聚合函数 / 关闭开关 / 预取时机）已统一收进
+[实时动作块（rtc）](./motrix_edge_rtc.md)：
 
-**原理**：块重叠来自「提前触发推理」。旧块还剩余 $o$ 步未消费时，用当前观测请求下一块
-（服务端从当前步预测未来 $K$ 步），新块与旧块在 $[cur, cur+o)$ 重叠 $o$ 步——对这 $o$ 步做
-聚合即可抹平边界。$K$=动作块长，$o$=重叠窗口。
-
-**机制（edge 同步版）**：ACTClient 每次 `infer(obs)` 按缓存剩余步决策（剩余 =
-`max(_actions)+1 - _next_timestep`，缓存空为 0）：
-
-1.  剩余 **0**（块耗尽）→ 常规请求新块（现状，无重叠）。
-2.  剩余 $\in (0, o]$ 且未触发本轮预取 → **同步重叠预取**：上传当前 obs
-    （`timestep=cur`、`must_go=True`）→ `GetActions` 取新块 `[cur, cur+K)` → 落缓存时对与已缓存
-    重叠的 timestep 做 `aggregate(old, new)` 加权更新（`_store_action_chunk` 升级点）。
-3.  剩余 $> o$ → 直接消费 `pop(cur)`。
-
--   `drain` 只消费缓存（含已平滑的重叠区），**不触发推理**；`reset` 清缓存与预取态，timestep 不回退。
--   **平滑质量**：每 $o$ 步触发一次新决策，重叠窗口 $o$ 步内做 $0.3\cdot\text{old}+0.7\cdot\text{new}$
-    式融合；$o$ 越大平滑越强、推理越频繁（服务端推理周期 $=K-o$ 步）。
--   **时序可行性**：预取同步阻塞在触发步至多「一次推理延迟」，因提前 $o$ 步发起，缓存不断流；
-    与现「块耗尽时请求」相比单次等待相同、频率更高（$K-o$ 步一次）。若需零卡顿，可把预取等待挪到
-    步进间隙或后台线程（可选项，默认同步）。
--   **与服务端交互**：预取观测恒 `must_go=True`，不受 predicted-timestep / 相似过滤丢弃；观测历史
-    窗口由服务端策略拼装，edge 低频稀疏上传属既有部署约束。
--   **聚合函数对齐 lerobot** `AGGREGATE_FUNCTIONS`：`weighted_average`(0.3/0.7，默认) /
-    `latest_only`(取新) / `average`(0.5/0.5) / `conservative`(0.7/0.3)。
--   平滑关闭：`smooth_overlap=0` → 退化为现状（仅块耗尽才推理，无重叠）。
+-   策略侧不再自持 `{timestep: action}` 缓存、不做块内平滑；act 只负责「按绝对步号上传观测 →
+    `GetActions` 取回整块」。
+-   会话侧 `RTCManager` 负责块队列 / 三元切分（prefix / execution / suffix）/ 重叠加权融合 /
+    预取时机；参数经 `policy.rtc` + `infer rtc` 命令 / `POST /v1/infers/rtc` 运行期可查改。
 
 ## 配置（policy 段）
 
@@ -157,18 +134,18 @@ policy:
     pretrained_name_or_path: <ACT checkpoint> # 必填：服务端据此加载策略
     actions_per_chunk: 50 # 动作块长 K
     fps: 30 # 训练/环境频率（动作块时间标定）
-    task:
-        "" # 指令（任务描述）：旧 act 配置键——**统一为 prompt**（见下「文本指令（prompt）」），
-        # prompt 配置优先、task 向后兼容，随策略指令下发
+    prompt: "" # 文本指令：推理前必须非空（act 旧 task 键向后兼容，见下「文本指令（prompt）」）
     rename_cameras: {} # edge 相机名 → 策略图像特征名重命名
-    image_cameras:
-        null # 策略输入相机子集（edge 观测图像名）；缺省全部。多余相机（策略
-        # image_features 没有的）不下发，避免服务端 KeyError
-    smooth_overlap: 10 # act 时序平滑重叠窗口（步）；0 = 关闭（edge 侧参数，默认开启）
-    aggregate_fn: weighted_average # 重叠聚合：weighted_average/latest_only/average/conservative
-    infer_freq:
-        10 # 推理会话步进频率（Hz，edge 侧参数）：会话「观测→推理→下发动作」的节奏，
-        # 间隔 = 1/infer_freq（默认 10Hz ≈ 0.1s/步）；调高则更密（如 0.33≈3Hz 旧值）
+    image_cameras: null # 策略输入相机子集（edge 观测图像名）；缺省全部
+    infer_freq: 10 # 推理会话步进频率（Hz，edge 侧参数）；间隔 = 1/infer_freq
+    # RTC（实时动作块：策略只返回原始块；块缓存 / 三元切分 / 时序平滑 / 预取由 rtc 负责）
+    rtc:
+        enabled: true # 关闭 → 每步一次推理只取块首步（无块缓存 / 无平滑）
+        action_horizon: 50 # 块长 H（信息性；缺省取策略 metadata / 客户端默认）
+        execution_horizon: 30 # 实际执行段 E（步）；缺省 = H - suffix_len
+        suffix_len: 20 # 过渡后缀 S（步）= 与下一块重叠窗口；0 = 关闭平滑
+        inference_delay: 0 # 前缀步数 D（信息性）
+        aggregate_fn: weighted_average # 重叠聚合
 ```
 
 ### 文本指令（prompt，统一概念）

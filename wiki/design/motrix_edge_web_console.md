@@ -32,7 +32,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 ## 动作 → 命令映射
 
 | HTTP 动作                                           | 底层命令                   |
-| --------------------------------------------------- | -------------------------- |
+| --------------------------------------------------- | -------------------------- | --- | --------------------- | ---------------------- | --- | ----------------------------- | -------------- |
 | `POST /v1/captures`（enter）                        | `session run capture`      |
 | `DELETE /v1/captures?lease_id=`                     | `session quit`             |
 | `POST /v1/infers`（必填 `policy_type`）             | `session run infer`        |
@@ -41,8 +41,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 | `POST /v1/infers/episode/start`                     | `capture episode start`    |
 | `POST /v1/infers/episode/end`                       | `capture episode end`      |
 | `POST /v1/infers/sync`                              | `capture sync`             |
-| `POST /v1/infers/prompt`                            | `infer prompt <text>`      |
-| `DELETE /v1/infers?lease_id=`                       | `session quit`             |
+| `POST /v1/infers/prompt`                            | `infer prompt <text>`      |     | `POST /v1/infers/rtc` | `infer rtc set <json>` |     | `DELETE /v1/infers?lease_id=` | `session quit` |
 | `POST /v1/commands`（`capability=estop`）           | `robot estop`              |
 
 ## 契约要点（前端实现，单点定义）
@@ -51,6 +50,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
 -   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；推理状态额外返回连接成功后的 `metadata`、当前 `prompt` / `recording` / `capture_meta`（默认 operator=policy、task_name=prompt），前端按 JSON 展示。
 -   推理面板提供 Prompt 输入（`POST /v1/infers/prompt` 预置，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
+-   **RTC 卡片**：展示 `GET /v1/infers` 的 `rtc`（enabled / 块长 H / 执行段 E / 后缀 S / 聚合函数 /
+    步号与剩余 / 最近一块的 prefix·execution·suffix 切分），并可经 `POST /v1/infers/rtc` 运行期改参数。
 -   WebRTC：`RTCPeerConnection` recvonly 视频轨 → `createOffer` → `setLocalDescription` →
     `POST /v1/webrtc/offer`（body `{sdp: pc.localDescription.sdp, type}`）→ `setRemoteDescription(answer)`；
     **必须发送含 ICE 候选的 `localDescription.sdp`**。

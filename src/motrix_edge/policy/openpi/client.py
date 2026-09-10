@@ -20,28 +20,22 @@ from motrix_edge.policy.contract import (
     extract_action_response,
     prepare_openpi_image,
 )
+from motrix_edge.rtc import ActionChunk
 from motrix_edge.transport import WsTransport
 
 
 class OpenPIClient(BasePolicyClient):
-    """openpi 策略客户端：**官方 openpi WebSocket 契约** + msgpack-over-ws 传输 + 动作块逐帧消费。
+    """openpi 策略客户端：**官方 openpi WebSocket 契约** + msgpack-over-ws 传输。
 
     与官方 ``WebsocketPolicyServer``（openpi 仓 ``serve_policy.py``）互通，服务端零改动：
       connect(): websocket 连接，接收服务端 metadata（官方**不含** action_horizon，
                  action_horizon 以 policy_config 为准，缺省 50）
-      infer():   仅当缓存块耗尽时 msgpack(官方 flat 观测) → 服务端取新动作块；否则直接
-                 消耗缓存块，返回单步动作（一个动作块支撑 horizon 步，期间不请求）
+      infer_chunk(): 组装官方 flat 观测 → 请求一次 → 返回**原始动作块**（``ActionChunk``）
       prepare(): 预热（发一帧观测触发服务端模型加载，丢弃结果）
-      reset():   清空动作块缓存（prompt 保留）
       disconnect(): 关闭连接
 
-    观测按 **官方 flat 契约** 组装（见 ``policy/contract.py`` 的 openpi wire 助手）：
-      {"state": qpos, "images": {模型相机名: uint8 RGB}, "prompt": <str>?}
-    布局（单臂 / 双相机）的**单一事实来源 = adapter 运行时配置**（``adapter config set`` 的
-    enabled_arms / enabled_cameras）：推理会话把 adapter 启用的相机名经 ``bind_adapter``
-    传入（**无需另读 edge.yml 的相机名**），openpi 据此过滤要下发的相机（state 维度由
-    观测 qpos 实际长度决定，随启用臂自动子集）；``rename_cameras``（edge 相机名 → 模型
-    相机名，模型侧命名，仍由 policy_config 提供）与 ``prompt``（运行时动态）如上。
+    **策略只负责取推理结果**：动作块缓存 / 三元切分 / 时序平滑 / 预取时机由
+    ``motrix_edge.rtc``（RTCManager）统一负责（见 wiki/design/motrix_edge_rtc.md）。
     """
 
     def __init__(self, policy_config: dict):
@@ -66,8 +60,6 @@ class OpenPIClient(BasePolicyClient):
             api_key=self.policy_config.get("api_key"),
         )
         self._action_horizon = None  # 动作块长（信息性：metadata 或 policy_config，缺省 50）
-        self._chunk = None  # 缓存动作块（[horizon, dim] 或单步 [dim]）
-        self._cursor = 0  # 当前块消费游标
 
     def bind_adapter(self, action_dim=None, camera_names=None):
         """绑定机器人适配器运行时启用的布局（adapter config set 的 enabled_cameras）。
@@ -95,13 +87,9 @@ class OpenPIClient(BasePolicyClient):
             self._action_horizon = int(
                 self.server_metadata.get("action_horizon") or self.policy_config.get("action_horizon", 50)
             )
-            self._chunk = None
-            self._cursor = 0
         except Exception:
             self.server_metadata = {}
             self._action_horizon = None
-            self._chunk = None
-            self._cursor = 0
             self._transport.close()
             raise
 
@@ -114,37 +102,19 @@ class OpenPIClient(BasePolicyClient):
         """
         if observation is None or not self.connected:
             return
-        self._request_chunk(observation)
-        self._chunk = None  # 丢弃预热块：缓存留给真实 rollout
-        self._cursor = 0
+        self.infer_chunk(observation)  # 丢弃预热块
 
-    # -- 动作块缓存（openpi 自有：块逐帧切片，短块/长块按实际长度耗尽） ---------------
-    @property
-    def _chunk_empty(self) -> bool:
-        return self._chunk is None
+    def infer_chunk(self, observation, index: int | None = None) -> ActionChunk:
+        """请求一次推理并返回**原始动作块**（``[H, dim]`` 或单步 ``[dim]``）。
 
-    def _consume_cached(self):
-        """消费缓存块的当前步动作；耗尽后清空缓存。单步动作（[dim]）透传不切片。"""
-        if self._chunk is None:
-            return None
-        if self._chunk.ndim == 1:
-            action = self._chunk
-            self._chunk = None
-            return action
-        action = self._chunk[self._cursor]
-        self._cursor += 1
-        if self._cursor >= self._chunk.shape[0]:
-            self._chunk = None
-            self._cursor = 0
-        return action
-
-    def _request_chunk(self, observation) -> None:
-        """块耗尽：向推理端请求新动作块并落入缓存（不按协商值截断/越界）。
+        ``index``（绝对步号）对 openpi 无意义（服务端每次完整返回一块、由块长决定覆盖范围），
+        仅用于回填 ``ActionChunk.start_index``（RTCManager 据此对齐块起始步号）。
 
         按 **openpi 官方 flat 契约** 组装观测：qpos → ``state``（原样上传，服务端归一化）；
         图像解码 → 缩放 ``image_size``（省带宽）→ **uint8 数组**（不再 jpeg），经
         ``image_cameras`` 过滤 + ``rename_cameras`` 改名到模型相机名；``prompt`` 每次请求
         动态携带（服务端每帧重新 tokenize，可换）。
+        块缓存 / 切分 / 平滑由 RTCManager 负责，本方法不做任何缓存。
         """
         qpos = observation[KEY_OBS_QPOS]
         prepared = {}
@@ -158,27 +128,7 @@ class OpenPIClient(BasePolicyClient):
             prepared[model_key] = prepare_openpi_image(value, self.image_size)
         payload = build_openpi_observation(qpos, prepared, prompt=self.prompt)
         response = self._transport.request(payload)
-        self._chunk = extract_action_response(response)
-        self._cursor = 0
-
-    def infer(self, observation):
-        """单步推理：**仅当缓存块耗尽时才向推理端请求**，否则直接消耗缓存块（不请求）。
-
-        每步由 ``infer rollout`` 驱动；一个动作块（[horizon, dim]）经本地缓存逐帧
-        消费 horizon 步，期间不再访问推理端，块耗尽后才请求下一块。
-        """
-        if self._chunk_empty:
-            self._request_chunk(observation)
-        return self._consume_cached()
-
-    def drain(self, observation=None):
-        """只消费当前缓存的 action chunk（不发新推理请求）；无缓存返回 None。"""
-        return self._consume_cached()
-
-    def reset(self):
-        """清空动作块缓存（推理端连接保持不变）。"""
-        self._chunk = None
-        self._cursor = 0
+        return ActionChunk(actions=extract_action_response(response), start_index=int(index or 0))
 
     def disconnect(self):
         self._transport.close()

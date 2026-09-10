@@ -12,6 +12,7 @@
 -   [机器人适配器（adapter）](./motrix_edge_adapter.md)
 -   [会话（session）](./motrix_edge_session.md)
 -   [推理策略客户端（policy）](./motrix_edge_policy.md)
+-   [实时动作块（rtc）](./motrix_edge_rtc.md)
 -   [上传会话（UploadSession）](./motrix_edge_upload_session.md)
 -   [命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)
