@@ -149,3 +149,134 @@ def test_scan_metadata_unknown_and_type_mismatch_handled(tmp_path):
     assert episode["meta"]["frames"] is None
     assert episode["meta"]["duration"] is None  # 缺失字段补 None
     assert episode["metadata_unknown"] == {"future_field": {"nested": 1}}
+
+
+# ---- 打包（pack）-------------------------------------------------------------
+
+
+def _make_episodes(folder, count):
+    for index in range(count):
+        (folder / f"episode_{index}.mcap").write_bytes(b"mcap")
+        (folder / f"episode_{index}.json").write_text("{}", encoding="utf-8")
+
+
+def _packed_session(tmp_path, count=2):
+    _make_episodes(tmp_path, count)
+    session = UploadSession()
+    session.scan(str(tmp_path))
+    session.select([f"episode_{index}" for index in range(count)])
+    return session
+
+
+def test_pack_moves_selected_episodes_to_default_folder(tmp_path):
+    """默认包名 pack<选中数量>：选中 episode 的 .mcap + .json **移动**进包目录，并自动重扫。"""
+    session = _packed_session(tmp_path, 2)
+    assert session.status()["suggested_pack_name"] == "pack2"
+
+    result = session.pack()
+
+    assert result["name"] == "pack2"
+    assert result["path"] == str(tmp_path / "pack2")
+    assert result["episode_count"] == 2
+    assert result["episode_ids"] == ["episode_0", "episode_1"]
+    assert result["file_count"] == 4
+    assert sorted(path.name for path in (tmp_path / "pack2").iterdir()) == [
+        "episode_0.json",
+        "episode_0.mcap",
+        "episode_1.json",
+        "episode_1.mcap",
+    ]
+    # 源文件已移走（移动而非复制）→ 重扫后列表为空、选择集清空
+    assert not (tmp_path / "episode_0.mcap").exists()
+    assert result["scan"]["episode_count"] == 0
+    assert result["scan"]["selected_episode_ids"] == []
+    assert session.status()["suggested_pack_name"] == ""
+
+
+def test_pack_keeps_unselected_episodes(tmp_path):
+    """只打包选中的：未选中的 episode 留在扫描目录里。"""
+    _make_episodes(tmp_path, 3)
+    session = UploadSession()
+    session.scan(str(tmp_path))
+    session.select(["episode_1"])
+
+    result = session.pack("my_pack")
+
+    assert result["name"] == "my_pack"
+    assert result["episode_ids"] == ["episode_1"]
+    assert result["scan"]["episode_count"] == 2
+    assert sorted(episode["episode_id"] for episode in result["scan"]["episodes"]) == ["episode_0", "episode_2"]
+
+
+def test_pack_rejects_existing_folder_name(tmp_path):
+    """重名无法打包：目录已存在 → 409（不覆盖、不合并），改名后成功。"""
+    session = _packed_session(tmp_path, 2)
+    (tmp_path / "pack2").mkdir()
+
+    with pytest.raises(UploadError, match="already exists") as excinfo:
+        session.pack()
+    assert excinfo.value.status_code == 409
+    assert (tmp_path / "episode_0.mcap").exists()  # 没有动源文件
+
+    ok = session.pack("pack2_new")
+    assert ok["name"] == "pack2_new"
+    assert ok["scan"]["episode_count"] == 0
+
+
+@pytest.mark.parametrize("bad_name", ["", "   ", "a/b", "..", ".hidden", "a\\b", "a:b"])
+def test_pack_rejects_unsafe_name(tmp_path, bad_name):
+    """非法包名（非单个安全目录名）→ 400，且不建目录、不动源文件。"""
+    session = _packed_session(tmp_path, 1)
+    with pytest.raises(UploadError) as excinfo:
+        session.pack(bad_name)
+    assert excinfo.value.status_code == 400
+    assert (tmp_path / "episode_0.mcap").exists()
+
+
+def test_pack_requires_scan_and_selection(tmp_path):
+    """未扫描 → 409；已扫描但未选择 → 409。"""
+    with pytest.raises(UploadError, match="scan a folder") as excinfo:
+        UploadSession().pack()
+    assert excinfo.value.status_code == 409
+
+    _make_episodes(tmp_path, 1)
+    session = UploadSession()
+    session.scan(str(tmp_path))
+    with pytest.raises(UploadError, match="no episodes selected"):
+        session.pack()
+
+
+def test_pack_rolls_back_when_move_fails(tmp_path, monkeypatch):
+    """移动失败 → 回滚（已移动的移回原处、删除空目录）→ 500，不留半成品包。"""
+    session = _packed_session(tmp_path, 2)
+    import motrix_edge.session.upload_session as module
+
+    real_move = module.shutil.move
+    calls = {"count": 0}
+
+    def flaky_move(src, dst):
+        calls["count"] += 1
+        if calls["count"] == 2:  # 第二个文件移动失败
+            raise OSError("disk error")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(module.shutil, "move", flaky_move)
+    with pytest.raises(UploadError, match="pack failed") as excinfo:
+        session.pack()
+
+    assert excinfo.value.status_code == 500
+    assert not (tmp_path / "pack2").exists()  # 半成品目录已清理
+    assert (tmp_path / "episode_0.mcap").exists()  # 已移动的文件移回原处
+    assert (tmp_path / "episode_0.json").exists()
+    assert session.status()["selected_episode_ids"] == ["episode_0", "episode_1"]  # 选择集保留（可重试）
+
+
+def test_pack_missing_source_file(tmp_path):
+    """源文件在打包前被删（选择集仍指向它）→ 404，不建目录。"""
+    session = _packed_session(tmp_path, 1)
+    (tmp_path / "episode_0.mcap").unlink()
+
+    with pytest.raises(UploadError, match="source files missing") as excinfo:
+        session.pack()
+    assert excinfo.value.status_code == 404
+    assert not (tmp_path / "pack1").exists()

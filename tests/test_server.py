@@ -238,6 +238,47 @@ def test_upload_scan_without_path_returns_bad_request():
     assert response.status_code == 400
 
 
+def test_upload_pack_endpoint_moves_selection(tmp_path):
+    """POST /v1/uploads/pack：打包（移动）选中 episode → 回执含包路径 + 重扫结果。"""
+    for index in range(2):
+        (tmp_path / f"episode_{index}.mcap").write_bytes(b"mcap")
+        (tmp_path / f"episode_{index}.json").write_text("{}", encoding="utf-8")
+    client = TestClient(create_app(BASE_CFG, uploads=UploadSession()))
+    client.post("/v1/uploads", json={"folder_path": str(tmp_path)})
+    client.post("/v1/uploads/select", json={"episode_ids": ["episode_0", "episode_1"]})
+    assert client.get("/v1/uploads").json()["suggested_pack_name"] == "pack2"
+
+    response = client.post("/v1/uploads/pack", json={})  # 缺省包名 pack<数量>
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "pack2"
+    assert body["file_count"] == 4
+    assert body["scan"]["episode_count"] == 0  # 重扫：源文件已移入包目录
+    assert sorted(path.name for path in (tmp_path / "pack2").iterdir()) == [
+        "episode_0.json",
+        "episode_0.mcap",
+        "episode_1.json",
+        "episode_1.mcap",
+    ]
+    # 重名 → 409（改名后成功）
+    client.post("/v1/uploads", json={"folder_path": str(tmp_path)})
+    (tmp_path / "episode_0.mcap").write_bytes(b"mcap")
+    (tmp_path / "episode_0.json").write_text("{}", encoding="utf-8")
+    client.post("/v1/uploads", json={"folder_path": str(tmp_path)})
+    client.post("/v1/uploads/select", json={"episode_ids": ["episode_0"]})
+    assert client.post("/v1/uploads/pack", json={"name": "pack2"}).status_code == 409
+    assert client.post("/v1/uploads/pack", json={"name": "../escape"}).status_code == 400
+    assert client.post("/v1/uploads/pack", json={"name": "pack1_ok"}).status_code == 200
+
+
+def test_upload_pack_without_selection_returns_conflict(tmp_path):
+    client = TestClient(create_app(BASE_CFG, uploads=UploadSession()))
+    assert client.post("/v1/uploads/pack").status_code == 409  # 未扫描
+    client.post("/v1/uploads", json={"folder_path": str(tmp_path)})
+    assert client.post("/v1/uploads/pack").status_code == 409  # 已扫描但未选择
+
+
 def test_upload_scan_falls_back_to_adapter_data_dir(tmp_path):
     """POST /v1/uploads 缺省目录回退链：adapter 数据目录（node.data_status.data_dir）优先。"""
     from types import SimpleNamespace

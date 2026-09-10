@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,8 +116,95 @@ class UploadSession:
                 "ready_count": sum(item["status"] == "ready" for item in episode_list),
                 "invalid_count": sum(item["status"] == "invalid" for item in episode_list),
                 "selected_episode_ids": sorted(self._selected, key=self._episode_sort_key),
+                "suggested_pack_name": self.suggested_pack_name(),
                 "episodes": episode_list,
             }
+
+    def suggested_pack_name(self) -> str:
+        """建议包名 ``pack<选中数量>``（未扫描 / 未选择 → 空串）。前端包名输入框预填值。"""
+        with self._lock:
+            if not self._folder_path or not self._selected:
+                return ""
+            return f"pack{len(self._selected)}"
+
+    def pack(self, name: str | None = None) -> dict:
+        """把**选择集**打包到 ``<扫描目录>/<包名>/``（`.mcap` + `.json`，**移动**）。
+
+        设计见 wiki/design/motrix_edge_upload_session.md：
+
+          - 包名缺省 ``pack<选中数量>``；**目录已存在则拒绝（409）**（不覆盖 / 不合并）——
+            重名时由调用方改名重试；非法包名（不是单个安全路径段）→ 400；
+          - 源文件缺失 → 404（不建目录）；移动任一文件失败 → **回滚**（已移动的移回原处、
+            删掉刚建的空目录）→ 500，不留半成品包；
+          - 成功后**自动重扫**（包目录不被扫到）并清空选择集，回执含重扫结果 ``scan``。
+        """
+        with self._lock:
+            if not self._folder_path:
+                raise UploadError("scan a folder before packing", status_code=409)
+            if not self._selected:
+                raise UploadError("no episodes selected", status_code=409)
+            folder = Path(self._folder_path)
+            # name=None → 缺省 pack<选中数量>；显式传入的空串 / 空白 → 400（不静默用默认名）
+            pack_name = self._validate_pack_name(name if name is not None else f"pack{len(self._selected)}")
+            target = folder / pack_name
+            if target.exists():
+                raise UploadError(
+                    f"pack folder already exists: {target.name}（请改名后重试）",
+                    status_code=409,
+                )
+            episode_ids = sorted(self._selected, key=self._episode_sort_key)
+            sources: list[Path] = []
+            for episode_id in episode_ids:
+                episode = self._episodes[episode_id]
+                sources.extend(
+                    Path(info["path"])
+                    for info in (episode.get("mcap"), episode.get("metadata"))
+                    if info and info.get("path")
+                )
+            missing = [str(path) for path in sources if not path.is_file()]
+            if missing:
+                raise UploadError(f"source files missing: {missing}", status_code=404)
+
+            moved: list[Path] = []
+            try:
+                target.mkdir(parents=False)  # 仅建一级：包目录父目录必须已存在
+                for source in sources:
+                    shutil.move(str(source), str(target / source.name))
+                    moved.append(source)
+            except OSError as exc:
+                for source in moved:  # 回滚：已移动的文件移回原处
+                    try:
+                        shutil.move(str(target / source.name), str(source))
+                    except OSError:  # noqa: PERF203 回滚尽力而为（失败不影响报错）
+                        pass
+                shutil.rmtree(target, ignore_errors=True)  # 清理半成品目录
+                raise UploadError(f"pack failed: {exc}", status_code=500) from exc
+            self._selected.clear()
+
+        scan = self.scan(str(folder))  # 重扫（包目录在子目录，不会被扫到）
+        return {
+            "name": pack_name,
+            "path": str(target),
+            "episode_count": len(episode_ids),
+            "episode_ids": episode_ids,
+            "file_count": len(sources),
+            "files": [str(target / source.name) for source in sources],
+            "scan": scan,
+        }
+
+    @staticmethod
+    def _validate_pack_name(name: str) -> str:
+        """校验包名是**单个安全路径段**（不得逃出扫描目录 / 生成隐藏目录）→ 返回规范化名。"""
+        candidate = str(name).strip()
+        if not candidate:
+            raise UploadError("pack name is required")
+        if len(candidate) > 64:
+            raise UploadError("pack name is too long (max 64 characters)")
+        if candidate in (".", "..") or candidate.startswith("."):
+            raise UploadError(f"invalid pack name: {candidate!r}（不得以 . 开头）")
+        if any(sep in candidate for sep in ("/", "\\")) or any(ch in candidate for ch in "\0\n\r\"'*:<>?|"):
+            raise UploadError(f"invalid pack name: {candidate!r}（只能是单个目录名）")
+        return candidate
 
     def select(self, episode_ids: list[str]) -> dict:
         """按 episode 标识替换选择集。"""

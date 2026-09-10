@@ -21,7 +21,7 @@
                    正在运行的 EdgeNode + 共享 CommandBus，见 wiki/design/motrix_edge_server.md）
   /v1/infers/*     推理会话控制（无回合概念：enter → 持续推理 → exit；注入 InferService 绑定
                    正在运行的 EdgeNode + 共享 CommandBus）
-  /v1/uploads/*    本地采集 episode 扫描、选择与上传队列
+  /v1/uploads/*    本地采集 episode 扫描、选择、上传队列与打包（pack）
 
 identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` 作为请求元数据上报，
 具体发送（访问控制面 / 推理 / 上传）由后续客户端层实现。
@@ -246,6 +246,16 @@ class UploadSelectRequest(BaseModel):
     """POST /v1/uploads/select 请求体：按 episode id 替换选择集。"""
 
     episode_ids: list[str] = Field(default_factory=list)
+
+
+class UploadPackRequest(BaseModel):
+    """POST /v1/uploads/pack 请求体：打包（移动）选中 episode 的包名。
+
+    包目录建在当前扫描目录下（``<folder_path>/<name>/``）；缺省 ``pack<选中数量>``；
+    目录同名已存在 → 409（需改名）；见 wiki/design/motrix_edge_upload_session.md。
+    """
+
+    name: str | None = Field(default=None, description="包名（单个目录名）；缺省 pack<选中数量>")
 
 
 def create_app(
@@ -541,6 +551,16 @@ def create_app(
     async def uploads_select(req: UploadSelectRequest):
         """按 episode id 替换待上传选择集。"""
         return _upload_call(lambda: uploads.select(req.episode_ids))
+
+    @app.post("/v1/uploads/pack")
+    async def uploads_pack(req: UploadPackRequest | None = None):
+        """打包（**移动**）选中 episode 到 ``<扫描目录>/<包名>/``，并返回重扫结果。
+
+        body 可选 ``name``（缺省 ``pack<选中数量>``）；目录同名已存在 → 409（改名后重试）；
+        非法包名 → 400；未扫描 / 未选择 → 409；源文件缺失 → 404；移动失败回滚 → 500。
+        """
+        name = req.name if req is not None else None
+        return _upload_call(lambda: uploads.pack(name))
 
     @app.post("/v1/uploads/upload")
     async def uploads_enqueue():
