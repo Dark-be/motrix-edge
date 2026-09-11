@@ -17,9 +17,10 @@
 通过 ROBOT_REGISTRY 注册机器人实现，由 get_robot(base_cfg) 依据配置 robot.type
 选择性实例化。
 
-机器人（BaseRobot 子类）是「会动」的一层：持有 action/target_action，由 env 主循环每帧
-step() 限速推进并产出原始观测 get_observation()；与 adapter 协定的 obs/action 形态由类
-常量（QPOS / IMAGE_NAMES / IMAGES）固定声明，不依赖 motrix_edge.profile。
+机器人（BaseRobot 子类）是「会动」的一层：持有 action/target_action，由 env 控制线程每拍
+step() 限速推进并 sample_qpos() 采样机械臂状态，观测线程每拍 build_observation()
+拼装（缓存状态 + 相机帧）；与 adapter 协定的 obs/action 形态由类常量（QPOS / IMAGE_NAMES /
+IMAGES）固定声明，不依赖 motrix_edge.profile。
 
 真实硬件机器人（如 DualPiperRobot）依赖硬件 SDK（alicia_d_sdk / pyAgxArm /
 pyrealsense2 / v4l2），这些 SDK 只安装在对应机器人上；注册表持有「模块路径 + 类名」，

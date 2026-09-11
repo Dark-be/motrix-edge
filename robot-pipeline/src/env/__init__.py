@@ -15,9 +15,9 @@
 """env 包 —— 机器人运行环境（server 进程侧；无硬件依赖，可离线导入）。
 
 层次：
-  server (HTTP) → env (30Hz 主循环 + 共享内存发布) → robot (action/target_action/step 限速)
+  server (HTTP) → env (控制线程 30Hz 步进 / 观测线程取帧发布) → robot (action/target_action/step 限速)
 
-- ``base_env.py``：唯一运行环境（只控制 robot）。机器人实现在 ``robot`` 包
+- ``base_env.py``：唯一运行环境（只控制 robot；控制 / 观测双线程）。机器人实现在 ``robot`` 包
   （``src/robot/``：BaseRobot 基类 + 各机器人实现，均无 profile，obs/action 形态由类常量固定）。
 - ``get_env(base_cfg)``：**按配置自动匹配**——依据 ``robot.type`` 经 robot 注册表懒加载
   实例化机器人，包进 ``BaseEnv`` 返回。新增机器人只需在 ``ROBOT_REGISTRY`` 注册 + 写配置，

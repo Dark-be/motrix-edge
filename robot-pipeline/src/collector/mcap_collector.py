@@ -58,7 +58,7 @@ from utils.base.data_handler import debug_print
 KEY_QPOS = "observations/qpos"
 KEY_ACTION = "action"
 CAMERA_PREFIX = "observations/images/"
-KEY_TIMESTAMP = "timestamp"  # obs 内帧采集时刻（秒，float；由 Robot.get_observation() 提供）
+KEY_TIMESTAMP = "timestamp"  # obs 内帧采集时刻（秒，float；由 Robot.sample_qpos() 提供）
 
 # ROS2 官方消息定义（.msg 展开文本，register_msgdef 使用）
 MSG_FLOAT64_MULTI_ARRAY = """\

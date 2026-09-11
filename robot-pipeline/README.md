@@ -25,7 +25,7 @@ src/                      # robot-pipeline 包（src 布局，包名 config/env/
   config/                 # robot server 配置 + 加载逻辑
     __init__.py           # load_config / get_config_dir（MOTRIX_CONFIG_DIR 优先，包内默认兜底）
     *_server.yml          # test_robot / dual_piper / dual_alicia_piper / single_piper
-  env/                    # BaseEnv：30Hz 主循环 / 命令队列 / 采集控制
+  env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
   server/                 # robot_server.py 入口 + contract_server.py（/v1 契约服务器）
   collector/              # 数据采集（act_mcap：MCAP 流式写入 + 元信息 JSON）
@@ -46,14 +46,20 @@ Edge adapter（HTTP 指令下行 + 共享内存观测上行）   ← motrix_edge
 robot server（contract_server：HTTP + 共享内存发布）
         │
         ▼
-env（BaseEnv：30Hz 主循环 / 命令队列 / 采集控制）
-        │  每帧 step()
+env（BaseEnv：控制线程 / 观测线程 + 命令队列 + 采集控制）
+        │  控制拍 step() + sample_qpos()；观测拍 build_observation()
         ▼
 robot（BaseRobot：action / target_action 限速逼近）
-        │  get_observation()（qpos + images）
+        │  get_observation_qpos()（控制线程）/ get_observation_images()（观测线程）
         ▼
-collector（act_mcap：流式写 episode_{idx}.mcap + 元信息 JSON）
+collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 ```
+
+**控制 / 观测分线程**：`BaseEnv` 起两条线程——**控制线程**（`HZ`=30Hz）执行运动指令、
+`robot.step()` 限速步进、采样机械臂状态（qpos / action）缓存；**观测线程**（`OBS_HZ`=30Hz）
+取相机帧并与缓存状态拼装观测，交给共享内存发布与采集落盘。相机或磁盘卡顿只表现为观测
+丢帧（并有慢帧告警），机械臂仍按 30Hz 稳定步进。运动指令与采集指令因此走两条队列，
+分别由控制线程、观测线程唯一消费（robot / collector 各自单写者）。
 
 一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos`、
 `observations/images/<cam>`）、HTTP 端点、共享内存布局都由 **motrix_edge.adapter** 下的

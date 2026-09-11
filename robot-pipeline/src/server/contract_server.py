@@ -20,10 +20,10 @@
 ``motrix_edge.adapter.{base,http_contract,shm_contract}``，契约单点），并直接写
 共享内存（ObsShmWriter）。env 不碰 HTTP / 共享内存，只负责控制 robot。
 
-env（BaseEnv 子类）只控制 robot：30Hz 主循环、状态切换、接收控制方法（robot_reset /
-robot_execute ...）。本模块把 /v1 指令桥接到 env，并在每帧回调（env.on_frame）中读取
-env 保留的观测副本（30Hz 由 env 调用 robot.get_observation() 产生）组装 standard_obs、
-写入共享内存、缓存供 /observe 调试。
+env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程取帧发布、状态切换、接收
+控制方法（robot_reset / robot_execute ...）。本模块把 /v1 指令桥接到 env，并在每拍回调
+（env.on_frame，由 env 观测线程触发）中读取 env 保留的观测副本（= 控制线程采样的机械臂
+状态 + 本拍相机帧）组装 standard_obs、写入共享内存、缓存供 /observe 调试。
 
 端点（前缀 /v1）:
     POST /v1/discover      自描述探活
@@ -153,7 +153,7 @@ class CaptureSyncRequest(BaseModel):
 class _ShmPublisher:
     """server 侧观测发布器：组装 standard_obs 并写入共享内存（env 不碰共享内存）。
 
-    env 每帧回调（on_frame）把 30Hz 保留的观测副本传入 publish()；本类按 adapter 契约
+    env 观测线程每拍回调（on_frame）把保留的观测副本传入 publish()；本类按 adapter 契约
     组装 standard_obs、写入 ObsShmWriter，并缓存供 /observe 调试。
     """
 
@@ -163,7 +163,7 @@ class _ShmPublisher:
         self.last_obs: dict = {}  # 最新 standard_obs（/observe 调试用）
 
     def publish(self, obs):
-        """发布一帧观测（obs 来自 env 30Hz 保留的副本，键已按契约：observations/qpos + images/<cam>）。"""
+        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约：observations/qpos + images/<cam>）。"""
         if obs is None or obs.get(KEY_QPOS) is None:
             return
         image_names = _robot_image_names(self.robot)
