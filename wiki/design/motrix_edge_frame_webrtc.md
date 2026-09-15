@@ -96,4 +96,5 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 -   观测语义：[机器人适配器（adapter）](./motrix_edge_adapter.md)
 -   会话写入帧缓存：[会话（session）](./motrix_edge_session.md)
--   代码入口：`src/motrix_edge/frame/`（**feat/6**）；WebRTC 推流（`server/webrtc.py`）随 **feat/3** 落地
+-   WebRTC 端点注册：[HTTP 控制面（server）](./motrix_edge_server.md)
+-   代码入口：`src/motrix_edge/frame/`（**feat/6**）、`src/motrix_edge/server/webrtc.py`（**feat/3**）—— 随对应分支落地

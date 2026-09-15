@@ -2,118 +2,124 @@
 
 ## 摘要
 
-`policy/` 提供通用的「网络推理客户端」抽象：边缘节点收集 observation 后经它发给推理节点并
-取回动作。**传输层与格式契约解耦**，使不同推理策略（openpi / act / 自研）可插拔；进入推理
-会话时显式选择注册表中的 `policy_type`，由 `get_policy(base_cfg, policy_type=...)`
-**懒加载**实例化（依赖第三方包，避免导入 `motrix_edge` 时缺依赖报错）。
+`policy/` 提供「网络推理客户端」抽象：边缘节点把 observation 经它发给推理节点并取回动作。
+**传输层独立成包（`motrix_edge/transport`）、与具体策略 / lerobot 解耦**；`policy/` 只保留
+格式契约与策略特有行为（openpi / act）。进入推理会话时显式选择注册表中的 `policy_type`，
+由 `get_policy(base_cfg, policy_type=...)` **懒加载**实例化（避免导入 `motrix_edge` 时因缺
+第三方依赖报错）。
+
+策略与 wire 形态（**策略只负责「取一次推理的原始动作块」**；块缓存 / 三元切分 / 时序平滑 /
+预取时机统一由 [实时动作块（rtc）](./motrix_edge_rtc.md) 负责）：
+
+| 类型   | 传输         | 消息格式          | 推理结果                          |
+| ------ | ------------ | ----------------- | --------------------------------- |
+| openpi | WebSocket    | msgpack（契约）   | `[horizon, dim]` 原始动作块       |
+| act    | lerobot gRPC | pickle（lerobot） | `TimedAction` 整块（含 timestep） |
 
 ## 目标与原则
 
--   生命周期由 `InferSession` 驱动：**显式 `infer connect` 单次触发 `connect`**，`session_finish` 时 `disconnect`；
-    进入推理会话不自动连接。
--   一问一答阻塞式：`infer(obs)` 上传观测 → 返回单步动作；异常返回 `None` 供上层跳过。
--   注册式懒加载：`POLICY_REGISTRY` 登记策略类型，`get_policy()` 选中时才 `import`（连带加载依赖）。
+-   生命周期：连接状态与时机**内聚到 policy**（策略自行管理，不硬编码在会话层）。
+    `connect()` 幂等可重连；`ensure_connected()` 惰性（未连则单次限时连接，供 rollout 自动触发）；
+    `prepare(obs)` 可选**预热**（act：提前下发策略指令 / 服务端加载模型；openpi：no-op）；
+    `session_finish` 时 `disconnect`。进入推理会话不自动连接（首个 rollout 惰性自连）。
+-   `infer_chunk(obs, index)` 输入观测返回**一次推理的原始动作块**（`ActionChunk` / ndarray）；
+    异常 / 空块返回 `None` 供上层跳过；`index` = 当前绝对步号（流式策略 act 用作
+    `TimedObservation.timestep`，openpi 仅回填 `start_index`）。**块缓存 / 三元切分 /
+    时序平滑 / 预取时机不属策略职责**（统一在 `motrix_edge.rtc`，见
+    [实时动作块（rtc）](./motrix_edge_rtc.md)）。
+-   注册式懒加载：`POLICY_REGISTRY` 登记类型，`get_policy()` 选中时才 `import`。
 
 ## 包结构
 
 ```
-policy/
-├── __init__.py       # POLICY_REGISTRY + get_policy 工厂 + policy_adapters()
-├── base.py           # BasePolicyClient 抽象（connect / infer / reset / disconnect）
-├── transport.py      # MsgpackTransport：通用 msgpack-over-websocket 传输（一问一答）
-├── msgpack_numpy.py  # numpy 数组安全序列化（msgpack 扩展，对象数组不回落 pickle）
-├── contract.py       # 格式契约：消息 key 常量 + build_observation / extract_action / 图像编码
-├── broker.py         # ActionChunkBroker：动作块逐帧下发（[horizon, dim] → 单步）
-├── openpi/           # OpenPIClient：openpi 默认图像尺寸 224×224
-└── act/              # ACTClient / ACT7DofClient：ACT 默认图像尺寸 640×480
+src/motrix_edge/
+├── transport/          # 通用传输层（与 lerobot/具体策略解耦）
+│   ├── __init__.py     # BaseTransport / WsTransport / MsgpackTransport(别名) + get_transport(kind,cfg)
+│   ├── base.py         # BaseTransport：connect / close / server_metadata
+│   ├── ws.py           # WsTransport：msgpack-over-websocket（一问一答 request）——openpi 用
+│   ├── grpc.py         # AsyncInferenceGrpcTransport：channel + stub 封装（Ready 后组合 wire）——act 用
+│   └── msgpack_numpy.py# numpy 安全 msgpack 序列化
+└── policy/
+    ├── __init__.py     # POLICY_REGISTRY + get_policy 工厂 + policy_adapters()
+    ├── base.py         # BasePolicyClient 抽象（connect / infer_chunk / reset / disconnect）
+    ├── contract.py     # 格式契约（openpi wire）：key 常量 + build_observation/extract_action/图像编码
+    ├── openpi/         # OpenPIClient（ws + msgpack：请求一次返回原始动作块）
+    └── act/            # ACTClient（lerobot gRPC 流式：按绝对步号取回整块）
 ```
+
+lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保留）提供 wire 最小件：
+`transport/`（proto 生成物 + 分块 / pickle 工具）、`async_inference/helpers.py`（wire 数据类
+`TimedObservation` / `TimedAction` / `RemotePolicyConfig`）。edge **不引入 `pip lerobot`**，
+仅 act 依赖 CPU torch 解析 `torch.Tensor` 动作。
+
+## 传输层（motrix_edge/transport）
+
+按「传输方式」承载、不关心消息格式（序列化契约与策略语义在上层）：
+
+-   `WsTransport`：msgpack-over-websocket。`connect()` 建连并收服务端首条 metadata；`request(payload)`
+    发收一问一答；可选 `api_key`。openpi 使用。
+-   `AsyncInferenceGrpcTransport`：lerobot AsyncInference 的 channel + stub 封装（insecure channel、
+    connect_timeout、幂等 close）。**只做连接管理**；`Ready` / `SendPolicyInstructions` /
+    `SendObservations` / `GetActions` 的 **wire 语义由 act 客户端组合**。grpc / pb2 延迟导入。
 
 ## BasePolicyClient
 
-最小接口：`connect()`（初始化传输、读取服务端 metadata）、`infer(observation)`（输入观测返回
-动作）、`drain()`（只消费当前缓存的 action chunk，不发新推理请求；无缓存返回 None）、
-`reset()`（清空策略状态，如动作块缓存）、`disconnect()`。子类实现具体策略。
+最小接口：`connect()`（幂等/可重连：初始化传输、读取服务端 metadata）、`connected`（只读：是否已连）、
+`ensure_connected()`（未连则 `connect()`，已连 no-op——**惰性自连**入口）、`prepare(observation=None)`
+（可选预热，默认 no-op；act 覆盖为首次下发策略指令/触发服务端加载）、
+`infer_chunk(observation, index=None)`（返回**原始动作块**；策略唯一职责）、`bind_adapter(...)`
+（绑定 adapter 启用布局：相机名 / qpos 维数）、`reset()`（清策略状态）、`disconnect()`。
+基类无连接判断（`connected` 默认 False，子类覆盖）。**块缓存 / 切分 / 平滑不属基类**——见 rtc。
 
-## 传输层（MsgpackTransport）
+> 连接语义（旧版由 `InferSession` 维护 `_connected` + 强制先 `infer connect`，act 引入后
+> connect 只轻握手、真正就绪=服务端加载模型 → 该硬编码已删除）：策略自行管理连接状态；
+> 会话只做编排（rollout 前 `ensure_connected()`；`infer connect` 可选显式预连 + `prepare` 预热）。
 
-通用 msgpack-over-websocket 传输（借鉴 openpi-client 的 `WebsocketClientPolicy`）：
+## 格式契约（contract.py，openpi wire）
 
--   `connect()`：建立连接并接收服务端首条 **metadata**（单次尝试限时，重试由 session 驱动）。
--   `request(payload)`：发送 msgpack 并阻塞接收响应；服务端以文本回包表示错误。
--   `close()`：关闭连接。可选 `api_key` 鉴权头。
+仅 openpi 使用（act 走 lerobot wire，见 act 节）。消息 schema（msgpack）**单点定义**：
 
-## 格式契约（contract.py）
+| 方向                        | 消息                                                                             | 说明                                                                                                                     |
+| --------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 客户端 → 服务端（每步一次） | `{"observations/qpos": ndarray, "observations/images/<name>": ndarray \| bytes}` | 图像统一解码 → `resize_with_pad` 等比缩放补零到 `policy.image_size`（默认 224×224）→ 按 `image_format` 编码（jpeg 默认） |
+| 服务端 → 客户端             | `{"action": ndarray}`                                                            | `[horizon, dim]` 动作块或 `[dim]` 单步；含 `error` 键视为异常                                                            |
 
-消息 schema（wire 上 msgpack），**单点定义**：
+`build_observation` / `extract_action` / `resize_with_pad`（复刻 openpi `tf.image.resize_with_pad`）。
 
-| 方向                        | 消息                                                                             | 说明                                                                                                                 |
-| --------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| 客户端 → 服务端（每步一次） | `{"observations/qpos": ndarray, "observations/images/<name>": ndarray \| bytes}` | 图像统一解码 → 等比缩放补零到 `policy.image_size`（默认 224×224）→ 按 `image_format` 编码 jpeg bytes（默认）或 uint8 |
-| 服务端 → 客户端             | `{"action": ndarray}`                                                            | `[horizon, dim]` 动作块（由 `ActionChunkBroker` 逐帧下发）或 `[dim]` 单步；含 `error` 键视为异常                     |
+## OpenPIClient（ws + msgpack）
 
--   `build_observation(qpos, images, image_size, image_format)`：组装观测消息。
--   `extract_action(response)`：抽取 `"action"` 键（`error` 键 → `RuntimeError`）。
--   图像编码：`resize_with_pad` 复刻 openpi 的 `tf.image.resize_with_pad`（等比缩放 + 居中补零）。
+-   `connect()`：建 ws 连接，收 metadata（含 `action_horizon`）→ `server_metadata`；失败清理半开连接。
+-   返回**原始动作块**（`[horizon, dim]` 或单步 `[dim]`）；**不做缓存 / 切片**——块消费由 rtc 负责。
+-   `infer_chunk(obs, index)`：`build_observation` → `request` → 返回整块（每次调用都真实请求）。
+-   `prepare(obs)`：预热（发一帧观测触发模型加载，丢弃结果）；`reset`：无本地状态（连接保持）。
 
-适配器 `get_observation()` 输出的键名（`observations/qpos`、`observations/images/*`）即契约格式，
-客户端直接透传并重编码图像，无需在会话侧再次组装。
+## ACTClient（lerobot gRPC 流式）
 
-## ActionChunkBroker
+edge = lerobot `Robot` 侧客户端，与官方 `async_inference/policy_server.py` 互通，**采用 lerobot
+原生流式语义**（对照官方 `robot_client.py`）：
 
-动作块逐帧下发，**块耗尽后才由调用方向推理端请求新块**（与 openpi-client 语义一致）：
+-   `connect()`：gRPC channel + `Ready` 握手（服务端 `_reset_server` 清状态）。策略指令
+    `SendPolicyInstructions` 延后到首次 `infer_chunk`（此时才知 state 维度 / 相机）。
+-   wire：观测 `pickle(TimedObservation)` **分块** `SendObservations`（`must_go=True` 强制推理）；
+    服务端每 `GetActions` 对队列最新观测推理并**返回整个动作块**（不缓存）；edge `GetActions`
+    轮询取回 `pickle(list[TimedAction])`，转成 `ActionChunk`（首步绝对步号）返回。服务端无动作缓存。
+-   **无本地动作缓存**：`infer_chunk(obs, index)` 每次上传观测（`timestep=index`）、取回整块；
+    块重叠 / 平滑由 rtc 负责（见 [实时动作块（rtc）](./motrix_edge_rtc.md)）。
+-   图像：edge 侧直接 `resize_with_pad` **letterbox 到 `policy.image_size`（默认 224×224，横向图
+    上下留黑边）** 后以 uint8 RGB 上传——服务端 ACT 按 `image_features(224×224)` 处理时 resize
+    为 no-op、不变形。
+-   服务端观测过滤：丢弃「timestep 已预测」或「与上次处理观测过于相似」的观测，除非 `must_go=True`；
+    edge 恒置 `must_go=True` 规避。
 
--   `empty`：当前无可用动作块（True = 调用方需向推理端请求新块并 `feed`）。
--   `feed(chunk)`：存入新动作块（仅在 `empty` 时调用）。
--   `step()`：消耗缓存块的当前步动作（**不触发网络请求**）；单步动作（`[dim]`）透传不切片。
--   `reset()`：清空缓存。
+### 时序平滑（移交 rtc）
 
-## OpenPIClient 与 ACTClient
+动作块的**重叠预取 + 加权聚合**（重叠窗口 / 聚合函数 / 关闭开关 / 预取时机）已统一收进
+[实时动作块（rtc）](./motrix_edge_rtc.md)：
 
-`OpenPIClient` 和 `ACTClient` 共享同一 WebSocket + MsgPack 传输与动作块消费流程：
-
--   `connect()`：websocket 连接，接收 metadata（含 `action_horizon`），保存为客户端
-    `server_metadata` 并初始化 `ActionChunkBroker`；连接失败或断开后清空。
--   `infer(obs)`：**仅当动作块耗尽（`broker.empty`）时**组装观测 → `transport.request` 取新动作块；
-    其余步骤直接 `broker.step()` 消耗缓存块（一个动作块支撑 horizon 步推理，期间不访问推理端）。
--   `reset()`：清空动作块缓存；`disconnect()`：关闭传输。
-
-两者当前的协议字段相同，差异是默认图像输入尺寸：
-
-| 客户端          | 注册类型  | 默认 `image_size`                  |
-| --------------- | --------- | ---------------------------------- |
-| `OpenPIClient`  | `openpi`  | `[224, 224]`                       |
-| `ACTClient`     | `act`     | `[480, 640]`（图像宽 640、高 480） |
-| `ACT7DofClient` | `act7dof` | `[480, 640]`（同 ACT）             |
-
-ACT 可通过 `policy.image_size` 覆盖默认值；其余观测键、响应键和 `action_horizon` 约定不变。
-
-### ACT7DofClient（act7dof）
-
-固定输入布局的 ACT 变体：在通用 `ACTClient` 基础上增加五项**可配置约束**，用于适配
-「7 维 qpos + 2 相机」这类固定拓扑：
-
--   `qpos_dim`（默认 7）：推理前校验**发送 qpos** 的维度，不匹配即抛错，避免把错误
-    维度的观测发到推理端（防御性校验）。
--   `qpos_indices`（默认空）：从观测 `observations/qpos` 中按索引挑选 / 重排维度
-    （如从 14 维双臂观测取单臂 `[0..6]`）；空则用全量。
--   `cameras`（默认空）：**从 adapter 已有相机观测键中挑选**要发送的相机名列表；空则
-    发送全部 `observations/images/*`（回退通用行为）。
--   `action_indices`（默认空）：模型输出 action 映射回机器人**完整动作空间**的下标；
-    空则透传模型输出。
--   `action_fill`（默认空）：未覆盖维度（如另一臂）的填充值 —— **home 位姿**，标量
-    广播或按未覆盖下标顺序的 list；缺省 0，**不跟随当前 qpos**。
-
-图像尺寸 / 格式与 `action_horizon` 约定同 `ACTClient`。配置示例：
-
-```yaml
-policy:
-    type: act7dof
-    qpos_dim: 7
-    qpos_indices: [0, 1, 2, 3, 4, 5, 6] # 从 14 维观测取单臂
-    action_indices: [0, 1, 2, 3, 4, 5, 6] # 模型 action 填充回 14 维
-    action_fill: [0, 0, 0, 0, 0, 0, 0] # 另一臂 home 位姿（未覆盖维度）
-    cameras: [cam_left, cam_right] # 从 adapter 观测键挑选
-```
+-   策略侧不再自持 `{timestep: action}` 缓存、不做块内平滑；act 只负责「按绝对步号上传观测 →
+    `GetActions` 取回整块」。
+-   会话侧 `RTCManager` 负责块队列 / 三元切分（prefix / execution / suffix）/ 重叠加权融合 /
+    预取时机；参数经 `policy.rtc` + `infer rtc` 命令 / `POST /v1/infers/rtc` 运行期可查改。
 
 ## 配置（policy 段）
 
@@ -121,44 +127,109 @@ policy:
 policy:
     host: 0.0.0.0 # 推理节点默认地址
     port: 8765 # 推理节点默认端口
+    type: act # 默认策略类型（会话显式选择时覆盖）
+    # 策略配置项（**每个策略有自己的独立配置项**；运行时给定，见「策略配置项」）
+    device: cuda # act：服务端推理设备
+    actions_per_chunk: 50 # act：动作块长 K（须匹配模型 chunk）
+    infer_freq: 10 # 推理会话步进频率（Hz，edge 侧参数）；间隔 = 1/infer_freq
+    # RTC（实时动作块：策略只返回原始块；块缓存 / 三元切分 / 时序平滑 / 预取 / prefix 跳过由 rtc 负责）
+    rtc:
+        enabled: true # 关闭 → 每步一次推理只取块首步（无块缓存 / 无平滑）
+        action_horizon: 50 # 块长上限 H（一次推理只取策略块的前 H 步）
+        prefix_len: 2 # 前置段 P（推理期间已被执行的前 P 步，跳过）
+        execution_horizon: 28 # 执行段 E（缺省 = 实际块长 - P - S）
+        suffix_len: 20 # 后缀段 S（与下一块的重叠窗口）
+        aggregate_fn: weighted_average # 重叠聚合  # P + E + S = 50 = H
 ```
 
-策略类型、图像尺寸、图像格式和 `action_horizon` 由具体策略客户端的默认值或服务端 metadata
-决定；进入推理会话时必须显式选择已注册策略。`infer ip` / `infer port` 仅修改上述默认端点。
+### 策略配置项（每个策略独立，前端按 schema 动态渲染）
+
+**每个策略有自己的独立配置项**（prompt / 模型路径 / 设备 / 块长…），外加所有策略共有的**推理端点**
+（`host` / `port`）；全部由策略包**静态声明**，CLI 与前端共用同一声明——前端**按所选策略动态渲染
+表单**（端点项、会话内锁定项都由 schema 标记，不需写死输入框）：
+
+| 分组                 | 配置项                                                                                             | 适用范围 | 会话内可改       |
+| -------------------- | -------------------------------------------------------------------------------------------------- | -------- | ---------------- |
+| `endpoint`（公共项） | `host`（推理节点 IP）/ `port`（端口 1-65535）                                                      | 所有策略 | 否（随会话锁定） |
+| 策略项               | `openpi`：`prompt`（文本指令，必填）                                                               | openpi   | 是               |
+| 策略项               | `act`：`pretrained_name_or_path`（模型路径，**运行时给定**，必填）/ `device` / `actions_per_chunk` | act      | 是               |
+
+声明结构（`policy.POLICY_COMMON_CONFIG_ITEMS` + `policy.POLICY_CONFIG_ITEMS`）：`key` / `label` /
+`type`（text / int / bool）/ `required` / `runtime`（`false` = 会话内锁定）/ `group`（`endpoint` = 推理
+端点）/ `default` / `placeholder` / `help`；派生便捷标志 `requires_prompt` / `requires_model_path`，
+以及 `policy_config_status()` 的 `runtime_keys`（会话内可改键清单）。
+
+推理端点与 `infer ip` / `infer port` **同一写入实现**（`set_policy_endpoint`，非空 host / 端口范围校验），
+只是现在也能从策略配置表单 / `infer config set` / `POST /v1/infers` body 的 `config` 一起改。
+
+运行时通道（均写内存态 `policy` 段，**不写回 yaml**；下次 `session run infer` 或当前会话下一请求生效）：
+
+| 命令                      | 位置参数 | 语义                                                       |
+| ------------------------- | -------- | ---------------------------------------------------------- |
+| `infer config`            | —        | 查询当前策略的配置项（schema + 当前值 + `missing` 缺失项） |
+| `infer config set <json>` | `json`   | 按当前策略 schema 白名单校验并设置（可部分）               |
+| `infer prompt <text>`     | `text`   | `prompt` 项的快捷命令（语言条件策略）                      |
+| `infer model(set) <path>` | `path`   | `pretrained_name_or_path` 项的快捷命令（lerobot 类）       |
+
+未知键 / 类型不符 / 必填为空 → `rejected`（400）。**策略已连接时设置端点（host / port）→
+`rejected`（409）**：连接目标不能热改（否则与实际连接不一致），需断开连接 / 退出会话后再改。
+端点与其它配置项均为 `runtime=True`（未连接时会话内可改，并同步到运行中的策略客户端：
+`policy.set_endpoint` → 传输层重建 URI / gRPC target，下次 `infer connect` 用新地址）。
+会话内设置其余项会同时应用到**正在运行的**策略客户端（下一请求生效）；会话外只影响下次进入会话。
+
+### 文本指令（prompt，**仅语言条件策略**）
+
+`prompt` 是**声明了 prompt 配置项的策略**（当前为 openpi）的文本指令：
+
+-   `BasePolicyClient.prompt`（缺省 None；`requires_prompt` 类属性由策略声明）；openpi 每次 infer 请求
+    动态携带（服务端每帧重新 tokenize）。
+-   会话内经 `infer prompt <text>` 预置；对该类策略 **prompt 为空不能开始推理**（单步 / 持续 rollout 与
+    rollout 录制开始均门控拒绝）——录制 rollout 时作为 episode 的 `task_name`（`operator=policy`）。
+-   **act 不需要 prompt**（ACT 不接受文本条件）：不门控、不下发；录制 rollout 只同步 `operator=policy`。
+-   多种策略共用一条通道：均经 `handle_policy_config` / `set_policy_config` 校验与写入（见上表）。
+
+单臂任务：`policy.type` 用 `act`（通用 ACT，按启用臂数直通）；`enabled_arms` / `enabled_cameras` /
+`home_qpos` 为**运行时配置**（见 [机器人适配器（adapter）](./motrix_edge_adapter.md)）。
 
 ## 运行时端点配置（infer ip / infer port）
 
-推理节点地址（`policy.host` / `policy.port`）既可由 `config/edge.yml` 静态配置，也可在
-运行期经命令总线动态设置（前端推理卡片设置推理端 ip / 端口后，edge 下次启动推理会话生效）：
+推理节点地址（`policy.host` / `policy.port`）可由 `edge.yml` 静态配置，也可运行期经命令总线动态
+设置（前端「策略配置」卡片的端点项，或进入会话时随 `config` 一并写入）：
 
-| 命令                 | 位置参数 | 语义                                                    | 状态可用性 |
-| -------------------- | -------- | ------------------------------------------------------- | ---------- |
-| `infer ip`           | —        | 查询当前推理节点 IP                                     | 全局       |
-| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）             | 全局       |
-| `infer port`         | —        | 查询当前推理节点端口                                    | 全局       |
-| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`）            | 全局       |
-| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内     |
+| 命令                 | 位置参数 | 语义                                                    | 状态可用性     |
+| -------------------- | -------- | ------------------------------------------------------- | -------------- |
+| `infer ip`           | —        | 查询当前推理节点 IP                                     | 全局           |
+| `infer ip set <ip>`  | `ip`     | 设置推理节点 IP（写入内存态 `policy.host`）             | 未连接策略即可 |
+| `infer port`         | —        | 查询当前推理节点端口                                    | 全局           |
+| `infer port set <p>` | `port`   | 设置推理节点端口（写入内存态 `policy.port`）            | 未连接策略即可 |
+| `infer connect`      | —        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata） | 会话内         |
 
--   配置为**内存态**（写入 `base_cfg["policy"]`，不写回 yaml），下次 `session run infer`
-    实例化策略客户端时生效；推理会话进行中设置仅对下一会话生效。
--   端点是 Edge 级配置（与节点状态机解耦），任何状态（IDLE / READY / ACTIVE / ERROR）均可用。
--   HTTP 经 `/v1/commands` capability（`infer_ip` / `infer_port` / `infer_ip_set` /
-    `infer_port_set`）走同一命令总线，本地 CLI 与前端行为一致；当前配置端点由
-    `/v1/infers` status 的 `endpoint` 字段回读。
+配置为**内存态**（写入 `base_cfg["policy"]`，不写回 yaml），下次 `session run infer` 实例化策略
+客户端时生效。端点是 Edge 级配置；HTTP 经 `/v1/commands` capability 走同一命令总线。
+
+端点同时是**策略配置的公共项**（`host` / `port`，见上「策略配置项」）：`infer config` /
+`infer config set`（或 `POST /v1/infers` 的 `config`）走 `set_policy_endpoint` 同一校验与写入。
+端点与其它配置项**同层级**（未连接时随时可改，含会话内）：会话内改会同步到运行中的策略客户端
+（`policy.set_endpoint` → 传输层重建 URI / gRPC target，下次 `infer connect` 用新地址）；
+**策略已连接后改为 409**（连接目标不能热改）——断开连接 / 退出会话后再改。
 
 ## 虚拟推理端点（scripts/test_infer_point.py）
 
-无真实推理的模拟 openpi 策略服务端（联调用）：运行在指定 ip / 端口，连接后先下发 metadata
-（含 `action_horizon`），每个请求返回一段**有界随机游走**的 action chunk（`[horizon, dim]`），
-用于在无真实模型时验证「edge → 推理端」传输契约与 `ActionChunkBroker` 逐帧切片。与 Edge 的
-耦合仅限 wire 契约（`contract` / `msgpack_numpy`），可独立运行：:
+无真实推理的模拟 **openpi** 策略服务端（联调用）：运行在指定 ip / 端口，连接后先下发 metadata
+（含 `action_horizon`），每个请求返回一段**有界随机游走**的 action chunk（`[horizon, dim]`），用于
+验证「edge → 推理端」传输契约与 openpi 自有块缓存的逐帧消费。与 Edge 耦合仅限 wire 契约
+（`contract` / `transport.msgpack_numpy`），可独立运行：:
 
 ```
 uv run python scripts/test_infer_point.py --host 0.0.0.0 --port 8765 --action-dim 14 --action-horizon 16
 ```
 
+act 的联调（fake gRPC 服务端 + 真实 lerobot `policy_server`）见
+[act-lerobot-grpc 实施计划](../plan/motrix_edge_policy_act_grpc_plan.md)。
+
 ## 相关文档
 
--   推理会话（消费 policy）：[会话（session）](./motrix_edge_session.md)
+-   推理会话（消费 policy，驱动 connect / rollout）：[会话（session）](./motrix_edge_session.md)
 -   命令总线（infer ip/port 命令）：[命令总线（CommandBus）](./motrix_edge_command_bus.md)
--   代码入口：`src/motrix_edge/policy/` —— 随 **feat/6**（任务运行时核心）落地
+-   vendored lerobot 与 transport 包说明：见本文件「包结构」「传输层」；代码入口：
+    `src/motrix_edge/policy/`、`src/motrix_edge/transport/`、`src/lerobot/`

@@ -11,7 +11,7 @@
 ## 目标与原则
 
 -   **会话 = 任务环境**：`session run <type>` 一步完成「选择 + 启动」→ ACTIVE；`session quit`
-    退出回 READY。租约**独立于任务**（Edge 级，随 feat/3 落地），session 只消费。
+    退出回 READY。租约**独立于任务**（Edge 级，见 [lease](./motrix_edge_lease.md)），session 只消费。
 -   **命令驱动**：会话在 `run()` 循环内消费命令（`session quit` / `robot estop` / `robot execute` 等）。
 -   **adapter 注入**：`get_session(..., adapter=node.adapter)`；会话按能力校验（capture 要求
     CAPTURE，infer 要求 EXECUTE），不支持 → `ValueError`。
@@ -50,6 +50,14 @@ session.safe_stop()      # 安全停止（幂等、失败安全；委托 adapter
 从 `SESSION_REGISTRY` 按 `session_type`（capture / infer，缺省用配置 `session.type`，再缺省
 capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配置 `policy.type`）。
 
+## UploadSession（上传会话，文件会话）
+
+`UploadSession` 扫描本地采集目录，按 episode 文件名配对 `.mcap` 与 `.json`，读取 JSON 元数据并生成文件摘要；它不占用 RobotAdapter，也不改变 EdgeNode 节点状态。详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
+
+## UploadSession（上传会话，文件会话）
+
+`UploadSession` 与 `CaptureSession`、`InferSession` 同属 `session/` 包，但不进入 EdgeNode 的机器人任务状态机。它扫描本地采集目录、配对 `.mcap` / `.json`、读取元数据并生成 episode 文件摘要；详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
+
 ## CaptureSession（采集会话）
 
 基于 `RobotAdapter` 的**采集执行器（无回合流程控制）**：
@@ -63,24 +71,42 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 
 ## InferSession（推理会话）
 
-基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无回合概念，由 rollout 步进驱动）**：
+基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无「多步推理」模式）**：
 
 -   `run()`：`adapter.reset()` + `policy.reset()` → 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
--   **连接推迟到显式命令**：进入会话**不连接**推理节点；`infer connect` **单次尝试**连接策略
-    服务器（成功回执含服务端 metadata；失败回执 error，连接状态保持未连接）。`infer rollout`
-    仅在已连接时可用（未连接 → 503）。
--   `infer rollout [mode]`：推理闭环步进，支持三种模式（参数缺省 = 1 次）：
-    -   `count`（`infer rollout <N>`，N 1–100，缺省 1）：连续执行 N 次
-        `obs = adapter.observe()` → `action = policy.infer(obs)` → `adapter.rollout(action)`；
-        回执包含最后动作与动作列表。
-    -   `continuous`（`infer rollout continuous`）：**持续推理** —— 启动即回执 `started`，
-        然后持续执行推理闭环，直到 `session quit` / `robot estop` 停止（持续期间每步轮询
-        命令响应退出 / 复位 / 急停；重复 `infer rollout` → rejected）。
-    -   `drain`（`infer rollout drain`）：**消耗当前动作块** —— 只把策略已缓存的
-        `ActionChunkBroker` 动作块消费完（不发新推理请求），回执消耗步数；无缓存则 0 步。
-        （`observe` 是**推理输入**；显示观测由节点级写入 `frame_manager`，会话不写。）
--   命令：`infer connect`、`infer rollout [mode]`、`session quit`（退出回 home）、`robot estop`、
-    `robot reset`、`robot execute`、`robot teleop`；`capture meta list/add/edit/delete/delete-key`（配置级命令，任务态同样可用）。
+-   **连接内聚到 policy、rollout 惰性自连**：进入会话**不连接**推理节点。`infer rollout`
+    前自动 `policy.ensure_connected()`（未连则单次限时连接；失败回执 error、可重试）——
+    不再要求先 `infer connect`。
+-   `infer connect`（**可选**）：显式预连 + 预热 —— `policy.connect()` 成功回执含服务端 metadata，
+    随后尝试 `adapter.observe()` 一帧调 `policy.prepare(obs)`（act：提前下发策略指令、服务端加载
+    模型到 device，避免首次 rollout 卡模型加载；openpi：no-op）。失败回执 error，可重试。
+-   `infer rollout`（**单步**）/ `infer rollout continuous`（**持续**）：一次 / 持续执行
+    `obs = adapter.observe()` → `action = rtc.infer(obs)` → `adapter.rollout(action)`。
+    **动作块缓存 / 三元切分 / 时序平滑 / 预取由 [RTCManager](./motrix_edge_rtc.md) 负责**
+    （策略只提供原始动作块：`policy.infer_chunk`；会话持有 `self.rtc = build_rtc(...)`，
+    `reset` / `session_finish` 同步复位）。
+    **prompt 为空不能开始推理（仅对声明 prompt 配置项的策略）**：openpi 等语言条件策略要求
+    会话内已 `infer prompt <text>` 预置非空文本（空 → rejected 400，不推理）；act 不需要 prompt
+    （`requires_prompt=False`，不门控、不下发）。`infer rollout <N>`（多步）与 `infer rollout drain`
+    （缓存推理）**已取消**（多步/缓存不再作为独立命令模式）。（`observe` 是**推理输入**；
+    显示观测由节点级写入 `frame_manager`，会话不写。）
+-   **推理时 rollout 录制（同采集）**：robot 本身不关心推理还是采集——`capture episode start`
+    通知进程开启录制（capturing 期间按帧录 mcap，含 action），`capture episode end` 结束并保存。
+    需要 prompt 的策略开始录制同样要求 prompt 非空（录制 rollout 的 task_name = prompt）。
+    录制元信息由调用方**显式** `capture sync --meta <json>` 同步（默认 `operator="policy"`、
+    `task_name=prompt` 由会话 / server 状态上报，不自动 sync）。录制与单步 / 持续推理正交：持续
+    推理中亦可 episode start/end 与 sync（robot 不关心谁在驱动）。
+-   **策略配置项**：`infer config` / `infer config set <json>` / `infer prompt <text>` /
+    `infer model(set) <path>`（见 [推理策略客户端（policy）](./motrix_edge_policy.md)）；会话内设置
+    会同时应用到正在运行的策略客户端（下一请求生效）。公共项**推理端点** `host` / `port` 与其
+    它项同级（会话内未连接时可改，改后同步传输层连接目标）；**策略已连接后禁用**（409：连接目标
+    不能热改）。
+-   命令：`infer prompt <text>`（文本指令，需要 prompt 的策略推理/录制前必须非空）、`infer config` /
+    `infer model`（策略配置项查询 / 设置）、`infer connect`（可选预连/预热）、`infer rollout` /
+    `infer rollout continuous`、`capture episode start/end`（rollout 录制）、
+    `capture sync --meta <json>`（录制元信息）、`infer rtc` / `infer rtc set <json>`（RTC 参数
+    查询 / 运行期设置）、`session quit`（退出回 home）、`robot estop`、`robot reset`、`robot execute`、
+    `robot teleop`。
 
 ## 相关文档
 

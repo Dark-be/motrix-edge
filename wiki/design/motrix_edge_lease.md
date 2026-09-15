@@ -4,11 +4,16 @@
 
 租约是 **Edge 层级的独立授权机制**，独立于机器人 / 任务（`lease/`，`LeaseManager` 单点管理、
 线程安全）。**租约权威在 Console**：Console Backend **生成 Lease**（`lease_id` / `edge_id` /
-`holder_subject_id` / `purpose` / `expires_at` / `lease_version` 等）并经 HTTP API 把租约
+`holder_subject_id` / `purpose` / `lease_version` 等）并经 HTTP API 把租约
 **镜像**下发到 Edge；Edge **只保留 + 校验**（`LeaseManager.install` / `require`），
 **自身不生成租约**。Edge 在租约**有效（Active 且未过期）**时才允许执行受限操作（进入 /
 控制任务、`/v1/commands` 含 estop）——受限操作须携带匹配租约（`X-Lease-Id`），由 Edge
 校验后放行。
+
+> **过期时间由 Console（web）决定**：`expires_at` 由 Console 在签发 / 续约时计算并随租约
+> **镜像**下发；Edge 只保留 + `require` 校验（按本机时钟与 `expires_at` 比较判过期），
+> **不自行计算过期**。对外时间字段（`expires_at` / `renewed_at`）统一以北京时间
+> （`Asia/Shanghai`，+08:00）序列化，供展示 / 倒计时。
 
 > **前端暂代 Console**：Console Backend 尚未接入前，`frontend/edge-console` 的「租约编辑
 > 生成栏」暂代 Console 生成 / 续约 / 撤销租约（见「前端暂代 Console」）。
@@ -23,6 +28,10 @@
     `lease_version` 原地延长；Edge 在旧租约到期前收到新镜像即可保持控制。
 -   **单点校验**：访问校验（`require`）由 `LeaseManager` 实现；Service 只调用
     `leases.require()`，不复制逻辑。
+-   **Console 决定过期**：`expires_at` 由 Console（web）在签发 / 续约时计算并下发；Edge
+    只保留镜像并按本机时钟校验是否过期，不自行计算。
+-   **时间统一北京时间**：所有对外时间字段（`expires_at` / `renewed_at`）统一以
+    `Asia/Shanghai`（+08:00）序列化。
 
 ## 数据流（正确模型）
 
@@ -49,7 +58,7 @@ lease 信息暂包括：
 | holder_subject_id | string | 租约所属操作员 |
 | purpose | string | 租约用途（如 capture / rollout / maintenance） |
 | state | string | 状态：Reserved、Active、Revoked、Expired |
-| expires_at | datetime | 租约过期时间 |
+| expires_at | datetime | 租约过期时间（北京时间 +08:00；由 Console 签发/续约时决定） |
 | renewed_at | datetime | 最近一次续约时间 |
 | lease_version | int | 租约版本；续约时递增，版本回退拒绝 |
 
@@ -73,7 +82,8 @@ lease 信息暂包括：
 
 ## 请求体
 
-`POST /v1/leases`（Console 签发租约 → Edge 存储镜像，Edge 不生成）：
+`POST /v1/leases`（Console 签发租约 → Edge 存储镜像，Edge 不生成；**`expires_at` 由
+Console 决定**，随请求体下发，Edge 只保留 + 校验）：
 
 ```json
 {
@@ -82,16 +92,17 @@ lease 信息暂包括：
     "holder_subject_id": "operator-1",
     "purpose": "capture",
     "state": "active",
-    "expires_at": "2030-01-01T00:00:00+08:00",
+    "expires_at": "2026-09-04T14:00:00+08:00",
     "lease_version": 1,
     "ttl": 120
 }
 ```
 
-`POST /v1/leases/{id}:renew`（Console 续约：更高 `lease_version` + 新 `expires_at`）：
+`POST /v1/leases/{id}:renew`（Console 续约：更高 `lease_version` + **新 `expires_at`**
+由 Console 决定并下发）：
 
 ```json
-{ "lease_version": 2, "expires_at": "2030-01-01T00:01:00+08:00" }
+{ "lease_version": 2, "expires_at": "2026-09-04T14:01:00+08:00" }
 ```
 
 ### 受控操作（Edge 校验）
@@ -106,10 +117,25 @@ Console Backend 尚未接入时，`frontend/edge-console` 的**租约编辑生�
 管理租约（Edge 自身不生成租约）：
 
 -   填写部分字段（`lease_id` / `edge_id` / `holder_subject_id` / `purpose` / `state`）与
-    **持续时间**，页面实时**提示预期过期时间**（= 当前时间 + 持续时间），提交
-    `POST /v1/leases` 把租约镜像部署到 Edge。
--   按 `renew_interval` 定时 `POST /v1/leases/{id}:renew` 自动续约（心跳，暂代 Console）。
+    **过期时间**：页面让用户选择时长并按本地时钟换算 `expires_at`，随镜像下发（过期由
+    Console 侧决定）；Edge 只保留镜像。
+-   按 `renew_interval` 定时 `POST /v1/leases/{id}:renew`（携带新 `expires_at`）自动续约
+    （心跳，暂代 Console）。
 -   撤销：`POST /v1/leases/{id}:revoke`。
+
+## 过期时间（Console 决定）与时间序列化
+
+-   **为什么由 Console 决定**：租约的权威与到期策略在 Console（web）——它决定"这份租约
+    什么时刻过期"并随镜像下发；Edge 是**现场镜像**，`expires_at` 由 Console 计算后传入，
+    Edge 只 `install` 保留（归一化到北京时间存储），并在 `require` 时按 Edge 本地时钟与
+    `expires_at` 比较判定是否过期（过期判定必须在 Edge 侧：租约是"Edge 允不允许受控操作"
+    的授权）。跨机若有秒级时钟偏差，由 Console 在签发时留足余量（ttl / renew 间隔远大于
+    偏差）。
+-   **时区统一**：Edge 对外序列化前把 `expires_at` / `renewed_at` 归一化到 `+08:00`
+    （`Asia/Shanghai`），避免 UTC（前端 `toISOString` 恒为 UTC）与北京混用造成的
+    "差 8 小时"歧义。
+-   **回显**：`POST /v1/leases` / `:renew` / `GET /v1/leases`（状态汇总与镜像查询）返回
+    归一化后的 `expires_at`（+08:00），前端以其做到期倒计时。
 
 ## 错误语义
 

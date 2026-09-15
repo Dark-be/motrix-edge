@@ -4,16 +4,20 @@
 
 本目录保存基于设计文档制定的实现计划。每篇计划维护 TODO list，完成一项勾选一项；计划完整落地后删除对应文档并更新本索引。
 
-> 已随 feat/6（任务运行时核心）与 feat/3（HTTP 控制面）落地的计划（webrtc / observe_preview /
-> adapter_discover / robot_adapter / capture_session / captures / infer_connect_capture_sync /
-> infer_test）已删除；feat/7 的 upload_session / upload_pack 两份计划亦已落地删除
-> （未实现项见 [上传会话](../design/motrix_edge_upload_session.md)「后续版本」）；以下为保留的
-> 后续 / 在途计划。
+> 已随 feat/6（任务运行时核心）、feat/3（HTTP 控制面）与后续 feat（improve infer /
+> capture meta / infer connect + capture sync / rtc / policy config / upload pack）落地的计划（webrtc / observe_preview /
+> adapter_discover / robot_adapter / capture_session / captures / infer_test /
+> infer_connect_capture_sync / capture_meta / rtc）已删除；以下为保留的后续 / 在途计划。
 
 ## 索引
 
 -   [边缘节点开发计划](./motrix_edge_development_plan.md)
 -   [Adapter 身份与选择实施计划](./motrix_edge_adapter_selection_plan.md)
+-   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
 -   [推理策略选择实施计划](./motrix_edge_policy_selection_plan.md)
+-   [UploadSession 实施计划](./motrix_edge_upload_session_plan.md)
+-   [ACT 走 Lerobot gRPC + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
+-   [robot-pipeline 控制 / 观测双线程实施计划](./robot_pipeline_control_thread_plan.md)
+-   [RTC 过渡策略（权重过渡 / 连续过渡）实施计划](./motrix_edge_rtc_transition_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->
