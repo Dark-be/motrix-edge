@@ -26,8 +26,9 @@
 
 实现继承 ``HttpShmAdapter`` 共享基类（HTTP 指令下行 + 共享内存观测上行 + 状态查询），
 本类只声明类常量：身份（discover 解析传入，缺省回退类常量）、能力（动作维度 / 相机
-布局 / 支持的 ``AdapterCapability``）、连接参数（SDK URL / 共享内存名 / 超时）。能力与
-连接参数**全部由类级常量定义**（自包含，不随 discover 传输、不接收 Edge 配置）。
+布局 / 支持的 ``AdapterCapability``）、连接参数（SDK URL / 共享内存名 / 超时）。身份由
+机器人进程 discover 解析（``name`` / ``id`` / ``type``）传入构造函数；能力与连接参数
+**全部由类级常量定义**（自包含，不随 discover 传输、不接收 Edge 配置）。
 """
 
 from motrix_edge.adapter.base import AdapterCapability
@@ -42,7 +43,17 @@ class TestRobotAdapter(HttpShmAdapter):
     # ---- 能力 / 连接参数（类级常量，自包含，不随 discover 传输）----
     ROBOT_MODEL_ID = "test-robot"
     ROBOT_MODEL_VERSION = "0.0.0"
-    ACTION_DIM = 14  # 动作维度
+    ACTION_DIM = 14  # 完整动作维度
+    # 单臂动作维度与臂布局（与双臂 Piper 一致；供基类 configure / 臂映射助手）
+    ACTION_DIM_PER_ARM = 7
+    ARM_LEFT = "left"
+    ARM_RIGHT = "right"
+    LEFT_QPOS_SLICE = slice(0, 7)
+    RIGHT_QPOS_SLICE = slice(7, 14)
+    ARM_NAMES = (ARM_LEFT, ARM_RIGHT)
+    ARM_QPOS_SLICES = {ARM_LEFT: LEFT_QPOS_SLICE, ARM_RIGHT: RIGHT_QPOS_SLICE}
+    HOME_QPOS = [0.0] * 14
+    DEFAULT_ENABLED_ARMS = (ARM_LEFT, ARM_RIGHT)
     # 相机布局：{相机名: 分辨率 (width, height)}（SDK 产出 raw RGB；observe 编码 JPEG 原图）
     IMAGES: dict[str, tuple[int, int]] = {
         "cam_head": (640, 480),

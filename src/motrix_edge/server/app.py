@@ -49,6 +49,7 @@ from motrix_edge.lease import BEIJING_TZ, Lease, LeaseError, LeaseManager, Lease
 from motrix_edge.server.capture import CaptureError, CaptureService
 from motrix_edge.server.command import CommandError, CommandService
 from motrix_edge.server.infer import InferError, InferService
+from motrix_edge.server.preview import PreviewError, PreviewService
 from motrix_edge.server.webrtc import WebRTCError, WebRTCService
 from motrix_edge.session.upload_session import UploadError, UploadSession
 from motrix_edge.utils.version import get_package_version
@@ -128,8 +129,8 @@ class LeaseInstallRequest(BaseModel):
     """POST /v1/leases 请求体：Console 签发并下发的租约**镜像**（权威在 Console）。
 
     字段见 wiki/design/motrix_edge_lease.md「lease 信息」：lease_id / edge_id /
-    holder_subject_id / purpose / state / expires_at / renewed_at / lease_version；
-    ``ttl`` 为有效期（秒，信息字段）。
+    holder_subject_id / purpose / state / expires_at / lease_version；``ttl`` 为
+    有效期（秒，信息字段）。``expires_at`` 由 Console 决定并随镜像下发。
     """
 
     lease_id: str = Field(..., description="Console 生成的租约 id")
@@ -137,7 +138,7 @@ class LeaseInstallRequest(BaseModel):
     holder_subject_id: str = Field(..., description="租约所属操作员")
     purpose: str = Field(..., description="租约用途（如 capture / rollout / maintenance）")
     state: LeaseState = Field(default=LeaseState.ACTIVE, description="签发状态（reserved / active）")
-    expires_at: datetime = Field(..., description="过期时间（ISO 8601，北京时间）")
+    expires_at: datetime = Field(..., description="过期时间（ISO 8601，北京时间；Console 决定）")
     lease_version: int = Field(default=1, ge=1, description="租约版本；续约时递增")
     ttl: float | None = Field(default=None, gt=0, description="有效期（秒，信息字段）")
 
@@ -146,7 +147,7 @@ class LeaseRenewRequest(BaseModel):
     """POST /v1/leases/{id}:renew 请求体：Console 续约 —— 更高 lease_version + 新 expires_at。"""
 
     lease_version: int = Field(..., ge=1, description="新租约版本（须高于当前，版本回退拒绝）")
-    expires_at: datetime = Field(..., description="续约后的过期时间（ISO 8601，北京时间）")
+    expires_at: datetime = Field(..., description="续约后的过期时间（ISO 8601，北京时间；Console 决定）")
 
 
 class WebRTCOfferRequest(BaseModel):
@@ -291,6 +292,7 @@ def create_app(
     lease_manager: LeaseManager | None = None,
     webrtc: WebRTCService | None = None,
     uploads: UploadSession | None = None,
+    preview: PreviewService | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
@@ -307,8 +309,9 @@ def create_app(
                    ``/v1/leases/*`` 总可用。
     webrtc: 可选 ``WebRTCService``（aiortc 推流，视频轨道从 FrameManager 取帧）；
             未注入时 ``/v1/webrtc/offer`` 返回 501。
-    uploads: 可选 ``UploadSession``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode
-             扫描与选择（见``/v1/uploads/*``）。
+    uploads: 可选 ``UploadSession``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
+    preview: 可选 ``PreviewService``（**独立于采集 / 推理会话**，直接读 node.frame_manager
+             观测缓存）；注入后注册 ``/v1/preview`` 观测预览端点，未注入时返回 501。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
@@ -345,6 +348,18 @@ def create_app(
     # ``async def`` 会占住 uvicorn 事件循环，连带冻结 health / preview / WebRTC 信令。
     # 唯一例外是本文件顶部的 correlation 中间件（必须 ``async def``）。
 
+    @app.middleware("http")
+    async def _no_store_cache(request: Request, call_next):
+        """控制面（/v1/*）响应一律 ``Cache-Control: no-store``：实时状态禁止浏览器缓存。
+
+        预览 / 租约等轮询 GET 若被浏览器缓存，会回放旧的 410 / 过期状态（同一 URL
+        每秒轮询命中缓存，表现为 "date" 是旧时间、请求不进服务端日志）。
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/v1"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/v1/health")
     def health():
         """探活：版本 / identity / 已绑定适配器 / 磁盘 / 时钟。
@@ -378,6 +393,54 @@ def create_app(
         from motrix_edge.adapter import adapter_details
 
         return {"adapters": adapter_details()}
+
+    @app.get("/v1/adapters/config")
+    def adapters_config():
+        """运行时 adapter 能力配置（enabled_arms / enabled_cameras）。
+
+        由 ``adapter config`` 命令 / 前端设置，adapter discover 绑定时应用；此处只读。
+        """
+        if node is None:
+            return {}
+        return node.adapter_config
+
+    @app.get("/v1/adapters/current")
+    def adapters_current():
+        """当前绑定 adapter **实际生效**的能力配置（启用的臂 / 相机 / 动作维度 / home）。
+
+        只读（无需租约）：读 adapter 实例实际生效值（``configure()`` 应用后），与
+        ``GET /v1/adapters/config``（运行时配置状态）区分。**未绑定 adapter → 回退包内
+        默认 adapter 的默认配置**（``default=True``，前端刷新即可见勾选）；无任何注册
+        adapter → 404。
+        """
+        if node is None:
+            raise HTTPException(status_code=501, detail="node not initialized")
+        cfg = node.adapter_config_effective()
+        if cfg is None:
+            raise HTTPException(status_code=404, detail="no adapter registered")
+        return cfg
+
+    @app.post("/v1/adapters/config")
+    def adapters_config_set(req: AdapterConfigRequest, x_lease_id: str | None = Header(default=None)):
+        """设置运行时 adapter 能力配置（可部分更新；应用到当前已绑定 adapter）。
+
+        受控操作：须持有有效租约（X-Lease-Id）。非法配置 → 400（状态不更新）。
+        """
+        if node is None:
+            raise HTTPException(status_code=501, detail="node not initialized")
+        try:
+            lease_manager.require(x_lease_id)
+        except LeaseError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        applied = node._apply_adapter_config(
+            {
+                "enabled_arms": req.enabled_arms,
+                "enabled_cameras": req.enabled_cameras,
+            }
+        )
+        if not applied:
+            raise HTTPException(status_code=400, detail="adapter config rejected (invalid arms/cameras)")
+        return node.adapter_config
 
     @app.post("/v1/webrtc/offer")
     def webrtc_offer(req: WebRTCOfferRequest, x_lease_id: str | None = Header(default=None)):
@@ -465,7 +528,7 @@ def create_app(
             "lease_id": lease.lease_id,
             "lease_version": lease.lease_version,
             "state": lease.state.value,
-            "expires_at": lease.expires_at.isoformat(),
+            "expires_at": lease.expires_at.astimezone(BEIJING_TZ).isoformat(),
         }
 
     @app.get("/v1/leases/{lease_id}")
@@ -611,9 +674,15 @@ def create_app(
     def captures_preview(x_lease_id: str | None = Header(default=None)):
         """最新观测预览：qpos / action 状态 + 摄像头名列表（图像走 WebRTC，不内联）。
 
-        受控操作：须持有有效租约（X-Lease-Id）。
+        独立于采集 / 推理会话（PreviewService 直接读 node.frame_manager 观测缓存）：
+        不要求会话，预览随时可开；受控操作：须持有有效租约（X-Lease-Id）。
         """
-        return _capture_call(lambda: _captures().preview(lease_id=x_lease_id))
+        if preview is None:
+            raise HTTPException(status_code=501, detail="preview not enabled")
+        try:
+            return preview.preview(lease_id=x_lease_id)
+        except PreviewError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.get("/v1/captures/meta")
     def captures_meta():
