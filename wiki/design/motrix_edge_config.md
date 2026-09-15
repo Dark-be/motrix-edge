@@ -4,8 +4,8 @@
 
 `src/motrix_edge/config/` 是**配置子包**：外界配置优先（环境变量 `MOTRIX_CONFIG_DIR`），否则用
 包内 **package data** 只读兜底（`edge.yml` / `capture.yml`）；日志 / 可写状态目录遵循 XDG（`XDG_STATE_HOME`，
-缺省回退 CWD）。CLI 入口统一在 `__main__.py`（console script `motrix-edge` 与
-`python -m motrix_edge` 共用同一 `main()`）。
+缺省回退 CWD）。CLI 分两处：入口与子命令在 `__main__.py`（console script `motrix-edge` 与
+`python -m motrix_edge` 共用同一 `main()`），交互式会话集中在 `utils/cli.py`（`CliSession`）。
 
 > 迁移（issue #10）：仓库根顶层 `config/` 目录与 `_GLOBAL_CONFIG.py`（`ROOT_DIR` / `CONFIG_DIR` /
 > `DATA_PATH` / `LOG_PATH` 仓库根推导常量）已删除——顶层 `config/` 与 robot-pipeline 顶层
@@ -60,11 +60,16 @@
 
 交互式 `run` 使用 `prompt_toolkit` 统一处理终端输入与输出：
 
+-   **单一落点**：`utils/cli.py` 的 `CliSession`（输入循环 + `CommandCompleter` 补全 + `execute_line`
+    解析下发 + `format_result` 回执格式化），`__main__.py` 只做入口、子命令与装配。
 -   `PromptSession` 提供可编辑行输入、历史记录与命令补全（基于 `CommandRegistry`，CLI / HTTP 共享同一命令契约），
     底部工具栏在识别出命令后提示其位置参数（如 `robot execute` → `参数: qpos`）。
 -   `patch_stdout` 使 node / web / 会话线程的 `print` 输出（含 `debug_print`）不打断当前输入行。
 -   EOF / Ctrl-C 仅退出 CLI 输入线程；`EdgeNode` 主循环与生命周期清理不受影响。
 -   一次性子命令（`adapters` / `version`）直接打印后退出，无需交互会话。
+-   行命令提交给共享 `CommandBus`（与 HTTP 同一注册表、同一状态校验与回执语义，**唯一差异是
+    租约**）——见 [命令总线（CommandBus）](./motrix_edge_command_bus.md)；`prompt-toolkit` 是
+    显式依赖（`pyproject.toml`）。
 
 运行拓扑：`run` = node 主线程持续运行 `EdgeNode`（CLI 键盘线程经注册表解析行命令 → `push` 到
 共享 `CommandBus`）+ web 作为独立线程跑 FastAPI。
@@ -77,4 +82,5 @@
 ## 相关文档
 
 -   各包配置细节见对应包文档：[按包索引](./motrix_edge_architecture.md#按包索引分包导航)
--   代码入口：`src/motrix_edge/config/` 与 `src/motrix_edge/__main__.py`（CLI）—— 随 **feat/6**（任务运行时核心）落地
+-   代码入口：`src/motrix_edge/config/`、`src/motrix_edge/__main__.py`（入口 / 子命令）与
+    `src/motrix_edge/utils/cli.py`（交互式会话）—— 随 **feat/6**（任务运行时核心）落地

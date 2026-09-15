@@ -14,64 +14,17 @@
 
 """``python -m motrix_edge`` / console script ``motrix-edge`` 的命令行入口。
 
-CLI 相关逻辑（main() 及子命令 run / adapters list / version）集中在此；
-`node.py` 只保留 EdgeNode 生命周期核心库，不承载入口逻辑。
+本模块承载入口与**一次性子命令**（run / adapters list / adapters detail / version），以及
+``run`` 的运行装配（node + 各服务 + CLI 输入线程）；交互式终端逻辑在
+``motrix_edge/utils/cli.py``，`node.py` 只保留 EdgeNode 生命周期核心库。
 """
 
-import shlex
 import threading
 
 from motrix_edge.utils.adapters import print_adapter_details, print_adapters
-from motrix_edge.utils.commands import CMD_ROBOT_ESTOP, CommandBus, CommandError, build_command_registry
-from motrix_edge.utils.data_handler import debug_print, read_key
+from motrix_edge.utils.cli import CliSession
+from motrix_edge.utils.commands import CommandBus, build_command_registry
 from motrix_edge.utils.version import get_package_version
-
-
-class _CliInput:
-    """CLI 输入协调器：键盘线程唯一读 stdin，经命令注册表解析为命令 submit 到总线并打印回执。
-
-    单 adapter 包：无 adapter 选择环节，读入的行命令（``build_command_registry`` 注册的
-    命令词，空格分隔不用点，支持 ``key=value`` 参数）直接驱动 node 主循环（session run
-    <type> 一步启动会话、session quit 退出等）；每个命令 submit 同步等回执并打印执行
-    结果（status / error / data）。急停（robot estop）保持 push 即发即忘：安全命令不
-    阻塞输入线程。
-    """
-
-    def __init__(self, bus, registry):
-        self._bus = bus
-        self._registry = registry
-
-    def read_loop(self) -> None:
-        """键盘线程主循环：阻塞读 stdin，解析为命令 submit 到总线并打印执行回执。"""
-        while True:
-            line = read_key()
-            if line is None:
-                continue
-            try:
-                cmd = self._registry.parse_argv(shlex.split(line))
-            except CommandError as exc:
-                debug_print("CLI", f"Failed to parse command: {exc}", "WARNING")
-                continue
-            if cmd.name == CMD_ROBOT_ESTOP:
-                self._bus.push(cmd)  # 急停：即发即忘，不阻塞输入线程（可随时触发）
-                continue
-            try:
-                result = self._bus.submit(cmd, timeout=10.0)
-            except CommandError as exc:
-                debug_print("CLI", f"{cmd.name} return timeout: {exc}", "WARNING")
-                continue
-            self._print_result(cmd, result)
-
-    @staticmethod
-    def _print_result(cmd, result) -> None:
-        """打印命令执行回执（键盘命令也回显执行结果）。"""
-        line = f"[{cmd.name}] {result.status}"
-        if result.status == "ok":
-            if result.data:
-                line += f" {result.data}"
-        else:
-            line += f" ({result.status_code}): {result.error or 'no error'}"
-        print(line)
 
 
 def _print_version() -> None:
@@ -92,10 +45,14 @@ def _start_web(app, host: str, port: int):
     import uvicorn
 
     from motrix_edge.config import LOG_PATH
+    from motrix_edge.utils.data_handler import file_log_enabled
     from motrix_edge.utils.logging import uvicorn_log_config
 
     log_dir = LOG_PATH
-    os.makedirs(log_dir, exist_ok=True)
+    # 开关的单点在 ``file_log_enabled()``（``uvicorn_log_config`` 缺省就读它）：关闭时不建目录
+    # （不留空 logs/），也不在此处另判一次环境变量（同一开关两处判会口径漂移）
+    if file_log_enabled():
+        os.makedirs(log_dir, exist_ok=True)
     log_config = uvicorn_log_config(os.path.join(log_dir, "uvicorn.log"))
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info", log_config=log_config))
     threading.Thread(target=server.run, name="web", daemon=True).start()
@@ -105,8 +62,8 @@ def _start_web(app, host: str, port: int):
 def _run_node(args) -> None:
     """加载配置并启动 EdgeNode（阻塞式主循环，直到 Ctrl-C）。
 
-    配置来源：``run --config <path>`` 指定 yaml 文件路径（如
-    /etc/motrix-edge/edge.yaml）；缺省回退 ``config/edge.yml``。
+    配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省选择性加载——环境变量
+    ``MOTRIX_CONFIG_DIR`` 指向的外界配置优先，否则包内默认 ``edge.yml``（只读兜底）。
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
     node），本地 CLI 按键保留。
     """
@@ -134,15 +91,17 @@ def _run_node(args) -> None:
     from motrix_edge.server.infer import InferService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
-    from motrix_edge.utils.data_handler import debug_print
+    from motrix_edge.utils.data_handler import debug_print, file_log_enabled
 
+    # 打印配置来源 + 状态 / 日志目录（区分环境变量 MOTRIX_CONFIG_DIR vs 包内默认；文件日志默认关闭）
     config_dir = get_config_dir()
     debug_print(
         "EdgeNode",
         f"Loaded config: {config_source}"
         f" | config_dir={config_dir or 'packaged default (read-only)'}"
         f" | state_dir={get_state_dir()}"
-        f" | log_dir={get_log_dir()}",
+        f" | log_dir={get_log_dir()}"
+        f" | file_logging={'ON' if file_log_enabled() else 'OFF (MOTRIX_LOG_FILE=0)'}",
         "INFO",
     )
     os.environ["INFO_LEVEL"] = base_cfg.get("INFO_LEVEL", "DEBUG")
@@ -160,25 +119,28 @@ def _run_node(args) -> None:
         "INFO",
     )
 
-    # 共享命令总线：web / CLI 按键线程 push，EdgeNode 主循环 poll（本地 CLI 保留）
+    # 共享命令总线：web / CLI 输入线程 push，EdgeNode 主循环 poll。
     registry = build_command_registry()
     bus = CommandBus()
-    cli = _CliInput(bus, registry)
+    cli = CliSession(registry)
 
-    # 键盘线程唯一读 stdin：行命令经注册表解析为 Command 后 push 到总线
-    threading.Thread(target=cli.read_loop, name="cli-keys", daemon=True).start()
+    # prompt_toolkit 负责行编辑、历史、补全和并发输出保护。
+    threading.Thread(target=cli.run, args=(bus,), name="cli-input", daemon=True).start()
 
     # node 主线程持续运行；web 是 node 的独立线程（node 接收 web 请求）
-    # 单 adapter 包：node 启动后 discover 探测并绑定唯一 adapter，采集 / 推理都基于它
-    node = EdgeNode(base_cfg, command_source=bus)
+    # 单 adapter 包：node 启动后按 adapter.host/port 探测并绑定唯一 adapter，采集 / 推理都基于它
     # Edge 级租约（独立于任务）：受控 HTTP 操作（进入任务 / 命令含 estop）须持有；
-    # Console 按 renew_interval 定时续租，超期 ttl 未续租则失效需重新激活
+    # Console 按 renew_interval 定时续租，超期 ttl 未续租则失效需重新激活。
+    # 同一实例也交给 node：命令面的 ``lease revoke`` 由 node 执行（不传只回 501）。
     leases = build_lease_manager(base_cfg)
+    node = EdgeNode(base_cfg, command_source=bus, lease_manager=leases)
     captures = CaptureService(node, bus, leases=leases)
     infers = InferService(node, bus, leases=leases)
     commands = CommandService(node, bus, leases=leases)
     webrtc = WebRTCService(node, leases=leases)
-    preview = PreviewService(node, leases=leases)  # 观测预览（独立于会话，直接读 frame_manager）
+    # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存
+    preview_service = PreviewService(node, leases=leases)
+    # 注：``uploads`` 不在此传 —— ``create_app`` 缺省按 ``base_cfg.upload`` 自建（见其 docstring）。
     web = _start_web(
         create_app(
             base_cfg,
@@ -188,7 +150,7 @@ def _run_node(args) -> None:
             commands=commands,
             lease_manager=leases,
             webrtc=webrtc,
-            preview=preview,
+            preview=preview_service,
         ),
         host,
         port,
@@ -226,7 +188,7 @@ def main():
     subparsers.add_parser("version", help="显示 motrix-edge 版本号")
     args = parser.parse_args()
 
-    # 非交互子命令：仅在使用时才加载 motrix_edge 核心库
+    # 一次性子命令：直接打印后退出（无需交互会话）。
     if args.command == "adapters" and args.adapter_action == "list":
         print_adapters()
         return

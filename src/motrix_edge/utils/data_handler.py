@@ -14,7 +14,6 @@
 
 import datetime
 import os
-import sys
 
 from motrix_edge.config import LOG_PATH
 
@@ -76,14 +75,3 @@ def debug_print(name, info, level="INFO", end="\n", flush=True):
                 f.write(f"[{timestamp}]{msg}\n")
         except Exception as e:
             print(f"\033[91m[ERROR][DEBUG_PRINT] Failed to write log to file: {e}\033[0m")
-
-
-def read_key():
-    """读取一行命令（支持多字母 + 回车，如 adapter id 或单字母命令 y/a/u/i/o/p/w/r）。
-
-    阻塞读 stdin 一行，去掉换行与首尾空白；EOF 或空行返回 None。
-    """
-    line = sys.stdin.readline()
-    if not line:
-        return None
-    return line.rstrip("\r\n").strip() or None

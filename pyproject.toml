@@ -19,6 +19,7 @@ dependencies = [
     "aiortc>=1.15.0,<2.0.0",  # 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），上限约束防升级静默失效
     "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
     "grpcio>=1.62.0",  # lerobot gRPC AsyncInference 传输（act 策略；vendored lerobot 在 src/lerobot）
+    "prompt-toolkit>=3.0.53",  # 交互式 CLI（utils/cli.py）：行编辑 / 历史 / 补全
     # lerobot-act：服务端动作载荷是 torch.Tensor，pickle 反序列化需 torch（client._to_numpy）。
     # 固定官方 CPU 源（见文件末 [[tool.uv.index]]）+ `+cpu` 后缀版本，避免拉入 CUDA / nvidia-* 依赖。
     "torch==2.9.1+cpu",
