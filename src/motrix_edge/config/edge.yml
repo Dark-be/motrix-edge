@@ -17,6 +17,17 @@ policy:
   image_size: [224, 224] # 约定图像尺寸
   image_format: jpeg # jpeg（默认） | uint8
   # action_horizon: 16 # 可选，服务端 metadata 未提供时使用
+  # --- RTC（实时动作块管理：异步预取 + 三元切分 + 过渡策略；见 wiki/design/motrix_edge_rtc.md）---
+  # 策略只返回原始动作块（openpi/act 通用）；块缓存 / 切分 / 过渡 / 预取由 rtc 统一负责。
+  # 预取在后台线程完成（控制环不阻塞）：推理期间走过的步会在返回时按步号自动跳过。
+  # 运行期可经 `infer rtc`（查询）/ `infer rtc set <json>`（设置）或 POST /v1/infers/rtc 修改。
+  rtc:
+    enabled: true # 关闭 → 每步一次推理只取块首步（无块缓存 / 无过渡）
+    action_horizon: 50 # 块长上限 H：一次推理只取策略块的前 H 步
+    prefix_len: 0 # 前置段 P：额外强制跳过的前 P 步（真实过期步自动跳过）
+    execution_horizon: 30 # 执行段 E；须 > P（null = 按 H - P - S 推导，代码兜底缺省）
+    suffix_len: 20 # 后缀段 S（与下一块执行段的重叠窗口，同时是预取提前量）；须满足 P + S < H
+    aggregate_fn: weighted_average # 过渡策略：weighted_average/conservative/average/latest_only/continuous
 
 # 上传会话（UploadSession，/v1/uploads/*；见 wiki/design/motrix_edge_upload_session.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。
