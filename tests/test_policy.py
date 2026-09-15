@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 
 from motrix_edge.policy import POLICY_REGISTRY, get_policy
-from motrix_edge.policy.broker import ActionChunkBroker
 from motrix_edge.policy.contract import (
     KEY_ACTION,
     KEY_OBS_IMAGE_PREFIX,
@@ -98,70 +97,8 @@ def test_extract_action_missing_key():
         extract_action({"foo": 1})
 
 
-def test_broker_chunk_slicing():
-    """feed 新块后逐帧切片；块耗尽后 empty → 需重新 feed。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    chunk = np.array([[1.0, 2.0], [3.0, 4.0]])
-    assert broker.empty  # 初始无块
-    broker.feed(chunk)
-    assert not broker.empty
-    assert np.array_equal(broker.step(), np.array([1.0, 2.0]))
-    assert np.array_equal(broker.step(), np.array([3.0, 4.0]))
-    # 块耗尽后 empty → 需重新 feed 新块（调用方向推理端请求的时机）
-    assert broker.empty
-    new_chunk = np.array([[5.0, 6.0], [7.0, 8.0]])
-    broker.feed(new_chunk)
-    assert np.array_equal(broker.step(), np.array([5.0, 6.0]))
-
-
-def test_broker_single_step_passthrough():
-    """单步动作（[dim]）透传不切片，消耗后即空。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    broker.feed(np.array([0.1, 0.2]))
-    action = broker.step()
-    assert np.array_equal(action, np.array([0.1, 0.2]))
-    assert broker.empty
-
-
-def test_broker_uses_actual_short_chunk_length():
-    """服务端返回短于协商 horizon 的末块时，按实际块长耗尽，不越界。"""
-    broker = ActionChunkBroker(action_horizon=4)
-    broker.feed(np.array([[1.0, 2.0], [3.0, 4.0]]))
-
-    assert np.array_equal(broker.step(), np.array([1.0, 2.0]))
-    assert np.array_equal(broker.step(), np.array([3.0, 4.0]))
-    assert broker.empty
-
-
-def test_broker_preserves_actual_long_chunk_length():
-    """服务端返回长于协商 horizon 的块时，不静默丢弃尾部动作。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    chunk = np.array([[1.0], [2.0], [3.0]])
-    broker.feed(chunk)
-
-    assert [broker.step().item() for _ in range(3)] == [1.0, 2.0, 3.0]
-    assert broker.empty
-
-
-def test_broker_reset():
-    broker = ActionChunkBroker(action_horizon=2)
-    chunk = np.array([[1.0, 2.0], [3.0, 4.0]])
-    broker.feed(chunk)
-    broker.reset()
-    assert broker.empty  # reset 清空缓存
-    broker.feed(chunk)
-    assert np.array_equal(broker.step(), np.array([1.0, 2.0]))
-
-
-def test_broker_step_without_feed_raises():
-    """未 feed 直接 step：明确报错（调用方应先检查 empty）。"""
-    broker = ActionChunkBroker(action_horizon=2)
-    with pytest.raises(RuntimeError):
-        broker.step()
-
-
 class _FakeTransport:
-    """计数 transport：支持 connect/close，并返回固定动作块 [horizon, dim]。"""
+    """计数 transport：支持 connect/close，记录最近 payload，返回固定动作块 [horizon, dim]。"""
 
     def __init__(self, horizon=2, dim=2, metadata=None):
         self.calls = 0
@@ -169,6 +106,7 @@ class _FakeTransport:
         self.horizon = horizon
         self.dim = dim
         self.server_metadata = metadata
+        self.last_payload = None
 
     def connect(self):
         pass
@@ -178,27 +116,40 @@ class _FakeTransport:
 
     def request(self, payload):
         self.calls += 1
-        return {"action": np.ones((self.horizon, self.dim), dtype=np.float32)}
+        self.last_payload = payload
+        return {"actions": np.ones((self.horizon, self.dim), dtype=np.float32)}
 
 
-def test_openpi_connect_closes_transport_when_action_horizon_missing():
-    """metadata / config 均缺 action_horizon 时，必须关闭已建立的 WebSocket。"""
+def test_openpi_defaults_action_horizon_when_metadata_missing():
+    """官方服务端 metadata 不提供 action_horizon → 回退 policy_config（缺省 50），不再报错。
+
+    连接失败清理（refresh 语义：close 既有/半开连接）仍须保持。
+    """
     from motrix_edge.policy.openpi.client import OpenPIClient
 
-    client = OpenPIClient({})
-    transport = _FakeTransport(metadata={})
+    client = OpenPIClient({})  # 无 metadata action_horizon、无 config action_horizon
+    transport = _FakeTransport(metadata={"model": "piper", "action_dim": 14})
     client._transport = transport
-
-    with pytest.raises(ValueError, match="action_horizon"):
-        client.connect()
-
-    assert transport.close_calls == 1
+    client.connect()
+    assert client.server_metadata == {"model": "piper", "action_dim": 14}
+    assert client._action_horizon == 50  # 缺省 50（配置键 policy.action_horizon）
+    client.disconnect()
     assert client.server_metadata == {}
-    assert client._broker is None
-    assert client._action_horizon is None
+
+    # metadata 有则优先；config 其次
+    client2 = OpenPIClient({"action_horizon": 40})
+    client2._transport = _FakeTransport(metadata={"action_horizon": 8})
+    client2.connect()
+    assert client2._action_horizon == 8  # metadata 优先
+    client2.disconnect()
+    client3 = OpenPIClient({"action_horizon": 40})
+    client3._transport = _FakeTransport(metadata={})
+    client3.connect()
+    assert client3._action_horizon == 40  # config 兜底
+    client3.disconnect()
 
 
-def test_policy_clients_expose_server_metadata():
+def test_openpi_exposes_server_metadata():
     from motrix_edge.policy.openpi.client import OpenPIClient
 
     metadata = {"model": "test-policy", "action_horizon": 16, "action_dim": 14}
@@ -206,42 +157,137 @@ def test_policy_clients_expose_server_metadata():
     client._transport = _FakeTransport(metadata=metadata)
     client.connect()
     assert client.server_metadata == metadata
+    assert client._action_horizon == 16
     client.disconnect()
     assert client.server_metadata == {}
 
 
-def test_openpi_infer_requests_only_when_chunk_empty():
-    """OpenPIClient.infer：**仅当 broker 块耗尽时才向推理端请求**（其余步骤消耗缓存块）。
+def test_openpi_infer_chunk_returns_raw_chunk():
+    """OpenPIClient.infer_chunk：每次调用真实请求一次，返回**原始动作块**（不做缓存 / 切片）。
 
-    一个动作块（[horizon, dim]）应支撑 horizon 步推理，期间不再访问推理端。
+    块缓存 / 三元切分 / 时序平滑由 RTCManager 负责（见 tests/test_rtc.py）——策略只取结果。
     """
     from motrix_edge.policy.openpi.client import OpenPIClient
 
     client = OpenPIClient({"action_horizon": 2})
     transport = _FakeTransport(horizon=2, dim=2)
     client._transport = transport
-    client._broker = ActionChunkBroker(2)
+    client.connect()
 
     obs = {"observations/qpos": np.zeros(2, dtype=np.float32)}
-    # 第 1 步：块为空 → 请求 1 次，消耗缓存第 1 步
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    chunk = client.infer_chunk(obs)
+    assert chunk.height == 2  # 整块返回（[horizon, dim]）
+    assert chunk.dim == 2
+    assert chunk.start_index == 0  # 未传 index → 0
+    assert np.allclose(chunk.actions, 1.0)
     assert transport.calls == 1
-    # 第 2 步：块未耗尽 → **不请求**，直接消耗缓存第 2 步
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
-    assert transport.calls == 1
-    # 第 3 步：块耗尽（empty）→ 再请求 1 次
-    assert np.array_equal(client.infer(obs), np.array([1.0, 1.0]))
+    # 再次调用仍真实请求（不再「块内不请求」——缓存归 RTCManager）
+    chunk2 = client.infer_chunk(obs, index=5)
+    assert chunk2.start_index == 5  # 回填 RTCManager 的绝对步号
     assert transport.calls == 2
 
 
-def test_policy_registry_has_openpi():
+def _jpeg_bytes(rgb):
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    assert ok
+    return buf.tobytes()
+
+
+def test_openpi_sends_official_flat_observation():
+    """OpenPIClient 按官方 flat 契约组装观测：state=qpos、图像为 uint8 数组（非 jpeg bytes）、
+    相机集来自 bind_adapter（adapter 启用的相机名，非 edge.yml）、rename_cameras 改名、
+    prompt 动态携带。"""
+    from motrix_edge.policy.contract import OPENPI_KEY_IMAGES, OPENPI_KEY_PROMPT, OPENPI_KEY_STATE
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    client = OpenPIClient(
+        {
+            "action_horizon": 2,
+            "image_size": 16,
+            "rename_cameras": {"cam_head": "base_0_rgb"},
+            "prompt": "open the box",
+        }
+    )
+    transport = _FakeTransport(horizon=2, dim=2)
+    client._transport = transport
+    # 布局来自 adapter 运行时配置（InferSession 进入时 bind_adapter）：只启用 cam_head + cam_right_wrist
+    client.bind_adapter(action_dim=7, camera_names=["cam_head", "cam_right_wrist"])
+    client.connect()
+
+    rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+    rgb[..., 0] = 200
+    obs = {
+        "observations/qpos": np.arange(2, dtype=np.float32),
+        "observations/images/cam_head": _jpeg_bytes(rgb),  # jpeg bytes → 改名 base_0_rgb
+        "observations/images/cam_left_wrist": _jpeg_bytes(rgb),  # 未启用（不在 bind 相机集）→ 过滤
+        "observations/images/cam_right_wrist": rgb,  # 数组直传
+    }
+    assert client.infer_chunk(obs) is not None
+
+    payload = transport.last_payload
+    assert np.array_equal(payload[OPENPI_KEY_STATE], obs["observations/qpos"])
+    assert payload[OPENPI_KEY_PROMPT] == "open the box"
+    images = payload[OPENPI_KEY_IMAGES]
+    assert set(images) == {"base_0_rgb", "cam_right_wrist"}  # bind 相机集过滤 + 改名
+    for img in images.values():
+        assert isinstance(img, np.ndarray)
+        assert img.dtype == np.uint8
+        assert img.shape == (16, 16, 3)  # uint8 HWC（非 jpeg bytes）
+
+
+def test_openpi_camera_layout_comes_from_bind_adapter_not_config():
+    """openpi **不读 edge.yml 的相机名**：仅 bind_adapter 决定要下发的相机（未绑定 = 透传全部）。"""
+    from motrix_edge.policy.contract import OPENPI_KEY_IMAGES
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    client = OpenPIClient({"action_horizon": 1, "image_size": 8})  # policy_config 不带任何相机列表
+    transport = _FakeTransport(horizon=1, dim=1)
+    client._transport = transport
+    client.connect()
+    obs = {
+        "observations/qpos": np.zeros(1, dtype=np.float32),
+        "observations/images/cam_head": np.zeros((4, 4, 3), dtype=np.uint8),
+        "observations/images/cam_left_wrist": np.zeros((4, 4, 3), dtype=np.uint8),
+    }
+    client.infer_chunk(obs)  # 未绑定 → 透传观测内全部相机
+    assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head", "cam_left_wrist"}
+
+    client.bind_adapter(action_dim=7, camera_names=["cam_head"])  # adapter 只启用 cam_head（双相机→单相机）
+    client.infer_chunk(obs)  # 上一块（horizon=1）已耗尽 → 再请求
+    assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head"}
+
+
+def test_openpi_prompt_dynamic_per_request():
+    """prompt 运行时动态可换（会话侧 set policy.prompt 后，下一请求携带新文本）。"""
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    client = OpenPIClient({"action_horizon": 1, "image_size": 8})
+    transport = _FakeTransport(horizon=1, dim=1)
+    client._transport = transport
+    client.connect()
+    obs = {"observations/qpos": np.zeros(1, dtype=np.float32)}
+
+    client.infer_chunk(obs)  # 块为空 → 请求
+    assert "prompt" not in transport.last_payload  # 缺省 prompt=None → 不发（服务端 default_prompt 兜底）
+
+    client.prompt = "switch tasks now"
+    client.infer_chunk(obs)  # 块已耗尽（horizon=1）→ 再请求
+    assert transport.last_payload["prompt"] == "switch tasks now"
+
+
+# act 策略已改为 lerobot gRPC 流式客户端（见 tests/test_act_grpc_client.py），
+# 不再使用 ws / ActionChunkBroker / image_size；相关旧断言已移除。
+
+
+def test_policy_registry_has_openpi_and_act():
     assert "openpi" in POLICY_REGISTRY
+    assert "act" in POLICY_REGISTRY
 
 
 def test_validate_policy_type():
     from motrix_edge.policy import validate_policy_type
 
-    assert validate_policy_type("openpi") == "openpi"
+    assert validate_policy_type("act") == "act"
     with pytest.raises(ValueError, match="nonexistent"):
         validate_policy_type("nonexistent")
 
@@ -256,25 +302,16 @@ def test_get_policy_default_openpi():
     assert policy.__class__.__name__ == "OpenPIClient"
 
 
+def test_get_policy_act():
+    policy = get_policy({"policy": {"type": "act"}})
+    assert policy.__class__.__name__ == "ACTClient"
+    # act 走 lerobot gRPC：不再有 ws 的 image_size / image_format
+    assert not hasattr(policy, "image_size")
+
+
 def test_get_policy_uses_only_shared_endpoint_config():
-    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="openpi")
+    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="act")
     assert policy.policy_config["host"] == "127.0.0.1"
     assert policy.policy_config["port"] == 8765
-    assert policy.image_size == (224, 224)
-    assert policy.image_format == "jpeg"
-
-
-def test_openpi_drain_consumes_cached_chunk():
-    """drain：只消费缓存动作块（不发新推理请求）；无缓存返回 None。"""
-    from motrix_edge.policy.openpi.client import OpenPIClient
-
-    client = OpenPIClient({})
-    client._transport = _FakeTransport(horizon=2, dim=2)
-    client._broker = ActionChunkBroker(2)
-    assert client.drain() is None  # 无缓存：不发请求
-    assert client._transport.calls == 0
-    client._broker.feed(np.array([[1.0, 2.0], [3.0, 4.0]]))
-    assert np.array_equal(client.drain(), np.array([1.0, 2.0]))
-    assert np.array_equal(client.drain(), np.array([3.0, 4.0]))
-    assert client.drain() is None  # 耗尽
-    assert client._transport.calls == 0  # drain 从不发请求
+    assert policy._transport._host == "127.0.0.1"
+    assert policy._transport._port == 8765

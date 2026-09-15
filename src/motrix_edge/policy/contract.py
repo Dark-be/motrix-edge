@@ -31,10 +31,18 @@ import numpy as np
 KEY_OBS_QPOS = "observations/qpos"
 KEY_OBS_IMAGE_PREFIX = "observations/images/"
 KEY_ACTION = "action"
+KEY_ACTIONS = "actions"  # openpi 官方响应键（[horizon, dim] 动作块）
 KEY_ERROR = "error"
 
 IMAGE_JPEG = "jpeg"
 IMAGE_UINT8 = "uint8"
+
+# ---- openpi 官方 wire（实时机器人 flat 契约，见 wiki/design/motrix_edge_policy.md）----
+# 观测外层键：state（低维状态，客户端传原始 qpos，服务端负责归一化）+ images（{模型相机名:
+# uint8 RGB 数组}）+ 可选 prompt（文本指令，每次请求可换；缺失时服务端用 default_prompt）。
+OPENPI_KEY_STATE = "state"
+OPENPI_KEY_IMAGES = "images"
+OPENPI_KEY_PROMPT = "prompt"
 
 
 def to_rgb_uint8(image) -> np.ndarray:
@@ -120,3 +128,48 @@ def extract_action(response: dict) -> np.ndarray:
     if KEY_ACTION not in response:
         raise KeyError(f"Response missing '{KEY_ACTION}' key, got: {list(response.keys())}")
     return np.asarray(response[KEY_ACTION])
+
+
+# ---- openpi 官方 wire 助手（openpi 策略客户端用；旧 build_observation 供本地 mock）----
+
+
+def prepare_openpi_image(image, image_size) -> np.ndarray:
+    """把 edge 观测图像（JPEG bytes 或 ndarray）转为 openpi 服务端需要的 uint8 RGB [h, w, c]。
+
+    解码（如需）→ 等比缩放补零到 ``image_size``（客户端侧缩放省带宽，官方惯例 224×224）→
+    返回 **uint8 数组**（官方服务端只收数组、不收 JPEG bytes）。官方对 CHW / HWC 均接受，
+    这里统一输出 HWC。
+    """
+    arr = to_rgb_uint8(image)
+    return resize_with_pad(arr, image_size[0], image_size[1])
+
+
+def build_openpi_observation(state, images: dict, prompt=None) -> dict:
+    """按 openpi 官方 flat 契约组装观测消息。
+
+    Args:
+        state: 低维状态（机器人 qpos；客户端传原始值，服务端按 norm_stats 归一化）。
+        images: {模型相机名: uint8 RGB [h, w, c]}（已用 ``prepare_openpi_image`` 预处理）。
+        prompt: 可选文本指令；每次请求可换。None = 不发（服务端用 default_prompt 兜底）。
+    Returns:
+        {"state": ndarray, "images": {...}, "prompt": <str>?}
+    """
+    obs = {OPENPI_KEY_STATE: np.asarray(state), OPENPI_KEY_IMAGES: dict(images)}
+    if prompt is not None:
+        obs[OPENPI_KEY_PROMPT] = prompt
+    return obs
+
+
+def extract_action_response(response: dict) -> np.ndarray:
+    """从 openpi 服务端响应中抽取动作块：官方 ``"actions"``（[horizon, dim]），兼容旧 ``"action"``。
+
+    Raises:
+        RuntimeError: 响应含 ``"error"`` 键（服务端错误）。
+        KeyError: 响应缺 ``"actions"`` / ``"action"`` 键。
+    """
+    if KEY_ERROR in response:
+        raise RuntimeError(f"Error in inference response: {response[KEY_ERROR]}")
+    for key in (KEY_ACTIONS, KEY_ACTION):
+        if key in response:
+            return np.asarray(response[key])
+    raise KeyError(f"Response missing '{KEY_ACTIONS}'/'{KEY_ACTION}' key, got: {list(response.keys())}")

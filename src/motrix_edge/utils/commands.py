@@ -32,6 +32,16 @@ import queue
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motrix_edge.policy import (
+    policy_config_connect_locked_keys,
+    policy_config_items,
+    policy_config_keys,
+    policy_config_runtime_keys,
+    policy_features,
+    validate_policy_type,
+)
+from motrix_edge.rtc import DEFAULT_RTC_CONFIG, validate_config, validate_params
+
 # ===== 命令名（空格分隔，单点定义）===========================================
 # 命令词统一**空格分隔、不用点**。分层：
 #   session run <type>  启动会话（选择 + 启动一步完成；type = capture / infer，参数）
@@ -40,6 +50,9 @@ from typing import Callable
 #   node reset          节点复位 / ERROR 恢复 → IDLE
 #   infer rollout       单步推理闭环（会话内消费）
 #   infer connect       显式连接推理节点（会话内消费）
+#   infer rtc           查询 / 设置 RTC 参数（实时动作块管理器；配置级，任何状态可用）
+#   infer model         查询 / 设置策略模型路径（lerobot 类策略；运行时提供，配置级）
+#   infer config        查询 / 设置策略配置项（每个策略有自己的独立配置项；配置级）
 #   capture sync        同步采集元信息到机器人进程（会话内消费）
 CMD_SESSION_RUN = "session run"  # 启动会话（参数 session = capture / infer；一步完成）
 CMD_SESSION_QUIT = "session quit"  # 退出当前会话
@@ -55,13 +68,24 @@ CMD_CAPTURE_META_ADD = "capture meta add"  # 新增采集元信息选项（位�
 CMD_CAPTURE_META_EDIT = "capture meta edit"  # 编辑采集元信息选项（位置参数 key, old, new）
 CMD_CAPTURE_META_DELETE = "capture meta delete"  # 删除采集元信息选项（位置参数 key, value）
 CMD_CAPTURE_META_DELETE_KEY = "capture meta delete-key"  # 删除采集元信息分类（位置参数 key）
+CMD_ADAPTER_CONFIG = "adapter config"  # 查询运行时 adapter 能力配置（enabled_arms / cameras / home）
+CMD_ADAPTER_CONFIG_SET = "adapter config set"  # 设置运行时 adapter 能力配置（位置参数 json，JSON 对象）
+CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adapter 实际生效的能力配置（启用臂 / 相机）
+CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
-CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（参数 count，连续执行多步）
+CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；多步/drain 已取消）
 CMD_INFER_CONNECT = "infer connect"  # 单次尝试连接推理节点（推理会话内消费）
 CMD_INFER_IP = "infer ip"  # 查询推理节点 IP（内存态 policy.host）
 CMD_INFER_IP_SET = "infer ip set"  # 设置推理节点 IP（位置参数 ip；下次 session run infer 生效）
 CMD_INFER_PORT = "infer port"  # 查询推理节点端口（内存态 policy.port）
 CMD_INFER_PORT_SET = "infer port set"  # 设置推理节点端口（位置参数 port；下次 session run infer 生效）
+CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；会话内运行时可改）
+CMD_INFER_RTC = "infer rtc"  # 查询 RTC 参数与运行状态（内存态 policy.rtc）
+CMD_INFER_RTC_SET = "infer rtc set"  # 设置 RTC 参数（位置参数 json，JSON 对象；内存态 policy.rtc）
+CMD_INFER_MODEL = "infer model"  # 查询 lerobot 类策略的模型路径（内存态 policy.pretrained_name_or_path）
+CMD_INFER_MODEL_SET = "infer model set"  # 设置模型路径（位置参数 path；运行时提供，不写回 yaml）
+CMD_INFER_CONFIG = "infer config"  # 查询当前策略的配置项（schema 清单 + 当前值 + 缺失必填项）
+CMD_INFER_CONFIG_SET = "infer config set"  # 设置策略配置项（位置参数 json，按当前策略 schema 校验）
 
 
 class CommandError(Exception):
@@ -236,46 +260,45 @@ def parse_bool(raw) -> bool:
     raise ValueError(f"invalid boolean: {raw!r}")
 
 
-def parse_rollout_count(raw, default: int = 1, maximum: int = 100) -> int:
-    """解析 ``infer rollout`` 连续执行次数；缺省 1，合法范围 ``1..maximum``。"""
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        count = int(raw)
-    except (TypeError, ValueError):
-        raise ValueError(f"invalid rollout count: {raw!r}") from None
-    if not 1 <= count <= maximum:
-        raise ValueError(f"rollout count must be between 1 and {maximum}")
-    return count
-
-
-ROLLOUT_MODE_COUNT = "count"  # 推理 N 次（infer rollout <N>）
+ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
 ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 session quit / estop）
-ROLLOUT_MODE_DRAIN = "drain"  # 只消耗当前缓存动作块（不发新推理请求）
 
 
-def parse_rollout_mode(raw, default: int = 1, maximum: int = 100) -> tuple[str, int]:
-    """解析 ``infer rollout`` 参数 → ``(mode, count)``。
+def parse_rollout_mode(raw) -> str:
+    """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续）。
 
-    - 空 / 数字 → ``("count", N)``：推理 N 次（缺省 1，范围 1..maximum）；
-    - ``"continuous"`` → 持续推理（启动即回执，直到 session quit / estop）；
-    - ``"drain"`` → 只消费当前已缓存的 action chunk（不发新推理请求）。
+    - 空 / ``"1"`` → ``single``：单步推理（一次 观测 → 推理 → 动作 闭环）；
+    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 session quit / estop）；
+    - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 + ``capture
+      episode start/end`` 录制 rollout 回合，见 wiki/design/motrix_edge_session.md）；
+    - ``"drain"`` → ``ValueError``（**缓存推理已取消**：动作块只作策略内部缓存，
+      不再提供「只消费缓存块」的命令模式）。
     非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
     """
     text = str(raw or "").strip().lower()
-    if text in (ROLLOUT_MODE_CONTINUOUS, ROLLOUT_MODE_DRAIN):
-        return (text, 0)
-    return (ROLLOUT_MODE_COUNT, parse_rollout_count(raw, default=default, maximum=maximum))
+    if text in ("", "1"):
+        return ROLLOUT_MODE_SINGLE
+    if text == ROLLOUT_MODE_CONTINUOUS:
+        return ROLLOUT_MODE_CONTINUOUS
+    if text == "drain":
+        raise ValueError("rollout drain mode removed: use capture episode start/end to record a rollout")
+    if text.isdigit():
+        count = int(text)
+        if count > 1:
+            raise ValueError(f"multi-step rollout removed: use single-step or continuous (got {raw!r})")
+        raise ValueError(f"invalid rollout: {raw!r}")
+    raise ValueError(f"invalid rollout: {raw!r}")
 
 
-def parse_meta(raw) -> dict:
-    """解析 ``capture sync`` 的 meta 参数（JSON 字符串）→ ``dict``。
+def parse_meta(raw, what: str = "capture sync") -> dict:
+    """解析 JSON 对象参数（``capture sync --meta`` / ``infer rtc set`` / ``adapter config set``）。
 
-    缺失 / 非法 / 非对象 JSON → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+    ``what`` 仅用于错误信息（默认 ``capture sync``）。缺失 / 非法 / 非对象 JSON →
+    ``ValueError``（命令处理器回执 rejected，不崩溃）。
     """
     text = str(raw or "").strip()
     if not text:
-        raise ValueError("capture sync requires meta (JSON object)")
+        raise ValueError(f"{what} requires a JSON object")
     try:
         meta = json.loads(text)
     except (TypeError, ValueError):
@@ -346,6 +369,159 @@ def handle_infer_endpoint(base_cfg, cmd):
         return ok_result(**endpoint)
     # infer ip / infer port：查询当前配置端点
     return ok_result(**get_policy_endpoint(base_cfg))
+
+
+def get_rtc_params(base_cfg) -> dict:
+    """读取 RTC 参数（``base_cfg["policy"]["rtc"]`` 覆盖代码缺省）。"""
+    policy = base_cfg.get("policy", {})
+    return {**DEFAULT_RTC_CONFIG, **(policy.get("rtc") or {})}
+
+
+def handle_infer_rtc(base_cfg, cmd) -> CommandResult:
+    """处理 RTC 配置命令（``infer rtc`` / ``infer rtc set <json>``）。
+
+    写内存态 ``base_cfg["policy"]["rtc"]``（不写回 yaml），下次 ``session run infer``
+    实例化 RTCManager 时生效；会话内由 InferSession 额外应用到**正在运行的** manager
+    （下一块起生效）。节点主循环（非任务态）与会话循环（任务态）**共用**本函数，保证
+    配置命令「任何状态可用」（与 ``infer ip`` 同款）。参数非法 → rejected（400）。
+    """
+    if cmd.name != CMD_INFER_RTC_SET:
+        return ok_result(rtc=get_rtc_params(base_cfg))
+    try:
+        patch = validate_params(parse_meta(cmd.params.get("json"), what="infer rtc set"))
+        merged = {**get_rtc_params(base_cfg), **patch}
+        validate_config(merged)  # 交叉约束（P + S < H、E > P）：配置错误在设置时就拦住
+    except ValueError as exc:
+        return CommandResult(status="rejected", error=str(exc), status_code=400)
+    base_cfg.setdefault("policy", {})["rtc"] = merged
+    return ok_result(rtc=merged)
+
+
+def policy_config_status(base_cfg, policy_type=None) -> dict:
+    """策略配置项状态：schema 清单 + 当前值 + 缺失必填项（供 CLI ``infer config`` / 前端表单）。
+
+    返回 ``{"policy_type", "items": [schema 项 + value], "values": {...}, "missing": [...],
+    "requires_prompt", "requires_model_path", "lerobot", "runtime_keys": [...],
+    "connect_locked_keys": [...]}``。
+
+    ``items`` 含**公共项**（推理端点 ``host`` / ``port``，``group="endpoint"``、
+    ``locked_when_connected=True``）与策略自身配置项；前端按同一张表单渲染，端点仅在
+    「策略已连接」时置灰。
+    """
+    policy_cfg = base_cfg.get("policy", {})
+    policy_type = validate_policy_type(policy_type or policy_cfg.get("type", "openpi"))
+    items: list[dict] = []
+    values: dict = {}
+    missing: list[str] = []
+    for item in policy_config_items(policy_type):
+        value = policy_cfg.get(item["key"], item.get("default"))
+        values[item["key"]] = value
+        if item.get("required") and (value is None or str(value).strip() == ""):
+            missing.append(item["key"])
+        items.append({**item, "value": value})
+    return {
+        "policy_type": policy_type,
+        "items": items,
+        "values": values,
+        "missing": missing,
+        "runtime_keys": sorted(policy_config_runtime_keys(policy_type)),
+        "connect_locked_keys": sorted(policy_config_connect_locked_keys(policy_type)),
+        **policy_features(policy_type),
+    }
+
+
+def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
+    """按策略 schema 校验并写入内存态 ``base_cfg["policy"]``（不写回 yaml）；返回写入项。
+
+    未知键（不在该策略的配置项清单内）/ 类型不符 / 必填为空 → ``ValueError``。
+    公共项 ``host`` / ``port``（推理端点）复用 ``set_policy_endpoint`` 校验（地址非空、端口 1-65535），
+    与 ``infer ip`` / ``infer port`` 同一写入路径。
+    """
+    allowed = policy_config_keys(policy_type)
+    unknown = [key for key in params if key not in allowed]
+    if unknown:
+        raise ValueError(f"unknown {policy_type} config key(s): {unknown} (allowed: {sorted(allowed)})")
+    items = {item["key"]: item for item in policy_config_items(policy_type)}
+    policy_cfg = base_cfg.setdefault("policy", {})
+    written: dict = {}
+    endpoint_params: dict = {}
+    for key, raw in params.items():
+        if key in ("host", "port"):  # 推理端点：交给 set_policy_endpoint 统一校验 / 写入
+            endpoint_params[key] = raw
+            continue
+        item = items[key]
+        kind = item.get("type", "text")
+        if kind == "int":
+            if raw is None or str(raw).strip() == "":
+                raise ValueError(f"{key} requires an integer")
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be an integer, got {raw!r}") from None
+        elif kind == "bool":
+            value = parse_bool(raw)
+        else:
+            value = str(raw).strip()
+            if item.get("required") and not value:
+                raise ValueError(f"{key} is required (non-empty)")
+        policy_cfg[key] = value
+        written[key] = value
+    if endpoint_params:
+        host = endpoint_params.get("host")
+        port = endpoint_params.get("port")
+        endpoint = set_policy_endpoint(
+            base_cfg,
+            host=None if host is None or str(host).strip() == "" else host,
+            port=None if port is None or str(port).strip() == "" else port,
+        )
+        for key in endpoint_params:
+            written[key] = endpoint.get(key)
+    return written
+
+
+def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
+    """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
+    ``infer model`` / ``infer model set <path>``。
+
+    每个策略有自己的独立配置项（prompt / 模型路径 / 设备 / 块长…）+ **公共项**（推理端点
+    host / port，`group="endpoint"`、会话内锁定），见 ``policy.POLICY_CONFIG_ITEMS``：
+    ``infer config`` 返回清单 + 当前值 + 缺失必填项；``infer config set <json>`` 按当前策略 schema
+    校验并写入（可部分）；``infer prompt`` / ``infer model(set)`` 是 ``prompt`` /
+    ``pretrained_name_or_path`` 两个内置项的**快捷命令**（同一校验与写入路径）。
+
+    配置写入内存态 ``base_cfg["policy"]``（**不写回 yaml**），下次 ``session run infer`` 生效；
+    会话内由 InferSession 额外写入运行中的策略客户端（下一请求生效）。节点主循环（非任务态）
+    与会话循环（任务态）**共用**本函数，保证「任何状态可用」（与 ``infer ip`` 同款）。
+    参数缺失 / 非法键 / 类型不符 → rejected（400，不崩溃）。
+    """
+    policy_type = validate_policy_type(policy_type or base_cfg.get("policy", {}).get("type", "openpi"))
+    if cmd.name == CMD_INFER_CONFIG:  # 查询：配置项清单 + 当前值 + 缺失必填项
+        return ok_result(policy_config=policy_config_status(base_cfg, policy_type))
+    if cmd.name == CMD_INFER_MODEL:  # 查询模型路径（lerobot 类策略）
+        return ok_result(
+            policy_type=policy_type,
+            pretrained_name_or_path=base_cfg.get("policy", {}).get("pretrained_name_or_path"),
+        )
+    if cmd.name == CMD_INFER_CONFIG_SET:
+        try:
+            params = parse_meta(cmd.params.get("json"), what="infer config set")
+        except ValueError as exc:
+            return CommandResult(status="rejected", error=str(exc), status_code=400)
+    elif cmd.name == CMD_INFER_PROMPT:  # 快捷：文本指令（语言条件策略）
+        params = {"prompt": cmd.params.get("prompt")}
+    elif cmd.name == CMD_INFER_MODEL_SET:  # 快捷：模型路径（lerobot 类策略）
+        params = {"pretrained_name_or_path": cmd.params.get("path")}
+    else:
+        return CommandResult(status="rejected", error=f"unsupported policy config command: {cmd.name}", status_code=400)
+    try:
+        written = set_policy_config(base_cfg, policy_type, params)
+    except ValueError as exc:
+        return CommandResult(status="rejected", error=str(exc), status_code=400)
+    return ok_result(
+        policy_type=policy_type,
+        written=written,
+        policy_config=policy_config_status(base_cfg, policy_type),
+    )
 
 
 def handle_capture_meta(cmd, store=None) -> CommandResult:
@@ -426,17 +602,28 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>
         CommandSpec(name=CMD_CAPTURE_META_LIST, positional=("key",)),  # capture meta list [key]
-        CommandSpec(name=CMD_CAPTURE_META_ADD, positional=("key", "value")),  # add <key> <value>
+        CommandSpec(name=CMD_CAPTURE_META_ADD, positional=("key", "value")),  # capture meta add <key> <value>
         CommandSpec(name=CMD_CAPTURE_META_EDIT, positional=("key", "old", "new")),  # edit <key> <old> <new>
-        CommandSpec(name=CMD_CAPTURE_META_DELETE, positional=("key", "value")),  # delete <key> <value>
-        CommandSpec(name=CMD_CAPTURE_META_DELETE_KEY, positional=("key",)),  # delete-key <key>
+        CommandSpec(name=CMD_CAPTURE_META_DELETE, positional=("key", "value")),  # capture meta delete <key> <value>
+        CommandSpec(name=CMD_CAPTURE_META_DELETE_KEY, positional=("key",)),  # capture meta delete-key <key>
+        CommandSpec(name=CMD_ADAPTER_CONFIG),  # adapter config：查询运行时 adapter 能力配置
+        CommandSpec(name=CMD_ADAPTER_CONFIG_SET, positional=("json",)),  # adapter config set <json>
+        CommandSpec(name=CMD_ADAPTER_CONFIG_CURRENT),  # adapter config current：当前生效能力（启用臂 / 相机）
+        CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
-        CommandSpec(name=CMD_INFER_ROLLOUT, positional=("count",)),  # infer rollout [count]
+        CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：单次尝试连接推理节点
         CommandSpec(name=CMD_INFER_IP),  # infer ip：查询推理节点 IP（无参）
         CommandSpec(name=CMD_INFER_IP_SET, positional=("ip",)),  # infer ip set <ip>
         CommandSpec(name=CMD_INFER_PORT),  # infer port：查询推理节点端口（无参）
         CommandSpec(name=CMD_INFER_PORT_SET, positional=("port",)),  # infer port set <port>
+        CommandSpec(name=CMD_INFER_PROMPT, positional=("prompt",)),  # infer prompt <text>：运行时改文本指令
+        CommandSpec(name=CMD_INFER_RTC),  # infer rtc：查询 RTC 参数 / 运行状态
+        CommandSpec(name=CMD_INFER_RTC_SET, positional=("json",)),  # infer rtc set <json>：设置 RTC 参数
+        CommandSpec(name=CMD_INFER_MODEL),  # infer model：查询策略模型路径（lerobot 类）
+        CommandSpec(name=CMD_INFER_MODEL_SET, positional=("path",)),  # infer model set <path>
+        CommandSpec(name=CMD_INFER_CONFIG),  # infer config：查询策略配置项（schema + 当前值）
+        CommandSpec(name=CMD_INFER_CONFIG_SET, positional=("json",)),  # infer config set <json>
     ]:
         registry.register(spec)
     return registry
