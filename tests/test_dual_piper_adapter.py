@@ -125,7 +125,7 @@ def test_control_and_capture_commands_forward():
 def test_health_and_capture_status():
     http = _FakeHttp(
         {
-            "/v1/health": {"ok": True},
+            "/v1/health": {"ok": True, "detail": "", "control_hz": 30.0, "measured_hz": 29.8},
             "/v1/capture/status": {
                 "running": True,
                 "meta": {"operator": "Yu", "task_name": "put bowls", "description": "demo"},
@@ -135,7 +135,10 @@ def test_health_and_capture_status():
     )
     adapter = _adapter(http)
 
-    assert adapter.health().ok is True
+    health = adapter.health()
+    assert health.ok is True
+    assert health.control_hz == 30.0  # 名义控制频率（robot env HZ）
+    assert health.measured_hz == 29.8  # 实测主循环帧率
     assert adapter.running is True
     capture = adapter.capture_status()
     assert capture is not None

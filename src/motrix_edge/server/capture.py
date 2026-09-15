@@ -165,13 +165,16 @@ class CaptureService:
         }
 
     def _adapter_state(self) -> dict:
-        """当前节点 active adapter 状态（身份 + 心跳缓存）。"""
+        """当前节点 active adapter 状态（身份 + 心跳缓存 + 控制频率）。"""
         node = self._node
         adapter = getattr(node, "adapter", None)
+        health = getattr(node, "adapter_health", None)
         return {
             "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
             "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
             "running": getattr(adapter, "running", None) if adapter is not None else None,
+            "control_hz": getattr(health, "control_hz", None) if health is not None else None,
+            "measured_hz": getattr(health, "measured_hz", None) if health is not None else None,
         }
 
     def exit(self, lease_id: str | None = None) -> dict:
@@ -248,7 +251,11 @@ class CaptureService:
         return {"meta": self._meta_store.list_meta()}
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。"""
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。
+
+        ``capture_status`` = adapter 上报的采集状态缓存（运行位 + 元信息 + 数据目录，见
+        ``node.capture_status``）；未绑定 / 未缓存 → None。
+        """
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT

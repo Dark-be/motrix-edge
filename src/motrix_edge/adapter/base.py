@@ -70,10 +70,16 @@ class AdapterCapability(str, Enum):
 
 @dataclass
 class HealthStatus:
-    """健康检查结果：ok=False 时 detail 说明原因。"""
+    """健康检查结果：ok=False 时 detail 说明原因。
+
+    ``control_hz`` = 机器人名义控制频率（env 主循环 HZ）；``measured_hz`` = 实测主
+    循环帧率（robot server 最近窗口统计）；未知时为 None。
+    """
 
     ok: bool
     detail: str = ""
+    control_hz: float | None = None  # 名义控制频率（Hz）
+    measured_hz: float | None = None  # 实测主循环帧率（Hz）
 
 
 @dataclass

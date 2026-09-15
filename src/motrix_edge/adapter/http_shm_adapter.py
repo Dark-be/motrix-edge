@@ -20,12 +20,13 @@
 - **HTTP 指令下行**：``execute`` / ``rollout`` / ``safe_stop`` / ``reset`` /
   ``set_teleop`` / 采集回合控制；
 - **共享内存观测上行**：读取 qpos 与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；
-- **状态查询**：``health`` 实时查询进程，``capture_status`` 查询采集状态（运行位 / 元信息 /
-  数据目录与列表）。
+- **状态查询**：``health`` 实时查询进程，``capture_status`` 查询采集状态（运行位 / 元信息 / 数据目录）。
 
-**子类只需声明类常量**（身份 / 能力 / 连接参数 / 动作维度 / 相机布局），本基类提供全部
-通用实现（``__init__`` + 指令 / 观测 / 状态方法）。身份由 discover 解析传入（``name``，
-缺省回退类常量）；能力与连接参数由类级常量定义，不随 discover 传输、不接收 Edge 配置。
+**子类只需声明类常量**（身份 / 能力 / 连接参数 / 臂布局 / 相机布局），本基类提供全部
+通用实现（``__init__`` + 指令 / 观测 / 状态方法）。身份与连接参数由 discover 解析传入
+（``name`` / ``endpoint`` / ``shm_name``，缺省回退类常量）；能力由类级常量定义；运行时可由
+Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 / 相机，未启用臂动作用
+``HOME_QPOS`` 填充。
 """
 
 import cv2
@@ -44,7 +45,10 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
+    FIELD_DETAIL,
+    FIELD_MEASURED_HZ,
     FIELD_META,
     FIELD_OK,
     FIELD_RUNNING,
@@ -62,6 +66,14 @@ from motrix_edge.adapter.http_contract import (
 )
 from motrix_edge.adapter.shm_contract import ObsShmReader
 from motrix_edge.utils.data_handler import debug_print
+
+
+def _as_opt_float(value) -> float | None:
+    """health 频率字段：缺失 / 非数值 → None。"""
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class HttpShmAdapter(RobotAdapter):
@@ -137,15 +149,25 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- health（实时查询 SDK 进程状态）-----------------------------------------
     def health(self) -> HealthStatus:
-        """健康检查：实时 ``GET /v1/health``（SDK 自维护硬件；Edge 只查询）。"""
+        """健康检查：实时 ``GET /v1/health``（SDK 自维护硬件；Edge 只查询）。
+
+        附带 robot 名义 / 实测控制频率（control_hz / measured_hz，robot env 上报）。
+        """
+        data = {}
         try:
             resp = self._client().get(PATH_HEALTH)
-            ok = resp.status_code == 200 and bool(resp.json().get(FIELD_OK, False))
+            data = resp.json() if resp.status_code == 200 else {}
+            ok = resp.status_code == 200 and bool(data.get(FIELD_OK, False))
         except Exception as exc:  # noqa: BLE001 进程失联
             debug_print(self.name, f"health check failed: {exc}", "WARNING")
             ok = False
         self._running = ok
-        return HealthStatus(ok=ok)
+        return HealthStatus(
+            ok=ok,
+            detail=str(data.get(FIELD_DETAIL) or ""),
+            control_hz=_as_opt_float(data.get(FIELD_CONTROL_HZ)),
+            measured_hz=_as_opt_float(data.get(FIELD_MEASURED_HZ)),
+        )
 
     # ---- 指令（经 HTTP 转发 SDK 进程）-------------------------------------------
     def reset(self) -> None:
