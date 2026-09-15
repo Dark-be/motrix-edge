@@ -43,7 +43,7 @@ adapter/
 | observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行** |
 | execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                |
 | teleop          | `set_teleop(enabled)`               | 设置遥操作开关（true=遥操作 / false=程控）；默认 no-op                       |
-| capture status  | `capture_status()`                  | 采集状态：运行位（是否正在采集）+ 元信息 + 数据目录 / 列表（默认 None）      |
+| capture status  | `capture_status()`                  | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）    |
 | capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                     |
 | capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                           |
 | rollout         | `rollout(action)`                   | 推理闭环：接收模型 action，经 HTTP 转发进程限速靠近                          |
@@ -62,7 +62,7 @@ adapter/
 
 -   **observe 只读缓存、不采集**：观测由适配器自身持续运行更新；`observe()` 只取出缓存供
     「预览 + policy 推理」消费。数据采集（录制写盘）由适配器 / 进程自维护，**不驱动回合**，
-    adapter 只预留 `capture_status()` 上报（运行位 + 元信息 + 数据目录 / 列表）。
+    adapter 只预留 `capture_status()` 上报（运行位 + 元信息 `meta` + 数据目录）。
 -   **观测图像为 JPEG**（adapter 提供原图，如 640x480）；Edge 侧可解码 / 降采样后用于预览与 WebRTC。
 
 ### 能力模型（AdapterCapability）
@@ -136,7 +136,7 @@ adapter:
 | POST | `/v1/rollout`                           | `{action: [dim]}` | `{status}`                                                                          |
 | POST | `/v1/teleop`                            | `{enabled}`       | `{status}`                                                                          |
 | POST | `/v1/safe_stop`                         | —                 | `{status}`                                                                          |
-| GET  | `/v1/capture/status`                    | —                 | `{running, operator, task_name, meta, data_dir, data_files}`                        |
+| GET  | `/v1/capture/status`                    | —                 | `{running, meta, data_dir}`                                                         |
 | POST | `/v1/capture/sync`                      | `{meta}`          | `{status}`                                                                          |
 | POST | `/v1/capture/start` / `/v1/capture/end` | —                 | `{status}`                                                                          |
 

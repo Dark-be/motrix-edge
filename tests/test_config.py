@@ -34,7 +34,7 @@ def test_load_config_falls_back_to_packaged_default(monkeypatch):
     monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
     cfg = load_config("edge.yml")
     assert cfg["INFO_LEVEL"] == "INFO"
-    assert cfg["discover"]["host"] == "127.0.0.1"
+    assert cfg["adapter"]["host"] == "127.0.0.1"  # 段落名与 node.py 读取的键一致（原 discover 从不被读取）
     assert cfg["policy"]["type"] == "openpi"
 
 

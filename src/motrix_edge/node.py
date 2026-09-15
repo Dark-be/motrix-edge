@@ -37,7 +37,13 @@ from motrix_edge.frame import FrameManager
 from motrix_edge.policy import validate_policy_type
 from motrix_edge.session import get_session
 from motrix_edge.session.base import RunResult
+from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_META_ADD,
+    CMD_CAPTURE_META_DELETE,
+    CMD_CAPTURE_META_DELETE_KEY,
+    CMD_CAPTURE_META_EDIT,
+    CMD_CAPTURE_META_LIST,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
     CMD_INFER_PORT,
@@ -50,6 +56,7 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     CommandResult,
+    handle_capture_meta,
     handle_infer_endpoint,
     ok_result,
     parse_bool,
@@ -144,6 +151,7 @@ class EdgeNode:
         alive_check_interval=2.0,
         capture_status_interval=2.0,
         observe_interval=0.05,
+        capture_meta_store=None,
     ):
         self.base_cfg = base_cfg
         self.command_source = command_source if command_source is not None else _noop_command_source
@@ -176,6 +184,9 @@ class EdgeNode:
         # 数据目录 / 列表。由主循环在 READY / ACTIVE 期间周期刷新（与 health 同节奏，
         # **不限采集会话**），server /v1/captures 只读缓存——不因前端轮询而实时请求 SDK。
         self._capture_status = None
+        # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令读写；缺省用
+        # 默认路径（与 server / 会话同源），测试可注入临时 store。
+        self.capture_meta_store = capture_meta_store if capture_meta_store is not None else CaptureMetaStore()
 
         # 状态进入日志钩子（INIT/IDLE/READY/ACTIVE/ERROR 统一注册到 _log_state）
         for state in (NodeState.INIT, NodeState.IDLE, NodeState.READY, NodeState.ACTIVE, NodeState.ERROR):
@@ -262,6 +273,19 @@ class EdgeNode:
         # base_cfg["policy"]，下次 session run infer 生效（进行中会话不受影响）。
         if cmd.name in (CMD_INFER_IP, CMD_INFER_IP_SET, CMD_INFER_PORT, CMD_INFER_PORT_SET):
             self._reply(cmd, self._on_infer_endpoint(cmd))
+            return
+
+        # 采集元信息选项命令（capture meta list / add / edit / delete / delete-key）：配置级
+        # 命令，任何状态（IDLE / READY / ACTIVE / ERROR）均可用（读写 config/capture.yml 的
+        # meta 段；与 infer ip 同一语义，与会话状态机解耦）。
+        if cmd.name in (
+            CMD_CAPTURE_META_LIST,
+            CMD_CAPTURE_META_ADD,
+            CMD_CAPTURE_META_EDIT,
+            CMD_CAPTURE_META_DELETE,
+            CMD_CAPTURE_META_DELETE_KEY,
+        ):
+            self._reply(cmd, handle_capture_meta(cmd, self.capture_meta_store))
             return
 
         # 状态处理器返回是否已回执；未回执（当前状态不适用）→ 兜底回执，避免 submit 挂起
@@ -398,6 +422,7 @@ class EdgeNode:
                 frame_manager=self.frame_manager,
                 adapter=self.adapter,  # 复用节点 active adapter（生命周期归节点）
                 policy_type=policy_type,
+                capture_meta_store=self.capture_meta_store,  # 同一实例（单锁）
             )
             self.session_type = session_type
             self.session.session_start()  # 连接硬件/初始化会话（adapter 已就绪则跳过 discover）
@@ -632,7 +657,6 @@ class EdgeNode:
                 debug_print("EdgeNode", f"释放会话资源失败: {exc}", "ERROR")
             self.session = None
             self.session_type = None
-        self._data_status = None  # 清空采集数据状态缓存（会话结束后无意义）
         self._capture_status = None  # 清空采集状态缓存（会话结束后无意义）
 
     def _release_adapter(self) -> None:

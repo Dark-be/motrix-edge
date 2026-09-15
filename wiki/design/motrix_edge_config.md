@@ -3,7 +3,7 @@
 ## 摘要
 
 `src/motrix_edge/config/` 是**配置子包**：外界配置优先（环境变量 `MOTRIX_CONFIG_DIR`），否则用
-包内 **package data** 只读兜底（`edge.yml`）；日志 / 可写状态目录遵循 XDG（`XDG_STATE_HOME`，
+包内 **package data** 只读兜底（`edge.yml` / `capture.yml`）；日志 / 可写状态目录遵循 XDG（`XDG_STATE_HOME`，
 缺省回退 CWD）。CLI 入口统一在 `__main__.py`（console script `motrix-edge` 与
 `python -m motrix_edge` 共用同一 `main()`）。
 
@@ -15,8 +15,12 @@
 
 -   **优先级**：① 外界配置目录 `MOTRIX_CONFIG_DIR`（可写，同名 `yml` 覆盖包内默认）；
     ② 包内默认 `src/motrix_edge/config/edge.yml`（`importlib.resources` 只读访问，不可写）。
+-   **`capture.yml`**（采集元信息选项，`capture meta` 命令族维护）：与 `edge.yml` 同一套优先级——
+    外界目录同名文件可写副本，包内默认只读（写回时落到 `writable_config_path`）；包内默认在
+    **首次读 / 写时惰性播种**（构造不做 IO，配置目录不可写时降级只读）；见
+    [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。
 -   `load_config(name)`：外界文件存在 → 读取；否则若 `name ∈ DEFAULT_CONFIG_FILES`
-    （`("edge.yml",)`）读包内默认；均缺失 → `{}`（兜底不抛错）。
+    （`("edge.yml", "capture.yml")`）读包内默认；均缺失 → `{}`（兜底不抛错）。
 -   `run --config <path>`：指定任意 yaml 路径（如 `/etc/motrix-edge/edge.yaml`）；
     **路径不存在 → `SystemExit("error: File ... does not exist.")`**（干净报错，不回显 traceback）。
 

@@ -1,8 +1,9 @@
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
-# 机器人进程发现：Edge 向固定端口发 POST /v1/discover 寻找机器人进程；进程启动后
-# 自描述返回 id / name / type / 能力 / 相机 / 控制器等（见 wiki/design/motrix_edge_adapter.md）
-discover:
+# 机器人进程发现：Edge 向 adapter.host:adapter.port 发 POST /v1/discover 寻找机器人
+# 进程；进程启动后自描述返回 id / name / type / 能力 / 相机 / 控制器等（见
+# wiki/design/motrix_edge_adapter.md）。注：该段名为 ``adapter``，与 node.py 读取的键一致。
+adapter:
   host: 127.0.0.1
   port: 8090
 
@@ -16,3 +17,12 @@ policy:
   image_size: [224, 224] # 约定图像尺寸
   image_format: jpeg # jpeg（默认） | uint8
   # action_horizon: 16 # 可选，服务端 metadata 未提供时使用
+
+# 上传会话（UploadSession，/v1/uploads/*；见 wiki/design/motrix_edge_upload_session.md）：
+# 本地采集 episode 的扫描 / 查看 / 选择 / 打包。
+# **本版本只做本地文件查看与打包**：临时性的数据查看与筛选由数采人员经前端进行，打包后
+# 的文件由数采人员**手动上传**到数据平台；程序化上传（消费者为数据平台的上传 API）留待
+# 后续版本，`endpoint` 即为其预留的远端服务地址。
+upload:
+  data_dir: null # 缺省扫描目录（null = 运行时回退 adapter 数据目录）
+  endpoint: null # 数据平台上传服务地址（预留；未配置时 upload 动作返回 501，不删除源文件）

@@ -44,6 +44,9 @@ session.safe_stop()      # 安全停止（幂等、失败安全；委托 adapter
 
 ## get_session 工厂
 
+除会话类型外，节点会注入 `frame_manager` / `adapter` / `capture_meta_store`（采集元信息选项
+存储，与节点命令共用同一实例；不注入时会话自行按需创建）。
+
 从 `SESSION_REGISTRY` 按 `session_type`（capture / infer，缺省用配置 `session.type`，再缺省
 capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配置 `policy.type`）。
 
@@ -55,7 +58,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
     `robot teleop <bool>` 遥操作开关、`capture episode start/end` 控制一轮采集、
-    `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）。
+    `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
 -   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 
 ## InferSession（推理会话）
@@ -77,7 +80,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
         `ActionChunkBroker` 动作块消费完（不发新推理请求），回执消耗步数；无缓存则 0 步。
         （`observe` 是**推理输入**；显示观测由节点级写入 `frame_manager`，会话不写。）
 -   命令：`infer connect`、`infer rollout [mode]`、`session quit`（退出回 home）、`robot estop`、
-    `robot reset`、`robot execute`、`robot teleop`。
+    `robot reset`、`robot execute`、`robot teleop`；`capture meta list/add/edit/delete/delete-key`（配置级命令，任务态同样可用）。
 
 ## 相关文档
 

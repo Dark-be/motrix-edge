@@ -193,11 +193,6 @@ class BaseRobot:
         """当前执行中的 action（无则 None）。"""
         return self.action.copy() if self.action is not None else None
 
-    # ---- 状态（供 server 上报）---------------------------------------------------------
-    def data_status(self) -> dict:
-        """采集数据状态（预留：数据保存路径 + 本次采集得到的数据列表）。"""
-        return {"data_dir": None, "episodes": []}
-
     # ---- 生命周期（env / server 调用）----------------------------------------------------
     def connect(self):
         """连接硬件（子类实现；虚拟机器人直接 ready）。"""

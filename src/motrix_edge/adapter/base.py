@@ -78,20 +78,19 @@ class HealthStatus:
 
 @dataclass
 class CaptureStatus:
-    """采集状态（合并原「采集数据状态」+「采集元信息」）：运行位 + 元信息 + 数据落盘。
+    """采集状态（合并原「采集数据状态」+「采集元信息」）：运行位 + 元信息 + 数据目录。
 
-    数据采集（录制写盘）由适配器 / 机器人进程自维护（Edge **不承担保存职责**，只负责
-    收集 / 上传）；元信息（采集员 / 任务名等）由 ``capture sync --meta`` 从 console /
-    web 同步到进程，进程保存一轮数据时附加。Edge 周期查询（``capture_status()``）并缓存，
-    供 server 状态上报与前端展示。
+    数据采集（录制写盘）由适配器 / 机器人进程自维护（Edge **不承担保存职责**）；
+    元信息由 ``capture sync --meta`` 从 console / web 同步到进程，进程保存一轮数据时
+    附加——**只有 ``meta`` 一个载体**（采集员 / 任务名等是其中的键，分类可拓展），不另设
+    同义顶层字段。Edge 周期查询（``capture_status()``）并缓存，供 server 状态上报与前端
+    展示；**数据文件列表不在本状态里**——本地数据的扫描 / 选择 / 打包由
+    [UploadSession](./upload_session.py) 直接读目录完成。
     """
 
     running: bool = False  # 进程当前是否正在采集（episode 开→关）
-    operator: str | None = None  # 采集员姓名
-    task_name: str | None = None  # 任务名称
-    meta: dict = field(default_factory=dict)  # 通用元信息（保存数据时附加）
-    save_dir: str | None = None  # 数据保存目录（进程自维护；edge 只读）
-    data_files: list[str] = field(default_factory=list)  # 本次采集得到的数据列表
+    meta: dict = field(default_factory=dict)  # 采集元信息全集（capture sync 同步；含 operator / task_name 等键）
+    data_dir: str | None = None  # 数据目录（进程自维护；edge 只读）
 
 
 @dataclass

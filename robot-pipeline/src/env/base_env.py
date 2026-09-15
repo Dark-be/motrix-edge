@@ -68,7 +68,6 @@ class BaseEnv:
                 robot_type=str(getattr(self.robot, "ADAPTER_TYPE", "")),
             )
         self._episode_open = False  # 当前是否有未关闭的 episode
-        self._episodes: list[str] = []  # 已保存的 episode 文件路径
 
     # ---- 控制方法（HTTP 线程调用：只入队，不直接碰 robot；主循环统一执行）---------
     def _check_action_dim(self, flat_action):
@@ -136,25 +135,18 @@ class BaseEnv:
             "last_error": err,
         }
 
-    def data_status(self) -> dict:
-        """采集数据状态：数据保存目录（绝对路径）+ 已保存 episode 文件列表。"""
-        return {
-            "data_dir": str(self._collector.save_dir.resolve()),
-            "episodes": list(self._episodes),
-        }
-
     def capture_status(self) -> dict:
-        """采集状态：运行位 + 采集元信息（operator / task_name 等同步字段）。
+        """采集状态：运行位 + 采集元信息 + 数据目录。
 
-        元信息来自 collector（``meta`` property，含 capture sync 同步字段）；
-        供 server 的 ``GET /v1/capture/status`` 上报，adapter 侧 ``capture_status()`` 消费。
+        元信息为 collector 的 ``meta`` 全集（含 ``capture sync`` 同步的字段，如
+        ``operator`` / ``task_name``——**不另设同义顶层字段**，消费方直接读 ``meta``）；
+        供 server 的 ``GET /v1/capture/status`` 上报，adapter 侧 ``capture_status()``
+        消费（**合并**了原 ``data_status``：数据目录随采集状态一并上报）。
         """
-        meta = getattr(self._collector, "meta", {}) or {}
         return {
             "running": self.capturing,
-            "operator": meta.get("operator"),
-            "task_name": meta.get("task_name"),
-            "meta": meta,
+            "meta": getattr(self._collector, "meta", {}) or {},
+            "data_dir": str(self._collector.save_dir.resolve()),
         }
 
     def observe(self) -> dict:
@@ -287,6 +279,4 @@ class BaseEnv:
             self._collector.collect(self.observation)
         elif self._episode_open:
             self._episode_open = False
-            saved = self._collector.finish()
-            if saved is not None:
-                self._episodes.append(str(saved))
+            self._collector.finish()  # 写 MCAP footer + JSON 元信息（collector 自行日志）

@@ -19,6 +19,11 @@ import numpy as np
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.policy import get_policy
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_META_ADD,
+    CMD_CAPTURE_META_DELETE,
+    CMD_CAPTURE_META_DELETE_KEY,
+    CMD_CAPTURE_META_EDIT,
+    CMD_CAPTURE_META_LIST,
     CMD_INFER_CONNECT,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
@@ -49,13 +54,16 @@ class InferSession(BaseSession):
     session quit 退出、robot estop 急停、robot reset 复位。
     """
 
-    def __init__(self, base_cfg, command_source=None, frame_manager=None, adapter=None, policy_type=None):
+    def __init__(
+        self, base_cfg, command_source=None, frame_manager=None, adapter=None, policy_type=None, capture_meta_store=None
+    ):
         super().__init__(
             base_cfg=base_cfg,
             name="InferSession",
             command_source=command_source,
             frame_manager=frame_manager,
             adapter=adapter,
+            capture_meta_store=capture_meta_store,
         )
         if self.adapter is None:
             raise ValueError("infer session requires an injected adapter (owned by node)")
@@ -182,6 +190,14 @@ class InferSession(BaseSession):
                 CMD_INFER_PORT_SET,
             ):
                 self._reply(cmd, self._on_infer_endpoint(cmd))
+            elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
+                CMD_CAPTURE_META_LIST,
+                CMD_CAPTURE_META_ADD,
+                CMD_CAPTURE_META_EDIT,
+                CMD_CAPTURE_META_DELETE,
+                CMD_CAPTURE_META_DELETE_KEY,
+            ):
+                self._reply(cmd, self._on_capture_meta(cmd))
             else:  # 未识别命令（当前任务不适用）统一回执，避免 submit 挂起
                 if cmd is not None:
                     self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))

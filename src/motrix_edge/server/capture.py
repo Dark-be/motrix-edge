@@ -26,6 +26,7 @@ server 层不持有 / 不创建 / 不运行 EdgeNode：node 由 node 程序主�
 不复制。
 """
 
+import json
 import shutil
 
 import numpy as np
@@ -34,7 +35,9 @@ from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
 from motrix_edge.session.base import SessionState
+from motrix_edge.utils.capture_meta import CaptureMetaError, CaptureMetaStore
 from motrix_edge.utils.commands import (
+    CMD_CAPTURE_SYNC,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     Command,
@@ -71,10 +74,14 @@ class CaptureService:
     /v1/leases）；**异租约 / 缺失租约一律拒绝**（403），无活跃租约就控制 → 409。
     """
 
-    def __init__(self, node, bus: CommandBus, leases: LeaseManager | None = None):
+    def __init__(self, node, bus: CommandBus, leases: LeaseManager | None = None, capture_meta_store=None):
         self._node = node  # 正在运行的 EdgeNode（由 node 程序主线程持有）
         self._bus = bus  # 共享命令总线：web / CLI 线程 push，EdgeNode 主循环 poll
         self._leases = leases or LeaseManager()  # Edge 级租约（独立于任务，受控操作校验用）
+        # 采集元信息选项存储（config/capture.yml）：**进程内单实例**——优先用注入的，
+        # 其次复用节点持有的那一份（与 CLI 命令 / 会话共用同一数据与同一把锁），最后才自建；
+        # 测试可注入临时 store。
+        self._meta_store = capture_meta_store or getattr(node, "capture_meta_store", None) or CaptureMetaStore()
 
     # -- 动作翻译（HTTP → 信号）---------------------------------------------
     def precheck(self) -> dict:
@@ -98,11 +105,11 @@ class CaptureService:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"robot not ready: {exc}")
 
-        save_dir = self._save_dir()
+        data_dir = self._data_dir()
         disk = {}
-        if save_dir is not None:
+        if data_dir is not None:
             try:
-                usage = shutil.disk_usage(save_dir)
+                usage = shutil.disk_usage(data_dir)
                 disk = {"total": usage.total, "used": usage.used, "free": usage.free}
             except OSError as exc:
                 errors.append(f"disk unavailable: {exc}")
@@ -182,13 +189,71 @@ class CaptureService:
         self._raise_on_rejected(result)
         return {"status": "accepted"}
 
+    def sync(self, meta: dict, lease_id: str | None = None) -> dict:
+        """同步采集元信息（采集员 / 任务名等）到机器人进程：submit ``capture sync``。
+
+        采集会话内消费：解析 meta JSON → ``adapter.sync_capture_meta``，进程保存一轮
+        数据时附加。受控操作：须持有有效租约。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        result = self._submit(
+            Command(CMD_CAPTURE_SYNC, params={"meta": json.dumps(meta or {})}, meta={"lease_id": lease_id})
+        )
+        self._raise_on_rejected(result)
+        return {"status": "accepted", "meta": result.data.get("meta")}
+
+    def meta(self) -> dict:
+        """采集元信息选项（config/capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
+        return {"meta": self._meta_store.list_meta()}
+
+    # -- 元信息选项管理（配置数据，与 CLI ``capture meta`` 命令族同一实现）----------
+    #
+    # 配置级、**不依赖节点状态**（机器人进程未上线也能维护选项）；写操作是受控操作
+    # （改的是设备上的配置文件）→ 须持租约。写路径与 CLI 命令共用同一个
+    # ``CaptureMetaStore`` 实例（进程内单实例 / 一把锁），不会出现两处各写一份。
+    #
+    # **有意不经命令总线**（与 ``sync`` / ``enter`` 不同）：选项管理是纯本地配置，经总线
+    # 就得等节点主循环取命令（submit 最长 5s，且节点 ERROR 时会拒绝）；直连 store 才能在
+    # 任何节点状态下立即生效。CLI 那边继续走命令，两者落到同一个 store，行为一致。
+
+    def meta_add(self, key: str, value: str, lease_id: str | None = None) -> dict:
+        """新增元信息选项（分类不存在则创建）；重复 → 400。须持租约。"""
+        return self._meta_write(lease_id, lambda: self._meta_store.add(key, value))
+
+    def meta_edit(self, key: str, old: str, new: str, lease_id: str | None = None) -> dict:
+        """重命名元信息选项（``old`` → ``new``）；分类 / 选项不存在 → 400。须持租约。"""
+        return self._meta_write(lease_id, lambda: self._meta_store.edit(key, old, new))
+
+    def meta_delete(self, key: str, value: str, lease_id: str | None = None) -> dict:
+        """删除某分类下的选项（分类清空则一并删除）；不存在 → 400。须持租约。"""
+        return self._meta_write(lease_id, lambda: self._meta_store.delete(key, value))
+
+    def meta_delete_key(self, key: str, lease_id: str | None = None) -> dict:
+        """删除整个分类；分类不存在 → 400。须持租约。"""
+        return self._meta_write(lease_id, lambda: self._meta_store.delete_key(key))
+
+    def _meta_write(self, lease_id: str | None, action) -> dict:
+        """元信息选项写操作：租约校验 → 执行 → 回**最新全量列表**。
+
+        - 异常翻译：``CaptureMetaError``（参数非法 / 重复 / 不存在）→ ``CaptureError``，
+          保留其 HTTP 状态码，让路由层只用认一种错误类型；
+        - 回 ``{meta: 全量}``（与 ``GET /v1/captures/meta`` 同构）：前端写后无需再 GET。
+        """
+        self._ensure_lease(lease_id)
+        try:
+            action()
+        except CaptureMetaError as exc:
+            raise CaptureError(str(exc), status_code=exc.status_code) from exc
+        return {"meta": self._meta_store.list_meta()}
+
     def status(self) -> dict:
         """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。"""
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
         capture = self._capture_status()
-        save_dir = getattr(capture, "save_dir", None) if capture is not None else None
+        data_dir = getattr(capture, "data_dir", None) if capture is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
@@ -196,9 +261,8 @@ class CaptureService:
             "state": session_state,
             "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
             "capture_running": bool(getattr(capture, "running", False)) if capture is not None else False,
-            "save_dir": str(save_dir) if save_dir is not None else None,
-            "data_files": list(getattr(capture, "data_files", []) or []) if capture is not None else [],
-            "disk": self._disk_info(save_dir),
+            "data_dir": str(data_dir) if data_dir is not None else None,
+            "disk": self._disk_info(data_dir),
             "lease_id": lease_id,  # 当前活跃租约（独立于任务，见 /v1/leases/*）
         }
 
@@ -292,16 +356,16 @@ class CaptureService:
             return None
         return getattr(node, "capture_status", None)
 
-    def _save_dir(self):
+    def _data_dir(self):
         capture = self._capture_status()
         if capture is None:
             return None
-        return getattr(capture, "save_dir", None)
+        return getattr(capture, "data_dir", None)
 
     @staticmethod
-    def _disk_info(save_dir) -> dict:
+    def _disk_info(data_dir) -> dict:
         try:
-            usage = shutil.disk_usage(save_dir if save_dir is not None else "/")
+            usage = shutil.disk_usage(data_dir if data_dir is not None else "/")
             return {"total": usage.total, "used": usage.used, "free": usage.free}
         except OSError:
             return {"error": "unavailable"}

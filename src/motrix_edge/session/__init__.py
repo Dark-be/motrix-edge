@@ -24,6 +24,7 @@ EdgeNode（node.py）在自身生命周期中，根据上层下发的命令（se
 from .base import BaseSession, RunResult
 from .capture_session import CaptureSession
 from .infer_session import InferSession
+from .upload_session import UploadError, UploadSession
 
 # 注册表：会话类型名 -> 会话类
 SESSION_REGISTRY = {
@@ -41,6 +42,7 @@ def get_session(
     frame_manager=None,
     adapter=None,
     policy_type=None,
+    capture_meta_store=None,
 ):
     """工厂：从注册表实例化会话。
 
@@ -53,6 +55,12 @@ def get_session(
       adapter:       节点注入的 active adapter（单 adapter 包：采集 / 推理复用同一
                      adapter，生命周期归节点；会话只引用，不持有 / 不释放，必传）。
       policy_type:   推理策略类型（仅 infer 使用）；缺省用配置 policy.type。
+      capture_meta_store: 采集元信息选项存储（``CaptureMetaStore``）；节点注入同一实例，
+                     使「会话内 CLI 命令」与节点命令共用一份数据与一把锁（缺省 None = 会话
+                     自行按需创建；不注入时不传该实参，兼容自定义会话）。
+
+    ``UploadSession`` 与 CaptureSession / InferSession 同包，但属于文件管理会话，不进入
+    EdgeNode 的 RobotAdapter 任务状态机，通过 ``UploadSession`` 直接实例化。
     """
     if session_type is None:
         session_type = base_cfg.get("session", {}).get("type", "capture")
@@ -70,6 +78,8 @@ def get_session(
     }
     if session_type == "infer":
         kwargs["policy_type"] = policy_type  # 仅推理会话消费策略类型
+    if capture_meta_store is not None:  # 进程内单实例：节点注入，避免多把锁各管一段
+        kwargs["capture_meta_store"] = capture_meta_store
     return cls(**kwargs)
 
 
@@ -78,6 +88,8 @@ __all__ = [
     "RunResult",
     "CaptureSession",
     "InferSession",
+    "UploadError",
+    "UploadSession",
     "SESSION_REGISTRY",
     "get_session",
 ]

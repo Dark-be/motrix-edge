@@ -18,6 +18,11 @@ from motrix_edge.adapter import AdapterCapability
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
+    CMD_CAPTURE_META_ADD,
+    CMD_CAPTURE_META_DELETE,
+    CMD_CAPTURE_META_DELETE_KEY,
+    CMD_CAPTURE_META_EDIT,
+    CMD_CAPTURE_META_LIST,
     CMD_CAPTURE_SYNC,
     CMD_INFER_IP,
     CMD_INFER_IP_SET,
@@ -46,13 +51,14 @@ class CaptureSession(BaseSession):
     写 frame_manager——采集只负责驱动机器人进程采集（episode 起止、元信息同步）。
     """
 
-    def __init__(self, base_cfg, command_source=None, frame_manager=None, adapter=None):
+    def __init__(self, base_cfg, command_source=None, frame_manager=None, adapter=None, capture_meta_store=None):
         super().__init__(
             base_cfg=base_cfg,
             name="CaptureSession",
             command_source=command_source,
             frame_manager=frame_manager,
             adapter=adapter,
+            capture_meta_store=capture_meta_store,
         )
         if self.adapter is None:
             raise ValueError("capture session requires an injected adapter (owned by node)")
@@ -119,6 +125,14 @@ class CaptureSession(BaseSession):
                 CMD_INFER_PORT_SET,
             ):
                 self._reply(cmd, self._on_infer_endpoint(cmd))
+            elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
+                CMD_CAPTURE_META_LIST,
+                CMD_CAPTURE_META_ADD,
+                CMD_CAPTURE_META_EDIT,
+                CMD_CAPTURE_META_DELETE,
+                CMD_CAPTURE_META_DELETE_KEY,
+            ):
+                self._reply(cmd, self._on_capture_meta(cmd))
             elif name == CMD_CAPTURE_SYNC:  # 同步采集元信息（采集员 / 任务名等）到机器人进程
                 try:
                     meta = parse_meta(cmd.params.get("meta"))

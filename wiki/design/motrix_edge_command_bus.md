@@ -54,28 +54,34 @@ class CommandResult:
 
 ## 命令清单（build_command_registry）
 
-| 命令名                  | 位置参数  | 层级   | 语义                                                           | auth |
-| ----------------------- | --------- | ------ | -------------------------------------------------------------- | ---- |
-| `session run`           | `session` | 任务级 | 启动会话（选择 + 启动一步完成；capture / infer）               | none |
-| `session quit`          | —         | 任务级 | 退出当前会话（→ READY）                                        | none |
-| `robot reset`           | —         | 机器人 | 复位机器人（仅 adapter 可用）                                  | none |
-| `robot estop`           | —         | 全局   | 急停（安全停止 + 转 ERROR）                                    | none |
-| `robot execute`         | `qpos`    | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点）              | none |
-| `robot teleop`          | `enabled` | 机器人 | 遥操作开关（true/false）                                       | none |
-| `capture episode start` | —         | 任务级 | 开始一轮采集（adapter.start_capture）                          | none |
-| `capture episode end`   | —         | 任务级 | 结束一轮采集（adapter.end_capture）                            | none |
-| `node reset`            | —         | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                   | none |
-| `infer rollout`         | —         | 任务级 | 单步推理闭环（上传观测 → 下发动作）                            | none |
-| `infer connect`         | —         | 任务级 | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）        | none |
-| `infer ip`              | —         | 配置级 | 查询推理节点 IP（内存态 `policy.host`）                        | none |
-| `infer ip set`          | `ip`      | 配置级 | 设置推理节点 IP（下次 `session run infer` 生效）               | none |
-| `infer port`            | —         | 配置级 | 查询推理节点端口（内存态 `policy.port`）                       | none |
-| `infer port set`        | `port`    | 配置级 | 设置推理节点端口（下次 `session run infer` 生效）              | none |
-| `capture sync`          | `meta`    | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集会话内消费） | none |
+| 命令名                    | 位置参数        | 层级   | 语义                                                           | auth |
+| ------------------------- | --------------- | ------ | -------------------------------------------------------------- | ---- |
+| `session run`             | `session`       | 任务级 | 启动会话（选择 + 启动一步完成；capture / infer）               | none |
+| `session quit`            | —               | 任务级 | 退出当前会话（→ READY）                                        | none |
+| `robot reset`             | —               | 机器人 | 复位机器人（仅 adapter 可用）                                  | none |
+| `robot estop`             | —               | 全局   | 急停（安全停止 + 转 ERROR）                                    | none |
+| `robot execute`           | `qpos`          | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点）              | none |
+| `robot teleop`            | `enabled`       | 机器人 | 遥操作开关（true/false）                                       | none |
+| `capture episode start`   | —               | 任务级 | 开始一轮采集（adapter.start_capture）                          | none |
+| `capture episode end`     | —               | 任务级 | 结束一轮采集（adapter.end_capture）                            | none |
+| `node reset`              | —               | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                   | none |
+| `infer rollout`           | —               | 任务级 | 单步推理闭环（上传观测 → 下发动作）                            | none |
+| `infer connect`           | —               | 任务级 | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）        | none |
+| `infer ip`                | —               | 配置级 | 查询推理节点 IP（内存态 `policy.host`）                        | none |
+| `infer ip set`            | `ip`            | 配置级 | 设置推理节点 IP（下次 `session run infer` 生效）               | none |
+| `infer port`              | —               | 配置级 | 查询推理节点端口（内存态 `policy.port`）                       | none |
+| `infer port set`          | `port`          | 配置级 | 设置推理节点端口（下次 `session run infer` 生效）              | none |
+| `capture sync`            | `meta`          | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集会话内消费） | none |
+| `capture meta list`       | `key`（可选）   | 配置级 | 列出采集元信息选项（全部分类或某分类）                         | none |
+| `capture meta add`        | `key, value`    | 配置级 | 新增采集元信息选项（分类不存在则创建；重复 → rejected）        | none |
+| `capture meta edit`       | `key, old, new` | 配置级 | 重命名采集元信息选项（不存在 → rejected）                      | none |
+| `capture meta delete`     | `key, value`    | 配置级 | 删除某分类下的采集元信息选项（分类清空则删除分类）             | none |
+| `capture meta delete-key` | `key`           | 配置级 | 删除整个采集元信息分类                                         | none |
 
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
-`node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`（配置级，与节点
-状态机解耦）全局可用。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、
+`node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`、`capture meta *`
+（配置级，与节点状态机解耦）全局可用——`capture meta` 读写 `capture.yml` 的 `meta` 段，见
+[采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、
 `infer ip set 192.168.1.10`、`infer port set 8765`。
 
 ## 本地 vs HTTP（行为对齐）

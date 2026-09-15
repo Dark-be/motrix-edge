@@ -6,7 +6,9 @@
 
 > 已随 feat/6（任务运行时核心）与 feat/3（HTTP 控制面）落地的计划（webrtc / observe_preview /
 > adapter_discover / robot_adapter / capture_session / captures / infer_connect_capture_sync /
-> infer_test）已删除；以下为保留的后续 / 在途计划。
+> infer_test）已删除；feat/7 的 upload_session / upload_pack 两份计划亦已落地删除
+> （未实现项见 [上传会话](../design/motrix_edge_upload_session.md)「后续版本」）；以下为保留的
+> 后续 / 在途计划。
 
 ## 索引
 

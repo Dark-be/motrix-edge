@@ -58,7 +58,6 @@ class FakeRobotAdapter(RobotAdapter):
         self.name = config.get("name", self.NAME)
         self.available = available
         self._data_dir = config.get("data_dir")
-        self._data_files: list[str] = []
         self.reset_calls = 0
         self.safe_stop_calls = 0
         self.release_calls = 0
@@ -133,11 +132,8 @@ class FakeRobotAdapter(RobotAdapter):
         """采集状态：运行位 + 采集员 / 任务名等元信息 + 数据目录 / 列表。"""
         return CaptureStatus(
             running=self.capture_running,
-            operator=self.capture_meta.get("operator"),
-            task_name=self.capture_meta.get("task_name"),
             meta=dict(self.capture_meta),
-            save_dir=self._data_dir,
-            data_files=list(self._data_files),
+            data_dir=self._data_dir,
         )
 
     def sync_capture_meta(self, meta) -> None:

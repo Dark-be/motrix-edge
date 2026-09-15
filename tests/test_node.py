@@ -279,10 +279,12 @@ def _patch_get_session(monkeypatch, captured):
         frame_manager=None,
         adapter=None,
         policy_type=None,
+        capture_meta_store=None,
     ):
         captured["session_type"] = session_type
         captured["adapter"] = adapter
         captured["policy_type"] = policy_type
+        captured["capture_meta_store"] = capture_meta_store
         return _FakeSelectSession()
 
     monkeypatch.setattr(node_mod, "get_session", fake_get_session)
@@ -300,6 +302,7 @@ def test_start_session_reuses_node_adapter(monkeypatch):
     assert result.status == "ok"
     assert captured["session_type"] == "capture"
     assert captured["adapter"] is node.adapter  # 复用节点 adapter
+    assert captured["capture_meta_store"] is node.capture_meta_store  # 单实例：会话不另建 store
     assert node.state == NodeState.ACTIVE
     assert node._task_thread is not None and node._task_thread.is_alive()  # 任务已启动
     node.session.stop()
@@ -642,7 +645,7 @@ def test_tick_refreshes_capture_status_cache():
     class _StatusAdapter(_FakeAdapter):
         def __init__(self):
             super().__init__(available=True)
-            self.status = CaptureStatus(running=True, operator="张三", task_name="巡检")
+            self.status = CaptureStatus(running=True, meta={"operator": "张三", "task_name": "巡检"})
 
         def capture_status(self):
             return self.status

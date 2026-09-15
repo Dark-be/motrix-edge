@@ -19,16 +19,17 @@
 
 ## 端点总览
 
-| 方法            | 路径                                                            | 说明                                           | 服务           |
-| --------------- | --------------------------------------------------------------- | ---------------------------------------------- | -------------- |
-| GET             | `/v1/health`                                                    | 版本 / identity / 已绑定 adapter / 磁盘 / 时钟 | —（内建）      |
-| GET             | `/v1/adapters`                                                  | 静态列出全部注册适配器（不 discover / 不探活） | —（内建）      |
-| POST            | `/v1/commands`                                                  | 受控命令（capability 映射，须租约）            | CommandService |
-| POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}` | Edge 级租约（Console 签发镜像）                | LeaseManager   |
-| GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                        | 采集会话控制                                   | CaptureService |
-| GET/POST/DELETE | `/v1/infers` + `/v1/infers/rollout`                             | 推理会话控制                                   | InferService   |
-| GET             | `/v1/preview`                                                   | 最新观测预览（须租约）                         | CaptureService |
-| POST            | `/v1/webrtc/offer`                                              | WebRTC 推流信令（须租约）                      | WebRTCService  |
+| 方法                  | 路径                                                            | 说明                                           | 服务           |
+| --------------------- | --------------------------------------------------------------- | ---------------------------------------------- | -------------- |
+| GET                   | `/v1/health`                                                    | 版本 / identity / 已绑定 adapter / 磁盘 / 时钟 | —（内建）      |
+| GET                   | `/v1/adapters`                                                  | 静态列出全部注册适配器（不 discover / 不探活） | —（内建）      |
+| POST                  | `/v1/commands`                                                  | 受控命令（capability 映射，须租约）            | CommandService |
+| POST/GET              | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}` | Edge 级租约（Console 签发镜像）                | LeaseManager   |
+| GET/POST/PATCH/DELETE | `/v1/captures` + `…/precheck` + `…/meta`、`…/sync`              | 采集会话控制 + 采集元信息选项                  | CaptureService |
+| GET/POST              | `/v1/uploads` + `/v1/uploads/select·pack·upload·retry`          | 本地 episode 扫描 / 选择 / 打包与上传队列      | UploadSession  |
+| GET/POST/DELETE       | `/v1/infers` + `/v1/infers/rollout`                             | 推理会话控制                                   | InferService   |
+| GET                   | `/v1/preview`                                                   | 最新观测预览（须租约）                         | CaptureService |
+| POST                  | `/v1/webrtc/offer`                                              | WebRTC 推流信令（须租约）                      | WebRTCService  |
 
 correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动生成）。
 
@@ -52,22 +53,61 @@ correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动�
 
 采集为**观测会话**，端点经 `CaptureService` 桥接：
 
-| 方法   | 路径                     | 租约          | 说明                                                                                                 |
-| ------ | ------------------------ | ------------- | ---------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                    |
-| GET    | `/v1/captures`           | 无            | 状态快照：node_state / session / adapter / capture_running / save_dir / data_files / disk / lease_id |
-| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                      |
-| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                       |
-| GET    | `/v1/preview`            | 必需          | 最新观测预览（见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）                      |
+| 方法   | 路径                      | 租约          | 说明                                                                                     |
+| ------ | ------------------------- | ------------- | ---------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                        |
+| GET    | `/v1/captures`            | 无            | 状态快照：node_state / session / adapter / capture_running / data_dir / disk / lease_id  |
+| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                          |
+| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段，前端选择列表）                        |
+| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                              |
+| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                |
+| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                           |
+| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                   |
+| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加） |
+| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                           |
+| GET    | `/v1/preview`             | 必需          | 最新观测预览（见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）          |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 
-> **采集数据归属（边界）**：`capture_running` / `save_dir` / `data_files` 来自 `adapter.capture_status()`
-> （适配器 / SDK 进程自维护的**状态上报**：是否正在采集 + 数据目录与列表）——Edge 不驱动落盘、
-> 不校验、不上传。实际数据落盘 / 校验 / 上传
+> **采集数据归属（边界）**：`capture_running` / `data_dir` 来自 `adapter.capture_status()`
+> （适配器 / SDK 进程自维护的**状态上报**：是否正在采集 + 数据目录）——Edge 不驱动落盘、
+> 不校验；数据的本地组织（扫描 / 选择 / 打包）见 `/v1/uploads` 小节。实际数据落盘 / 校验 / 上传
 > **待完成**：后续按 hardware adapter 契约完成
 > **CaptureBundle**（manifest / checksum → Local Spool → Uploader，服务端确认后才删），
 > 属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
+
+## /v1/uploads（本地 episode 扫描与打包）
+
+本地采集目录的 episode 扫描 / 查看 / 选择 / **打包**，由 `UploadSession` 实现（**不占**
+RobotAdapter、不进节点任务状态机）；设计与字段见 [上传会话（UploadSession）](./motrix_edge_upload_session.md)。
+
+| 方法 | 路径                 | 租约 | 说明                                                                                                                                                                               |
+| ---- | -------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST | `/v1/uploads`        | 必需 | 创建 / 重扫；body 可选 `folder_path`（须在白名单内），缺省回退 adapter 数据目录 → `upload.data_dir`                                                                                |
+| GET  | `/v1/uploads`        | 必需 | 扫描汇总：episode 列表 / 状态 / 选择集 / 建议包名                                                                                                                                  |
+| POST | `/v1/uploads/select` | 必需 | 按 `episode_ids` 替换选择集（只允许可选的 episode）                                                                                                                                |
+| POST | `/v1/uploads/pack`   | 必需 | 把选中 episode **移动**到 `<扫描目录>/<包名>/`；重名 409、非法名 400、无扫描 / 无选择 409、源文件缺失 404、并发 409；收尾重扫失败 → `scan=null` + `warnings`（打包已成功，仍 200） |
+| POST | `/v1/uploads/upload` | 必需 | 加入上传队列；**未配置 `upload.endpoint` → 501**                                                                                                                                   |
+| POST | `/v1/uploads/retry`  | 必需 | 选择集中的失败项重置为 pending（未配置上传目标时不做网络传输）                                                                                                                     |
+
+**受控操作**：uploads 端点全部要求 `X-Lease-Id`（读端点也要——扫描会读目录内容、打包会移动文件，
+与 `/v1/preview` 同类）；缺失租约 `409` / 租约不匹配 `403`。
+
+**目录白名单**：`folder_path` 只允许在**数据目录**（adapter 上报的采集目录 / `upload.data_dir`）
+及其子目录内，越界 `400`；两个来源都没有 → `409`（不默认放开任意路径）。
+
+**重操作互斥**：`scan` / `pack` 同时只允许一个在跑，并发 `409`（都要对整目录算 SHA-256 / 搬运文件，
+避免拖住控制面）。
+
+**并发模型**：`app.py` 里**所有** HTTP handler 都是同步 `def`（FastAPI 交给线程池），唯一的例外是
+correlation 中间件（必须 `async def`）。原因：handler 内部全是**阻塞调用**——`CommandBus.submit`
+同步等回执（最长 5s）、`scan` 算 SHA-256 / `pack` 搬文件、adapter 的同步 HTTP 查询；写在 `async def`
+里会占住 uvicorn 事件循环，连带冻结 `/v1/health`、`/v1/preview` 与 WebRTC 信令。新增端点请沿用
+同步 `def`。
+
+> **当前范围**：上传 API 的**消费者是数据平台**，程序化上传在后续版本加入；本版本只做本地文件
+> 的查看 / 筛选 / 打包，包目录由数采人员**手动上传**到数据平台（打包是**移动**：源文件进入包目录，
+> 原位置不再保留）。
 
 ## /v1/infers（推理会话控制）
 

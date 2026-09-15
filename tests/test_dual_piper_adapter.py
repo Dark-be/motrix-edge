@@ -128,11 +128,8 @@ def test_health_and_capture_status():
             "/v1/health": {"ok": True},
             "/v1/capture/status": {
                 "running": True,
-                "operator": "Yu",
-                "task_name": "put bowls",
-                "meta": {"description": "demo"},
+                "meta": {"operator": "Yu", "task_name": "put bowls", "description": "demo"},
                 "data_dir": "/data/task",
-                "data_files": ["a.hdf5", "b.json"],
             },
         }
     )
@@ -143,11 +140,8 @@ def test_health_and_capture_status():
     capture = adapter.capture_status()
     assert capture is not None
     assert capture.running is True
-    assert capture.operator == "Yu"
-    assert capture.task_name == "put bowls"
-    assert capture.meta == {"description": "demo"}
-    assert capture.save_dir == "/data/task"
-    assert capture.data_files == ["a.hdf5", "b.json"]
+    assert capture.meta == {"operator": "Yu", "task_name": "put bowls", "description": "demo"}
+    assert capture.data_dir == "/data/task"
 
 
 def test_observe_returns_none_until_first_frame(monkeypatch):

@@ -33,11 +33,14 @@ env 保留的观测副本（30Hz 由 env 调用 robot.get_observation() 产生�
     POST /v1/rollout       推理动作 {action}
     POST /v1/teleop        遥操作开关 {enabled: bool}
     POST /v1/safe_stop     急停
-    GET  /v1/data_status   {data_dir, data_files, running}
     POST /v1/capture/start 开始一轮采集（episode 开始）
     POST /v1/capture/end   结束一轮采集（episode 结束）
-    POST /v1/capture/sync  同步采集元信息 {meta}（operator / task_name 等）
-    GET  /v1/capture/status {running, operator, task_name, meta}
+    POST /v1/capture/sync  同步采集元信息 {meta}（采集员 / 任务名等）
+    GET  /v1/capture/status {running, meta, data_dir}
+
+采集状态单一来源：原 ``GET /v1/data_status``（数据目录 + 数据列表）已**合并**进
+``/v1/capture/status``（数据目录随采集状态一并上报）；数据文件列表不经 HTTP 上报——
+本地数据的扫描 / 选择 / 打包由 Edge 的 UploadSession 直接读目录完成。
 
 入口见 server/robot_server.py（按 config 自动匹配机器人，由 robot.type 选择虚拟/真实接入位）。
 """
@@ -61,14 +64,12 @@ from motrix_edge.adapter.http_contract import (
     FIELD_ACTION_DIM,
     FIELD_CAPABILITIES,
     FIELD_DATA_DIR,
-    FIELD_DATA_FILES,
     FIELD_DETAIL,
     FIELD_ENDPOINT,
     FIELD_META,
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
     FIELD_OK,
-    FIELD_OPERATOR,
     FIELD_ROBOT,
     FIELD_ROBOT_MODEL_ID,
     FIELD_ROBOT_MODEL_VERSION,
@@ -76,7 +77,6 @@ from motrix_edge.adapter.http_contract import (
     FIELD_SHM_NAME,
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
-    FIELD_TASK_NAME,
     FIELD_TYPE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
@@ -378,20 +378,17 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 采集状态
     @app.get(PATH_CAPTURE_STATUS)
     def capture_status():
-        """采集状态（运行位 / 元信息 / 数据落盘）：Edge adapter.capture_status 消费。
+        """采集状态（运行位 / 元信息 / 数据目录）：Edge adapter.capture_status 消费。
 
-        ``{running, operator, task_name, meta, data_dir, data_files}``——``running`` 是
-        **env 真实采集位**（capture/start↔end 之间为 True），不是占位常量。
+        ``{running, meta, data_dir}``——``running`` 是 **env 真实采集位**（capture/start↔end
+        之间为 True）；元信息为 ``meta`` 全集（采集员 / 任务名等是其键，不另设同义顶层
+        字段）；数据目录随状态一并上报（原 ``/v1/data_status`` 已合入本端点）。
         """
         cs = env.capture_status()
-        ds = env.data_status()
         return {
             FIELD_RUNNING: bool(cs.get("running")),
-            FIELD_OPERATOR: cs.get("operator"),
-            FIELD_TASK_NAME: cs.get("task_name"),
             FIELD_META: cs.get("meta") or {},
-            FIELD_DATA_DIR: ds.get("data_dir"),
-            FIELD_DATA_FILES: ds.get("episodes", []),
+            FIELD_DATA_DIR: cs.get("data_dir"),
         }
 
     # ---------------------------------------------------------------- 调试（非契约）

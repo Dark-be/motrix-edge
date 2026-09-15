@@ -153,7 +153,7 @@ robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 | POST | `/v1/capture/start`  | —                 | 开始一轮采集（episode 开始）                                                    |
 | POST | `/v1/capture/end`    | —                 | 结束一轮采集（episode 结束）                                                    |
 | POST | `/v1/capture/sync`   | `{meta: {...}}`   | 同步采集元信息（operator / task_name 等）                                       |
-| GET  | `/v1/capture/status` | —                 | 采集状态（运行位 / 元信息 / 数据目录与列表）                                    |
+| GET  | `/v1/capture/status` | —                 | 采集状态（运行位 / 元信息 / 数据目录）                                          |
 
 另有调试端点 `GET /observe`（最新观测 qpos + 相机 JPEG base64）。
 

@@ -17,7 +17,7 @@
         （兼容单 dict / 旧 `robot` 段；按 `id`/`type` 查找）
 -   [ ] `adapter/test_adapter.py`：`TestRobotAdapter` 身份 / 行为参数改类级常量内置
         （`NAME` / `ACTION_DIM` / `IMAGES` / `STEP_RAD` / `SAVE_DIR` 等），不再从配置
-        读取（config 仅作可选覆盖，如测试注入临时 `save_dir`）
+        读取（config 仅作可选覆盖，如测试注入临时 `data_dir`）
 -   [ ] `config/test.yml`：`adapter` 改数组（`id` / `name` / `type`）
 -   [ ] `session`：`BaseSession` / `CaptureSession` / `InferSession` /
         `get_session` 透传 `adapter_id`

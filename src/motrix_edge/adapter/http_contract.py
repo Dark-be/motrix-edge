@@ -31,16 +31,19 @@
 | POST | ``/v1/rollout``          | ``{action: [dim]}``    | ``{status}``                                   |
 | POST | ``/v1/teleop``           | ``{enabled}``          | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
-| GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录与列表）      |
+| GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录）        |
 | POST | ``/v1/capture/sync``     | ``{meta}``             | ``{status}``                                   |
 | POST | ``/v1/capture/start``    | —                      | ``{status}``                                   |
 | POST | ``/v1/capture/end``      | —                      | ``{status}``                                   |
 
 - ``/v1/discover``：机器人进程**自描述探活**（不初始化）——声明身份与它支持被哪些
   adapter 类型操作（``supported_adapters``），edge 据此把 adapter 标记为可用并选择。
-- ``/v1/capture/status`` 响应字段：``running``（进程是否正在采集）/ ``operator`` /
-  ``task_name`` / ``meta`` / ``data_dir`` / ``data_files``——**合并**原 ``/v1/data_status``
-  （数据目录与列表），避免两处状态不一致。
+- ``/v1/capture/status`` 响应字段：``running``（进程是否正在采集）/ ``meta``（``capture sync``
+  同步的元信息全集）/ ``data_dir``——**合并**了原 ``/v1/data_status``（已删除，避免两处
+  状态不一致）；数据文件列表不在本端点：数据的扫描 / 选择 / 打包见
+  [上传会话（UploadSession）](../../../wiki/design/motrix_edge_upload_session.md)。
+- **元信息只有 ``meta`` 一个载体**：采集员 / 任务名等是 ``meta`` 里的键（分类可拓展），
+  不再另设同义顶层字段——消费方按需取 ``meta["operator"]`` / ``meta["task_name"]``。
 - ``status`` 取值 ``accepted`` 表示指令已被 SDK 接受。
 """
 
@@ -54,7 +57,7 @@ PATH_EXECUTE = "/v1/execute"  # 直接下发 raw 动作
 PATH_ROLLOUT = "/v1/rollout"  # 推理闭环：模型 action
 PATH_TELEOP = "/v1/teleop"  # 设置遥操作开关（true=遥操作 / false=程控）
 PATH_SAFE_STOP = "/v1/safe_stop"  # 安全停止（软停：停发指令并保持位姿，不断电）
-PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态（运行位 / 元信息 / 数据目录与列表）
+PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态（运行位 / 元信息 / 数据目录）
 PATH_CAPTURE_SYNC = "/v1/capture/sync"  # 同步采集元信息到进程（保存数据时附加）
 PATH_CAPTURE_START = "/v1/capture/start"  # 开始一轮采集（episode 开始）
 PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
@@ -64,8 +67,6 @@ FIELD_ACTION = "action"  # execute / rollout：动作数据
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
 FIELD_META = "meta"  # capture sync：采集元信息（dict，保存数据时附加）
-FIELD_OPERATOR = "operator"  # capture status：采集员姓名
-FIELD_TASK_NAME = "task_name"  # capture status：任务名称
 
 # ---- 响应 body 字段 ----
 FIELD_STATUS = "status"  # 指令是否被接受（accepted）
@@ -85,7 +86,6 @@ FIELD_CAPABILITIES = "capabilities"  # robot：能力 dict（capture / execute /
 FIELD_ENDPOINT = "endpoint"  # robot：SDK HTTP 指令地址
 FIELD_SHM_NAME = "shm_name"  # robot：观测共享内存通道名
 FIELD_RUNNING = "running"  # discover / capture status / robot：是否运行（语义随端点：进程运行 / 采集进行中）
-FIELD_DATA_FILES = "data_files"  # capture status：本次采集得到的数据列表
 
 # ---- 状态值 ----
 VALUE_STATUS_ACCEPTED = "accepted"
@@ -96,14 +96,12 @@ __all__ = [
     "FIELD_CAPABILITIES",
     "FIELD_CONTROLLERS",
     "FIELD_DATA_DIR",
-    "FIELD_DATA_FILES",
     "FIELD_DETAIL",
     "FIELD_ENDPOINT",
     "FIELD_META",
     "FIELD_NAME",
     "FIELD_OBSERVATION_KEYS",
     "FIELD_OK",
-    "FIELD_OPERATOR",
     "FIELD_ROBOT",
     "FIELD_ROBOT_MODEL_ID",
     "FIELD_ROBOT_MODEL_VERSION",
@@ -112,7 +110,6 @@ __all__ = [
     "FIELD_SHM_NAME",
     "FIELD_STATUS",
     "FIELD_SUPPORTED_ADAPTERS",
-    "FIELD_TASK_NAME",
     "FIELD_TELEOP_ENABLED",
     "FIELD_TYPE",
     "PATH_CAPTURE_END",

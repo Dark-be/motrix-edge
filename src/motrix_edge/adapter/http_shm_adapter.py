@@ -45,12 +45,9 @@ from motrix_edge.adapter.base import (
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
     FIELD_DATA_DIR,
-    FIELD_DATA_FILES,
     FIELD_META,
     FIELD_OK,
-    FIELD_OPERATOR,
     FIELD_RUNNING,
-    FIELD_TASK_NAME,
     FIELD_TELEOP_ENABLED,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
@@ -188,7 +185,7 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- 采集状态（运行位 / 元信息 / 数据落盘）-----------------------------------
     def capture_status(self) -> CaptureStatus | None:
-        """采集状态：运行位（是否正在采集）+ 元信息（采集员 / 任务名等）+ 数据目录与列表。"""
+        """采集状态：运行位（是否正在采集）+ 元信息（采集员 / 任务名等）+ 数据目录。"""
         try:
             resp = self._client().get(PATH_CAPTURE_STATUS)
             resp.raise_for_status()
@@ -198,11 +195,8 @@ class HttpShmAdapter(RobotAdapter):
             return None
         return CaptureStatus(
             running=bool(body.get(FIELD_RUNNING, False)),
-            operator=body.get(FIELD_OPERATOR),
-            task_name=body.get(FIELD_TASK_NAME),
             meta=dict(body.get(FIELD_META, {}) or {}),
-            save_dir=body.get(FIELD_DATA_DIR),
-            data_files=[str(path) for path in body.get(FIELD_DATA_FILES, []) or []],
+            data_dir=body.get(FIELD_DATA_DIR),
         )
 
     def sync_capture_meta(self, meta: dict) -> None:

@@ -14,6 +14,7 @@
 
 """server HTTP API 单元测试 —— FastAPI TestClient，无硬件、无网络可跑。"""
 
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ import pytest
 from fake_robot import FakeRobotAdapter
 from fastapi.testclient import TestClient
 
+from motrix_edge.adapter.base import CaptureStatus
 from motrix_edge.frame import FrameManager
 from motrix_edge.lease import Lease, LeaseManager, LeaseState
 from motrix_edge.node import EdgeNode, NodeState
@@ -32,6 +34,7 @@ from motrix_edge.server.capture import CaptureService
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.infer import InferService
 from motrix_edge.session.base import RunResult, SessionState
+from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
@@ -53,7 +56,7 @@ BASE_CFG = {
         "edge_name": "edge-test",
         "edge_version": "0.1.0",
     },
-    "discover": {"host": "127.0.0.1", "port": 8090},
+    "adapter": {"host": "127.0.0.1", "port": 8090},
 }
 
 
@@ -822,7 +825,7 @@ def test_captures_real_node_observes_until_exit(tmp_path):
             {
                 "name": "Test Robot",
                 "type": "test_robot",
-                "save_dir": str(tmp_path),  # 运行时行为参数（适配器特有）；能力由适配器返回
+                "data_dir": str(tmp_path),  # 运行时行为参数（适配器特有）；能力由适配器返回
             }
         ],
         "capture": {"obs_freq": 30},
@@ -833,7 +836,7 @@ def test_captures_real_node_observes_until_exit(tmp_path):
     node = EdgeNode(base_cfg=cfg, command_source=bus, alive_check_interval=0.2)
     # 注入进程内 FakeRobotAdapter 并置 READY（不依赖 SDK 进程 / 探测绑定）；
     # 先 discover 标记就绪，避免 READY 后 _tick 失联检查将其转 ERROR
-    node.adapter = FakeRobotAdapter(config={"save_dir": str(tmp_path)})
+    node.adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
     node.adapter_name = "Test Robot"
     node.adapter_type = "test_robot"
     node.initialize()  # INIT → IDLE（构造后默认 INIT，先完成初始化再置 READY）
@@ -958,3 +961,176 @@ def test_infers_rollout_steps_inference():
     # 清理退出
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
+
+
+# ---- /v1/uploads：本地 episode 扫描 / 选择 / 打包（受控操作，须租约）--------------
+
+
+def _make_episodes(folder, count=2):
+    """造 count 个 episode（.mcap + 同名 .json）。"""
+    for index in range(count):
+        (folder / f"episode_{index}.mcap").write_bytes(b"mcap")
+        (folder / f"episode_{index}.json").write_text(json.dumps({"operator": "张三"}), encoding="utf-8")
+
+
+def _upload_client(tmp_path, node=None):
+    """上传测试用 client：允许扫描根 = tmp_path（写入 upload.data_dir），并签发租约。"""
+    cfg = {**BASE_CFG, "upload": {"data_dir": str(tmp_path)}}
+    client = TestClient(create_app(cfg, node=node))
+    return client, install_lease(client)
+
+
+def test_upload_endpoints_require_lease(tmp_path):
+    """上传端点全部为受控操作：无活跃租约 → 409（**读端点也要**，与 /v1/preview 同类）。"""
+    client, _ = _upload_client(tmp_path)  # 已签发租约但请求不携带 → 403（租约不匹配）
+    assert client.get("/v1/uploads").status_code == 403
+    assert client.post("/v1/uploads", json={"folder_path": str(tmp_path)}).status_code == 403
+    assert client.post("/v1/uploads/select", json={"episode_ids": []}).status_code == 403
+    assert client.post("/v1/uploads/pack").status_code == 403
+    assert client.post("/v1/uploads/upload").status_code == 403
+    assert client.post("/v1/uploads/retry").status_code == 403
+
+    # 完全没有活跃租约 → 409（先安装租约）
+    bare = TestClient(create_app({**BASE_CFG, "upload": {"data_dir": str(tmp_path)}}))
+    assert bare.get("/v1/uploads").status_code == 409
+
+
+def test_upload_scan_select_and_pack_moves_episodes(tmp_path):
+    """扫描 → 选择 → 打包：文件**移动**进包目录（源文件不再保留，选择集清空）。"""
+    _make_episodes(tmp_path, 2)
+    client, lease = _upload_client(tmp_path)
+    headers = {"X-Lease-Id": lease}
+
+    scanned = client.post("/v1/uploads", json={"folder_path": str(tmp_path)}, headers=headers)
+    assert scanned.status_code == 200, scanned.text
+    assert scanned.json()["episode_count"] == 2
+
+    selected = client.post("/v1/uploads/select", json={"episode_ids": ["episode_0"]}, headers=headers)
+    assert selected.json()["selected_episode_ids"] == ["episode_0"]
+    assert selected.json()["suggested_pack_name"] == "pack1"
+
+    packed = client.post("/v1/uploads/pack", json={"name": "pkg"}, headers=headers)
+    assert packed.status_code == 200, packed.text
+    body = packed.json()
+    assert body["name"] == "pkg"
+    assert body["file_count"] == 2
+    assert (tmp_path / "pkg" / "episode_0.mcap").exists()
+    assert not (tmp_path / "episode_0.mcap").exists()  # 移动而非复制：源文件已不在原处
+    assert body["scan"]["episode_count"] == 1  # 重扫只剩未打包的 episode_1
+    assert client.get("/v1/uploads", headers=headers).json()["episode_count"] == 1
+
+
+def test_upload_scan_defaults_to_adapter_data_dir(tmp_path):
+    """缺省目录回退：未给 folder_path → 用 adapter 上报的数据目录（与 /v1/captures 同源）。"""
+    _make_episodes(tmp_path, 1)
+    node = SimpleNamespace(capture_status=CaptureStatus(running=False, data_dir=str(tmp_path)))
+    client = TestClient(create_app(BASE_CFG, node=node))  # 未配置 upload.data_dir
+    lease = install_lease(client)
+
+    body = client.post("/v1/uploads", headers={"X-Lease-Id": lease}).json()
+    assert body["folder_path"] == str(tmp_path.resolve())
+    assert body["episode_count"] == 1
+
+
+def test_upload_scan_outside_allowed_roots_is_rejected(tmp_path):
+    """越界目录 → 400：只允许扫描数据目录（adapter 数据目录 / upload.data_dir）及其子目录。"""
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    cfg = {**BASE_CFG, "upload": {"data_dir": str(allowed)}}
+    client = TestClient(create_app(cfg))
+    lease = install_lease(client)
+
+    resp = client.post("/v1/uploads", json={"folder_path": str(outside)}, headers={"X-Lease-Id": lease})
+    assert resp.status_code == 400
+    assert "outside the allowed upload roots" in resp.json()["detail"]
+
+
+def test_upload_scan_without_any_root_is_rejected():
+    """既无 upload.data_dir 也无 adapter 数据目录 → 409（不扫任意路径）。"""
+    client = TestClient(create_app(BASE_CFG))
+    lease = install_lease(client)
+
+    resp = client.post("/v1/uploads", headers={"X-Lease-Id": lease})
+    assert resp.status_code == 409
+    assert "no allowed upload root" in resp.json()["detail"]
+
+
+def test_upload_pack_without_selection_returns_conflict(tmp_path):
+    """未选择就打包 → 409。"""
+    _make_episodes(tmp_path, 1)
+    client, lease = _upload_client(tmp_path)
+    headers = {"X-Lease-Id": lease}
+    client.post("/v1/uploads", json={"folder_path": str(tmp_path)}, headers=headers)
+
+    resp = client.post("/v1/uploads/pack", headers=headers)
+    assert resp.status_code == 409
+    assert "no episodes selected" in resp.json()["detail"]
+
+
+def test_captures_meta_returns_options(tmp_path):
+    """/v1/captures/meta：采集元信息选项（只读，不需要租约）。"""
+    store_path = tmp_path / "capture.yml"
+    store_path.write_text("meta:\n  operator: [张三, 李四]\n", encoding="utf-8")
+    node = FakeNode()
+    captures = CaptureService(node, CommandBus(), capture_meta_store=CaptureMetaStore(store_path))
+    client = TestClient(create_app(BASE_CFG, node=node, captures=captures))
+
+    body = client.get("/v1/captures/meta").json()
+    assert body["meta"] == {"operator": ["张三", "李四"]}
+
+
+def _make_meta_client(tmp_path):
+    """选项管理端点夹具：CaptureService 与 app 共享同一 LeaseManager（否则租约互不可见）。"""
+    store_path = tmp_path / "capture.yml"
+    store_path.write_text("meta:\n  operator: [张三]\n", encoding="utf-8")
+    node = FakeNode()
+    leases = LeaseManager()
+    captures = CaptureService(node, CommandBus(), leases=leases, capture_meta_store=CaptureMetaStore(store_path))
+    client = TestClient(create_app(BASE_CFG, node=node, captures=captures, lease_manager=leases))
+    return client, store_path
+
+
+def test_captures_meta_management_endpoints(tmp_path):
+    """/v1/captures/meta 写操作：新增 / 重命名 / 删选项 / 删分类，回执是**全量选项**。
+
+    与 CLI ``capture meta`` 命令族共用同一个 store（单实例 / 一把锁），所以写后 GET 立即可见。
+    """
+    client, _ = _make_meta_client(tmp_path)
+    headers = {"X-Lease-Id": install_lease(client)}
+
+    # 新增（分类不存在则创建）：写后直接回全量，前端不必再 GET
+    added = client.post("/v1/captures/meta", json={"key": "task_name", "value": "桌面前移"}, headers=headers)
+    assert added.status_code == 200
+    assert added.json()["meta"] == {"operator": ["张三"], "task_name": ["桌面前移"]}
+    assert client.get("/v1/captures/meta").json()["meta"] == added.json()["meta"]  # 已落盘
+
+    # 重命名选项
+    renamed = client.patch("/v1/captures/meta", json={"key": "operator", "old": "张三", "new": "王五"}, headers=headers)
+    assert renamed.json()["meta"]["operator"] == ["王五"]
+
+    # 重复新增 → 400（选项已存在）
+    duplicate = client.post("/v1/captures/meta", json={"key": "operator", "value": "王五"}, headers=headers)
+    assert duplicate.status_code == 400
+
+    # 删除选项（分类清空则一并删除分类）；再删一次 → 400（不存在）
+    assert client.delete("/v1/captures/meta", params={"key": "task_name", "value": "桌面前移"}, headers=headers).json()[
+        "meta"
+    ] == {"operator": ["王五"]}
+    gone = client.delete("/v1/captures/meta", params={"key": "task_name", "value": "桌面前移"}, headers=headers)
+    assert gone.status_code == 400
+
+    # 删除整个分类
+    assert client.delete("/v1/captures/meta/operator", headers=headers).json()["meta"] == {}
+
+
+def test_captures_meta_writes_require_lease(tmp_path):
+    """选项写操作是受控操作（改设备配置）：无租约 → 409，且文件不被改动。"""
+    client, _ = _make_meta_client(tmp_path)
+
+    assert client.post("/v1/captures/meta", json={"key": "operator", "value": "王五"}).status_code == 409
+    assert client.patch("/v1/captures/meta", json={"key": "operator", "old": "张三", "new": "王五"}).status_code == 409
+    assert client.delete("/v1/captures/meta", params={"key": "operator", "value": "张三"}).status_code == 409
+    assert client.delete("/v1/captures/meta/operator").status_code == 409
+    assert client.get("/v1/captures/meta").json()["meta"] == {"operator": ["张三"]}  # 读仍然免租约

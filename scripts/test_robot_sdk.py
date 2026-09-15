@@ -20,13 +20,13 @@
   （``ObsShmWriter``），按 ``run_hz`` 持续产出模拟图像（raw RGB）+ 关节数据，与
   Edge adapter 的 ``ObsShmReader`` 读取逻辑**布局统一**。
 - **HTTP 服务器**：用 FastAPI 接受 adapter 指令（discover / health / reset / execute /
-  rollout / safe_stop / data_status）。
+  rollout / safe_stop / capture start·end·sync·status）。
 
 本进程自包含模拟硬件逻辑（``SimRobotCore``：关节推进 / 相机帧生成），与 Edge 共享的
 唯一部分是两份契约：**共享内存布局**（``motrix_edge.adapter.shm_contract``）与
 **HTTP 指令**（``motrix_edge.adapter.http_contract``），不 import ``motrix_edge`` 其它模块。
 **不实现数据采集 / 录制逻辑**——真实机器人 SDK 由自身自维护硬件与采集，本脚本只保留
-与 Edge 交互会用到的部分（观测上行 + 指令下行 + 数据状态查询）。既可独立运行（进程
+与 Edge 交互会用到的部分（观测上行 + 指令下行 + 采集状态查询）。既可独立运行（进程
 入口），也可被测试进程内复用（``create_sdk_app`` 组装 FastAPI app）。
 
 独立运行::
@@ -54,9 +54,9 @@ from motrix_edge.adapter.http_contract import (
     FIELD_CAPABILITIES,
     FIELD_CONTROLLERS,
     FIELD_DATA_DIR,
-    FIELD_DATA_FILES,
     FIELD_DETAIL,
     FIELD_ENDPOINT,
+    FIELD_META,
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
     FIELD_OK,
@@ -72,7 +72,8 @@ from motrix_edge.adapter.http_contract import (
     FIELD_TYPE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
-    PATH_DATA_STATUS,
+    PATH_CAPTURE_STATUS,
+    PATH_CAPTURE_SYNC,
     PATH_DISCOVER,
     PATH_EXECUTE,
     PATH_HEALTH,
@@ -106,7 +107,7 @@ class SimRobotCore:
     - ``frame()``：当前观测帧 ``{KEY_QPOS, KEY_ACTION, "images": [raw RGB, ...]}``。
 
     **不实现数据采集 / 录制逻辑**：真实机器人 SDK 由自身自维护硬件与采集；本脚本只保留
-    与 Edge 交互会用到的部分（观测上行 + 指令下行 + 数据状态查询）。
+    与 Edge 交互会用到的部分（观测上行 + 指令下行 + 采集状态查询）。
     """
 
     # 行为参数（可经 __init__ 覆盖）
@@ -121,7 +122,7 @@ class SimRobotCore:
     ACTION_DIM = 14
     IMAGES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]  # 相机布局
     STEP_RAD = 0.05  # 每帧限速步长
-    DATA_DIR = "data/test_task"  # 数据目录（供 data_status 上报；采集由真实 SDK 自维护）
+    DATA_DIR = "data/test_task"  # 数据目录（供 capture status 上报；采集由真实 SDK 自维护）
     INIT_QPOS = None  # 初始位姿（None → 全零 home）
     CAMERA_SIZE = (640, 480)  # (width, height)：观测图像尺寸（raw RGB）
 
@@ -143,7 +144,7 @@ class SimRobotCore:
         self._qpos = np.zeros(action_dim, dtype=np.float64)
         self._target: np.ndarray | None = None  # reset 设 home；随机游走 / rollout 设模型 action
         self._rng = np.random.default_rng(0)
-        self._data_dir: str | None = data_dir  # 数据目录（data_status 上报）
+        self._data_dir: str | None = data_dir  # 数据目录（capture status 上报）
 
         # 测试断言用记录（供 SDK 状态 / 服务测试）
         self.executed: list = []
@@ -152,6 +153,7 @@ class SimRobotCore:
         self.reset_calls = 0
         self.teleop_enabled = False  # 遥操作开关（teleop 指令设置）
         self.capturing = False  # 采集回合进行中（capture episode start / end）
+        self.capture_meta: dict = {}  # capture sync 同步的元信息（保存数据时附加）
         self.episode_count = 0  # 已开始采集的回合数（测试断言用）
         self._run_time = 0.0  # fake image 相位推进时间
 
@@ -185,6 +187,10 @@ class SimRobotCore:
     def end_capture(self) -> None:
         """结束一轮采集（episode 结束）：清 capturing 标志。"""
         self.capturing = False
+
+    def set_capture_meta(self, meta: dict) -> None:
+        """同步采集元信息（capture sync）：真实 SDK 在保存一轮数据时附加到描述文件。"""
+        self.capture_meta = dict(meta or {})
 
     def safe_stop(self) -> None:
         """安全停止（幂等、失败安全）：清空目标。"""
@@ -228,19 +234,11 @@ class SimRobotCore:
         rgb = (50 + normalized * 150).astype(np.uint8)
         return rgb
 
-    # ---- 数据状态（供 data_status 上报；采集由真实 SDK 自维护，本脚本不实现录制）----
+    # ---- 采集状态（供 capture status 上报；采集由真实 SDK 自维护，本脚本不实现录制）----
     @property
     def data_dir(self) -> Path | None:
-        """数据目录（data_status 上报）。"""
+        """数据目录（capture status 上报）。"""
         return Path(self._data_dir) if self._data_dir else None
-
-    @property
-    def data_files(self) -> list[str]:
-        """数据目录下已有的数据文件路径（data_status 上报；真实 SDK 自行填充采集产物）。"""
-        data_dir = self.data_dir
-        if data_dir is None or not data_dir.exists():
-            return []
-        return [str(p) for p in sorted(data_dir.iterdir()) if p.is_file()]
 
     # ---- 内部 ---------------------------------------------------------------
     def _refresh_target(self) -> None:
@@ -275,7 +273,11 @@ def create_sdk_app(
     - ``endpoint``：本进程 HTTP 地址（discover 自描述返回给 Edge，供 adapter 连指令）。
     """
     writer = ObsShmWriter(
-        name=shm_name, image_count=len(core.images), image_size=core.camera_size, qpos_dim=core.action_dim
+        name=shm_name,
+        image_count=len(core.images),
+        image_size=core.camera_size,
+        qpos_dim=core.action_dim,
+        action_dim=core.action_dim,  # 目标动作区（SHM 布局 v2：qpos + action + images）
     )
 
     class _State:
@@ -293,7 +295,7 @@ def create_sdk_app(
             while state.hardware_running:
                 core.step()  # 推进一帧运动（随机游走 / 限速靠近目标）
                 frame = core.frame()
-                writer.write(frame[_KEY_QPOS], frame["images"])
+                writer.write(frame[_KEY_QPOS], frame[_KEY_ACTION], frame["images"])
                 time.sleep(1 / run_hz)
 
         state.thread = threading.Thread(target=_hardware_loop, name="sdk-hardware", daemon=True)
@@ -376,14 +378,24 @@ def create_sdk_app(
         writer.set_flags(capturing=False)
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
-    @app.get(PATH_DATA_STATUS)
-    def data_status():
-        """采集数据状态：数据目录 + 本次采集得到的数据列表（数据由进程自维护）。"""
+    @app.get(PATH_CAPTURE_STATUS)
+    def capture_status():
+        """采集状态（运行位 / 元信息 / 数据目录）：Edge adapter.capture_status 消费。
+
+        ``running`` 是**本进程真实采集位**（capture/start ↔ end 之间为 True）；元信息为
+        ``capture sync`` 同步的全集；数据目录为采集产物落地目录（进程自维护）。
+        """
         return {
+            FIELD_RUNNING: bool(core.capturing),
+            FIELD_META: core.capture_meta,
             FIELD_DATA_DIR: str(core.data_dir) if core.data_dir else None,
-            FIELD_DATA_FILES: core.data_files,
-            FIELD_RUNNING: True,
         }
+
+    @app.post(PATH_CAPTURE_SYNC)
+    def capture_sync(body: dict):
+        """同步采集元信息（Edge adapter.sync_capture_meta 调用；进程保存一轮数据时附加）。"""
+        core.set_capture_meta(body.get(FIELD_META) or {})
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     return app
 
@@ -397,7 +409,7 @@ def run_sdk_server(
     log_level: str = "info",
 ) -> None:
     """阻塞运行 SDK 服务器（进程入口）：组装核心 + HTTP 服务并启动 uvicorn。"""
-    core = SimRobotCore(data_dir=data_dir)
+    core = SimRobotCore(data_dir=data_dir or SimRobotCore.DATA_DIR)
     app = create_sdk_app(core, shm_name=shm_name, run_hz=run_hz)
     config = uvicorn.Config(app, host=host, port=port, log_level=log_level)
     server = uvicorn.Server(config)

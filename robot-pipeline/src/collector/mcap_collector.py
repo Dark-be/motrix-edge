@@ -134,7 +134,7 @@ class ActMcapCollector:
 
     @property
     def save_dir(self) -> Path:
-        """当前数据保存目录（供 server 上报 data_status）。"""
+        """当前数据保存目录（供 server 上报 capture status）。"""
         return self._save_dir
 
     def set_robot_meta(self, robot_name: str = "", robot_type: str = "") -> None:
