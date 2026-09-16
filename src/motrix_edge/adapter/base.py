@@ -326,9 +326,14 @@ class RobotAdapter(ABC):
         """直接下发一维 array-like 动作指令（raw 指令，立即执行）。"""
         raise NotImplementedError
 
-    # ---- teleop（遥操作开关）--------------------------------------------------
-    def set_teleop(self, enabled: bool) -> None:
-        """设置遥操作开关（``True``=遥操作 / ``False``=程控 / 推理控制）。
+    # ---- teleop（遥操作 / 人工接管）-------------------------------------------
+    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+        """设置遥操作（``True``=遥操作 / ``False``=程控 / 推理控制）。
+
+        ``mode`` 为遥操作映射模式（``absolute`` 缺省 / ``delta`` = **人工接管**：以接管瞬间
+        的主 / 从位姿为锚点、只叠加主臂增量），**仅在 ``enabled=True`` 时有意义**；``None``
+        表示沿用进程侧缺省（等价 ``absolute``）。遥操作开启即视为人工接管，进程侧会拒绝
+        ``rollout``（见 `wiki/design/robot_pipeline_teleop.md`）。
 
         默认 no-op；支持遥操作的子类按需覆盖（如经 HTTP 转发机器人进程 /v1/teleop）。
         """
@@ -372,8 +377,13 @@ class RobotAdapter(ABC):
 
     # ---- rollout（推理闭环，被推理任务消费）-----------------------------------
     @abstractmethod
-    def rollout(self, action: Action) -> None:
-        """接收一维 array-like 模型动作，按 capabilities.action_dim 解析并推进一帧。"""
+    def rollout(self, action: Action) -> bool:
+        """接收一维 array-like 模型动作，按 capabilities.action_dim 解析并推进一帧。
+
+        返回是否**已下发**：``False`` = 进程侧拒绝本拍（遥操作 / 人工接管中，见
+        `wiki/design/robot_pipeline_teleop.md`），调用方应跳过本拍、下拍重试（遥操作关闭后
+        自动恢复）；``True`` / 无返回（旧实现）均视为已下发。
+        """
         raise NotImplementedError
 
     # ---- safe_stop（安全停止）-------------------------------------------------

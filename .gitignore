@@ -31,3 +31,7 @@ py-report.xml
 data/
 logs/
 
+# 运行期可写配置状态：未设 XDG_STATE_HOME / MOTRIX_CONFIG_DIR 时，CaptureMetaStore 会把
+# 包内默认 capture.yml 播种到 CWD（config.get_state_dir 缺省回退 CWD）——不属仓库内容。
+capture.yml
+

@@ -8,7 +8,7 @@
 -   **数据采集**：把每轮采集（episode）写为 Foxglove MCAP（ROS2 官方消息格式），并输出
     同名 JSON 元信息；
 -   **控制**：`reset` / `execute` / `rollout` / `teleop` / `safe_stop` 指令；
--   **遥操作**：Leader→Follower / master→slave 主从跟随；
+-   **遥操作**：Leader→Follower / master→slave 主从跟随（绝对映射 / 增量人工接管）；
 -   **策略部署 / 数据回放 / 可视化**：规划中（脚本尚未提供）。
 
 本目录是 motrix-edge 仓库根下的独立子项目（自带 `pyproject.toml` / `uv.lock` /
@@ -147,19 +147,19 @@ ROBOT_SERVER_CFG=dual_piper_server.yml uv run uvicorn server.robot_server:app --
 robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 `motrix_edge.adapter.http_contract`）：
 
-| 方法 | 路径                 | 请求 body         | 说明                                                                            |
-| ---- | -------------------- | ----------------- | ------------------------------------------------------------------------------- |
-| POST | `/v1/discover`       | —                 | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
-| GET  | `/v1/health`         | —                 | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
-| POST | `/v1/reset`          | —                 | 复位到 home（非阻塞）                                                           |
-| POST | `/v1/execute`        | `{action: [...]}` | 直接下发 raw 动作                                                               |
-| POST | `/v1/rollout`        | `{action: [...]}` | 推理动作                                                                        |
-| POST | `/v1/teleop`         | `{enabled: bool}` | 遥操作开关                                                                      |
-| POST | `/v1/safe_stop`      | —                 | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
-| POST | `/v1/capture/start`  | —                 | 开始一轮采集（episode 开始）                                                    |
-| POST | `/v1/capture/end`    | —                 | 结束一轮采集（episode 结束）                                                    |
-| POST | `/v1/capture/sync`   | `{meta: {...}}`   | 同步采集元信息（operator / task_name 等）                                       |
-| GET  | `/v1/capture/status` | —                 | 采集状态（运行位 / 元信息 / 数据目录）                                          |
+| 方法 | 路径                 | 请求 body          | 说明                                                                            |
+| ---- | -------------------- | ------------------ | ------------------------------------------------------------------------------- |
+| POST | `/v1/discover`       | —                  | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
+| GET  | `/v1/health`         | —                  | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
+| POST | `/v1/reset`          | —                  | 复位到 home（非阻塞）                                                           |
+| POST | `/v1/execute`        | `{action: [...]}`  | 直接下发 raw 动作                                                               |
+| POST | `/v1/rollout`        | `{action: [...]}`  | 推理动作（**遥操作中 → 409**：推理让位）                                        |
+| POST | `/v1/teleop`         | `{enabled, mode?}` | 遥操作（`mode` 缺省 `absolute`；`delta` = 人工接管增量）                        |
+| POST | `/v1/safe_stop`      | —                  | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
+| POST | `/v1/capture/start`  | —                  | 开始一轮采集（episode 开始）                                                    |
+| POST | `/v1/capture/end`    | —                  | 结束一轮采集（episode 结束）                                                    |
+| POST | `/v1/capture/sync`   | `{meta: {...}}`    | 同步采集元信息（operator / task_name 等）                                       |
+| GET  | `/v1/capture/status` | —                  | 采集状态（运行位 / 元信息 / 数据目录）                                          |
 
 另有调试端点 `GET /observe`（最新观测 qpos + 相机 JPEG base64）。
 
@@ -211,12 +211,27 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 
 ## 遥操作
 
+主从来源：
+
 -   `single_piper`：Leader 主臂（读取）+ Follower 从臂（执行），同构映射；
 -   `dual_piper` / `dual_alicia_piper`：master 主手（alicia）+ slave 从手（piper），
     左 → 左、右 → 右。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
-跟随。遥操作默认关闭（adapter 通讯控制中暂时均为 false）。
+（`robot.step_rad`）跟随；遥操作默认关闭（adapter 通讯控制中暂时均为 false）。`mode` 选映射模式：
+
+-   `absolute`（缺省）：主臂**绝对**位姿直连从臂 target——主从同构、位姿已对齐的示教采集；
+-   `delta`（**人工接管**）：`target = slave_ref + (master_now − master_ref)`——锚点在接管后
+    首拍采样（主臂读数与从臂位姿同一拍），增量恒从 0 开始，从臂不会因主从位姿差突变；
+    关节与夹爪同一套增量语义。模型即将失败时人工介入：先把主臂摆到与从臂相近的位姿，再
+    `POST /v1/teleop {"enabled": true, "mode": "delta"}`。
+
+两种模式的完整语义、锚点采样时机与边界见
+[robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。
+
+**遥操作期间推理让位**：遥操作开着（不分模式：遥操作即人工接管）时，`POST /v1/rollout` 返回
+`409`（不改 target、不退出遥操作）；`execute` / `reset` / `safe_stop` 不受影响（执行即结束遥操作）。
+Edge 侧 adapter 的 `rollout()` 据此返回 `False`，推理会话跳过该拍、遥操作关闭后自动恢复。
 
 ## CAN 总线配置
 

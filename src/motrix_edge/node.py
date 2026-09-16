@@ -75,6 +75,7 @@ from motrix_edge.utils.commands import (
     parse_bool,
     parse_meta,
     parse_qpos,
+    parse_teleop_mode,
 )
 from motrix_edge.utils.data_handler import debug_print
 
@@ -529,11 +530,12 @@ class EdgeNode:
         if cmd.name == CMD_ROBOT_TELEOP:
             try:
                 enabled = parse_bool(cmd.params.get("enabled"))
-                self.adapter.set_teleop(enabled)
+                mode = parse_teleop_mode(cmd.params.get("mode"))
+                self.adapter.set_teleop(enabled, mode)
             except ValueError as exc:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
                 return True
-            self._reply(cmd, ok_result(node_state=self.state, teleop=enabled))
+            self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode))
             return True
         return False
 

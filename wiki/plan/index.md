@@ -19,5 +19,6 @@
 -   [ACT 走 Lerobot gRPC + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
 -   [robot-pipeline 控制 / 观测双线程实施计划](./robot_pipeline_control_thread_plan.md)
 -   [RTC 过渡策略（权重过渡 / 连续过渡）实施计划](./motrix_edge_rtc_transition_plan.md)
+-   [robot-pipeline 遥操作（增量接管）实施计划](./robot_pipeline_teleop_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->

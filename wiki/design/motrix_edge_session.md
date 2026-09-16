@@ -65,7 +65,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 -   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
     **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
-    `robot teleop <bool>` 遥操作开关、`capture episode start/end` 控制一轮采集、
+    `robot teleop <bool> [mode]` 遥操作 / 人工接管（`mode=delta` = 增量接管）、`capture episode start/end` 控制一轮采集、
     `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
 -   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 

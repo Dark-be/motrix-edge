@@ -62,11 +62,11 @@ adapter/
 | capabilities    | `capabilities`（属性）              | 声明能力：动作维度 / 观测键布局 / 能力 dict                                  |
 | observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行** |
 | execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                |
-| teleop          | `set_teleop(enabled)`               | 设置遥操作开关（true=遥操作 / false=程控）；默认 no-op                       |
+| teleop          | `set_teleop(enabled, mode=None)`    | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；默认 no-op                 |
 | capture status  | `capture_status()`                  | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）    |
 | capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                     |
 | capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                           |
-| rollout         | `rollout(action)`                   | 推理闭环：接收模型 action，经 HTTP 转发进程限速靠近                          |
+| rollout         | `rollout(action)`                   | 推理闭环：接收模型 action 经 HTTP 转发进程；遥操作中进程拒收 → 返回 `False`  |
 | safe_stop       | `safe_stop()`                       | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**            |
 | 生命周期辅助    | `reset()`                           | 程序复位到 home（非阻塞）                                                    |
 
@@ -147,18 +147,18 @@ adapter:
 
 -   **HTTP 指令下行**（`http_contract.py`）：端点路径 + body 字段**单点定义**。端点一览（前缀 `/v1`）：
 
-| 方法 | 路径                                    | 请求 body         | 响应 body                                                                           |
-| ---- | --------------------------------------- | ----------------- | ----------------------------------------------------------------------------------- |
-| POST | `/v1/discover`                          | —                 | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`） |
-| GET  | `/v1/health`                            | —                 | `{ok, detail}`                                                                      |
-| POST | `/v1/reset`                             | —                 | `{status}`                                                                          |
-| POST | `/v1/execute`                           | `{action}`        | `{status}`                                                                          |
-| POST | `/v1/rollout`                           | `{action: [dim]}` | `{status}`                                                                          |
-| POST | `/v1/teleop`                            | `{enabled}`       | `{status}`                                                                          |
-| POST | `/v1/safe_stop`                         | —                 | `{status}`                                                                          |
-| GET  | `/v1/capture/status`                    | —                 | `{running, meta, data_dir}`                                                         |
-| POST | `/v1/capture/sync`                      | `{meta}`          | `{status}`                                                                          |
-| POST | `/v1/capture/start` / `/v1/capture/end` | —                 | `{status}`                                                                          |
+| 方法 | 路径                                    | 请求 body          | 响应 body                                                                           |
+| ---- | --------------------------------------- | ------------------ | ----------------------------------------------------------------------------------- |
+| POST | `/v1/discover`                          | —                  | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`） |
+| GET  | `/v1/health`                            | —                  | `{ok, detail}`                                                                      |
+| POST | `/v1/reset`                             | —                  | `{status}`                                                                          |
+| POST | `/v1/execute`                           | `{action}`         | `{status}`                                                                          |
+| POST | `/v1/rollout`                           | `{action: [dim]}`  | `{status}`；**遥操作中 → 409**（推理让位）                                          |
+| POST | `/v1/teleop`                            | `{enabled, mode?}` | `{status}`（`mode`：`absolute` 缺省 / `delta` 人工接管）                            |
+| POST | `/v1/safe_stop`                         | —                  | `{status}`                                                                          |
+| GET  | `/v1/capture/status`                    | —                  | `{running, meta, data_dir}`                                                         |
+| POST | `/v1/capture/sync`                      | `{meta}`           | `{status}`                                                                          |
+| POST | `/v1/capture/start` / `/v1/capture/end` | —                  | `{status}`                                                                          |
 
 -   **共享内存观测上行**（`shm_contract.py`）：SDK 进程按 `run_hz` 持续把观测（qpos + 目标
     action + raw RGB 图像）写入共享内存（`ObsShmWriter`），adapter 经 `ObsShmReader` 读取并

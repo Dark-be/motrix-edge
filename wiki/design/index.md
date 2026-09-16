@@ -22,7 +22,7 @@
 -   [HTTP 控制面（server）](./motrix_edge_server.md)
 -   [Edge 级租约（lease）](./motrix_edge_lease.md)
 -   [Edge Web Console（前端）](./motrix_edge_web_console.md)
--   [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)
 -   [robot-pipeline 运行时（env / robot 双线程）](./robot_pipeline_runtime.md)
+-   [robot-pipeline 遥操作（绝对映射 / 增量接管）](./robot_pipeline_teleop.md)
 
 <!-- 新增设计文档后在此登记标题链接。 -->

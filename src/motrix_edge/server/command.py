@@ -21,7 +21,8 @@ motrix_edge_lease.md）。当前实现（capability 映射）：
   - ``robot_reset``  → push ``Command(robot reset)``（机器人复位，adapter.reset）；
   - ``robot_execute``→ submit ``Command(robot execute, params={qpos})``（直接下发 raw 动作，
                        回执透传；维度校验在 adapter.execute）；
-  - ``robot_teleop`` → push ``Command(robot teleop, params={enabled})``（遥操作开关，true/false）；
+  - ``robot_teleop`` → push ``Command(robot teleop, params={enabled, mode?})``（遥操作 / 人工接管，
+    ``mode=delta`` 为增量接管）；
   - 其他 capability → 骨架（accepted，预留 Capability 校验 / 具体下发执行）。
 
 ``idempotency_key``（HTTP 请求体字段）为 Console 幂等契约**预留**：当前**未实现**去重
@@ -47,6 +48,7 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_RESET,
     CMD_ROBOT_TELEOP,
     Command,
+    parse_teleop_mode,
 )
 
 
@@ -119,9 +121,19 @@ class CommandService:
             }
 
         if capability == "robot_teleop":
-            # 遥操作开关：true / false 直接作为参数（adapter.set_teleop）
-            enabled = (params or {}).get("enabled")
-            self._bus.push(Command(CMD_ROBOT_TELEOP, params={"enabled": enabled}, meta={"lease_id": lease_id}))
+            # 遥操作（人工接管）：true / false 直接作为参数，可选 mode=absolute|delta 进同一命令
+            target_params = params or {}
+            try:  # 非法 mode 在入口就拒（push 型命令无回执通道，否则前端只看到 accepted）
+                parse_teleop_mode(target_params.get("mode"))
+            except ValueError as exc:
+                raise CommandError(str(exc), status_code=400) from exc
+            self._bus.push(
+                Command(
+                    CMD_ROBOT_TELEOP,
+                    params={"enabled": target_params.get("enabled"), "mode": target_params.get("mode")},
+                    meta={"lease_id": lease_id},
+                )
+            )
             return {"status": "accepted", "command_id": command_id, "executed": "robot_teleop"}
 
         if capability == "capture_episode_start":

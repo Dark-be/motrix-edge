@@ -775,7 +775,7 @@ def test_commands_robot_execute_pushes_qpos():
 
 
 def test_commands_robot_teleop_pushes_command():
-    """capability=robot_teleop → push robot teleop（enabled 直接作为参数）。"""
+    """capability=robot_teleop → push robot teleop（enabled + 可选 mode 直接作为参数）。"""
     node = FakeNode()
     client = make_commands_client(node)
     # 未持有租约：robot_teleop 被拒（409）
@@ -783,13 +783,38 @@ def test_commands_robot_teleop_pushes_command():
     lease = install_lease(client)
     r = client.post(
         "/v1/commands",
-        json={"command_id": "c1", "lease_id": lease, "capability": "robot_teleop", "params": {"enabled": "true"}},
+        json={
+            "command_id": "c1",
+            "lease_id": lease,
+            "capability": "robot_teleop",
+            "params": {"enabled": "true", "mode": "delta"},
+        },
     )
     assert r.status_code == 200
     assert r.json()["status"] == "accepted"
     time.sleep(0.1)
     cmd = next(c for c in node.pulled if getattr(c, "name", None) == CMD_ROBOT_TELEOP)
     assert cmd.params.get("enabled") == "true"  # enabled 直接作为参数
+    assert cmd.params.get("mode") == "delta"  # 人工接管（增量）模式随命令下发
+
+
+def test_commands_robot_teleop_rejects_invalid_mode():
+    """capability=robot_teleop 且 mode 非法 → 400（入口即拒，不 push 命令）。"""
+    node = FakeNode()
+    client = make_commands_client(node)
+    lease = install_lease(client)
+    r = client.post(
+        "/v1/commands",
+        json={
+            "command_id": "c1",
+            "lease_id": lease,
+            "capability": "robot_teleop",
+            "params": {"enabled": "true", "mode": "fast"},
+        },
+    )
+    assert r.status_code == 400
+    assert "invalid teleop mode" in r.json()["detail"]
+    assert node.pulled == []  # 未 push
 
 
 def test_commands_capture_episode_start_end_pushes_command():

@@ -58,7 +58,7 @@ stateDiagram-v2
 
 -   `robot estop`：**全局安全命令**，任何非 ERROR 状态先安全停止再转 ERROR。
 -   IDLE：拒绝 `session run` / `robot reset`（机器人未就绪）。
--   READY：`session run <type>`（选择 + 启动一步完成 → ACTIVE）、`robot reset`、`robot execute <qpos>`、`robot teleop <bool>`。
+-   READY：`session run <type>`（选择 + 启动一步完成 → ACTIVE）、`robot reset`、`robot execute <qpos>`、`robot teleop <bool> [mode]`。
 -   ACTIVE：`session quit`（退出 → READY）、`robot reset`、`robot execute`、`robot teleop`。
 -   ERROR：仅 `node reset` 恢复 → IDLE。
 

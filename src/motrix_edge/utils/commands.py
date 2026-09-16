@@ -32,6 +32,7 @@ import queue
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motrix_edge.adapter.http_contract import TELEOP_MODES
 from motrix_edge.policy import (
     policy_config_connect_locked_keys,
     policy_config_items,
@@ -59,7 +60,7 @@ CMD_SESSION_QUIT = "session quit"  # 退出当前会话
 CMD_ROBOT_RESET = "robot reset"  # 复位机器人（仅 adapter 可用时）
 CMD_ROBOT_ESTOP = "robot estop"  # 急停（安全停止 + 转 ERROR；全局安全命令）
 CMD_ROBOT_EXECUTE = "robot execute"  # 直接下发 raw 动作（位置参数 qpos，逗号分隔数字）
-CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作开关（位置参数 enabled = true / false）
+CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作（位置参数 enabled = true/false；可选 mode = absolute|delta 人工接管）
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）
@@ -258,6 +259,24 @@ def parse_bool(raw) -> bool:
     if text in ("false", "0", "no", "off"):
         return False
     raise ValueError(f"invalid boolean: {raw!r}")
+
+
+def parse_teleop_mode(raw) -> str | None:
+    """解析 ``robot teleop`` 的可选模式参数 → ``absolute`` / ``delta`` / ``None``。
+
+    - 缺失 / 空 → ``None``：不指定模式（进程侧缺省 ``absolute``，与旧调用方等价）；
+    - ``absolute`` → 主臂绝对位姿直连从臂 target（示教采集）；
+    - ``delta`` → **人工接管**：以接管瞬间的主 / 从位姿为锚点、只叠加主臂增量（从臂不突变）；
+    - 非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+
+    取值单点定义在 ``motrix_edge.adapter.http_contract``（``TELEOP_MODES``，与 /v1/teleop 契约同源）。
+    """
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    if text not in TELEOP_MODES:
+        raise ValueError(f"invalid teleop mode: {raw!r} (expect {'|'.join(TELEOP_MODES)})")
+    return text
 
 
 ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
@@ -597,7 +616,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ROBOT_RESET),
         CommandSpec(name=CMD_ROBOT_ESTOP),
         CommandSpec(name=CMD_ROBOT_EXECUTE, positional=("qpos",)),  # robot execute <qpos>
-        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled",)),  # robot teleop <true|false>
+        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),  # robot teleop <true|false> [mode]
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>

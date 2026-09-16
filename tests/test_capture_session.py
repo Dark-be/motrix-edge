@@ -161,13 +161,14 @@ def test_capture_robot_teleop_during_observe(tmp_path):
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
     session = capture_session.CaptureSession(
         make_config(tmp_path),
-        command_source=make_signals("robot teleop true", "robot teleop false", "session quit"),
+        command_source=make_signals("robot teleop true", "robot teleop false delta", "session quit"),
         frame_manager=FrameManager(),
         adapter=adapter,
     )
     session.session_start()
     assert session.run() == RunResult.FINISHED
-    assert adapter.teleop_values == [True, False]  # true → false 逐次设置
+    # true → false 逐次设置；mode 缺省 None（进程侧缺省 absolute），显式 delta 透传
+    assert adapter.teleop_calls == [(True, None), (False, "delta")]
     session.session_finish()
 
 

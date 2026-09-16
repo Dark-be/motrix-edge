@@ -22,9 +22,9 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 1. **连接栏**：Edge Base URL（默认 `http://localhost:8000`，localStorage 记忆）+ 连接 / 刷新 + 版本 / identity 概要。
 2. **租约面板**：租约状态 + 到期倒计时 + 激活 / 续租 / 释放 + 自动续租开关（默认开）。
 3. **状态面板**：节点状态（`node_state`）、会话状态（`state`）、**匹配到的适配器**（name / type / running）、磁盘、数据列表（1s 轮询；不再展示 `data_dir` / `default robot`）。
-4. **机器人命令卡片**：estop / reset / execute / teleop 命令控制（不再显示适配器，也不提供「查看全部适配器」；匹配到的适配器见状态栏）。
+4. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制（不再显示适配器，也不提供「查看全部适配器」；匹配到的适配器见状态栏）。
 5. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项；远端上传未配置时上传接口返回 `501`，此场景可用「**打包**」（`POST /v1/uploads/pack`）：包名默认 `pack<选中数量>`（预填 `suggested_pack_name`，可改名），把选中 episode 的 `.mcap` + `.json` **移动**到 `<扫描目录>/<包名>/`；同名目录已存在 → `409`（改名后重试）；成功后用回执的 `scan` 刷新列表（源文件已移走）。
-6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；**采集元信息**（采集员 / 任务名）从 `GET /v1/captures/meta`（`capture.yml`，`capture meta` 命令维护）下拉选择，再 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加），并展示 `GET /v1/captures` 返回的 `capture_status`（采集员 / 任务名 / 运行位）。
+6. **采集会话面板**：进入采集（enter）/ 退出采集（exit）/ 急停（estop），标注底层命令与合法状态；**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与节点 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
 7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后先「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）。**策略配置卡片按所选策略动态渲染**（schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers` 的 `policy_config`）：先是**公共项推理端点** `host` / `port`（与其它项同层级、同一张表单；仅在**策略已连接**时置灰锁定，未连接时（含会话内）可改，另有「保存端点」按钮直接写内存态），随后是策略项——openpi → 文本指令 `prompt`（必填，`POST /v1/infers/prompt`，推理/录制前必须）；act → 模型路径 `pretrained_name_or_path`（必填，可选 `/path/to/pretrained_model`）/ `device` / `actions_per_chunk`——**未进入会话时随「进入推理」一并下发**（`POST /v1/infers` body 的 `config`），会话内经 `POST /v1/infers/config`（`infer config set`）运行时应用（端点项仅在策略已连接时置灰）；必填项缺失（`missing` 非空）或端点未配置时推理 / 录制按钮禁用。推理按钮：**推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`，启动即回执、直到退出 / 急停）；**推理时 rollout 录制** = 「开始录制 / 结束录制」（`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带 `task_name=prompt`）。多步推理与「消耗缓存」模式已取消。退出推理后结束会话，连接成功时展示策略服务器 metadata。
 8. **RTC 卡片（推理面板内）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考），并可输入 H / P / S / E / 聚合函数后「应用 RTC 参数」（`POST /v1/infers/rtc`）；参数会话内即时生效（下一块起）。
 9. **视频面板**：WebRTC `<video>` 播放 + 连接状态 + 连接 / 断开按钮。
@@ -52,7 +52,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 -   受控请求封装：统一注入 `X-Lease-Id`；非 2xx 抛出 `{ status, detail }`。
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
--   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；推理状态额外返回连接成功后的 `metadata`、当前 `prompt` / `recording` / `capture_meta`（默认 operator=policy、task_name=prompt），前端按 JSON 展示。
+-   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集；推理状态同构，分类可拓展，前端按 key 逐行展示）；推理状态额外返回连接成功后的 `metadata`、当前 `prompt` / `recording` / `capture_meta`（默认 operator=policy、task_name=prompt），前端按 JSON 展示。
+-   采集元信息选项：`GET /v1/captures/meta` 读列表（免租约）与写回执同构 `{meta: {分类: [选项]}}`；前端按返回的分类动态渲染选择框与管理的下拉（不硬编码分类，新分类无需改前端）。
 -   推理面板提供 Prompt 输入（`POST /v1/infers/prompt` 预置，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
 -   **RTC 卡片**：展示 `GET /v1/infers` 的 `rtc`（enabled / 块长 H / 执行段 E / 后缀 S / 聚合函数 /
     步号与剩余 / 最近一块的 prefix·execution·suffix 切分），并可经 `POST /v1/infers/rtc` 运行期改参数。
@@ -64,7 +65,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 ## 布局与可用性
 
--   会话卡片（采集 / 推理）可**折叠**：收起暂时不用的会话；当前会话切换时自动收起另一张卡片。
+-   卡片（租约 / 状态 / 机器人命令 / 采集 / 推理 / 上传 / 预览 / 操作日志）均可**折叠**：收起暂时不用的卡片；头部保留关键摘要（租约状态 + 到期倒计时、node_state / session_state、「可发命令」、日志条数），收起也不丢状态。
+-   会话卡片（采集 / 推理）另有**自动折叠**：当前会话切换时自动收起另一张卡片。
 -   按钮 / 输入框设最小长度与 `whitespace-nowrap`，防止文字被挤压到两行。
 -   状态值（如会话状态）在小屏**纵向堆叠**（label 在上、value 在下），避免右对齐覆盖输入框。
 

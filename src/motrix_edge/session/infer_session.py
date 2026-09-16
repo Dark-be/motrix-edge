@@ -484,8 +484,17 @@ class InferSession(BaseSession):
             self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
             return
         action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 取本步动作
-        if action is not None:
-            self.adapter.rollout(action)  # 解析模型 action 为限速目标并推进一帧
+        if action is not None and self.adapter.rollout(action) is False:
+            # 遥操作（人工接管）中：推理让位（SDK 409）——本步不下发，回执说明原因
+            self._reply(
+                cmd,
+                CommandResult(
+                    status="rejected",
+                    error="teleop (human takeover) active: rollout refused",
+                    status_code=409,
+                ),
+            )
+            return
         repr_action = self._action_repr(action)
         debug_print(self.name, f"Rollout step executed (action={repr_action}).", "INFO")
         self._reply(
@@ -621,6 +630,8 @@ class InferSession(BaseSession):
                 continue
             action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 本步动作
             if action is not None:
+                # 遥操作（人工接管）中 SDK 拒绝本拍（409，adapter 已限流日志）：继续下一拍，
+                # 遥操作关闭（robot teleop false）后自动恢复下发。
                 self.adapter.rollout(action)
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
 
