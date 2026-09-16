@@ -53,6 +53,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_OK,
     FIELD_RUNNING,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_MODE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
@@ -115,6 +116,9 @@ class HttpShmAdapter(RobotAdapter):
         self.safe_stop_calls = 0
         self.reset_calls = 0
         self.teleop_enabled = False
+        self.teleop_mode: str | None = None  # 最近一次 set_teleop 的模式（None = 未指定，进程侧缺省）
+        self.rollout_refused_calls = 0  # 遥操作（人工接管）中 rollout 被 SDK 拒绝（409）次数
+        self._rollout_refused_logged = False  # 拒绝日志限流位（仅状态变化时各记一条）
 
     @property
     def running(self) -> bool:
@@ -190,17 +194,39 @@ class HttpShmAdapter(RobotAdapter):
         debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
         self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
 
-    def set_teleop(self, enabled: bool) -> None:
-        """设置遥操作开关（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。"""
-        self.teleop_enabled = bool(enabled)
-        debug_print(self.name, f"teleop set to {self.teleop_enabled}", "INFO")
-        self._client().post(PATH_TELEOP, json={FIELD_TELEOP_ENABLED: self.teleop_enabled})
+    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+        """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
 
-    def rollout(self, action: Action) -> None:
-        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。"""
+        ``mode``（``absolute`` / ``delta``）: 仅开启时有意义，缺省不发送该字段（进程侧回退
+        ``absolute``，与只发 ``enabled`` 的旧调用方等价）。
+        """
+        self.teleop_enabled = bool(enabled)
+        self.teleop_mode = mode if self.teleop_enabled else None
+        body: dict = {FIELD_TELEOP_ENABLED: self.teleop_enabled}
+        if self.teleop_mode:
+            body[FIELD_TELEOP_MODE] = self.teleop_mode
+        debug_print(self.name, f"teleop set to {self.teleop_enabled} (mode={self.teleop_mode})", "INFO")
+        self._client().post(PATH_TELEOP, json=body)
+
+    def rollout(self, action: Action) -> bool:
+        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。
+
+        遥操作（人工接管）中 SDK 返回 **409**：本拍不下发（返回 False）。持续推理（30Hz）会反复
+        命中，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
+        """
         target = self._expand_action(action, "rollout")
         self.rollout_calls += 1
-        self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
+        resp = self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
+        if resp.status_code == httpx.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
+            self.rollout_refused_calls += 1
+            if not self._rollout_refused_logged:
+                self._rollout_refused_logged = True
+                debug_print(self.name, "rollout refused: robot in teleop (human takeover)", "WARNING")
+            return False
+        if self._rollout_refused_logged:  # 遥操作结束：恢复下发（状态变化才记日志）
+            self._rollout_refused_logged = False
+            debug_print(self.name, "rollout resumed (teleop off)", "INFO")
+        return True
 
     def safe_stop(self) -> None:
         """安全停止（幂等、失败安全）：本地记录 + HTTP 转发 SDK 进程。

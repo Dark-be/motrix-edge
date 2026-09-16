@@ -153,6 +153,16 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 只读 `EdgeNode` 的**缓存**字段（由节点主循环周期刷新），**不**因前端轮询触发对机器人进程的
 实时请求：edge 运行不依赖前端。
 
+## 状态读取（只读缓存）
+
+`/v1/captures` 与 `/v1/infers` 的状态快照都含「当前节点绑定的 adapter」与「机器人进程采集
+状态」两段，统一由 `server/state.py` 提供（`adapter_ref` / `adapter_state` /
+`capture_status` / `capture_raw`）——**同一份字段定义，两个服务共用**，不再各自逐字段实现。
+
+只读 `EdgeNode` 的**缓存**字段（adapter 身份与心跳 `running` / `control_hz` / `measured_hz`、
+遥操作位 `teleop` / `teleop_mode`、采集 `running` / `meta`；由节点主循环周期刷新），**不**因
+前端轮询触发对机器人进程的实时请求：edge 运行不依赖前端。
+
 ## 错误语义
 
 | 状态码 | 含义                                                                       |

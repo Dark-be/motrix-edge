@@ -114,7 +114,8 @@ class _FakeAdapter:
         self.safe_stop_calls = 0
         self.executed = []
         self.reset_calls = 0
-        self.teleop_values: list[bool] = []
+        self.teleop_calls: list[tuple[bool, str | None]] = []
+        self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
         self.images = list(images) if images is not None else None  # 启用相机（adapter config 决定）
         self.action_dim = action_dim  # 启用臂 qpos 维数
         self.capabilities = SimpleNamespace(supports=lambda cap: True)  # EXECUTE 能力校验通过
@@ -141,11 +142,14 @@ class _FakeAdapter:
     def execute(self, action):
         self.executed.append(action)
 
-    def set_teleop(self, enabled):
-        self.teleop_values.append(bool(enabled))
+    def set_teleop(self, enabled, mode=None):
+        self.teleop_calls.append((bool(enabled), mode))
 
-    def rollout(self, action):
+    def rollout(self, action) -> bool:
+        if self.teleop_refused:  # 模拟 SDK 409（遥操作 / 人工接管中）：本拍不下发
+            return False
         self.executed.append(action)
+        return True
 
     def start_capture(self):
         self.start_capture_calls += 1
@@ -704,6 +708,31 @@ def test_infer_rollout_continuous_replies_started_and_stops(monkeypatch):
     assert adapter.executed  # 有动作下发
 
 
+def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
+    """infer rollout stop：停止持续推理并**回到会话主循环**（会话不退出，仍可单步推理）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
+    cont.reply_to = replies.append
+    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
+    stop.reply_to = replies.append
+    single = _REGISTRY.parse_argv(["infer", "rollout"])
+    single.reply_to = replies.append
+    # None = 无命令空档：让持续推理推一步后再下发 stop
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
+    assert [r.status for r in replies] == ["ok", "ok", "ok"]
+    assert replies[0].data["state"] == "continuous"
+    assert replies[1].data["continuous"] is False  # 停止回执
+    assert session.continuous is False  # 运行位已清
+    assert replies[2].data["count"] == 1  # 停止后单步推理仍可用（会话未退出）
+
+
 def test_infer_continuous_records_episode(monkeypatch):
     """持续推理期间可录制 rollout：capture episode start/end 在持续循环内被消费。"""
     adapter = _FakeAdapter(ready=True)
@@ -1207,10 +1236,31 @@ def test_infer_stop_returns_error(monkeypatch):
 
 
 def test_robot_teleop_in_infer_loop(monkeypatch):
-    """推理循环中 robot teleop：true/false 直接作为参数 → adapter.set_teleop。"""
+    """推理循环中 robot teleop：true/false（+ 可选 mode）作为参数 → adapter.set_teleop。"""
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
     _patch(monkeypatch, policy)
-    session = _build_session(adapter, policy, ("robot teleop true", "session quit"))
+    session = _build_session(adapter, policy, ("robot teleop true delta", "robot teleop false", "session quit"))
     assert session.run() == RunResult.FINISHED
-    assert adapter.teleop_values == [True]
+    assert adapter.teleop_calls == [(True, "delta"), (False, None)]
+
+
+def test_infer_rollout_refused_during_teleop(monkeypatch):
+    """遥操作（人工接管）中单步 infer rollout：SDK 拒绝（409）→ 回执 rejected，不下发动作。"""
+    adapter = _FakeAdapter(ready=True)
+    adapter.teleop_refused = True  # 模拟 SDK 409：遥操作中推理让位
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    rollout = _REGISTRY.parse_argv(["infer", "rollout"])
+    rollout.reply_to = replies.append
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.infer_calls == 1  # 推理照常跑（只是不下发）
+    assert adapter.executed == []  # 本拍动作未下发
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 409
+    assert "teleop" in replies[0].error
