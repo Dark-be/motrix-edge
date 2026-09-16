@@ -33,6 +33,11 @@
   后续若要支持「在控制流程中启动采集」，必须先解决这个同步点（见
   ``wiki/design/robot_pipeline_runtime.md``「跨队列顺序（有意弱化）」）。
 
+  **遥操作（人工接管）期间推理让位**：``robot_rollout`` 在 HTTP 线程同步抛
+  ``TakeoverActiveError``（server → 409），控制线程执行时 ``BaseRobot.rollout()`` 再判一次
+  （判据都是 ``robot.teleop_enabled``，**不分遥操作模式**）；``execute`` / ``reset`` / ``safe_stop``
+  不受影响（程控 / 安全优先，执行即结束遥操作）。
+
 层次：server (HTTP + 共享内存) → env (控制 / 观测线程 + 命令队列) → robot (action/target_action/step 限速)
 
 env 收到采集开关的请求启动采集开关，从收到采集开始，到收到采集结束，会保存其中的一段episode（mcap）
@@ -46,6 +51,10 @@ from collections import deque
 
 from collector import get_collector
 from utils.base.data_handler import debug_print
+
+
+class TakeoverActiveError(RuntimeError):
+    """遥操作（人工接管）进行中：推理下发（``rollout``）被拒（server 映射为 409）。"""
 
 
 class BaseEnv:
@@ -116,8 +125,15 @@ class BaseEnv:
         self.commands.put(("execute", flat_action))
 
     def robot_rollout(self, flat_action):
-        """推理闭环：入队，由控制线程执行（同步校验维度）。"""
+        """推理闭环：入队，由控制线程执行（同步校验维度 + **遥操作中同步拒绝**）。
+
+        **遥操作（人工接管，不分模式）进行中** → 抛 ``TakeoverActiveError``（server 映射 HTTP 409）：
+        从臂 target 由人工决定，推理下发必须让位；控制线程执行时 ``BaseRobot.rollout()``
+        **再判一次**（权威）——两次判定之间遥操作状态可能变化，以控制线程为准。
+        """
         self._check_action_dim(flat_action)
+        if self.robot.teleop_enabled:
+            raise TakeoverActiveError("teleop (human takeover) active: rollout refused")
         debug_print(self.robot.name, f"HTTP 收到命令: rollout dim={len(flat_action)}", "INFO")
         self.commands.put(("rollout", flat_action))
 
@@ -126,10 +142,14 @@ class BaseEnv:
         debug_print(self.robot.name, "HTTP 收到命令: safe_stop（急停）", "INFO")
         self.commands.put(("safe_stop", None))
 
-    def robot_set_teleop(self, enabled: bool):
-        """设置遥操作开关（True=遥操作 / False=程控）：入队，由控制线程执行。"""
-        debug_print(self.robot.name, f"HTTP 收到命令: teleop enabled={bool(enabled)}", "INFO")
-        self.commands.put(("teleop", bool(enabled)))
+    def robot_set_teleop(self, enabled: bool, mode: str | None = None):
+        """设置遥操作（``enabled``：True=遥操作 / False=程控；``mode``：映射模式）：入队，控制线程执行。
+
+        ``mode`` 为 ``absolute``（缺省，主臂绝对位姿直连）或 ``delta``（**人工接管**：以接管
+        瞬间的主 / 从位姿为锚点，只叠加主臂增量）——具体语义与锚点采样见 ``BaseRobot``。
+        """
+        debug_print(self.robot.name, f"HTTP 收到命令: teleop enabled={bool(enabled)} mode={mode}", "INFO")
+        self.commands.put(("teleop", (bool(enabled), mode)))
 
     def robot_capture_start(self):
         """开始一轮采集（episode 开始）：入队，由观测线程置 capturing=True。
@@ -357,14 +377,19 @@ class BaseEnv:
                 elif cmd == "execute":
                     self.robot.execute(payload)
                 elif cmd == "rollout":
-                    self.robot.rollout(payload)
+                    if not self.robot.rollout(payload):
+                        # 遥操作中：推理让位（预期状态，只记日志，不置 last_error / 不影响 health）
+                        debug_print(self.robot.name, "rollout ignored: teleop (human takeover) active.", "WARNING")
                 elif cmd == "safe_stop":
                     self.robot.safe_stop()
                 elif cmd == "teleop":
-                    if payload:
-                        self.robot.enable_teleop()
-                    else:
+                    enabled, mode = payload
+                    if not enabled:
                         self.robot.disable_teleop()
+                    elif mode:
+                        self.robot.enable_teleop(mode)  # 显式模式（delta = 人工接管）
+                    else:
+                        self.robot.enable_teleop()  # 缺省 absolute（兼容只发 enabled 的调用方）
                 else:
                     debug_print(self.robot.name, f"unknown command '{cmd}' ignored", "WARNING")
             except Exception as exc:  # noqa: BLE001 单条命令失败不阻断其余

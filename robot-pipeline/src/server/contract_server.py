@@ -30,8 +30,8 @@ env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程�
     GET  /v1/health        {ok, detail}
     POST /v1/reset         复位到 home（非阻塞）
     POST /v1/execute       raw 动作 {action}
-    POST /v1/rollout       推理动作 {action}
-    POST /v1/teleop        遥操作开关 {enabled: bool}
+    POST /v1/rollout       推理动作 {action}（**人工接管中 → 409**）
+    POST /v1/teleop        遥操作 {enabled: bool, mode?: absolute|delta}
     POST /v1/safe_stop     急停
     POST /v1/capture/start 开始一轮采集（episode 开始）
     POST /v1/capture/end   结束一轮采集（episode 结束）
@@ -55,12 +55,14 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 import uvicorn
+from env.base_env import TakeoverActiveError
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from utils.base.data_handler import debug_print
 
 from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
+    DEFAULT_TELEOP_MODE,
     FIELD_ACTION_DIM,
     FIELD_CAPABILITIES,
     FIELD_CONTROL_HZ,
@@ -91,6 +93,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_ROLLOUT,
     PATH_SAFE_STOP,
     PATH_TELEOP,
+    TELEOP_MODES,
     VALUE_STATUS_ACCEPTED,
 )
 from motrix_edge.adapter.shm_contract import ObsShmWriter
@@ -153,6 +156,10 @@ class ActionRequest(BaseModel):
 
 class TeleopRequest(BaseModel):
     enabled: bool = Field(..., description="是否启用遥操作（true=遥操作 / false=程控）")
+    mode: str = Field(
+        default=DEFAULT_TELEOP_MODE,
+        description="遥操作映射模式：absolute=主臂绝对位姿直连 / delta=人工接管（锚点增量）",
+    )
 
 
 class CaptureSyncRequest(BaseModel):
@@ -357,14 +364,32 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 
     @app.post(PATH_ROLLOUT)
     def rollout(req: ActionRequest):
-        # 当前与 execute 一致：都只修改唯一目标，控制线程限速跟踪
-        return _apply_action(req)
+        """推理闭环：**遥操作（人工接管）进行中 → 409**。
+
+        遥操作期间从臂 target 由人工决定，推理下发必须让位（与 execute / reset 的「程控抢回」
+        相反：被拒的 rollout 不会结束遥操作）；Edge 侧 adapter 据此跳过本拍，遥操作关闭后自动恢复。
+        """
+        _require_ready()
+        try:
+            env.robot_rollout(req.action)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except TakeoverActiveError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_TELEOP)
     def teleop(req: TeleopRequest):
-        """设置遥操作开关（true=遥操作 / false=程控）。"""
+        """设置遥操作：``enabled``（true=遥操作 / false=程控）+ ``mode``（映射模式）。
+
+        ``mode``：``absolute``（缺省，主臂绝对位姿直连从臂 target）/ ``delta``（**人工接管**——
+        以接管瞬间的主 / 从位姿为锚点，只把主臂增量叠加到从臂 target，从臂不会突变）；
+        取值单点定义在 ``motrix_edge.adapter.http_contract``，非法取值返回 422。
+        """
         _require_ready()
-        env.robot_set_teleop(req.enabled)
+        if req.mode not in TELEOP_MODES:
+            raise HTTPException(status_code=422, detail=f"unknown teleop mode {req.mode!r} (expect {TELEOP_MODES})")
+        env.robot_set_teleop(req.enabled, req.mode)
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_SAFE_STOP)

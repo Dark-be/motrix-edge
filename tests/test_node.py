@@ -477,7 +477,7 @@ class _FakeExecAdapter:
     def __init__(self):
         self.executed = []
         self.reset_calls = 0
-        self.teleop_values: list[bool] = []
+        self.teleop_calls: list[tuple[bool, str | None]] = []
 
     def reset(self):
         self.reset_calls += 1
@@ -485,8 +485,8 @@ class _FakeExecAdapter:
     def execute(self, action):
         self.executed.append(action)
 
-    def set_teleop(self, enabled: bool):
-        self.teleop_values.append(bool(enabled))
+    def set_teleop(self, enabled: bool, mode: str | None = None):
+        self.teleop_calls.append((bool(enabled), mode))
 
 
 def _ready_node_with_exec_adapter():
@@ -595,12 +595,12 @@ def test_adapter_commands_share_behavior_in_active_state():
     assert node.state == NodeState.ACTIVE
     assert adapter.reset_calls == 1
     assert adapter.executed == [[1.0, 2.0, 3.0]]
-    assert adapter.teleop_values == [True]
+    assert adapter.teleop_calls == [(True, None)]
     assert [reply.status for reply in replies] == ["ok", "ok", "ok"]
 
 
 # ---------------------------------------------------------------------------
-# robot teleop（遥操作开关，true / false 直接作为参数）
+# robot teleop（遥操作 / 人工接管，true|false + 可选 mode）
 # ---------------------------------------------------------------------------
 
 
@@ -609,16 +609,38 @@ def test_robot_teleop_in_ready_calls_adapter():
     node, adapter = _ready_node_with_exec_adapter()
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
-    assert adapter.teleop_values == [True]
+    assert adapter.teleop_calls == [(True, None)]
     assert replies[0].status == "ok"
     assert replies[0].data["teleop"] is True
+    assert replies[0].data["mode"] is None  # 未指定模式：进程侧缺省 absolute
     assert node.state == NodeState.READY
 
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "false"}, reply_to=replies.append))
-    assert adapter.teleop_values == [True, False]
+    assert adapter.teleop_calls == [(True, None), (False, None)]
     assert replies[0].status == "ok"
     assert replies[0].data["teleop"] is False
+
+
+def test_robot_teleop_passes_mode():
+    """robot teleop true delta：人工接管（增量）模式随遥操作一起下发，回执回显 mode。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true", "mode": "delta"}, reply_to=replies.append))
+    assert adapter.teleop_calls == [(True, "delta")]
+    assert replies[0].status == "ok"
+    assert replies[0].data["mode"] == "delta"
+
+
+def test_robot_teleop_rejects_invalid_mode():
+    """robot teleop：mode 非法 → rejected（不调用 adapter）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true", "mode": "fast"}, reply_to=replies.append))
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 400
+    assert "invalid teleop mode" in replies[0].error
+    assert adapter.teleop_calls == []
 
 
 def test_robot_teleop_rejects_invalid_enabled():
@@ -629,13 +651,13 @@ def test_robot_teleop_rejects_invalid_enabled():
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
     assert "invalid boolean" in replies[0].error
-    assert adapter.teleop_values == []
+    assert adapter.teleop_calls == []
 
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={}, reply_to=replies.append))
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
-    assert adapter.teleop_values == []
+    assert adapter.teleop_calls == []
 
 
 def test_robot_teleop_not_applicable_in_idle():

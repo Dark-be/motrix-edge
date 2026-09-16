@@ -266,4 +266,18 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
     左 → 左、右 → 右。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
-跟随。遥操作默认关闭（adapter 通讯控制中暂时均为 false）。
+跟随（`robot.step_rad`）；遥操作默认关闭（adapter 通讯控制中暂时均为 false）。`mode` 选映射模式：
+
+-   `absolute`（缺省）：主臂**绝对**位姿直连从臂 target——主从同构、位姿已对齐的示教采集；
+-   `delta`（**人工接管**）：`target = slave_ref + (master_now − master_ref)`——锚点在接管后
+    首拍采样（主臂读数与从臂位姿同一拍），增量恒从 0 开始，从臂不会因主从位姿差突变；关节与
+    夹爪同一套增量语义。模型即将失败时人工介入：先把主臂摆到与从臂相近的位姿，再
+    `POST /v1/teleop {"enabled": true, "mode": "delta"}`。
+
+两种模式的完整语义、锚点采样时机与边界见
+[robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。
+
+**遥操作期间推理让位**：遥操作开着（不分模式：遥操作即人工接管）时，`POST /v1/rollout` 返回
+`409`（不改 target、不退出遥操作）；`execute` / `reset` / `safe_stop` 不受影响（执行即结束
+遥操作）。Edge 侧 adapter 的 `rollout()` 据此返回 `False`，推理会话跳过该拍、遥操作关闭后
+自动恢复。

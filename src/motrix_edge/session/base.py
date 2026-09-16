@@ -35,6 +35,7 @@ from motrix_edge.utils.commands import (
     ok_result,
     parse_bool,
     parse_qpos,
+    parse_teleop_mode,
 )
 from motrix_edge.utils.data_handler import debug_print
 
@@ -203,17 +204,20 @@ class BaseSession:
         self._reply(cmd, ok_result(state="ready", action=qpos))
 
     def _set_teleop(self, cmd) -> None:
-        """robot teleop：解析 true/false 参数 → ``adapter.set_teleop``（遥操作开关）。
+        """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。
 
-        参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop）。
+        ``mode=delta`` = 人工接管（接管瞬间主 / 从位姿为锚点，只叠加主臂增量）；遥操作开启
+        期间轮机侧会拒绝 ``rollout``（推理让位，见 `/v1/rollout` 契约）。
+        参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop 与模式）。
         """
         try:
             enabled = parse_bool(cmd.params.get("enabled"))
-            self.adapter.set_teleop(enabled)
+            mode = parse_teleop_mode(cmd.params.get("mode"))
+            self.adapter.set_teleop(enabled, mode)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
             return
-        self._reply(cmd, ok_result(state="ready", teleop=enabled))
+        self._reply(cmd, ok_result(state="ready", teleop=enabled, mode=mode))
 
     def run(self):
         """阻塞式会话执行（节点进入 ACTIVE 时调用），返回 RunResult。"""

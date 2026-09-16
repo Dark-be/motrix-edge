@@ -45,6 +45,7 @@ from motrix_edge.adapter.base import (
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_MODE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_EXECUTE,
@@ -275,13 +276,15 @@ def test_robot_adapters_filters_by_capability():
 
 
 class _FakeHttp:
-    """adapter 的 HTTP 客户端桩：记录 post 调用（不真实发送）。"""
+    """adapter 的 HTTP 客户端桩：记录 post 调用（不真实发送），统一返回 ``status_code``。"""
 
-    def __init__(self):
+    def __init__(self, status_code=200):
         self.posts = []
+        self.status_code = status_code  # 409 = SDK 拒绝（遥操作中推理让位）
 
     def post(self, url, json=None):
         self.posts.append((url, json))
+        return SimpleNamespace(status_code=self.status_code)
 
 
 def _exec_adapter():
@@ -311,22 +314,54 @@ def test_execute_sends_after_dimension_check():
     assert body == {FIELD_ACTION: qpos}
 
 
-# ---- teleop（遥操作开关）----------------------------------------------------
+# ---- teleop（遥操作 / 人工接管）----------------------------------------------
 
 
 def test_set_teleop_forwards_to_sdk():
-    """set_teleop：本地记录 + HTTP 转发 SDK /v1/teleop（enabled 为 bool）。"""
+    """set_teleop：本地记录 + HTTP 转发 SDK /v1/teleop（enabled 为 bool，mode 仅在开启时透传）。"""
     adapter = _exec_adapter()
     adapter.set_teleop(True)
     assert adapter.teleop_enabled is True  # 本地回显
+    assert adapter.teleop_mode is None  # 未指定模式 → 不发 mode 字段（进程侧缺省 absolute）
     assert len(adapter._http.posts) == 1
     url, body = adapter._http.posts[0]
     assert url == PATH_TELEOP
     assert body == {FIELD_TELEOP_ENABLED: True}
 
+    adapter.set_teleop(True, "delta")  # 人工接管（增量）
+    assert adapter.teleop_mode == "delta"
+    assert adapter._http.posts[-1] == (PATH_TELEOP, {FIELD_TELEOP_ENABLED: True, FIELD_TELEOP_MODE: "delta"})
+
     adapter.set_teleop(False)
     assert adapter.teleop_enabled is False
+    assert adapter.teleop_mode is None  # 关闭后不留模式
     assert adapter._http.posts[-1] == (PATH_TELEOP, {FIELD_TELEOP_ENABLED: False})
+
+
+# ---- rollout（推理闭环：遥操作中 SDK 拒绝）------------------------------------
+
+
+def test_rollout_returns_true_on_accepted():
+    """rollout：SDK 接受（200）→ True（本拍已下发）。"""
+    adapter = _exec_adapter()
+    assert adapter.rollout([0.0] * 14) is True
+    assert adapter.rollout_calls == 1
+    assert adapter.rollout_refused_calls == 0
+
+
+def test_rollout_returns_false_when_sdk_refuses_teleop():
+    """rollout：SDK 返回 409（遥操作 / 人工接管中）→ False，计数与日志限流位翻转。"""
+    adapter = _exec_adapter()
+    adapter._http = _FakeHttp(status_code=409)
+    assert adapter.rollout([0.0] * 14) is False
+    assert adapter.rollout([0.0] * 14) is False
+    assert adapter.rollout_calls == 2
+    assert adapter.rollout_refused_calls == 2
+    assert adapter._rollout_refused_logged is True  # 日志只在进入拒绝时记一条
+
+    adapter._http = _FakeHttp(status_code=200)  # 遥操作结束：恢复下发
+    assert adapter.rollout([0.0] * 14) is True
+    assert adapter._rollout_refused_logged is False
 
 
 # ---- capture episode（采集回合控制）------------------------------------------
