@@ -104,7 +104,9 @@ class CommandRequest(BaseModel):
 
 class CommandResponse(BaseModel):
     command_id: str
-    status: str  # accepted / error
+    # 命令回执状态：ok（执行成功）/ rejected（业务拒绝，如参数非法 / 状态不符）/ error /
+    # accepted（push 型命令：已入总线，无回执；未被 CommandService 消费时的骨架）
+    status: str
     idempotency_key: str | None
     correlation_id: str
     # 命令执行结果（CommandService 返回透传；push 型命令为 None）：
@@ -449,33 +451,34 @@ def create_app(
     def command(req: CommandRequest, request: Request):
         """受控命令：须持有有效租约（``lease_id``）；``capability=estop`` → 全局急停。
 
-        未注入 CommandService 时保持骨架（accepted）；具体执行 / Capability 校验留待后续。
+        回执状态直接反映命令执行结果（``ok`` / ``rejected`` / ``error``）；``push`` 型命令
+        （estop / node reset）无回执通道 → ``accepted``。未注入 CommandService 时保持骨架。
         """
         corr = getattr(request.state, "correlation_id", None) or new_correlation_id()
-        executed = None
-        error = None
-        data = None
-        if commands is not None:
-            try:
-                result = commands.execute(
-                    command_id=req.command_id,
-                    lease_id=req.lease_id,
-                    capability=req.capability,
-                    params=req.params,
-                )
-                executed = result.get("executed")
-                error = result.get("error")
-                data = result.get("data")
-            except CommandError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        if commands is None:  # 骨架：无 CommandService → accepted（具体执行 / 校验留待注入）
+            return CommandResponse(
+                command_id=req.command_id,
+                status="accepted",
+                idempotency_key=req.idempotency_key,
+                correlation_id=corr,
+            )
+        try:
+            result = commands.execute(
+                command_id=req.command_id,
+                lease_id=req.lease_id,
+                capability=req.capability,
+                params=req.params,
+            )
+        except CommandError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         return CommandResponse(
             command_id=req.command_id,
-            status="error" if error else "accepted",
+            status=result.get("status", "accepted"),
             idempotency_key=req.idempotency_key,
             correlation_id=corr,
-            executed=executed,
-            error=error,
-            data=data,
+            executed=result.get("executed"),
+            error=result.get("error"),
+            data=result.get("data"),
         )
 
     # ---- /v1/leases/*：Edge 级租约（独立于机器人 / 任务；受控操作须持有）----
@@ -788,10 +791,20 @@ def create_app(
 
         body：``mode``（single 缺省 / continuous）。
         需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（会话内 ``infer prompt`` 预置）；lerobot-act 不需要。
-        须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
+        须已在推理会话且持有租约；continuous 启动即回执 started，直到 ``infer rollout stop`` /
+        session quit / estop。
         """
         mode = req.mode if req is not None else None
         return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode))
+
+    @app.post("/v1/infers/rollout/stop")
+    def infers_rollout_stop(x_lease_id: str | None = Header(default=None)):
+        """停止持续推理（``infer rollout stop``）：回到会话 READY，**不退会话、不断策略连接**。
+
+        与 ``DELETE /v1/infers``（session quit）的区别：会话与策略连接保留，仍可再次
+        ``infer rollout`` / 改配置。未在持续推理中 → 409。受控操作：须持有租约。
+        """
+        return _infer_call(lambda: _infers().rollout_stop(lease_id=x_lease_id))
 
     @app.post("/v1/infers/episode/start")
     def infers_episode_start(x_lease_id: str | None = Header(default=None)):
@@ -812,8 +825,8 @@ def create_app(
     def infers_sync(req: InferSyncRequest, x_lease_id: str | None = Header(default=None)):
         """同步采集元信息（capture sync）：录制 rollout 时把 operator/task_name 同步到进程。
 
-        默认元信息 = ``{operator: "policy", task_name: <prompt>}``（见 GET /v1/infers 的
-        capture_meta），由调用方显式提交（Edge 不自动 sync）。受控操作：须持有租约。
+        默认元信息 = ``{operator: "policy", task_name: <prompt>}``，**由调用方自行组装并显式**
+        提交本端点（Edge 不自动 sync；也不在状态里代报默认值）。受控操作：须持有租约。
         """
         return _infer_call(lambda: _infers().sync(meta=req.meta, lease_id=x_lease_id))
 
