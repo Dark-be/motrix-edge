@@ -62,7 +62,7 @@ class FakeRobotAdapter(RobotAdapter):
         self.safe_stop_calls = 0
         self.release_calls = 0
         self.executed: list = []  # execute / rollout 记录（供测试断言）
-        self.teleop_values: list[bool] = []  # set_teleop 记录（供测试断言）
+        self.teleop_calls: list[tuple[bool, str | None]] = []  # set_teleop 记录（enabled, mode）
         self.capture_episodes: list[str] = []  # start_capture / end_capture 记录（供测试断言）
         self.capture_running = False  # 进程是否在采集（录制中）
         self.capture_meta: dict = {}  # 同步的采集元信息（保存数据时附加；供测试断言）
@@ -112,12 +112,13 @@ class FakeRobotAdapter(RobotAdapter):
         self._action = np.asarray(action, dtype=float)
         self.executed.append(np.asarray(action, dtype=float).tolist())
 
-    def rollout(self, action) -> None:
+    def rollout(self, action) -> bool:
         self._action = np.asarray(action, dtype=float)
         self.executed.append(np.asarray(action, dtype=float).tolist())
+        return True
 
-    def set_teleop(self, enabled: bool) -> None:
-        self.teleop_values.append(bool(enabled))
+    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+        self.teleop_calls.append((bool(enabled), mode))
 
     def start_capture(self) -> None:
         self.capture_episodes.append("start")

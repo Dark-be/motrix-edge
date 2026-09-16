@@ -44,7 +44,7 @@ from pathlib import Path
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 # 唯一允许依赖的 Edge 部分：共享内存布局契约（shm）+ HTTP 指令契约（http_contract），
 # 保证与 adapter 的读取 / 调用逻辑统一（见 motrix_edge/adapter/shm_contract.py、http_contract.py）
@@ -69,6 +69,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_MODE,
     FIELD_TYPE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
@@ -98,6 +99,10 @@ DEFAULT_SDK_HOST = "127.0.0.1"
 DEFAULT_SDK_PORT = 8090
 DEFAULT_SHM_NAME = "test_robot_obs"
 DEFAULT_RUN_HZ = 30
+
+
+class TeleopActiveError(RuntimeError):
+    """遥操作（人工接管）中：推理下发（rollout）被拒 → HTTP 409（与 robot-pipeline 契约一致）。"""
 
 
 class SimRobotCore:
@@ -152,6 +157,7 @@ class SimRobotCore:
         self.safe_stop_calls = 0
         self.reset_calls = 0
         self.teleop_enabled = False  # 遥操作开关（teleop 指令设置）
+        self.teleop_mode: str | None = None  # 遥操作模式（absolute | delta；None = 未指定）
         self.capturing = False  # 采集回合进行中（capture episode start / end）
         self.capture_meta: dict = {}  # capture sync 同步的元信息（保存数据时附加）
         self.episode_count = 0  # 已开始采集的回合数（测试断言用）
@@ -175,9 +181,10 @@ class SimRobotCore:
         """直接下发一维动作指令（raw）：记录调用，供测试断言。"""
         self.executed.append(action)
 
-    def set_teleop(self, enabled: bool) -> None:
-        """设置遥操作开关（true=遥操作 / false=程控）。"""
+    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+        """设置遥操作（true=遥操作 / false=程控；mode=absolute|delta，开启时有意义）。"""
         self.teleop_enabled = bool(enabled)
+        self.teleop_mode = mode if self.teleop_enabled else None
 
     def start_capture(self) -> None:
         """开始一轮采集（episode 开始）：置 capturing 标志。"""
@@ -198,7 +205,12 @@ class SimRobotCore:
         self._target = None
 
     def rollout(self, action) -> None:
-        """推理闭环：把模型 action 设为限速目标（维度校验）。"""
+        """推理闭环：把模型 action 设为限速目标（维度校验）。
+
+        遥操作（人工接管）中拒绝下发（与真实 robot-pipeline 一致，见 /v1/rollout 契约）。
+        """
+        if self.teleop_enabled:  # 遥操作中：推理让位
+            raise TeleopActiveError("teleop (human takeover) active: rollout refused")
         target = np.asarray(action, dtype=np.float64)
         if target.shape[0] != self.action_dim:
             raise ValueError(f"rollout action dim {target.shape[0]} != action_dim {self.action_dim}")
@@ -350,13 +362,17 @@ def create_sdk_app(
 
     @app.post(PATH_TELEOP)
     def teleop(body: dict):
-        """设置遥操作开关（true=遥操作 / false=程控）。"""
-        core.set_teleop(bool(body.get(FIELD_TELEOP_ENABLED, False)))
+        """设置遥操作（true=遥操作 / false=程控；可选 mode=absolute|delta 人工接管）。"""
+        core.set_teleop(bool(body.get(FIELD_TELEOP_ENABLED, False)), body.get(FIELD_TELEOP_MODE))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_ROLLOUT)
     def rollout(body: dict):
-        core.rollout(np.asarray(body[FIELD_ACTION], dtype=np.float64))
+        """推理闭环：遥操作（人工接管）中 → 409（与真实 robot-pipeline 契约一致）。"""
+        try:
+            core.rollout(np.asarray(body[FIELD_ACTION], dtype=np.float64))
+        except TeleopActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_SAFE_STOP)

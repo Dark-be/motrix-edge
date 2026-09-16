@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motrix_edge.adapter.http_contract import TELEOP_MODES
 from motrix_edge.policy import (
     policy_config_items,
     policy_config_keys,
@@ -59,7 +60,7 @@ CMD_SESSION_QUIT = "session quit"  # 退出当前会话
 CMD_ROBOT_RESET = "robot reset"  # 复位机器人（仅 adapter 可用时）
 CMD_ROBOT_ESTOP = "robot estop"  # 急停（安全停止 + 转 ERROR；全局安全命令）
 CMD_ROBOT_EXECUTE = "robot execute"  # 直接下发 raw 动作（位置参数 qpos，逗号分隔数字）
-CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作开关（位置参数 enabled = true / false）
+CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作（位置参数 enabled = true/false；可选 mode = absolute|delta 人工接管）
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）
@@ -74,6 +75,7 @@ CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adap
 CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
 CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；多步/drain 已取消）
+CMD_INFER_ROLLOUT_STOP = "infer rollout stop"  # 停止持续推理（回到会话 READY，不退会话也不断策略连接）
 CMD_INFER_CONNECT = "infer connect"  # 连接 + 启动异步预热（推理会话内消费；立即回执，重复调用幂等）
 
 CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；会话内运行时可改）
@@ -287,15 +289,34 @@ def parse_bool(raw) -> bool:
     raise ValueError(f"invalid boolean: {raw!r}")
 
 
+def parse_teleop_mode(raw) -> str | None:
+    """解析 ``robot teleop`` 的可选模式参数 → ``absolute`` / ``delta`` / ``None``。
+
+    - 缺失 / 空 → ``None``：不指定模式（进程侧缺省 ``absolute``，与旧调用方等价）；
+    - ``absolute`` → 主臂绝对位姿直连从臂 target（示教采集）；
+    - ``delta`` → **人工接管**：以接管瞬间的主 / 从位姿为锚点、只叠加主臂增量（从臂不突变）；
+    - 非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+
+    取值单点定义在 ``motrix_edge.adapter.http_contract``（``TELEOP_MODES``，与 /v1/teleop 契约同源）。
+    """
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    if text not in TELEOP_MODES:
+        raise ValueError(f"invalid teleop mode: {raw!r} (expect {'|'.join(TELEOP_MODES)})")
+    return text
+
+
 ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
-ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 session quit / estop）
+ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 infer rollout stop / session quit / estop）
 
 
 def parse_rollout_mode(raw) -> str:
     """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续）。
 
     - 空 / ``"1"`` → ``single``：单步推理（一次 观测 → 推理 → 动作 闭环）；
-    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 session quit / estop）；
+    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 ``infer rollout
+      stop`` / session quit / estop）；
     - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 + ``capture
       episode start/end`` 录制 rollout 回合，见 wiki/design/motrix_edge_session.md）；
     - ``"drain"`` → ``ValueError``（**缓存推理已取消**：动作块只作策略内部缓存，
@@ -599,7 +620,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ROBOT_RESET),
         CommandSpec(name=CMD_ROBOT_ESTOP),
         CommandSpec(name=CMD_ROBOT_EXECUTE, positional=("qpos",)),  # robot execute <qpos>
-        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled",)),  # robot teleop <true|false>
+        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),  # robot teleop <true|false> [mode]
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>
@@ -614,6 +635,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
         CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
+        CommandSpec(name=CMD_INFER_ROLLOUT_STOP),  # infer rollout stop：停止持续推理（会话保持）
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：连接 + 启动异步预热（下发动作之外的推理）
         CommandSpec(name=CMD_INFER_PROMPT, positional=("prompt",)),  # infer prompt <text>：运行时改文本指令
         CommandSpec(name=CMD_INFER_RTC),  # infer rtc：查询 RTC 参数 / 运行状态

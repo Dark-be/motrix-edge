@@ -29,7 +29,7 @@
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
 | POST | ``/v1/execute``          | ``{action}``           | ``{status}``                                   |
 | POST | ``/v1/rollout``          | ``{action: [dim]}``    | ``{status}``                                   |
-| POST | ``/v1/teleop``           | ``{enabled}``          | ``{status}``                                   |
+| POST | ``/v1/teleop``           | ``{enabled, mode?}``   | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
 | GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录）        |
 | POST | ``/v1/capture/sync``     | ``{meta}``             | ``{status}``                                   |
@@ -45,6 +45,11 @@
 - **元信息只有 ``meta`` 一个载体**：采集员 / 任务名等是 ``meta`` 里的键（分类可拓展），
   不再另设同义顶层字段——消费方按需取 ``meta["operator"]`` / ``meta["task_name"]``。
 - ``status`` 取值 ``accepted`` 表示指令已被 SDK 接受。
+- ``/v1/teleop`` 的 ``mode``（取值 ``absolute`` / ``delta``，缺省 ``absolute``）：``absolute``
+  把主臂绝对位姿直连从臂 target（示教采集）；``delta`` 为**人工接管**——以接管瞬间的主 / 从
+  位姿为锚点，只把主臂**增量**叠加到从臂 target（从臂不突变）。只发 ``{enabled}`` 的调用方
+  行为不变；robot-pipeline 侧语义见
+  [robot-pipeline 遥操作](../../../wiki/design/robot_pipeline_teleop.md)。
 """
 
 from __future__ import annotations
@@ -55,7 +60,7 @@ PATH_HEALTH = "/v1/health"  # 健康检查
 PATH_RESET = "/v1/reset"  # 程序复位到 home
 PATH_EXECUTE = "/v1/execute"  # 直接下发 raw 动作
 PATH_ROLLOUT = "/v1/rollout"  # 推理闭环：模型 action
-PATH_TELEOP = "/v1/teleop"  # 设置遥操作开关（true=遥操作 / false=程控）
+PATH_TELEOP = "/v1/teleop"  # 设置遥操作（enabled=true 遥操作 / false 程控；mode 可选）
 PATH_SAFE_STOP = "/v1/safe_stop"  # 安全停止（软停：停发指令并保持位姿，不断电）
 PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态（运行位 / 元信息 / 数据目录）
 PATH_CAPTURE_SYNC = "/v1/capture/sync"  # 同步采集元信息到进程（保存数据时附加）
@@ -65,6 +70,7 @@ PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
 # ---- 请求 body 字段 ----
 FIELD_ACTION = "action"  # execute / rollout：动作数据
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
+FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
 FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
 FIELD_META = "meta"  # capture sync：采集元信息（dict，保存数据时附加）
 
@@ -92,7 +98,14 @@ FIELD_RUNNING = "running"  # discover / capture status / robot：是否运行（
 # ---- 状态值 ----
 VALUE_STATUS_ACCEPTED = "accepted"
 
+# ---- teleop 模式取值（robot 层同名常量在 robot-pipeline 的 BaseRobot.TELEOP_MODES）----
+VALUE_TELEOP_MODE_ABSOLUTE = "absolute"  # 主臂绝对位姿直连从臂 target（示教采集）
+VALUE_TELEOP_MODE_DELTA = "delta"  # 人工接管：锚点增量（target = slave_ref + 主臂增量）
+TELEOP_MODES = (VALUE_TELEOP_MODE_ABSOLUTE, VALUE_TELEOP_MODE_DELTA)
+DEFAULT_TELEOP_MODE = VALUE_TELEOP_MODE_ABSOLUTE  # 不传 mode 时保持旧行为
+
 __all__ = [
+    "DEFAULT_TELEOP_MODE",
     "FIELD_ACTION",
     "FIELD_ACTION_DIM",
     "FIELD_CAPABILITIES",
@@ -115,6 +128,7 @@ __all__ = [
     "FIELD_STATUS",
     "FIELD_SUPPORTED_ADAPTERS",
     "FIELD_TELEOP_ENABLED",
+    "FIELD_TELEOP_MODE",
     "FIELD_TYPE",
     "PATH_CAPTURE_END",
     "PATH_CAPTURE_START",
@@ -127,5 +141,8 @@ __all__ = [
     "PATH_ROLLOUT",
     "PATH_SAFE_STOP",
     "PATH_TELEOP",
+    "TELEOP_MODES",
     "VALUE_STATUS_ACCEPTED",
+    "VALUE_TELEOP_MODE_ABSOLUTE",
+    "VALUE_TELEOP_MODE_DELTA",
 ]

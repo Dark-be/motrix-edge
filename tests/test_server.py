@@ -49,6 +49,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_MODEL_SET,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
     CMD_NODE_RESET,
@@ -60,9 +61,12 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_RUN,
     ROLLOUT_MODE_CONTINUOUS,
     CommandBus,
+    CommandResult,
     handle_policy_config,
     ok_result,
+    parse_bool,
     parse_rollout_mode,
+    parse_teleop_mode,
     policy_config_status,
 )
 
@@ -284,6 +288,7 @@ class FakeCaptureSession:
         self.command_source = command_source
         self.pulled = []
         self.adapter = FakeRobot()
+        self.recording = False  # 本回合是否采集进行中（episode start↔end）
 
     def run(self):
         while True:
@@ -297,6 +302,13 @@ class FakeCaptureSession:
                 self.state = SessionState.FINISHED
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
+            if name == CMD_CAPTURE_EPISODE_START:  # 开始一轮采集（回执供前端按钮互锁）
+                self.recording = True
+                self._reply(cmd, ok_result(state="recording", episode="start", recording=True))
+                continue
+            if name == CMD_CAPTURE_EPISODE_END:  # 结束一轮采集
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
 
     def _reply(self, cmd, result):
         if cmd is not None and cmd.reply_to is not None:
@@ -315,6 +327,7 @@ class FakeInferSession:
         self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
         self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
         self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
+        self.continuous = False  # 持续推理是否运行中（infer rollout continuous ↔ infer rollout stop）
         self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-act=False 不门控）
         # 会话使用的策略类型（决定配置项 schema）；缺省取配置 policy.type
         self.policy_config_type = policy_type or BASE_CFG.get("policy", {}).get("type", "openpi")
@@ -365,12 +378,22 @@ class FakeInferSession:
             elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步（缺省）/ continuous 持续
                 mode = parse_rollout_mode((cmd.params or {}).get("mode"))
                 if mode == ROLLOUT_MODE_CONTINUOUS:
+                    self.continuous = True
                     self._reply(cmd, ok_result(state="continuous", started=True, count=0, actions=[]))
                 else:
                     self._reply(
                         cmd,
                         ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]),
                     )
+            elif name == CMD_INFER_ROLLOUT_STOP:  # 停止持续推理（会话保持 READY）
+                if not self.continuous:
+                    self._reply(
+                        cmd,
+                        CommandResult(status="rejected", error="continuous rollout not running", status_code=409),
+                    )
+                else:
+                    self.continuous = False
+                    self._reply(cmd, ok_result(state="ready", continuous=False))
             elif name in (  # 策略配置项：infer config(set) / infer model(set)（按策略 schema 校验）
                 CMD_INFER_CONFIG,
                 CMD_INFER_CONFIG_SET,
@@ -432,6 +455,7 @@ class FakeNode:
         self.adapter = FakeRobot()
         self._task_thread = None  # 任务线程（session.run 后台线程，镜像真实 EdgeNode）
         self._task_result = None
+        self.teleop_calls: list[tuple[bool, str | None]] = []  # set_teleop 调用记录（enabled, mode）
 
     def set_pending_adapter(self, adapter_id):
         """记录 HTTP 预留的待选适配器 id（真实 EdgeNode 为带锁槽位，此处仅记录）。"""
@@ -476,6 +500,17 @@ class FakeNode:
                     self._reply(cmd, ok_result(node_state=self.state))
                 elif name == CMD_ROBOT_EXECUTE:  # robot execute：qpos 直接作为参数（回执 ok）
                     self._reply(cmd, ok_result(action=(cmd.params or {}).get("qpos")))
+                elif name == CMD_ROBOT_RESET:  # robot reset：回执（adapter.reset）
+                    self._reply(cmd, ok_result(node_state=self.state))
+                elif name == CMD_ROBOT_TELEOP:  # robot teleop：回执回显生效的 teleop / mode
+                    try:
+                        enabled = parse_bool((cmd.params or {}).get("enabled"))
+                        mode = parse_teleop_mode((cmd.params or {}).get("mode"))
+                    except ValueError as exc:
+                        self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                    else:
+                        self.teleop_calls.append((enabled, mode))
+                        self._reply(cmd, ok_result(teleop=enabled, mode=mode))
             else:
                 time.sleep(0.005)
 
@@ -526,6 +561,17 @@ def make_captures_client(node):
     preview_svc = PreviewService(node, leases=leases)
     threading.Thread(target=node.run, name="fake-node", daemon=True).start()
     return service, TestClient(create_app(BASE_CFG, captures=service, lease_manager=leases, preview=preview_svc))
+
+
+def make_capture_commands_client(node):
+    """采集会话 + 命令服务同一个 node：/v1/captures（enter/exit）与 /v1/commands（episode）共用总线。"""
+    bus = CommandBus()
+    node.command_source = bus
+    leases = LeaseManager()
+    captures = CaptureService(node, bus, leases=leases)
+    commands = CommandService(node, bus, leases=leases)
+    threading.Thread(target=node.run, name="fake-node", daemon=True).start()
+    return captures, TestClient(create_app(BASE_CFG, captures=captures, commands=commands, lease_manager=leases))
 
 
 def test_preview_requires_lease():
@@ -791,8 +837,8 @@ def test_commands_reset_recovers_node():
     assert CMD_NODE_RESET in [getattr(c, "name", None) for c in node.pulled]
 
 
-def test_commands_robot_reset_pushes_robot_reset():
-    """capability=robot_reset → push robot reset（adapter.reset，非节点复位）。"""
+def test_commands_robot_reset_returns_receipt():
+    """capability=robot_reset → submit robot reset（adapter.reset，非节点复位），回执 ok。"""
     node = FakeNode()
     client = make_commands_client(node)
     # 未持有租约：robot_reset 被拒（409）
@@ -800,8 +846,8 @@ def test_commands_robot_reset_pushes_robot_reset():
     lease = install_lease(client)
     r = client.post("/v1/commands", json={"command_id": "c1", "lease_id": lease, "capability": "robot_reset"})
     assert r.status_code == 200
-    assert r.json()["status"] == "accepted"
-    time.sleep(0.1)
+    assert r.json()["status"] == "ok"  # 同步回执（不再是 push 型的 accepted）
+    assert r.json()["executed"] == "robot_reset"
     assert CMD_ROBOT_RESET in [getattr(c, "name", None) for c in node.pulled]
 
 
@@ -819,15 +865,19 @@ def test_commands_robot_execute_pushes_qpos():
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["status"] == "accepted"
+    assert body["status"] == "ok"  # 同步回执（真执行完才返回）
     assert body["executed"] == "robot_execute"
     assert body["data"]["action"] == qpos  # qpos 直接作为参数
     # 命令已进入总线（submit 同步等回执）
     assert CMD_ROBOT_EXECUTE in [getattr(c, "name", None) for c in node.pulled]
 
 
-def test_commands_robot_teleop_pushes_command():
-    """capability=robot_teleop → push robot teleop（enabled 直接作为参数）。"""
+def test_commands_robot_teleop_returns_receipt():
+    """capability=robot_teleop → **submit** robot teleop，回执回显生效的 teleop / mode。
+
+    遥操作是「按一下要确认成没成」的操作：push 型命令没有回执通道，参数非法 / 适配器不支持时
+    调用方只看到 accepted（历史行为）——故改为 submit。
+    """
     node = FakeNode()
     client = make_commands_client(node)
     # 未持有租约：robot_teleop 被拒（409）
@@ -835,33 +885,67 @@ def test_commands_robot_teleop_pushes_command():
     lease = install_lease(client)
     r = client.post(
         "/v1/commands",
-        json={"command_id": "c1", "lease_id": lease, "capability": "robot_teleop", "params": {"enabled": "true"}},
+        json={
+            "command_id": "c1",
+            "lease_id": lease,
+            "capability": "robot_teleop",
+            "params": {"enabled": "true", "mode": "delta"},
+        },
     )
     assert r.status_code == 200
-    assert r.json()["status"] == "accepted"
-    time.sleep(0.1)
-    cmd = next(c for c in node.pulled if getattr(c, "name", None) == CMD_ROBOT_TELEOP)
-    assert cmd.params.get("enabled") == "true"  # enabled 直接作为参数
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["executed"] == "robot_teleop"
+    assert body["data"]["teleop"] is True  # 回执回显实际生效的开关
+    assert body["data"]["mode"] == "delta"  # 人工接管（增量）模式
+    assert node.teleop_calls == [(True, "delta")]  # 命令已进总线并被 fake node 消费
+    # 非法 mode：命令处理器回执 rejected（HTTP 200 + status=rejected + error），不是静默 accepted
+    bad = client.post(
+        "/v1/commands",
+        json={
+            "command_id": "c2",
+            "lease_id": lease,
+            "capability": "robot_teleop",
+            "params": {"enabled": "true", "mode": "bogus"},
+        },
+    )
+    assert bad.status_code == 200
+    assert bad.json()["status"] == "rejected"
+    assert "bogus" in bad.json()["error"]
 
 
-def test_commands_capture_episode_start_end_pushes_command():
-    """capability=capture_episode_start/end → push capture episode start/end 命令。"""
+def test_commands_capture_episode_start_end_return_receipts():
+    """capability=capture_episode_start/end → submit，回执回显 episode / recording。
+
+    采集按钮据此互锁：开始采集回执 → 禁用「开始」、使能「结束」（前端还会读
+    ``capture_status.running`` 作为权威位）。
+    """
     node = FakeNode()
-    client = make_commands_client(node)
-    # 未持有租约：被拒（409）
-    assert (
-        client.post("/v1/commands", json={"command_id": "c1", "capability": "capture_episode_start"}).status_code == 409
-    )
+    _service, client = make_capture_commands_client(node)
     lease = install_lease(client)
-    r = client.post("/v1/commands", json={"command_id": "c1", "lease_id": lease, "capability": "capture_episode_start"})
-    assert r.status_code == 200
-    assert r.json()["status"] == "accepted"
-    r = client.post("/v1/commands", json={"command_id": "c2", "lease_id": lease, "capability": "capture_episode_end"})
-    assert r.status_code == 200
-    time.sleep(0.1)
-    names = [getattr(c, "name", None) for c in node.pulled]
-    assert CMD_CAPTURE_EPISODE_START in names
-    assert CMD_CAPTURE_EPISODE_END in names
+    assert client.post("/v1/captures", headers={"X-Lease-Id": lease}).status_code == 200
+    wait_node_state(node, NodeState.ACTIVE)
+
+    started = client.post(
+        "/v1/commands",
+        json={"command_id": "c1", "lease_id": lease, "capability": "capture_episode_start"},
+    )
+    assert started.status_code == 200
+    body = started.json()
+    assert body["status"] == "ok"
+    assert body["data"]["episode"] == "start"
+    assert body["data"]["recording"] is True
+
+    ended = client.post(
+        "/v1/commands",
+        json={"command_id": "c2", "lease_id": lease, "capability": "capture_episode_end"},
+    )
+    assert ended.status_code == 200
+    assert ended.json()["data"]["episode"] == "end"
+    assert ended.json()["data"]["recording"] is False
+
+    assert client.delete("/v1/captures", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,6 +1091,31 @@ def test_captures_status_and_precheck():
     assert pre["node_state"] == NodeState.ACTIVE
     assert pre["lease_id"] == lease
     assert pre["leasable"] is False  # 已持租约 → 不可再租
+
+
+def test_captures_status_is_single_source_for_capture_fields():
+    """``/v1/captures`` 的采集字段只有一处：``capture_status``（运行位 / 元信息 / 数据目录）。
+
+    历史上同名事实另设过顶层 ``capture_running`` / ``data_dir``（与 ``capture_status`` 重复），
+    前端要在两处取同一件事 → 已删除，只保留 ``capture_status``。
+    """
+    node = FakeNode()
+    _service, client = make_captures_client(node)
+    node.capture_status = CaptureStatus(running=True, meta={"operator": "张三"}, data_dir="/tmp/data")
+    body = client.get("/v1/captures").json()
+    assert "capture_running" not in body
+    assert "data_dir" not in body
+    # 运行位 / 元信息 / 数据目录只在 capture_status 里各出现一次
+    assert body["capture_status"] == {"running": True, "meta": {"operator": "张三"}, "data_dir": "/tmp/data"}
+
+    # 绑定 adapter 的状态里带遥操作位（前端据此显示「程控 / 遥操作 / 人工接管」）
+    assert body["adapter"]["teleop"] is False
+    assert body["adapter"]["teleop_mode"] is None
+    node.adapter.teleop_enabled = True
+    node.adapter.teleop_mode = "delta"
+    adapter = client.get("/v1/captures").json()["adapter"]
+    assert adapter["teleop"] is True
+    assert adapter["teleop_mode"] == "delta"
 
 
 def test_captures_invalid_transition_returns_409():
@@ -1347,6 +1456,40 @@ def test_captures_meta_writes_require_lease(tmp_path):
     assert client.get("/v1/captures/meta").json()["meta"] == {"operator": ["张三"]}  # 读仍然免租约
 
 
+def test_infers_rollout_stop_keeps_session():
+    """``POST /v1/infers/rollout/stop``：停持续推理但**不退会话**（策略连接 / 机器人状态保持）。
+
+    与 ``DELETE /v1/infers`` 的区别就在这里：停止后会话仍是 ACTIVE、仍可继续单步 / 再次持续。
+    """
+    node = FakeNode()
+    _service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+
+    # 未在持续推理中 → 409（业务拒绝经回执透传到 HTTP）
+    assert client.post("/v1/infers/rollout/stop", headers={"X-Lease-Id": lease}).status_code == 409
+    # 不携带租约（Edge 已有活跃租约）→ 403
+    assert client.post("/v1/infers/rollout/stop").status_code == 403
+
+    assert (
+        client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "continuous"}).status_code == 200
+    )
+    wait_session_state(node, SessionState.READY)
+    assert client.get("/v1/infers").json()["continuous"] is True  # 运行位（前端门控「持续/停止」）
+
+    stopped = client.post("/v1/infers/rollout/stop", headers={"X-Lease-Id": lease})
+    assert stopped.status_code == 200
+    assert stopped.json()["continuous"] is False
+    snap = client.get("/v1/infers").json()
+    assert snap["continuous"] is False
+    assert snap["node_state"] == NodeState.ACTIVE  # 会话仍在（不退会话）
+    # 停止后仍可继续单步推理
+    assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}).status_code == 200
+
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
 def test_infers_rollout_single_and_continuous():
     """推理闭环模式：单步（缺省）/ continuous 持续；多步与 drain 已取消。"""
     node = FakeNode()
@@ -1377,7 +1520,7 @@ def test_infers_rollout_single_and_continuous():
 
 
 def test_infers_status_exposes_prompt_and_recording_defaults():
-    """status 携带 prompt / recording / capture_meta（operator=policy、task_name=prompt）。"""
+    """status 携带 prompt / recording / continuous（rollout 运行位）。"""
     node = FakeNode()
     service, client = make_infers_client(node)
     lease = install_lease(client)
@@ -1385,15 +1528,16 @@ def test_infers_status_exposes_prompt_and_recording_defaults():
     snap = client.get("/v1/infers").json()
     assert snap["prompt"] is None
     assert snap["recording"] is False
-    assert snap["capture_meta"] == {"operator": "policy", "task_name": None}
-    # 会话内设置 prompt → status.prompt / capture_meta.task_name 同步
+    assert snap["continuous"] is False  # 持续推理未运行（前端据此门控「持续 / 停止」）
+    # 会话内设置 prompt → status.prompt 同步
     assert (
         client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
         == 200
     )
     snap = client.get("/v1/infers").json()
     assert snap["prompt"] == "把零件放好"
-    assert snap["capture_meta"] == {"operator": "policy", "task_name": "把零件放好"}
+    # 无 capture_meta：录制默认元信息由调用方自行组装后经 /v1/infers/sync 显式提交
+    assert "capture_meta" not in snap
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
 

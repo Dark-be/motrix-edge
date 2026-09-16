@@ -28,7 +28,7 @@
 受控操作（enter / exit / rollout / episode / sync / rtc）须持有 Edge 级活跃租约（``X-Lease-Id``，
 经 ``LeaseManager`` 校验）。**prompt 仅对需要它的策略（语言条件，如 openpi）必需**：该类策略
 推理 / 录制开始前必须已 ``infer prompt`` 预置非空文本（prompt_required=True）；lerobot-act 不需要 prompt。
-录制 rollout 的默认 task_name = prompt。
+录制 rollout 的默认 task_name = prompt（由调用方组装后经 ``/v1/infers/sync`` 同步）。
 """
 
 import json
@@ -45,6 +45,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_CONNECT,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC_SET,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
@@ -80,9 +81,9 @@ class InferService:
 
         ``prompt`` = 当前推理文本指令（**仅需要 prompt 的策略**：推理 / 录制前必须非空，
         ``prompt_required=True`` 由策略声明，如 openpi；lerobot-act 不需要 prompt）；``recording`` = 推理
-        会话当前是否开启 rollout 录制；``capture_meta`` = 推理录制时 sync 的**默认采集元信息**
-        （operator 暂定 ``"policy"``、task_name = prompt，供前端/调用方显式 ``capture sync``）；
-        ``capture_status`` = 机器人进程实际采集状态缓存（running + ``meta`` 元信息全集，分类可拓展）。
+        会话当前是否开启 rollout 录制；``continuous`` = 持续推理是否正在运行（据此门控
+        「持续推理 / 停止推理」）；``capture_status`` = 机器人进程实际采集状态缓存（running +
+        ``meta`` 元信息全集，分类可拓展，与 ``/v1/captures`` 同构）。
         """
         node = self._node
         session = self._session()
@@ -114,8 +115,8 @@ class InferService:
             "dropped_actions": int(getattr(session, "dropped_actions", 0)) if session is not None else 0,
             # 推理会话当前是否开启 rollout 录制（capture episode start 后为 True）
             "recording": recording,
-            # 推理录制时 sync 的默认采集元信息（operator 暂定 "policy"、task_name = prompt）
-            "capture_meta": {"operator": "policy", "task_name": prompt},
+            # 持续推理是否正在运行（infer rollout continuous ↔ infer rollout stop）
+            "continuous": bool(getattr(session, "continuous", False)) if session is not None else False,
             # 机器人进程实际采集状态缓存（node 周期刷新；录制时 running=True + 已同步元信息）
             "capture_status": capture_status(self._node),
             # RTC（实时动作块）运行状态：enabled / params / index / remaining / inflight /
@@ -227,8 +228,8 @@ class InferService:
 
         - mode 缺省 / "single"：单步推理（一次 观测 → 推理 → 动作下发），回执 count=1 /
           action / actions；
-        - mode="continuous"：持续推理（启动即回执 started，直到 session quit / estop；
-          期间可 ``capture episode start/end`` 录制 rollout）。
+        - mode="continuous"：持续推理（启动即回执 started，直到 ``infer rollout stop`` /
+          session quit / estop；期间可 ``capture episode start/end`` 录制 rollout）。
 
         **多步与 drain（缓存推理）模式已取消**（改用单步 / 持续 + 录制）；prompt 不随
         rollout 传：由会话内 ``infer prompt`` 预置，会话侧门控（为空不能开始推理）。
@@ -252,6 +253,22 @@ class InferService:
             "action": result.data.get("action"),
             "actions": result.data.get("actions"),
         }
+
+    def rollout_stop(self, lease_id: str | None = None) -> dict:
+        """停止持续推理（``infer rollout stop``）：回到会话 READY，会话与策略连接保持。
+
+        与 ``session quit`` 的区别：**不退出会话**（不释放策略连接 / 不复位机器人），只是
+        结束持续推理循环，之后仍可再次 ``infer rollout`` / 改配置。须已在推理会话
+        （ACTIVE）且持有活跃租约；未在持续推理中 → 409。
+        """
+        self._ensure_node()
+        self._ensure_lease(lease_id)
+        node = self._node
+        if node.session is None or node.state != NodeState.ACTIVE:
+            raise InferError("not in a task session")
+        result = self._submit(Command(CMD_INFER_ROLLOUT_STOP, meta={"lease_id": lease_id}))
+        self._raise_on_rejected(result)
+        return {"status": "accepted", "state": result.data.get("state"), "continuous": False}
 
     def episode_start(self, lease_id: str | None = None) -> dict:
         """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
@@ -290,8 +307,8 @@ class InferService:
     def sync(self, meta: dict, lease_id: str | None = None) -> dict:
         """同步采集元信息（capture sync）：推理录制 rollout 时把 operator/task_name 同步到进程。
 
-        录制 rollout 的默认元信息 = ``{operator: "policy", task_name: <prompt>}``（见 status
-        的 capture_meta），由调用方显式提交本端点（Edge 不自动 sync）。"""
+        录制 rollout 的默认元信息 = ``{operator: "policy", task_name: <prompt>}``，由调用方
+        自行组装并显式提交本端点（Edge **不自动 sync**、也不在状态里代报默认值）。"""
         self._ensure_node()
         self._ensure_lease(lease_id)
         node = self._node
@@ -370,6 +387,7 @@ class InferService:
         return {"status": "accepted", "prompt": prompt}
 
     # -- 内部 ---------------------------------------------------------------
+
     def _policy_config_status(self, policy_type: str | None = None) -> dict:
         """策略配置项状态（schema + 当前值 + 缺失必填项）。
 
