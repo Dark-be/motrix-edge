@@ -150,7 +150,7 @@ class CaptureService:
             "status": "accepted",
             "state": self._session_state(),
             "lease_id": self._leases.status()["lease_id"],  # 当前租约（回显）
-            "adapter": adapter_ref(self._node),  # 当前节点 active adapter 身份
+            "adapter": adapter_ref(node),  # 当前节点 active adapter 身份
         }
 
     def exit(self, lease_id: str | None = None) -> dict:
@@ -227,27 +227,31 @@ class CaptureService:
         return {"meta": self._meta_store.list_meta()}
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态 / 磁盘。
 
-        ``capture_status`` = adapter 上报的采集状态缓存（运行位 + 元信息 + 数据目录，见
-        ``node.capture_status``）；未绑定 / 未缓存 → None。
+        ``capture_status`` = adapter 上报的采集状态缓存（**运行位 + 元信息全集 + 数据目录**，
+        见 ``node.capture_status``）；未绑定 / 未缓存 → None。运行位与数据目录**只在这里出现
+        一次**（不再另设 ``capture_running`` / 顶层 ``data_dir`` 同义字段）。
         """
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
-        capture = capture_raw(self._node)
+        capture = capture_raw(node)
         data_dir = getattr(capture, "data_dir", None) if capture is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": session_state,
-            "adapter": adapter_state(self._node),  # 当前节点 active adapter 状态
-            # 采集状态缓存（运行位 + 元信息全集 + 数据目录）：形态单点定义在 server/state.py
-            # （与 /v1/infers 的 capture_status 同构）；运行位与数据目录只在这里出现一次
-            # （不另设 capture_running / 顶层 data_dir 同义字段）
+            "adapter": adapter_state(node),  # 当前节点 active adapter 状态（含遥操作位）
+            # 采集状态缓存（adapter.capture_status()：运行位 + 元信息全集 + 数据目录）：形态单点
+            # 定义在 server/state.py（与 /v1/infers 的 capture_status 同构）；运行位与数据目录
+            # 只在这里出现一次（不再另设 capture_running / 顶层 data_dir 同义字段）
             "capture_status": (
-                {**(capture_status(self._node) or {}), "data_dir": str(data_dir or "") or None}
+                {
+                    **(capture_status(node) or {}),
+                    "data_dir": str(getattr(capture, "data_dir", None) or "") or None,
+                }
                 if capture is not None
                 else None
             ),

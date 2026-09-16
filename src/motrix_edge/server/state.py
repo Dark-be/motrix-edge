@@ -12,19 +12,25 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""server 层的节点状态读取（captures / infers 两个服务**共用**的单点实现）。
+"""server 状态助手 —— 各 controller 状态快照的公共只读片段。
 
-只读 ``EdgeNode`` 的**缓存**字段（adapter 身份 / 心跳缓存 / 采集状态），**不**触发对 SDK
-进程的实时请求——前端轮询 ``/v1/captures`` / ``/v1/infers`` 只读缓存（缓存由节点主循环周期
-刷新，见 wiki/design/motrix_edge_server.md）。
+``/v1/captures``（CaptureService）与 ``/v1/infers``（InferService）的状态快照都含「当前
+节点绑定的 adapter」这一段（身份 + 心跳缓存 + 控制频率 + 遥操作位）与「机器人进程采集状态」
+一段；单点实现在此，避免两处各写一份而漂移（历史上有过两份逐字段重复的实现）。
+
+全部只读 **node 内存状态**（节点主循环已周期 discover / 心跳并缓存），不触发任何对机器人
+进程的实时请求（前端轮询不穿透到 SDK 进程）。
 """
+
+from __future__ import annotations
 
 
 def adapter_ref(node) -> dict:
-    """当前节点绑定 adapter 的身份（``name`` / ``type``）。
+    """当前节点 active adapter 身份（``name`` / ``type``）；未绑定 → 空值。
 
-    委托 ``node.adapter_ref``（节点是身份的单一来源）；无该属性的测试替身回退
-    按 ``adapter_name`` / ``adapter`` 读，保持向后兼容。
+    ``name`` / ``type`` 优先取节点绑定时的记录（discover 赋予的名称 + entry point 类型），
+    回退 adapter 实例自身字段。实现委托 ``node.adapter_ref``（节点是身份的单一来源），
+    无该属性的测试替身走下面的回退读取。
     """
     if node is None:
         return {"name": None, "type": None}
@@ -39,19 +45,25 @@ def adapter_ref(node) -> dict:
 
 
 def adapter_state(node) -> dict:
-    """adapter 状态：身份 + 心跳缓存（``running`` / ``control_hz`` / ``measured_hz``）。
+    """当前节点 active adapter 状态：身份 + 心跳缓存（running / 控制频率）+ 遥操作位。
 
-    心跳字段来自 ``node.adapter_health``（节点周期查询并缓存的 ``HealthStatus``）；未探测到
-    （尚未缓存 / 适配器未就绪）时为 ``None``。``control_hz`` / ``measured_hz`` 为**该机器人
-    进程的实际控制频率**（名义值 / 实测值），供前端展示与排查抖动。
+    - ``running``：进程运行位；``control_hz`` / ``measured_hz``：名义 / 实测控制频率
+      （来自节点缓存的心跳 ``adapter_health``，未缓存 → None）；
+    - ``teleop`` / ``teleop_mode``：遥操作（人工接管）当前是否开启与映射模式
+      （``absolute`` 示教 / ``delta`` 增量接管）——**仅支持遥操作的 adapter 会上报**
+      （``set_teleop`` 记录；不支持者为 False / None），供前端显示「当前：程控 / 遥操作 /
+      人工接管」并据此决定是否允许推理。
     """
-    adapter = getattr(node, "adapter", None) if node is not None else None
-    health = getattr(node, "adapter_health", None) if node is not None else None
+    adapter = getattr(node, "adapter", None)
+    health = getattr(node, "adapter_health", None)
+    teleop = bool(getattr(adapter, "teleop_enabled", False))
     return {
         **adapter_ref(node),
         "running": getattr(adapter, "running", None) if adapter is not None else None,
         "control_hz": getattr(health, "control_hz", None) if health is not None else None,
         "measured_hz": getattr(health, "measured_hz", None) if health is not None else None,
+        "teleop": teleop,
+        "teleop_mode": getattr(adapter, "teleop_mode", None) if teleop else None,
     }
 
 

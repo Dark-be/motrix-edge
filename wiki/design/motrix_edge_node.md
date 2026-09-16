@@ -60,7 +60,7 @@ stateDiagram-v2
     **总线旁路队列**（`CommandBus.poll_critical`）——任务运行期间主循环不 poll 普通命令，
     但急停必须任何状态立即生效（否则一条分钟级长操作，如推理预热加载模型，会把急停一起挡住）。
 -   IDLE：拒绝 `session run` / `robot reset`（机器人未就绪）。
--   READY：`session run <type>`（选择 + 启动一步完成 → ACTIVE）、`robot reset`、`robot execute <qpos>`、`robot teleop <bool>`。
+-   READY：`session run <type>`（选择 + 启动一步完成 → ACTIVE）、`robot reset`、`robot execute <qpos>`、`robot teleop <bool> [mode]`。
 -   ACTIVE：`session quit`（退出 → READY）、`robot reset`、`robot execute`、`robot teleop`。
 -   ERROR：仅 `node reset` 恢复 → IDLE。
 
