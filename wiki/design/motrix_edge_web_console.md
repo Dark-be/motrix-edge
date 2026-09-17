@@ -19,20 +19,21 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 ## 页面布局（单页分区）
 
-总体：**顶部 sticky 状态条** + 两栏（左：操作，右：状态与观测）；操作结果即时 toast，完整历史进左下角日志抽屉。
+总体：**顶部 sticky 状态条** + 两栏（左：观测与操作，右：租约与状态）；操作结果即时 toast，完整历史进左下角日志抽屉。
 
 0. **顶部状态条（sticky）**：Edge Base URL（默认 `http://localhost:8000`，localStorage 记忆 + **刷新自动重连**）+ 连接 / 断开 + 在线 / **离线（数据已过期）** + `node_state` + 当前会话类型 / 状态 + 租约状态与到期倒计时 + **全局急停**（须持租约；快捷键 `Esc`）。
     - **顶部状态条常驻**：急停、租约倒计时、节点 / 会话状态不必滚到下面的卡片里找。
-1. **会话区（采集 / 推理二选一）**：同一时刻只可能有一个会话，故两张卡共用一块位置——顶部「会话类型」分段控件切换（会话进行中则锁定为当前会话）；只有被选中的那张面板参与渲染。
-2. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束（`capture episode start/end`）按采集运行位互锁**——开始后（收到回执或 `capture_status.running=true`）「开始」置灰、「结束」使能，反之亦然，避免误触反序操作；另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与节点 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
-3. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制；头部显示**当前遥操作位**（程控 / 遥操作（absolute）/ 人工接管（增量）），关遥操作在未开启时置灰。
-4. **租约面板**：租约状态 + 到期倒计时 + 签发 / 续租 / 撤销 + 自动续租开关（默认开）。
-5. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项；远端上传未配置时上传接口返回 `501`，此场景可用「**打包**」（`POST /v1/uploads/pack`）：包名默认 `pack<选中数量>`（预填 `suggested_pack_name`，可改名），把选中 episode 的 `.mcap` + `.json` **移动**到 `<扫描目录>/<包名>/`；同名目录已存在 → `409`（改名后重试）；成功后用回执的 `scan` 刷新列表（源文件已移走）。
-6. **状态面板**（右栏）：节点状态（`node_state`）、会话状态（`state`）、**匹配到的适配器**（name / type / running / control_hz / measured_hz）、磁盘。
-7. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后先「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）。**策略配置卡片按所选策略动态渲染**（schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers` 的 `policy_config`）：先是**公共项推理端点** `host` / `port`（与其它项同层级、同一张表单；仅在**策略已连接**时置灰锁定，未连接时（含会话内）可改，另有「保存端点」按钮直接写内存态），随后是策略项——openpi → 文本指令 `prompt`（必填，`POST /v1/infers/prompt`，推理/录制前必须）；act → 模型路径 `pretrained_name_or_path`（必填，可选 `/path/to/pretrained_model`）/ `device` / `actions_per_chunk`——**未进入会话时随「进入推理」一并下发**（`POST /v1/infers` body 的 `config`），会话内经 `POST /v1/infers/config`（`infer config set`）运行时应用（端点项仅在策略已连接时置灰）；必填项缺失（`missing` 非空）或端点未配置时推理 / 录制按钮禁用。推理按钮：**推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`）/ **停止推理**（`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制**（`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带 `task_name=prompt`）。多步推理与「消耗缓存」模式已取消。退出推理后结束会话，连接成功时展示策略服务器 metadata。
-8. **RTC 卡片（推理面板内，默认收起）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 步号与剩余 / 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考）；「展开参数」后可输入 H / P / S / E / 聚合函数并「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。
-9. **观测预览面板（右栏，默认收起）**：WebRTC `<video>` 逐相机播放 + 连接状态 + 连接 / 断开按钮 + `GET /v1/preview` 的 qpos / action 数值与摄像头名列表（图像不内联）。**观测无需进入会话**（节点级持续观测）；头部「预览显示」开关打开后才轮询与推流。
-10. **操作反馈**：每次受控操作弹 **toast**（右侧下方，约 4.5s 自动消失，只给一行摘要），完整记录进**左下角日志抽屉**（可展开 / 清空）；完整 JSON 回执留在各面板内部，不刷日志。
+1. **观测预览面板（左栏首卡，瞩目位置）**：WebRTC `<video>` 逐相机播放 + 连接状态 + 连接 / 断开按钮 + `GET /v1/preview` 的 qpos / action 数值与摄像头名列表（图像不内联）。**观测无需进入会话**（节点级持续观测）；默认展开，头部「预览显示」开关可收起（收起时停止轮询与推流，保留会话状态 / 相机路数 / 视频状态摘要）。
+2. **会话区（采集 / 推理二选一）**：同一时刻只可能有一个会话，故两张卡共用一块位置——顶部「会话类型」分段控件切换（会话进行中则锁定为当前会话）；只有被选中的那张面板参与渲染。
+3. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束（`capture episode start/end`）按采集运行位互锁**——开始后（收到回执或 `capture_status.running=true`）「开始」置灰、「结束」使能，反之亦然，避免误触反序操作；另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与节点 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
+4. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制；头部显示**当前遥操作位**（程控 / 遥操作（absolute）/ 人工接管（增量）），关遥操作在未开启时置灰。
+5. **租约面板（右栏）**：租约状态 + 到期倒计时 + 签发 / 续租 / 撤销 + 自动续租开关（默认开）。
+6. **上传会话面板**：输入目录并扫描 `.mcap` / `.json`，按 episode 选择，加入上传队列或重试失败项；远端上传未配置时上传接口返回 `501`，此场景可用「**打包**」（`POST /v1/uploads/pack`）：包名默认 `pack<选中数量>`（预填 `suggested_pack_name`，可改名），把选中 episode 的 `.mcap` + `.json` **移动**到 `<扫描目录>/<包名>/`；同名目录已存在 → `409`（改名后重试）；成功后用回执的 `scan` 刷新列表（源文件已移走）。
+7. **状态面板（右栏）**：节点状态（`node_state`）、会话状态（`state`）、**匹配到的适配器**（name / type / running / control_hz / measured_hz）、磁盘。
+8. **推理面板**：从 `/v1/health` 的已注册策略列表中必选策略，再进入推理；进入会话后先「连接推理节点」（`POST /v1/infers/connect`，`connected` 字段反映连接状态）。**策略配置卡片按所选策略动态渲染**（schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers` 的 `policy_config`）：先是**公共项推理端点** `host` / `port`（与其它项同层级、同一张表单；仅在**策略已连接**时置灰锁定，未连接时（含会话内）可改，另有「保存端点」按钮直接写内存态），随后是策略项——openpi → 文本指令 `prompt`（必填，`POST /v1/infers/prompt`，推理/录制前必须）；act → 模型路径 `pretrained_name_or_path`（必填，可选 `/path/to/pretrained_model`）/ `device` / `actions_per_chunk`——**未进入会话时随「进入推理」一并下发**（`POST /v1/infers` body 的 `config`），会话内经 `POST /v1/infers/config`（`infer config set`）运行时应用（端点项仅在策略已连接时置灰）；必填项缺失（`missing` 非空）或端点未配置时推理 / 录制按钮禁用。推理按钮：**推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`）/ **停止推理**（`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制**（`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带 `task_name=prompt`）。多步推理与「消耗缓存」模式已取消。退出推理后结束会话，连接成功时展示策略服务器 metadata。
+9. **RTC 卡片（推理面板内，默认收起）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 步号与剩余 / 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考）；「展开参数」后可输入 H / P / S / E / 聚合函数并「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。
+10. **观测预览面板（右栏，默认收起）**：WebRTC `<video>` 逐相机播放 + 连接状态 + 连接 / 断开按钮 + `GET /v1/preview` 的 qpos / action 数值与摄像头名列表（图像不内联）。**观测无需进入会话**（节点级持续观测）；头部「预览显示」开关打开后才轮询与推流。
+11. **操作反馈**：每次受控操作弹 **toast**（右下角，约 4.5s 自动消失，只给一行摘要），完整记录进**左下角日志抽屉**（可展开 / 清空）；完整 JSON 回执留在各面板内部，不刷日志。
 
 ## 动作 → 命令映射
 

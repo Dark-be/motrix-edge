@@ -96,7 +96,7 @@ class InferService:
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT,
-            "adapter": self._adapter_state(),
+            "adapter": adapter_state(node),
             "policy": self._policy_ref(),
             # 策略服务器连接状态；metadata 仅在已连接时暴露（连接成功后才有服务端元信息）
             "connected": connected,
@@ -173,7 +173,7 @@ class InferService:
         return {
             "status": "accepted",
             "lease_id": self._leases.status()["lease_id"],  # 当前租约（回显）
-            "adapter": self._adapter_ref(),  # 当前节点 active adapter 身份
+            "adapter": adapter_ref(node),  # 当前节点 active adapter 身份
             "policy": policy_type,  # 回显本次选用的策略类型（None = 配置默认）
             "policy_config": self._policy_config_status(policy_type),  # 生效后的配置项状态
         }
@@ -375,14 +375,6 @@ class InferService:
         return {"status": "accepted", "prompt": prompt}
 
     # -- 内部 ---------------------------------------------------------------
-    def _adapter_state(self) -> dict:
-        """当前节点 active adapter 状态（身份 + 心跳缓存 + 控制频率 + 遥操作位）。"""
-        return adapter_state(self._node)
-
-    def _adapter_ref(self) -> dict:
-        """当前节点 active adapter 身份（name / type）。"""
-        return adapter_ref(self._node)
-
     def _capture_status(self) -> dict | None:
         """机器人进程实际采集状态缓存（node 周期刷新；录制时 running=True + 已同步元信息）。
 

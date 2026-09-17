@@ -65,6 +65,15 @@ class CommandError(Exception):
         self.status_code = status_code
 
 
+# 推理端点配置 capability →（总线命令名, 取参数函数）；查询类无参数（None = 空 params）
+_ENDPOINT_CAPABILITIES = {
+    "infer_ip": (CMD_INFER_IP, None),
+    "infer_port": (CMD_INFER_PORT, None),
+    "infer_ip_set": (CMD_INFER_IP_SET, lambda p: {"ip": p.get("ip")}),
+    "infer_port_set": (CMD_INFER_PORT_SET, lambda p: {"port": p.get("port")}),
+}
+
+
 class CommandService:
     """HTTP commands → 租约校验 + 信号总线（estop 等）的桥接控制器。"""
 
@@ -140,24 +149,13 @@ class CommandService:
         # 推理端点配置（infer ip / infer port get/set）：配置级命令经同一命令总线
         # （submit 同步回执），与本地 CLI 行为一致；写入内存态 policy 段，下次
         # session run infer 生效。
-        if capability == "infer_ip":
-            return self._infer_endpoint_cmd(command_id, "infer_ip", CMD_INFER_IP, lease_id=lease_id)
-        if capability == "infer_port":
-            return self._infer_endpoint_cmd(command_id, "infer_port", CMD_INFER_PORT, lease_id=lease_id)
-        if capability == "infer_ip_set":
-            return self._infer_endpoint_cmd(
+        if capability in _ENDPOINT_CAPABILITIES:
+            name, build_params = _ENDPOINT_CAPABILITIES[capability]
+            return self._submit_cmd(
                 command_id,
-                "infer_ip_set",
-                CMD_INFER_IP_SET,
-                params={"ip": (params or {}).get("ip")},
-                lease_id=lease_id,
-            )
-        if capability == "infer_port_set":
-            return self._infer_endpoint_cmd(
-                command_id,
-                "infer_port_set",
-                CMD_INFER_PORT_SET,
-                params={"port": (params or {}).get("port")},
+                capability,
+                name,
+                params=build_params(params or {}) if build_params else {},
                 lease_id=lease_id,
             )
 
@@ -198,7 +196,3 @@ class CommandService:
             "data": result.data,
             "error": result.error,
         }
-
-    def _infer_endpoint_cmd(self, command_id, executed, name, params=None, lease_id=None) -> dict:
-        """推理端点配置命令：submit 同步等回执（node 主循环消费），回执透传。"""
-        return self._submit_cmd(command_id, executed, name, params=params, lease_id=lease_id)
