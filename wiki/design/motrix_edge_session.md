@@ -65,7 +65,8 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 -   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
     **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
-    `robot teleop <bool> [mode]` 遥操作 / 人工接管（`mode=delta` = 增量接管）、`capture episode start/end` 控制一轮采集、
+    `robot teleop <bool> [mode]` 遥操作 / 人工接管（`mode=delta` = 增量接管）、`capture episode start/end` 控制一轮采集
+    （回执回显 `episode` / `recording`）、
     `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
 -   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 
@@ -85,6 +86,9 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     **动作块缓存 / 三元切分 / 时序平滑 / 预取由 [RTCManager](./motrix_edge_rtc.md) 负责**
     （策略只提供原始动作块：`policy.infer_chunk`；会话持有 `self.rtc = build_rtc(...)`，
     `reset` / `session_finish` 同步复位）。
+    **持续推理的停止**：`infer rollout stop` 结束持续循环并**回到会话主循环**（会话保持
+    ACTIVE、策略连接不断，可继续单步 / 再次持续）；`session quit` 才是退出会话。运行位由
+    会话的 `continuous` 属性上报（server `/v1/infers` 的 `continuous`）。
     **prompt 为空不能开始推理（仅对声明 prompt 配置项的策略）**：openpi 等语言条件策略要求
     会话内已 `infer prompt <text>` 预置非空文本（空 → rejected 400，不推理）；act 不需要 prompt
     （`requires_prompt=False`，不门控、不下发）。`infer rollout <N>`（多步）与 `infer rollout drain`
@@ -103,10 +107,13 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     不能热改）。
 -   命令：`infer prompt <text>`（文本指令，需要 prompt 的策略推理/录制前必须非空）、`infer config` /
     `infer model`（策略配置项查询 / 设置）、`infer connect`（可选预连/预热）、`infer rollout` /
-    `infer rollout continuous`、`capture episode start/end`（rollout 录制）、
-    `capture sync --meta <json>`（录制元信息）、`infer rtc` / `infer rtc set <json>`（RTC 参数
-    查询 / 运行期设置）、`session quit`（退出回 home）、`robot estop`、`robot reset`、`robot execute`、
-    `robot teleop`。
+    `infer rollout continuous` / `infer rollout stop`（停止持续推理，留在会话）、
+    `capture episode start/end`（rollout 录制）、`capture sync --meta <json>`（录制元信息）、
+    `infer rtc` / `infer rtc set <json>`（RTC 参数查询 / 运行期设置）、`session quit`（退出回 home）、
+    `robot estop`、`robot reset`、`robot execute`、`robot teleop`。
+-   **回执**：`capture episode start/end`、`robot teleop`、`robot reset`、`capture sync` 等
+    经 submit 提交的命令均回执结果（`episode` / `recording`、`teleop` / `mode`、`meta`），
+    HTTP 侧据此把「按钮点下去没有下文」变成可判定结果（见 [命令总线](./motrix_edge_command_bus.md#回执通道push--submit)）。
 
 ## 相关文档
 

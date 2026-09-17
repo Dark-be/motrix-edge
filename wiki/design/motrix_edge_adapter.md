@@ -55,20 +55,20 @@ adapter/
 
 职责面与「角色」一一对应：
 
-| 职责面          | 方法                                | 说明                                                                         |
-| --------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
-| discover/health | `health()`                          | 健康检查；实时 `GET /v1/health`（SDK 型无后台心跳线程），缓存 `running`      |
-|                 | `release()`                         | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                              |
-| capabilities    | `capabilities`（属性）              | 声明能力：动作维度 / 观测键布局 / 能力 dict                                  |
-| observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行** |
-| execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                |
-| teleop          | `set_teleop(enabled, mode=None)`    | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；默认 no-op                 |
-| capture status  | `capture_status()`                  | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）    |
-| capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                     |
-| capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                           |
-| rollout         | `rollout(action)`                   | 推理闭环：接收模型 action 经 HTTP 转发进程；遥操作中进程拒收 → 返回 `False`  |
-| safe_stop       | `safe_stop()`                       | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**            |
-| 生命周期辅助    | `reset()`                           | 程序复位到 home（非阻塞）                                                    |
+| 职责面          | 方法                                | 说明                                                                                                                                                |
+| --------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| discover/health | `health()`                          | 健康检查；实时 `GET /v1/health`（SDK 型无后台心跳线程），缓存 `running`                                                                             |
+|                 | `release()`                         | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                                                                                                     |
+| capabilities    | `capabilities`（属性）              | 声明能力：动作维度 / 观测键布局 / 能力 dict                                                                                                         |
+| observe         | `observe()`                         | 读取**最新观测缓存**（JPEG 图像 + qpos，含 action）；**不推进 / 不影响运行**                                                                        |
+| execute         | `execute(action)`                   | 直接下发 raw 动作（立即执行）                                                                                                                       |
+| teleop          | `set_teleop(enabled, mode=None)`    | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；支持者记录 `teleop_enabled` / `teleop_mode` 供 server 状态上报，不支持者默认 no-op 且保持 `False` |
+| capture status  | `capture_status()`                  | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）                                                                           |
+| capture sync    | `sync_capture_meta(meta)`           | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                                                                            |
+| capture episode | `start_capture()` / `end_capture()` | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                                                                                                  |
+| rollout         | `rollout(action)`                   | 推理闭环：接收模型 action 经 HTTP 转发进程；遥操作中进程拒收 → 返回 `False`                                                                         |
+| safe_stop       | `safe_stop()`                       | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**                                                                                   |
+| 生命周期辅助    | `reset()`                           | 程序复位到 home（非阻塞）                                                                                                                           |
 
 ### 观测键契约（standard_obs 键名）
 

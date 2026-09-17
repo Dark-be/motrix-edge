@@ -66,6 +66,7 @@ class CommandResult:
 | `capture episode end`     | —                 | 任务级        | 结束一轮录制（采集 / 推理 rollout 共用；保存该 episode）                           | none |
 | `node reset`              | —                 | 节点级        | 节点复位 / ERROR 恢复 → IDLE                                                       | none |
 | `infer rollout`           | `mode`            | 任务级        | 单步（缺省）/ `continuous` 持续推理；**需要 prompt 的策略**为空不能开始            | none |
+| `infer rollout stop`      | —                 | 任务级        | 停止持续推理（回到会话 READY，**不退会话、不断策略连接**）                         | none |
 | `infer connect`           | —                 | 任务级        | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）                            | none |
 | `infer prompt`            | `prompt`          | 任务级/配置级 | 设置 `prompt` 配置项（语言条件策略；推理/录制前必须非空）                          | none |
 | `infer config`            | —                 | 任务级/配置级 | 查询当前策略的配置项（schema + 当前值 + `missing`）                                | none |
@@ -90,8 +91,21 @@ class CommandResult:
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
 `node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`、`capture meta`、
 `adapter config`（配置级，与节点状态机解耦）全局可用。CLI 示例：`session run capture`、
-`robot execute 0,0,0`、`robot teleop true`、`infer ip set 192.168.1.10`、`infer port set 8765`、
-`capture meta add operator 王五`、`adapter config set '{"enabled_arms": ["right"]}'`。
+`robot execute 0,0,0`、`robot teleop true`、`infer rollout stop`、`infer ip set 192.168.1.10`、
+`infer port set 8765`、`capture meta add operator 王五`、`adapter config set '{"enabled_arms": ["right"]}'`。
+
+## 回执通道（push / submit）
+
+命令携带 `reply_to` 即 **submit**（调用方同步等回执），缺省为 **push**（即发即忘）：
+
+-   **走 submit**：`robot reset` / `robot execute` / `robot teleop` / `capture episode start,end` /
+    `capture sync` / `infer connect` —— 「操作要确认成没成」的命令，回执含结果字段
+    （如 teleop 的 `teleop`/`mode`、episode 的 `episode`/`recording`、execute 的 `action`）；
+-   **走 push**：`robot estop` / `node reset` —— 急停不能等回执（且可能没有消费方）；节点 ERROR
+    恢复路径也不该阻塞在同步等待上。二者经 HTTP `/v1/commands` 调用时回执为 `accepted`。
+
+CLI 默认对可回执命令 `submit` 并等回执；HTTP 层由 `server/command.py` 的 capability 映射决定通道，
+并把回执状态（`ok` / `rejected` / `error`）原样透传为 `CommandResponse.status`。
 
 ## 本地 vs HTTP（行为对齐）
 

@@ -56,39 +56,50 @@ UploadSession 不占用 RobotAdapter 或 EdgeNode 任务状态机：
 `idempotency_key`（**预留、未实现**：幂等去重尚未落地，字段仅回显；调用方需自行处理
 重试，勿依赖去重）。`CommandService.execute` 先校验租约，再按 capability 映射为总线命令：
 
-| capability                  | 总线命令                            | 说明                                                |
-| --------------------------- | ----------------------------------- | --------------------------------------------------- |
-| `estop`                     | `robot estop`（push）               | 全局急停：安全停止 + 节点转 ERROR                   |
-| `reset`                     | `node reset`（push）                | 节点复位（ERROR → IDLE）                            |
-| `robot_reset`               | `robot reset`（push）               | 机器人复位（adapter.reset）                         |
-| `robot_execute`             | `robot execute`（submit）           | 直接下发 raw 动作（qpos），回执透传                 |
-| `robot_teleop`              | `robot teleop`（push）              | 遥操作 / 人工接管（enabled=true/false；mode=delta） |
-| `capture_episode_start/end` | `capture episode start/end`（push） | 开始 / 结束一轮采集                                 |
-| `capture_sync`              | `capture sync`（submit）            | 同步采集元信息（params.meta）                       |
-| `infer_connect`             | `infer connect`（submit）           | 单次尝试连接推理节点                                |
-| 其他                        | —（骨架）                           | 预留 Capability 校验 / 具体下发                     |
+**submit（同步等回执，回执透传）**——操作类命令一律走这条，调用方拿得到成功 / 失败与结果：
+
+| capability                            | 总线命令                              | 说明                                                                              |
+| ------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------- |
+| `robot_reset`                         | `robot reset`（submit）               | 机器人复位（adapter.reset）                                                       |
+| `robot_execute`                       | `robot execute`（submit）             | 直接下发 raw 动作（qpos），维度校验在 adapter                                     |
+| `robot_teleop`                        | `robot teleop`（submit）              | 遥操作 / 人工接管（enabled=true/false；mode=delta）；回执回显生效的 teleop / mode |
+| `capture_episode_start/end`           | `capture episode start/end`（submit） | 开始 / 结束一轮采集；回执回显 episode / recording                                 |
+| `capture_sync`                        | `capture sync`（submit）              | 同步采集元信息（params.meta）                                                     |
+| `infer_connect`                       | `infer connect`（submit）             | 单次尝试连接推理节点                                                              |
+| `infer_ip(_set)` / `infer_port(_set)` | `infer ip / port (set)`（submit）     | 查询 / 设置推理端点                                                               |
+
+**push（即发即忘，无回执）**——只给「不能等 / 不该等」的路径：
+
+| capability | 总线命令              | 说明                              |
+| ---------- | --------------------- | --------------------------------- |
+| `estop`    | `robot estop`（push） | 全局急停：安全停止 + 节点转 ERROR |
+| `reset`    | `node reset`（push）  | 节点复位（ERROR → IDLE）          |
+
+其他 capability → 骨架（`accepted`，预留 Capability 校验 / 具体下发）。
+
+回执状态即命令结果：`CommandResponse.status` = `ok` / `rejected`（业务拒绝，如参数非法、状态不符）/ `error`，push 型为 `accepted`；命令未被消费（submit 超时）→ `504`。
 
 ## /v1/captures（采集会话控制）
 
 采集为**观测会话**，端点经 `CaptureService` 桥接：
 
-| 方法   | 路径                     | 租约          | 说明                                                                                                |
-| ------ | ------------------------ | ------------- | --------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                   |
-| GET    | `/v1/captures`           | 无            | 状态快照：node_state / session / adapter / data_dir / data_files / capture_status / disk / lease_id |
-| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                     |
-| GET    | `/v1/captures/meta`      | 无            | 采集元信息选项（`capture.yml` 的 `meta` 段；前端选择列表，`capture meta` 维护）                     |
-| POST   | `/v1/captures/sync`      | 必需          | body `{meta}`：同步采集元信息到机器人进程（`capture sync`，采集会话内消费）                         |
-| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                      |
-| GET    | `/v1/preview`            | 必需          | 最新观测预览（无需进入会话，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）       |
+| 方法   | 路径                     | 租约          | 说明                                                                                                          |
+| ------ | ------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`           | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                             |
+| GET    | `/v1/captures`           | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ capture_status / disk / lease_id |
+| GET    | `/v1/captures/precheck`  | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                               |
+| GET    | `/v1/captures/meta`      | 无            | 采集元信息选项（`capture.yml` 的 `meta` 段；前端选择列表，`capture meta` 维护）                               |
+| POST   | `/v1/captures/sync`      | 必需          | body `{meta}`：同步采集元信息到机器人进程（`capture sync`，采集会话内消费）                                   |
+| DELETE | `/v1/captures?lease_id=` | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                |
+| GET    | `/v1/preview`            | 必需          | 最新观测预览（无需进入会话，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）                 |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 
-> **采集数据归属（边界）**：`data_dir` / `data_files` 为适配器 / SDK 进程自维护的
-> **状态上报占位**——Edge 不驱动落盘、不校验、不上传。实际数据落盘 / 校验 / 上传
-> **待完成**：后续按 hardware adapter 契约（`data_status()` 返回的数据文件夹）完成
-> **CaptureBundle**（manifest / checksum → Local Spool → Uploader，服务端确认后才删），
-> 属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
+> **采集数据归属（边界）**：`capture_status.data_dir` 为适配器 / SDK 进程自维护的
+> **状态上报占位**——Edge 不驱动落盘、不校验、不上传（数据文件列表不经 HTTP 上报，
+> 本地扫描 / 打包见 `/v1/uploads`）。实际数据落盘 / 校验 / 上传 **待完成**：后续按
+> hardware adapter 契约完成 **CaptureBundle**（manifest / checksum → Local Spool →
+> Uploader，服务端确认后才删），属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
 
 ## /v1/uploads（本地 episode 扫描与打包）
 
@@ -129,19 +140,20 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 **rollout 录制** = `capture episode start/end`（robot 不关心推理/采集）；端点经
 `InferService` 桥接：
 
-| 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                               |
-| ------ | -------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/infers`               | 必需          | `enter`：body 提供已注册的 `policy_type`、可选 `host` / `port`（快捷字段）与 `config`（**整份策略配置**：公共项端点 host/port + 该策略配置项，如 act 的模型路径）→ `session run infer`                                                             |
-| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / metadata / endpoint / prompt / prompt_required / recording / capture_meta / capture_status（running + `meta` 元信息全集，与 `/v1/captures` 同构） / rtc / policy_config / lease_id |
-| POST   | `/v1/infers/connect`       | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）                                                                                                                                                                                       |
-| POST   | `/v1/infers/rollout`       | 必需          | 单步（缺省）或 `mode: continuous` 持续；多步（count>1）/ drain 已取消 → 400；prompt 不随本端点传（会话内 `infer prompt` 预置）                                                                                                                     |
-| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`；**需要 prompt 的策略**为空 → 400）                                                                                                                                                                 |
-| POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`；robot 保存该 episode）                                                                                                                                                                               |
-| POST   | `/v1/infers/sync`          | 必需          | body `{meta}`：录制 rollout 时同步采集元信息（默认 operator=policy、task_name=prompt，显式提交）                                                                                                                                                   |
-| POST   | `/v1/infers/rtc`           | 必需          | body 为 RTC 参数（可部分：enabled / action_horizon / prefix_len / execution_horizon / suffix_len / aggregate_fn）→ `infer rtc set`（写入 `policy.rtc` 并应用到运行中 RTCManager）                                                                  |
-| POST   | `/v1/infers/config`        | 必需          | body `{config}`：运行期设置**策略配置项**（按当前策略 schema 白名单校验）→ `infer config set`；回执含生效后的 `policy_config`                                                                                                                      |
-| POST   | `/v1/infers/prompt`        | 必需          | 会话内设置文本指令（`prompt` 项快捷入口；**仅声明 prompt 项的策略**如 openpi）                                                                                                                                                                     |
-| DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                           |
+| 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                                                   |
+| ------ | -------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/infers`               | 必需          | `enter`：body 提供已注册的 `policy_type`、可选 `host` / `port`（快捷字段）与 `config`（**整份策略配置**：公共项端点 host/port + 该策略配置项，如 act 的模型路径）→ `session run infer`                                                                                 |
+| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ policy / connected / metadata / endpoint / prompt / prompt_required / recording / continuous / capture_status（running + `meta`，与 `/v1/captures` 同构）/ rtc / policy_config / lease_id |
+| POST   | `/v1/infers/connect`       | 必需          | 单次尝试连接推理节点（`infer connect`；成功回执含 metadata）                                                                                                                                                                                                           |
+| POST   | `/v1/infers/rollout`       | 必需          | 单步（缺省）或 `mode: continuous` 持续；多步（count>1）/ drain 已取消 → 400；prompt 不随本端点传（会话内 `infer prompt` 预置）                                                                                                                                         |
+| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`；**需要 prompt 的策略**为空 → 400）                                                                                                                                                                                     |
+| POST   | `/v1/infers/rollout/stop`  | 必需          | 停止持续推理（`infer rollout stop`）：回到会话 READY，**不退会话、不断策略连接**；未在持续推理中 → 409                                                                                                                                                                 |
+| POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`；robot 保存该 episode）                                                                                                                                                                                                   |
+| POST   | `/v1/infers/sync`          | 必需          | body `{meta}`：录制 rollout 时同步采集元信息（默认 operator=policy、task_name=prompt，显式提交）                                                                                                                                                                       |
+| POST   | `/v1/infers/rtc`           | 必需          | body 为 RTC 参数（可部分：enabled / action_horizon / prefix_len / execution_horizon / suffix_len / aggregate_fn）→ `infer rtc set`（写入 `policy.rtc` 并应用到运行中 RTCManager）                                                                                      |
+| POST   | `/v1/infers/config`        | 必需          | body `{config}`：运行期设置**策略配置项**（按当前策略 schema 白名单校验）→ `infer config set`；回执含生效后的 `policy_config`                                                                                                                                          |
+| POST   | `/v1/infers/prompt`        | 必需          | 会话内设置文本指令（`prompt` 项快捷入口；**仅声明 prompt 项的策略**如 openpi）                                                                                                                                                                                         |
+| DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                                               |
 
 ## 错误语义
 
