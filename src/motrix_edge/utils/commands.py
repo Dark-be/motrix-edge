@@ -75,6 +75,7 @@ CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adap
 CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
 CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；多步/drain 已取消）
+CMD_INFER_ROLLOUT_STOP = "infer rollout stop"  # 停止持续推理（回到会话 READY，不退会话也不断策略连接）
 CMD_INFER_CONNECT = "infer connect"  # 单次尝试连接推理节点（推理会话内消费）
 CMD_INFER_IP = "infer ip"  # 查询推理节点 IP（内存态 policy.host）
 CMD_INFER_IP_SET = "infer ip set"  # 设置推理节点 IP（位置参数 ip；下次 session run infer 生效）
@@ -280,14 +281,15 @@ def parse_teleop_mode(raw) -> str | None:
 
 
 ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
-ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 session quit / estop）
+ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 infer rollout stop / session quit / estop）
 
 
 def parse_rollout_mode(raw) -> str:
     """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续）。
 
     - 空 / ``"1"`` → ``single``：单步推理（一次 观测 → 推理 → 动作 闭环）；
-    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 session quit / estop）；
+    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 ``infer rollout
+      stop`` / session quit / estop）；
     - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 + ``capture
       episode start/end`` 录制 rollout 回合，见 wiki/design/motrix_edge_session.md）；
     - ``"drain"`` → ``ValueError``（**缓存推理已取消**：动作块只作策略内部缓存，
@@ -631,6 +633,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
         CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
+        CommandSpec(name=CMD_INFER_ROLLOUT_STOP),  # infer rollout stop：停止持续推理（会话保持）
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：单次尝试连接推理节点
         CommandSpec(name=CMD_INFER_IP),  # infer ip：查询推理节点 IP（无参）
         CommandSpec(name=CMD_INFER_IP_SET, positional=("ip",)),  # infer ip set <ip>

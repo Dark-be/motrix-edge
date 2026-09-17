@@ -190,6 +190,11 @@ class RobotAdapter(ABC):
         self.enabled_arms = list(self.DEFAULT_ENABLED_ARMS or self.ARM_NAMES)
         self._home_qpos = np.asarray(self.HOME_QPOS or [0.0] * self.ACTION_DIM, dtype=np.float64)
         self._full_image_names = list(self.IMAGES)
+        # 遥操作 / 人工接管状态：**由真正支持遥操作的子类**在 set_teleop 里记录（基类 no-op
+        # 不写——否则「不支持遥操作的适配器」会被上报成遥操作中）；server 据此在状态里
+        # 暴露 ``teleop`` / ``teleop_mode``（见 server/state.py）。
+        self.teleop_enabled = False
+        self.teleop_mode: str | None = None
 
     # ---- 能力裁剪（configure：启用臂 / 相机；home 固定由 HOME_QPOS 定义）----------
     def configure(self, enabled_arms=None, enabled_cameras=None) -> None:
@@ -335,7 +340,9 @@ class RobotAdapter(ABC):
         表示沿用进程侧缺省（等价 ``absolute``）。遥操作开启即视为人工接管，进程侧会拒绝
         ``rollout``（见 `wiki/design/robot_pipeline_teleop.md`）。
 
-        默认 no-op；支持遥操作的子类按需覆盖（如经 HTTP 转发机器人进程 /v1/teleop）。
+        默认 no-op（**不支持遥操作的适配器不记录状态**，保持 ``teleop_enabled=False``）；
+        支持遥操作的子类按需覆盖（如经 HTTP 转发机器人进程 /v1/teleop），并在生效后同步
+        ``teleop_enabled`` / ``teleop_mode`` 供 server 状态上报。
         """
         pass
 

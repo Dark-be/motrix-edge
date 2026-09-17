@@ -43,6 +43,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_PORT_SET,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
     CMD_ROBOT_ESTOP,
@@ -126,6 +127,9 @@ class InferSession(BaseSession):
         # 录制本身由机器人进程自维护（capturing=True 按帧录 mcap）；本标记只作会话侧
         # 上报（server /v1/infers status 的 recording 字段）。
         self._recording = False
+        # 持续推理运行位（infer rollout continuous ↔ infer rollout stop）：供 server
+        # 上报（/v1/infers 的 continuous），前端据此门控「持续推理 / 停止推理」。
+        self._continuous = False
 
         debug_print(self.name, f"Policy config: {self.policy_config} (type={self.policy_type})", "INFO")
 
@@ -138,6 +142,11 @@ class InferSession(BaseSession):
     def recording(self) -> bool:
         """推理会话当前是否开启了一轮 rollout 录制（capture episode start 后为 True）。"""
         return bool(self._recording)
+
+    @property
+    def continuous(self) -> bool:
+        """持续推理是否正在运行（``infer rollout continuous`` 启动 → ``infer rollout stop`` 结束）。"""
+        return bool(self._continuous)
 
     @property
     def prompt(self) -> str | None:
@@ -402,9 +411,14 @@ class InferSession(BaseSession):
                     continue
                 if not self._ensure_connected(cmd):  # 惰性自连：未连接则自动连接（失败已回执）
                     continue
-                if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 session quit / estop
+                if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 stop / session quit / estop
                     self._reply(cmd, ok_result(state="continuous", started=True))
+                    self._continuous = True
                     result = self._run_continuous()
+                    self._continuous = False
+                    if result is None:  # infer rollout stop：回到本循环（会话保持 ACTIVE / READY）
+                        self.state = SessionState.READY
+                        continue
                     self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
                     return result
                 self._run_single(cmd)  # 单步推理（缺省）
@@ -557,20 +571,25 @@ class InferSession(BaseSession):
         rtc = getattr(self, "rtc", None)
         return rtc.status() if rtc is not None else None
 
-    def _run_continuous(self) -> RunResult:
-        """infer rollout continuous：持续推理，每步轮询命令响应退出 / 复位 / 急停 / 录制。
+    def _run_continuous(self) -> RunResult | None:
+        """infer rollout continuous：持续推理，每步轮询命令响应停止 / 退出 / 复位 / 急停 / 录制。
 
-        启动命令已回执 started（prompt 已在启动前校验非空）；持续直到 session quit
+        启动命令已回执 started（prompt 已在启动前校验非空）；持续直到 ``infer rollout
+        stop``（**回到会话主循环，会话保持 ACTIVE / READY，策略连接不断**）/ session quit
         （FINISHED）/ robot estop（ERROR）/ node 失联（ERROR）。持续期间接受
         ``capture episode start/end``（录制 rollout）与 ``capture sync``（同步元信息）——
-        录制与持续推理正交（robot 不关心模式）。返回 RunResult（由调用方置会话状态）。
+        录制与持续推理正交（robot 不关心模式）。返回 ``None`` = 回到会话主循环。
         """
-        debug_print(self.name, "Continuous rollout started (session quit to stop).", "INFO")
+        debug_print(self.name, "Continuous rollout started (infer rollout stop to stop).", "INFO")
         while True:
             if self._stop_requested:  # 外部请求停止（node 失联 ERROR）：立即退出
                 return RunResult.ERROR
             cmd = self.command_source()
             name = _cmd_name(cmd)
+            if name == CMD_INFER_ROLLOUT_STOP:  # 停止持续推理：留在会话（策略连接 / 机器人状态不变）
+                self._reply(cmd, ok_result(state="ready", continuous=False))
+                debug_print(self.name, "Continuous rollout stopped by request (session kept).", "INFO")
+                return None
             if name == CMD_SESSION_QUIT:  # 停止持续推理并退出会话
                 self.adapter.reset()  # 推理结束回到 home
                 self._record_exit(cmd)

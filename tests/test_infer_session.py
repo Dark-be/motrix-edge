@@ -613,6 +613,29 @@ def test_infer_rollout_continuous_replies_started_and_stops(monkeypatch):
     assert adapter.executed  # 有动作下发
 
 
+def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
+    """infer rollout stop：停止持续推理并**回到会话主循环**（会话不退出，仍可单步推理）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
+    cont.reply_to = replies.append
+    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
+    stop.reply_to = replies.append
+    single = _REGISTRY.parse_argv(["infer", "rollout"])
+    single.reply_to = replies.append
+    # None = 无命令空档：让持续推理推一步后再下发 stop
+    session = _build_session(adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"))
+
+    assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
+    assert [r.status for r in replies] == ["ok", "ok", "ok"]
+    assert replies[0].data["state"] == "continuous"
+    assert replies[1].data["continuous"] is False  # 停止回执
+    assert session.continuous is False  # 运行位已清
+    assert replies[2].data["count"] == 1  # 停止后单步推理仍可用（会话未退出）
+
+
 def test_infer_continuous_records_episode(monkeypatch):
     """持续推理期间可录制 rollout：capture episode start/end 在持续循环内被消费。"""
     adapter = _FakeAdapter(ready=True)

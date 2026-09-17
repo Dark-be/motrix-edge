@@ -31,6 +31,7 @@ import shutil
 
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
+from motrix_edge.server.state import adapter_ref, adapter_state
 from motrix_edge.session.base import SessionState
 from motrix_edge.utils.capture_meta import CaptureMetaError, CaptureMetaStore
 from motrix_edge.utils.commands import (
@@ -149,29 +150,7 @@ class CaptureService:
             "status": "accepted",
             "state": self._session_state(),
             "lease_id": self._leases.status()["lease_id"],  # 当前租约（回显）
-            "adapter": self._adapter_ref(),  # 当前节点 active adapter 身份
-        }
-
-    def _adapter_ref(self) -> dict:
-        """当前节点 active adapter 身份（name / type）。"""
-        node = self._node
-        adapter = getattr(node, "adapter", None)
-        return {
-            "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
-            "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
-        }
-
-    def _adapter_state(self) -> dict:
-        """当前节点 active adapter 状态（身份 + 心跳缓存 + 控制频率）。"""
-        node = self._node
-        adapter = getattr(node, "adapter", None)
-        health = getattr(node, "adapter_health", None)
-        return {
-            "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
-            "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
-            "running": getattr(adapter, "running", None) if adapter is not None else None,
-            "control_hz": getattr(health, "control_hz", None) if health is not None else None,
-            "measured_hz": getattr(health, "measured_hz", None) if health is not None else None,
+            "adapter": adapter_ref(node),  # 当前节点 active adapter 身份
         }
 
     def exit(self, lease_id: str | None = None) -> dict:
@@ -248,10 +227,11 @@ class CaptureService:
         return {"meta": self._meta_store.list_meta()}
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态 / 磁盘。
 
-        ``capture_status`` = adapter 上报的采集状态缓存（运行位 + 元信息 + 数据目录，见
-        ``node.capture_status``）；未绑定 / 未缓存 → None。
+        ``capture_status`` = adapter 上报的采集状态缓存（**运行位 + 元信息全集 + 数据目录**，
+        见 ``node.capture_status``）；未绑定 / 未缓存 → None。运行位与数据目录**只在这里出现
+        一次**（不再另设 ``capture_running`` / 顶层 ``data_dir`` 同义字段）。
         """
         node = self._node
         session = self._session()
@@ -263,9 +243,7 @@ class CaptureService:
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": session_state,
-            "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
-            "capture_running": bool(getattr(capture, "running", False)) if capture is not None else False,
-            "data_dir": str(data_dir) if data_dir is not None else None,
+            "adapter": adapter_state(node),  # 当前节点 active adapter 状态（含遥操作位）
             # 采集状态缓存（adapter.capture_status()：运行位 + 元信息全集 + 数据目录）
             "capture_status": (
                 {
