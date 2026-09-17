@@ -66,7 +66,7 @@ class OpenPIClient(BasePolicyClient):
         )
         self._action_horizon = None  # 动作块长（信息性：metadata 或 policy_config，缺省 50）
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
+    def bind_adapter(self, action_dim=None, camera_names=None, arms=None):
         """绑定机器人适配器运行时启用的布局（adapter config set 的 enabled_cameras）。
 
         相机名单一事实来源 = adapter 配置：推理会话（InferSession）进入时把 adapter 启用的

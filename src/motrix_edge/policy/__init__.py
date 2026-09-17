@@ -32,6 +32,7 @@ import importlib
 POLICY_REGISTRY = {
     "openpi": ("motrix_edge.policy.openpi.client", "OpenPIClient"),
     "act": ("motrix_edge.policy.act.client", "ACTClient"),
+    "llm": ("motrix_edge.policy.llm.client", "LLMPolicyClient"),
 }
 
 # 策略配置项（**静态声明**：每个策略有自己的独立配置项——prompt / 模型路径 / 设备 / 块长…）。
@@ -39,7 +40,7 @@ POLICY_REGISTRY = {
 # 元素字段：
 #   key         配置键（写入 base_cfg["policy"][key]；运行时经 infer config set / POST /v1/infers/config）
 #   label       展示名（前端表单标签）
-#   type        text | int | bool（校验 / 控件类型）
+#   type        text | int | float | bool（校验 / 控件类型）
 #   required    是否必填（缺失时前端提示；后端在设置时校验非空）
 #   runtime     是否可在**会话内**运行时修改（True = 与其它配置项同级，改写后作用于运行中的客户端）
 #   locked_when_connected  是否在**策略已连接**后禁改（True 仅用于连接目标：host / port——
@@ -47,6 +48,8 @@ POLICY_REGISTRY = {
 #   default     代码缺省（可选；None 表示无缺省）
 #   placeholder / help  前端输入提示（可选）
 #   group       分组（"endpoint" = 推理端点：前端归入策略配置表单的公共项）
+#   secret      敏感项（密钥）：值只存内存态（不落盘），状态回显 / 日志一律脱敏为 ***，
+#               前端渲染为密码框（如 llm 的 api_key）
 #
 # 公共配置项（所有策略共有）：推理端点——与策略自身配置项**同层级**（同一 schema、同一表单、
 # 同一 infer config 通道），唯一差别是连接策略后锁定（locked_when_connected）。
@@ -120,6 +123,131 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
             "help": "服务端动作块长 K（与模型 chunk 匹配）",
         },
     ],
+    "llm": [
+        {
+            "key": "base_url",
+            "label": "模型端点 base_url",
+            "type": "text",
+            "required": False,
+            "runtime": True,
+            "default": "https://api.openai.com/v1",
+            "placeholder": "https://api.openai.com/v1",
+            "help": "OpenAI 兼容端点（请求 POST {base_url}/chat/completions）",
+        },
+        {
+            "key": "model",
+            "label": "模型名 model",
+            "type": "text",
+            "required": True,
+            "runtime": True,
+            "default": None,
+            "placeholder": "gpt-4o / qwen-vl-max",
+            "help": "云端视觉语言模型名（必填）",
+        },
+        {
+            "key": "prompt",
+            "label": "任务指令 prompt",
+            "type": "text",
+            "required": True,
+            "runtime": True,
+            "default": None,
+            "placeholder": "如：把红色方块叠到蓝色方块上",
+            "help": "语言条件策略：推理 / 录制前必须非空（可经 infer prompt 运行时改）",
+        },
+        {
+            "key": "api_key",
+            "label": "API key",
+            "type": "text",
+            "required": False,
+            "runtime": True,
+            "secret": True,
+            "default": None,
+            "placeholder": "sk-...",
+            "help": "前端输入，仅存 edge 内存态（不落盘、不回显，刷新后需重填）；留空时回退环境变量"
+            "（默认 OPENAI_API_KEY，可经 edge.yml 的 policy.api_key_env 改名）",
+        },
+        {
+            "key": "timeout",
+            "label": "请求超时 timeout（秒）",
+            "type": "float",
+            "required": False,
+            "runtime": True,
+            "default": 30.0,
+            "help": "单次请求超时秒数；超时 → 本步不下发（保持当前目标）",
+        },
+        {
+            "key": "temperature",
+            "label": "采样温度 temperature",
+            "type": "float",
+            "required": False,
+            "runtime": True,
+            "default": 0.0,
+            "help": "控制任务建议 0（确定性强）",
+        },
+        {
+            "key": "max_tokens",
+            "label": "响应上限 max_tokens",
+            "type": "int",
+            "required": False,
+            "runtime": True,
+            "default": 1024,
+            "help": "单次响应 token 上限（轨迹越长需要越大）",
+        },
+        {
+            "key": "horizon",
+            "label": "块长 horizon（步）",
+            "type": "int",
+            "required": False,
+            "runtime": True,
+            "default": 15,
+            "help": "重采样后的动作块长 H；需满足 H / infer_freq > 模型往返耗时",
+        },
+        {
+            "key": "image_size",
+            "label": "图像最长边 image_size",
+            "type": "int",
+            "required": False,
+            "runtime": True,
+            "default": 768,
+            "help": "下发图像等比缩放的最长边（像素，省带宽 / token）",
+        },
+        {
+            "key": "history_len",
+            "label": "历史轮数 history_len",
+            "type": "int",
+            "required": False,
+            "runtime": True,
+            "default": 3,
+            "help": "回灌的历史动作摘要轮数（0 = 不带历史）",
+        },
+        {
+            "key": "max_points",
+            "label": "轨迹点数上限 max_points",
+            "type": "int",
+            "required": False,
+            "runtime": True,
+            "default": 32,
+            "help": "模型单次可给的轨迹点数上限（超出截断到最早的 N 个）",
+        },
+        {
+            "key": "max_pose_step",
+            "label": "单步最大位移 max_pose_step（米）",
+            "type": "float",
+            "required": False,
+            "runtime": True,
+            "default": 0.05,
+            "help": "相邻输出步最大笛卡尔位移；超出整块按比例缩放（0 = 不限制）",
+        },
+        {
+            "key": "system_prompt",
+            "label": "系统提示 system_prompt",
+            "type": "text",
+            "required": False,
+            "runtime": True,
+            "default": None,
+            "help": "输出格式约定（坐标系 / JSON schema）；留空用内置缺省",
+        },
+    ],
 }
 
 
@@ -141,6 +269,23 @@ def policy_config_runtime_keys(policy_type: str) -> set[str]:
 def policy_config_connect_locked_keys(policy_type: str) -> set[str]:
     """**策略已连接后禁改**的键（``locked_when_connected=True``，如推理端点 host / port）。"""
     return {item["key"] for item in policy_config_items(policy_type) if item.get("locked_when_connected")}
+
+
+def policy_secret_keys(policy_type: str) -> set[str]:
+    """**敏感配置键**（``secret=True``，如 llm 的 ``api_key``）：仅存内存态，出参 / 日志需脱敏。"""
+    return {item["key"] for item in policy_config_items(policy_type) if item.get("secret")}
+
+
+def mask_policy_secrets(policy_type: str, values: dict | None) -> dict:
+    """把敏感键的值替换为 ``***``（**仅用于出参 / 日志**；内存态保留原值）。
+
+    空值 / 缺失项保持原样（不假装“已设置”）。
+    """
+    masked = dict(values or {})
+    for key in policy_secret_keys(policy_type):
+        if masked.get(key):
+            masked[key] = "***"
+    return masked
 
 
 def policy_features(policy_type: str) -> dict:

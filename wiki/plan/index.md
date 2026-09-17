@@ -15,6 +15,7 @@
 -   [Adapter 身份与选择实施计划](./motrix_edge_adapter_selection_plan.md)
 -   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
 -   [推理策略选择实施计划](./motrix_edge_policy_selection_plan.md)
+-   [LLM 轨迹策略实施计划](./motrix_edge_llm_policy_plan.md)
 -   [UploadSession 实施计划](./motrix_edge_upload_session_plan.md)
 -   [ACT 走 Lerobot gRPC + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
 -   [robot-pipeline 控制 / 观测双线程实施计划](./robot_pipeline_control_thread_plan.md)

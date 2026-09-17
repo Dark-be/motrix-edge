@@ -71,6 +71,7 @@ from motrix_edge.utils.commands import (
     handle_infer_endpoint,
     handle_infer_rtc,
     handle_policy_config,
+    mask_command_secrets,
     ok_result,
     parse_bool,
     parse_meta,
@@ -428,8 +429,10 @@ class EdgeNode:
 
         委托给 ``utils.commands.handle_policy_config``（写内存态 ``base_cfg["policy"]``，
         按**当前策略的配置项 schema** 校验）；与 ``infer ip`` 同为配置级命令（任何状态可用）。
+        回执里的 ``written`` **脱敏**（密钥只回 ``***``，不随 HTTP / 日志回显）。
         """
-        return handle_policy_config(self.base_cfg, cmd)
+        result = handle_policy_config(self.base_cfg, cmd)
+        return mask_command_secrets(result, result.data.get("policy_type") or "")
 
     def _on_adapter_config(self, cmd):
         """adapter config / adapter config set <json> / adapter config current：查询 / 设置 / 查询当前生效。

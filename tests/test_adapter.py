@@ -35,6 +35,7 @@ from motrix_edge.adapter import (
 from motrix_edge.adapter import test_adapter as test_adapter_mod
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
+    KEY_POSE,
     KEY_QPOS,
     AdapterCapability,
     DiscoveredRobot,
@@ -219,8 +220,11 @@ def test_capabilities_declares_action_dim_and_observation_keys():
     adapter = get_adapter(make_discovered())
     caps = adapter.capabilities
     assert caps.action_dim == 14
+    assert caps.action_spaces == ["joint", "cartesian_pose"]  # 关节 + 笛卡尔（机器人侧 IK）
+    assert caps.pose_dim == 12  # 双臂 × 6（xyz + rpy）
     assert caps.observation_keys == [
         KEY_QPOS,
+        KEY_POSE,
         f"{CAMERA_PREFIX}cam_head",
         f"{CAMERA_PREFIX}cam_left_wrist",
         f"{CAMERA_PREFIX}cam_right_wrist",

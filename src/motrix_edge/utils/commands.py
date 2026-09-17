@@ -39,6 +39,7 @@ from motrix_edge.policy import (
     policy_config_keys,
     policy_config_runtime_keys,
     policy_features,
+    policy_secret_keys,
     validate_policy_type,
 )
 from motrix_edge.rtc import DEFAULT_RTC_CONFIG, validate_config, validate_params
@@ -431,11 +432,16 @@ def policy_config_status(base_cfg, policy_type=None) -> dict:
     """
     policy_cfg = base_cfg.get("policy", {})
     policy_type = validate_policy_type(policy_type or policy_cfg.get("type", "openpi"))
+    secret_keys = policy_secret_keys(policy_type)
     items: list[dict] = []
     values: dict = {}
     missing: list[str] = []
     for item in policy_config_items(policy_type):
         value = policy_cfg.get(item["key"], item.get("default"))
+        if item["key"] in secret_keys:  # 敏感项（密钥）：不回显值，只报是否已设置
+            values[item["key"]] = ""
+            items.append({**item, "value": "", "configured": bool(value)})
+            continue
         values[item["key"]] = value
         if item.get("required") and (value is None or str(value).strip() == ""):
             missing.append(item["key"])
@@ -449,6 +455,23 @@ def policy_config_status(base_cfg, policy_type=None) -> dict:
         "connect_locked_keys": sorted(policy_config_connect_locked_keys(policy_type)),
         **policy_features(policy_type),
     }
+
+
+def mask_command_secrets(result: CommandResult, policy_type: str) -> CommandResult:
+    """命令回执**出参脱敏**：``data["written"]`` 里的敏感项（如 ``api_key``）替换为 ``***``。
+
+    只用于**对外回执 / 日志**——调用方（会话 / 节点）应先用原值写入内存态与运行中的策略客户端，
+    再把脱敏后的回执发出去（密钥不随 HTTP 轮询 / 日志回显）。
+    """
+    data = dict(result.data or {})
+    written = dict(data.get("written") or {})
+    if not written:
+        return result
+    for key in policy_secret_keys(policy_type):
+        if written.get(key):
+            written[key] = "***"
+    data["written"] = written
+    return CommandResult(status=result.status, data=data, error=result.error, status_code=result.status_code)
 
 
 def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
@@ -472,13 +495,15 @@ def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
             continue
         item = items[key]
         kind = item.get("type", "text")
-        if kind == "int":
+        if kind in ("int", "float"):
             if raw is None or str(raw).strip() == "":
-                raise ValueError(f"{key} requires an integer")
+                raise ValueError(f"{key} requires a number")
             try:
-                value = int(raw)
+                value = int(raw) if kind == "int" else float(raw)
             except (TypeError, ValueError):
-                raise ValueError(f"{key} must be an integer, got {raw!r}") from None
+                raise ValueError(
+                    f"{key} must be {'an integer' if kind == 'int' else 'a number'}, got {raw!r}"
+                ) from None
         elif kind == "bool":
             value = parse_bool(raw)
         else:

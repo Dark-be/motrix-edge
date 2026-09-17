@@ -118,7 +118,7 @@ def test_health_returns_identity_and_version():
     assert "adapters" in body and "robots" in body["adapters"]
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act", "llm"]
     # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 策略自身项）
     by_type = {p["type"]: p for p in body["adapters"]["policies"]}
     assert [item["key"] for item in by_type["openpi"]["config_items"]] == ["host", "port", "prompt"]
@@ -137,7 +137,7 @@ def test_health_without_node_returns_empty_robot():
     body = client.get("/v1/health").json()
     assert body["robot"] == {"name": None, "type": None}
     assert body["adapters"]["robots"] == []
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "act", "llm"]
 
 
 def test_adapters_info_returns_capabilities():

@@ -15,6 +15,7 @@
 -   [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)
 -   [上传会话（UploadSession）](./motrix_edge_upload_session.md)
 -   [推理策略客户端（policy）](./motrix_edge_policy.md)
+-   [LLM 轨迹策略（policy/llm）](./motrix_edge_llm_policy.md)
 -   [实时动作块（rtc）](./motrix_edge_rtc.md)
 -   [命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)

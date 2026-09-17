@@ -45,8 +45,9 @@ def make_signals(*seq):
 
 
 class _FakePolicy:
-    def __init__(self, requires_prompt=False):
+    def __init__(self, requires_prompt=False, action_space=None):
         self.requires_prompt = requires_prompt  # 是否语言条件策略（openpi=True 门控；act=False 不门控）
+        self.action_space = action_space  # 输出动作语义（None = 关节空间；cartesian_pose = 笛卡尔）
         self.infer_calls = 0
         self.reset_calls = 0
         self.disconnect_calls = 0
@@ -67,10 +68,11 @@ class _FakePolicy:
             raise ValueError("policy already connected: disconnect before changing endpoint")
         self.endpoint_calls.append((host, port))
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
+    def bind_adapter(self, action_dim=None, camera_names=None, arms=None):
         self.bind_calls += 1
         self.bound_action_dim = action_dim
         self.bound_cameras = camera_names
+        self.bound_arms = arms
 
     def connect(self):
         self.connect_calls += 1
@@ -104,6 +106,7 @@ class _FakeAdapter:
         self.ready = ready
         self.safe_stop_calls = 0
         self.executed = []
+        self.rollout_spaces: list = []  # rollout 收到的动作空间（None = 未指定）
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
         self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
@@ -136,10 +139,11 @@ class _FakeAdapter:
     def set_teleop(self, enabled, mode=None):
         self.teleop_calls.append((bool(enabled), mode))
 
-    def rollout(self, action) -> bool:
+    def rollout(self, action, action_space=None) -> bool:
         if self.teleop_refused:  # 模拟 SDK 409（遥操作 / 人工接管中）：本拍不下发
             return False
         self.executed.append(action)
+        self.rollout_spaces.append(None if action_space is None else str(action_space))
         return True
 
     def start_capture(self):
@@ -179,6 +183,17 @@ def test_infer_loop_runs_observation_to_action(monkeypatch):
     assert policy.infer_calls == 1  # 一次 infer rollout → obs → infer → action
     assert len(adapter.executed) == 1
     assert adapter.safe_stop_calls == 0
+
+
+def test_cartesian_policy_passes_action_space_to_adapter(monkeypatch):
+    """笛卡尔策略：会话把策略声明的动作空间透传给 adapter（机器人侧据此做 IK）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(action_space="cartesian_pose")
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("infer prompt 叠方块", "infer connect", "infer rollout", "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert adapter.rollout_spaces == ["cartesian_pose"]
 
 
 def test_infer_rollout_single_step_replies_action(monkeypatch):

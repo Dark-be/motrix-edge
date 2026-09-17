@@ -19,6 +19,7 @@ import numpy as np
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.policy import (
     get_policy,
+    mask_policy_secrets,
     policy_config_connect_locked_keys,
     validate_policy_type,
 )
@@ -55,6 +56,7 @@ from motrix_edge.utils.commands import (
     CommandResult,
     handle_infer_rtc,
     handle_policy_config,
+    mask_command_secrets,
     ok_result,
     parse_meta,
     parse_rollout_mode,
@@ -131,7 +133,19 @@ class InferSession(BaseSession):
         # 上报（/v1/infers 的 continuous），前端据此门控「持续推理 / 停止推理」。
         self._continuous = False
 
-        debug_print(self.name, f"Policy config: {self.policy_config} (type={self.policy_type})", "INFO")
+        debug_print(
+            self.name,
+            f"Policy config: {mask_policy_secrets(self._policy_type_name(), self.policy_config)} "
+            f"(type={self.policy_type})",
+            "INFO",
+        )
+
+    def _policy_type_name(self) -> str:
+        """当前策略类型名（供 schema 查询 / 密钥脱敏；无则空串）。"""
+        try:
+            return validate_policy_type(self.policy_type or self.policy_config.get("type", "openpi"))
+        except ValueError:
+            return ""
 
     @property
     def connected(self) -> bool:
@@ -281,10 +295,12 @@ class InferSession(BaseSession):
             return result
         written = result.data.get("written") or {}
         if written:
-            self._apply_policy_config(written)
+            self._apply_policy_config(written)  # 用**原值**应用到运行中的客户端（内存态）
+        # 出参脱敏：written 里的密钥不回显（HTTP / 日志只看到 ***）
+        safe = mask_command_secrets(result, self._policy_type_name())
         if cmd.name == CMD_INFER_PROMPT:  # 保持既有回执形状（prompt=...）
             return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
-        return ok_result(state=getattr(self, "state", "ready"), **result.data)
+        return ok_result(state=getattr(self, "state", "ready"), **(safe.data or {}))
 
     def _connect_locked_config_keys(self, cmd) -> list[str]:
         """本次设置里属于「策略已连接后禁改」的配置键（``locked_when_connected``，如端点）。
@@ -365,11 +381,12 @@ class InferSession(BaseSession):
             caps = getattr(adapter, "capabilities", None)
             camera_names = list(getattr(caps, "image_names", None) or [])
         action_dim = getattr(adapter, "action_dim", None)
+        arms = list(getattr(adapter, "enabled_arms", None) or [])
         try:
-            bind(action_dim=action_dim, camera_names=camera_names or None)
+            bind(action_dim=action_dim, camera_names=camera_names or None, arms=arms or None)
             debug_print(
                 self.name,
-                f"Policy bound to adapter layout: action_dim={action_dim}, cameras={camera_names}",
+                f"Policy bound to adapter layout: action_dim={action_dim}, cameras={camera_names}, arms={arms}",
                 "INFO",
             )
         except Exception as exc:  # noqa: BLE001 布局绑定失败不致命
@@ -498,7 +515,7 @@ class InferSession(BaseSession):
             self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
             return
         action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 取本步动作
-        if action is not None and self.adapter.rollout(action) is False:
+        if action is not None and self.adapter.rollout(action, action_space=self._policy_action_space()) is False:
             # 遥操作（人工接管）中：推理让位（SDK 409）——本步不下发，回执说明原因
             self._reply(
                 cmd,
@@ -651,7 +668,7 @@ class InferSession(BaseSession):
             if action is not None:
                 # 遥操作（人工接管）中 SDK 拒绝本拍（409，adapter 已限流日志）：继续下一拍，
                 # 遥操作关闭（robot teleop false）后自动恢复下发。
-                self.adapter.rollout(action)
+                self.adapter.rollout(action, action_space=self._policy_action_space())
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
 
     @staticmethod
@@ -660,3 +677,11 @@ class InferSession(BaseSession):
         if action is None:
             return None
         return np.asarray(action).reshape(-1).tolist()
+
+    def _policy_action_space(self):
+        """当前策略声明的动作空间（缺省 None → adapter 按关节空间解释，与旧行为一致）。
+
+        笛卡尔策略（``policy.action_space = cartesian_pose``）由 adapter 随指令下发该语义，
+        机器人侧据此做 IK；不支持该空间的适配器会在 ``rollout`` 内报 ValueError。
+        """
+        return getattr(getattr(self, "policy", None), "action_space", None)

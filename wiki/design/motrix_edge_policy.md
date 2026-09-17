@@ -11,10 +11,11 @@
 策略与 wire 形态（**策略只负责「取一次推理的原始动作块」**；块缓存 / 三元切分 / 时序平滑 /
 预取时机统一由 [实时动作块（rtc）](./motrix_edge_rtc.md) 负责）：
 
-| 类型   | 传输         | 消息格式          | 推理结果                          |
-| ------ | ------------ | ----------------- | --------------------------------- |
-| openpi | WebSocket    | msgpack（契约）   | `[horizon, dim]` 原始动作块       |
-| act    | lerobot gRPC | pickle（lerobot） | `TimedAction` 整块（含 timestep） |
+| 类型   | 传输         | 消息格式                   | 推理结果                                 |
+| ------ | ------------ | -------------------------- | ---------------------------------------- |
+| openpi | WebSocket    | msgpack（契约）            | `[horizon, dim]` 原始动作块              |
+| act    | lerobot gRPC | pickle（lerobot）          | `TimedAction` 整块（含 timestep）        |
+| llm    | HTTP JSON    | OpenAI chat（图像 base64） | 稀疏笛卡尔轨迹 JSON → **重采样**为动作块 |
 
 ## 目标与原则
 
@@ -28,6 +29,11 @@
     时序平滑 / 预取时机不属策略职责**（统一在 `motrix_edge.rtc`，见
     [实时动作块（rtc）](./motrix_edge_rtc.md)）。
 -   注册式懒加载：`POLICY_REGISTRY` 登记类型，`get_policy()` 选中时才 `import`。
+-   动作语义：`BasePolicyClient.action_space`（缺省 `joint`；`llm` 为 `cartesian_pose`）——
+    会话把它透传给 `adapter.rollout(action, action_space=...)`，机器人侧据此决定是否走
+    笛卡尔 IK（见 [LLM 轨迹策略（policy/llm）](./motrix_edge_llm_policy.md)）。
+-   布局绑定：`bind_adapter(action_dim, camera_names, arms)` 由会话注入 adapter 的**启用布局**
+    （qpos 维数 / 相机名 / 臂名），策略不另读 `edge.yml`。
 
 ## 包结构
 
@@ -44,7 +50,8 @@ src/motrix_edge/
     ├── base.py         # BasePolicyClient 抽象（connect / infer_chunk / reset / disconnect）
     ├── contract.py     # 格式契约（openpi wire）：key 常量 + build_observation/extract_action/图像编码
     ├── openpi/         # OpenPIClient（ws + msgpack：请求一次返回原始动作块）
-    └── act/            # ACTClient（lerobot gRPC 流式：按绝对步号取回整块）
+    ├── act/            # ACTClient（lerobot gRPC 流式：按绝对步号取回整块）
+    └── llm/            # LLMPolicyClient（OpenAI 兼容 HTTP：轨迹点解析 / 重采样 → 动作块）
 ```
 
 lerobot 仅作为 **vendored 内置依赖**（`src/lerobot`，Apache-2.0 头保留）提供 wire 最小件：
@@ -148,11 +155,12 @@ policy:
 （`host` / `port`）；全部由策略包**静态声明**，CLI 与前端共用同一声明——前端**按所选策略动态渲染
 表单**（端点项、会话内锁定项都由 schema 标记，不需写死输入框）：
 
-| 分组                 | 配置项                                                                                             | 适用范围 | 会话内可改       |
-| -------------------- | -------------------------------------------------------------------------------------------------- | -------- | ---------------- |
-| `endpoint`（公共项） | `host`（推理节点 IP）/ `port`（端口 1-65535）                                                      | 所有策略 | 否（随会话锁定） |
-| 策略项               | `openpi`：`prompt`（文本指令，必填）                                                               | openpi   | 是               |
-| 策略项               | `act`：`pretrained_name_or_path`（模型路径，**运行时给定**，必填）/ `device` / `actions_per_chunk` | act      | 是               |
+| 分组                 | 配置项                                                                                                                                                                                                        | 适用范围 | 会话内可改       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------- |
+| `endpoint`（公共项） | `host`（推理节点 IP）/ `port`（端口 1-65535）                                                                                                                                                                 | 所有策略 | 否（随会话锁定） |
+| 策略项               | `openpi`：`prompt`（文本指令，必填）                                                                                                                                                                          | openpi   | 是               |
+| 策略项               | `act`：`pretrained_name_or_path`（模型路径，**运行时给定**，必填）/ `device` / `actions_per_chunk`                                                                                                            | act      | 是               |
+| 策略项               | `llm`：`model`（必填）/ `prompt`（必填）/ `base_url` / `api_key_env` / `horizon` / `image_size` / `history_len` / `max_points` / `max_pose_step` / `temperature` / `max_tokens` / `timeout` / `system_prompt` | llm      | 是               |
 
 声明结构（`policy.POLICY_COMMON_CONFIG_ITEMS` + `policy.POLICY_CONFIG_ITEMS`）：`key` / `label` /
 `type`（text / int / bool）/ `required` / `runtime`（`false` = 会话内锁定）/ `group`（`endpoint` = 推理

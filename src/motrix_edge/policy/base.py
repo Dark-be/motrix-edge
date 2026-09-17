@@ -13,6 +13,9 @@
 # in compliance with the license file.
 
 
+from motrix_edge.adapter.base import ActionSpace
+
+
 class BasePolicyClient:
     """推理策略客户端基类（策略侧最小接口）。
 
@@ -22,9 +25,14 @@ class BasePolicyClient:
     ``requires_prompt``：该策略是否**需要文本指令（prompt）**——语言条件策略（openpi）为
     ``True``，推理前必须已 ``infer prompt <text>`` 预置非空文本（会话据此门控）；
     非语言条件策略（act：ACT 不接受文本条件）为 ``False``，不参与 prompt 门控。
+
+    ``action_space``：该策略输出动作的**语义**（缺省关节空间）——会话据此告诉适配器如何解释
+    动作（``cartesian_pose`` = 末端位姿，由机器人侧 IK 转关节后执行，见
+    wiki/design/motrix_edge_llm_policy.md）。
     """
 
     requires_prompt: bool = False  # 是否需要 prompt（语言条件策略子类覆盖为 True）
+    action_space: ActionSpace = ActionSpace.JOINT  # 输出动作语义（笛卡尔策略覆盖为 CARTESIAN_POSE）
 
     def __init__(self, policy_config: dict) -> None:
         self.policy_config = policy_config or {}
@@ -84,13 +92,16 @@ class BasePolicyClient:
         """
         pass
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
-        """绑定推理时机器人适配器启用的布局（启用臂 qpos 维数 + 启用相机名）。
+    def bind_adapter(self, action_dim=None, camera_names=None, arms=None):
+        """绑定推理时机器人适配器启用的布局（启用臂 qpos 维数 + 启用相机名 + 启用臂名）。
 
         由推理会话（InferSession）在进入会话时调用：把 adapter 运行时配置（``adapter
         config set`` 的 enabled_arms / enabled_cameras）传给策略客户端，使布局的单一
         事实来源 = adapter（策略**不另读** edge.yml 的相机名）。默认 no-op；需要按启用
-        相机过滤 / 按启用臂切分的策略（如 openpi）覆盖。
+        相机过滤 / 按启用臂切分的策略（如 openpi / llm）覆盖。
+
+        ``arms`` = 启用臂名（物理顺序，如 ``["left", "right"]``）：笛卡尔等**按臂组织动作**
+        的策略据此决定动作块的分段布局。
         """
         pass
 
