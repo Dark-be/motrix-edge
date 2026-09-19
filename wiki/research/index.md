@@ -6,4 +6,6 @@
 
 ## 索引
 
+-   [Kleinkram InferenceService 对接对齐点（P1）](./motrix_edge_kleinkram_alignment.md)
+
 <!-- 新增研究文档后在此登记标题链接。 -->

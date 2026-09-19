@@ -15,23 +15,31 @@
 """EdgeNode / NodeLifecycle 单元测试 —— 状态机转移、急停安全停止、结果处理，无硬件可跑。"""
 
 import threading
+import time
+
+import pytest
 
 from motrix_edge.adapter import DEFAULT_DISCOVER_HOST, DEFAULT_DISCOVER_PORT
 from motrix_edge.node import EdgeNode, NodeLifecycle, NodeState
 from motrix_edge.session.base import RunResult
 from motrix_edge.utils.commands import (
-    CMD_INFER_IP,
-    CMD_INFER_IP_SET,
-    CMD_INFER_PORT,
-    CMD_INFER_PORT_SET,
+    CMD_INFER_CONFIG,
+    CMD_INFER_CONFIG_SET,
+    CMD_INFER_MODEL_SET,
+    CMD_INFER_PROMPT,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_RUN,
+    META_REPLY_DEADLINE,
     Command,
+    CommandBus,
+    CommandError,
     build_command_registry,
+    deadline_exceeded,
+    ok_result,
 )
 
 
@@ -154,6 +162,39 @@ def test_handle_result_error_calls_safe_stop_before_state_switch():
     assert node.session.safe_stop_calls == 1
     assert stop_states == [NodeState.ACTIVE]  # 调用时仍 ACTIVE（未切 ERROR）
     assert node.state == NodeState.ERROR
+
+
+def test_estop_uses_critical_bypass_while_task_runs():
+    """ACTIVE 期间急停走**总线旁路**即时生效：会话侧拿不到它，node 主循环即时处理。
+
+    任务运行期间主循环不 poll 普通命令（由会话消费）；若急停也走普通队列，一条分钟级长操作
+    （如推理预热加载模型）会把急停一起挡在队列里。这里验证分流（旁路独占）+ 处理结果。
+    """
+    bus = CommandBus()
+    node = EdgeNode({}, command_source=bus)
+    node.initialize()  # INIT → IDLE
+    node.lifecycle.transition(NodeState.READY)
+    node.lifecycle.transition(NodeState.ACTIVE)
+
+    stopped = []
+
+    class _StopSession(_FakeSession):
+        def stop(self):
+            stopped.append(1)
+
+    node.session = _StopSession()
+    node._task_thread = threading.Thread(target=lambda: None, daemon=True)
+    node._task_thread.start()
+    node._task_thread.join()  # 线程已结束但标记仍在 → 等价于「任务线程运行中」
+
+    bus.push(Command(CMD_ROBOT_ESTOP))  # HTTP / 键盘急停同款：push
+    assert bus() is None  # 会话（普通队列）拿不到急停 → 不会被长操作挡住
+    critical = node._poll_critical()
+    assert critical is not None and critical.name == CMD_ROBOT_ESTOP
+    node._dispatch(critical)
+    assert node.state == NodeState.ERROR  # 即时生效（不等任务结束）
+    assert stopped == [1]  # 会话被请求停止（预热取消挂在这里）
+    assert node._task_thread is None
 
 
 def test_enter_error_stops_task_thread_and_node_reset_recovers():
@@ -696,7 +737,8 @@ def test_tick_observes_during_capture_session():
 
 
 # ---------------------------------------------------------------------------
-# infer ip / infer port（推理端点配置命令：配置级，任何状态可用，写内存态 policy 段）
+# 推理端点（host / port）—— **普通 policy config 项**：配置级命令，任何状态可用
+# （端点 = 普通策略配置项，无专用命令）
 # ---------------------------------------------------------------------------
 
 
@@ -707,119 +749,141 @@ def _endpoint_node():
     return node
 
 
-def test_infer_endpoint_getters_return_config():
-    """infer ip / infer port：查询当前配置端点（回执 ok，含 host / port）。"""
+def test_command_bus_submit_marks_deadline_and_drops_late_reply():
+    """``submit`` 的提交语义：写入 ``reply_deadline`` + 迟到回执**丢弃**（不阻塞会话线程）。
+
+    真机安全靠前者：动作类处理器（``infer rollout`` / ``robot execute``）在下发前用
+    ``deadline_exceeded`` 自查，调用方已放弃就不动真机。后者防「超时 + 回执」把会话线程卡在
+    ``Queue.put`` 上（历史写法是阻塞 put）。
+    """
+    bus = CommandBus()
+    timed_out = Command(CMD_NODE_RESET)
+    with pytest.raises(CommandError) as exc:
+        bus.submit(timed_out, timeout=0.05)  # 无消费方 → 超时
+    assert exc.value.status_code == 504
+    assert META_REPLY_DEADLINE in timed_out.meta  # 提交时已写入截止时刻
+    assert deadline_exceeded(timed_out)  # 超时后自查为真（处理器据此丢弃动作）
+    # 迟到回执：调用方已放弃 → 丢弃（连续两次也不会抛 queue.Full / 不阻塞）
+    timed_out.reply_to(ok_result())
+    timed_out.reply_to(ok_result())
+    # 未到期的 deadline / 无 deadline（push 或手工构造）→ 不门控，保持既有语义
+    assert not deadline_exceeded(Command(CMD_NODE_RESET, meta={META_REPLY_DEADLINE: time.monotonic() + 5}))
+    assert not deadline_exceeded(Command(CMD_NODE_RESET))
+
+
+def test_infer_config_reports_endpoint_values():
+    """infer config：端点作为公共配置项上报（group=endpoint，含当前值）。"""
     node = _endpoint_node()
     replies = []
-    node._dispatch(Command(CMD_INFER_IP, reply_to=replies.append))
+    node._dispatch(Command(CMD_INFER_CONFIG, reply_to=replies.append))
     assert replies[0].status == "ok"
-    assert replies[0].data == {"host": "0.0.0.0", "port": 8765}
-
-    replies = []
-    node._dispatch(Command(CMD_INFER_PORT, reply_to=replies.append))
-    assert replies[0].status == "ok"
-    assert replies[0].data == {"host": "0.0.0.0", "port": 8765}
-
-
-def test_infer_endpoint_getter_without_policy_returns_none():
-    """未配置 policy 段时 getter 返回 host/port None（不崩）。"""
-    node = EdgeNode({}, command_source=lambda: None)
-    node.initialize()
-    replies = []
-    node._dispatch(Command(CMD_INFER_IP, reply_to=replies.append))
-    assert replies[0].status == "ok"
-    assert replies[0].data == {"host": None, "port": None}
+    snapshot = replies[0].data["policy_config"]
+    values = snapshot["values"]
+    assert values["host"] == "0.0.0.0"
+    assert values["port"] == 8765
+    assert [item["key"] for item in snapshot["items"]][:2] == ["host", "port"]
+    assert [item["group"] for item in snapshot["items"][:2]] == ["endpoint", "endpoint"]
 
 
-def test_infer_ip_set_updates_config():
-    """infer ip set <ip>：写内存态 policy.host，回执带回更新后端点。"""
+def test_infer_config_set_updates_endpoint():
+    """infer config set <json>：端点写内存态 policy 段（与 prompt / 模型路径同一通道）。"""
     node = _endpoint_node()
     replies = []
-    node._dispatch(Command(CMD_INFER_IP_SET, params={"ip": "192.168.1.10"}, reply_to=replies.append))
+    params = {"json": '{"host": "192.168.1.10", "port": 9000}'}
+    node._dispatch(Command(CMD_INFER_CONFIG_SET, params=params, reply_to=replies.append))
     assert replies[0].status == "ok"
-    assert replies[0].data == {"host": "192.168.1.10", "port": 8765}
+    assert replies[0].data["written"] == {"host": "192.168.1.10", "port": 9000}
     assert node.base_cfg["policy"]["host"] == "192.168.1.10"
-    assert node.base_cfg["policy"]["port"] == 8765  # 未改端口
-
-
-def test_infer_port_set_updates_config():
-    """infer port set <port>：写内存态 policy.port，回执带回更新后端点。"""
-    node = _endpoint_node()
-    replies = []
-    node._dispatch(Command(CMD_INFER_PORT_SET, params={"port": "9000"}, reply_to=replies.append))
-    assert replies[0].status == "ok"
-    assert replies[0].data == {"host": "0.0.0.0", "port": 9000}
     assert node.base_cfg["policy"]["port"] == 9000
-    assert node.base_cfg["policy"]["host"] == "0.0.0.0"  # 未改 ip
 
 
-def test_infer_ip_set_rejects_empty():
-    """infer ip set：ip 缺失 / 空 → rejected（400），配置不变。"""
+def test_infer_config_set_rejects_invalid_endpoint():
+    """端点非法值走同一套 schema 校验：端口越界 / 非整数（bool 与带小数浮点也拒）→ 400，配置不变。"""
     node = _endpoint_node()
+    for bad in ('{"port": 0}', '{"port": 65536}', '{"port": "abc"}', '{"port": true}', '{"port": 9000.7}'):
+        replies = []
+        node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": bad}, reply_to=replies.append))
+        assert replies[0].status == "rejected", f"{bad} should be rejected"
+        assert replies[0].status_code == 400
+    assert node.base_cfg["policy"]["port"] == 8765  # 配置未被污染
+    assert node.base_cfg["policy"]["host"] == "0.0.0.0"
+    # 一批里先合法后非法 → 整批拒绝（全量校验通过才写，host 的清除也不落地）
     replies = []
-    node._dispatch(Command(CMD_INFER_IP_SET, params={}, reply_to=replies.append))
+    payload = '{"host": null, "port": 0}'
+    node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": payload}, reply_to=replies.append))
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
     assert node.base_cfg["policy"]["host"] == "0.0.0.0"
 
+
+def test_infer_config_set_clears_endpoint_on_empty_value():
+    """空值（null / 空串）= 清除该项（回到缺省）：host / port 同一条规则，不写空串脏值。"""
+    node = _endpoint_node()
     replies = []
-    node._dispatch(Command(CMD_INFER_IP_SET, params={"ip": "  "}, reply_to=replies.append))
+    node._dispatch(
+        Command(CMD_INFER_CONFIG_SET, params={"json": '{"host": "", "port": null}'}, reply_to=replies.append)
+    )
+    assert replies[0].status == "ok"
+    assert replies[0].data["written"] == {"host": None, "port": None}  # 回执显式标出清除
+    assert "host" not in node.base_cfg["policy"]  # 不写空串（空串会拼出 `ws://` 在连接时才报错）
+    assert "port" not in node.base_cfg["policy"]
+    replies = []
+    node._dispatch(Command(CMD_INFER_CONFIG, reply_to=replies.append))
+    assert replies[0].data["policy_config"]["values"]["host"] is None  # 回缺省，前端按「host 非空」门控
+
+
+def test_infer_prompt_without_text_is_rejected():
+    """缺文本的 ``infer prompt`` → 400（不得把必填项写成字面量字符串 "None"）。
+
+    节点侧（非会话）直通 ``handle_policy_config``：若把缺失当成文本值，prompt 会变成 "None"
+    （非空 → ``missing`` 清空、推理门控放行），属会静默污染配置的脏值。
+    """
+    node = _endpoint_node()
+    replies = []
+    node._dispatch(Command(CMD_INFER_PROMPT, reply_to=replies.append))
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
+    assert "prompt" not in node.base_cfg["policy"]
 
 
-def test_infer_port_set_rejects_invalid():
-    """infer port set：端口缺失 / 非数字 / 越界 → rejected（400），配置不变。"""
-    node = _endpoint_node()
-    for bad in ("", "abc", "0", "65536", "-1", "1.5"):
-        replies = []
-        node._dispatch(Command(CMD_INFER_PORT_SET, params={"port": bad}, reply_to=replies.append))
-        assert replies[0].status == "rejected", f"port {bad!r} should be rejected"
-        assert replies[0].status_code == 400
-        assert node.base_cfg["policy"]["port"] == 8765  # 配置未被污染
-
-
-def test_infer_endpoint_commands_work_in_error_state():
-    """infer ip/port（配置级）在 ERROR 状态也可用（与状态机解耦）。"""
+def test_infer_config_works_in_error_state():
+    """配置级命令在 ERROR 状态也可用（与状态机解耦）。"""
     node = _endpoint_node()
     node._enter_error("boom")
     assert node.state == NodeState.ERROR
     replies = []
-    node._dispatch(Command(CMD_INFER_PORT_SET, params={"port": "9000"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": '{"port": 9000}'}, reply_to=replies.append))
     assert replies[0].status == "ok"
-    assert replies[0].data == {"host": "0.0.0.0", "port": 9000}
+    assert node.base_cfg["policy"]["port"] == 9000
 
 
-def test_infer_endpoint_commands_work_in_active_state():
+def test_infer_config_works_in_active_state():
     """ACTIVE 下配置命令由 node 全局处理，不会落入会话循环拒绝。"""
     node = _endpoint_node()
     node.lifecycle.transition(NodeState.READY)
     node.lifecycle.transition(NodeState.ACTIVE)
     replies = []
 
-    node._dispatch(Command(CMD_INFER_IP_SET, params={"ip": "10.0.0.8"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": '{"host": "10.0.0.8"}'}, reply_to=replies.append))
 
     assert node.state == NodeState.ACTIVE
     assert replies[0].status == "ok"
-    assert replies[0].data == {"host": "10.0.0.8", "port": 8765}
+    assert node.base_cfg["policy"]["host"] == "10.0.0.8"
 
 
-def test_infer_endpoint_command_parsing():
-    """CLI 解析：infer ip / infer ip set <ip> / infer port / infer port set <port>。"""
+def test_infer_config_command_parsing():
+    """CLI 解析：infer config / infer config set <json> / infer model set <path>。"""
     import shlex
 
     registry = build_command_registry()
-    cmd = registry.parse_argv(shlex.split("infer ip"))
-    assert cmd.name == CMD_INFER_IP
+    cmd = registry.parse_argv(shlex.split("infer config"))
+    assert cmd.name == CMD_INFER_CONFIG
     assert cmd.params == {}
 
-    cmd = registry.parse_argv(shlex.split("infer ip set 192.168.1.10"))
-    assert cmd.name == CMD_INFER_IP_SET
-    assert cmd.params == {"ip": "192.168.1.10"}  # 位置参数绑定
+    cmd = registry.parse_argv(["infer", "config", "set", '{"host":"10.0.0.8"}'])  # JSON 含引号，不经 shlex
+    assert cmd.name == CMD_INFER_CONFIG_SET
+    assert cmd.params == {"json": '{"host":"10.0.0.8"}'}
 
-    cmd = registry.parse_argv(shlex.split("infer port"))
-    assert cmd.name == CMD_INFER_PORT
-
-    cmd = registry.parse_argv(shlex.split("infer port set 8765"))
-    assert cmd.name == CMD_INFER_PORT_SET
-    assert cmd.params == {"port": "8765"}
+    cmd = registry.parse_argv(shlex.split("infer model set /tmp/model"))
+    assert cmd.name == CMD_INFER_MODEL_SET
+    assert cmd.params == {"path": "/tmp/model"}

@@ -29,14 +29,14 @@ motrix_edge_lease.md）。当前实现（capability 映射）：
 勿依赖去重。
 """
 
+import json
+
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
-    CMD_INFER_IP,
-    CMD_INFER_IP_SET,
-    CMD_INFER_PORT,
-    CMD_INFER_PORT_SET,
+    CMD_CAPTURE_SYNC,
+    CMD_INFER_CONNECT,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -130,43 +130,40 @@ class CommandService:
             self._bus.push(Command(CMD_CAPTURE_EPISODE_END, meta={"lease_id": lease_id}))
             return {"status": "accepted", "command_id": command_id, "executed": "capture_episode_end"}
 
-        # 推理端点配置（infer ip / infer port get/set）：配置级命令经同一命令总线
-        # （submit 同步回执），与本地 CLI 行为一致；写入内存态 policy 段，下次
-        # session run infer 生效。
-        if capability == "infer_ip":
-            return self._infer_endpoint_cmd(command_id, "infer_ip", CMD_INFER_IP, lease_id=lease_id)
-        if capability == "infer_port":
-            return self._infer_endpoint_cmd(command_id, "infer_port", CMD_INFER_PORT, lease_id=lease_id)
-        if capability == "infer_ip_set":
-            return self._infer_endpoint_cmd(
-                command_id,
-                "infer_ip_set",
-                CMD_INFER_IP_SET,
-                params={"ip": (params or {}).get("ip")},
-                lease_id=lease_id,
-            )
-        if capability == "infer_port_set":
-            return self._infer_endpoint_cmd(
-                command_id,
-                "infer_port_set",
-                CMD_INFER_PORT_SET,
-                params={"port": (params or {}).get("port")},
-                lease_id=lease_id,
-            )
+        if capability == "infer_connect":
+            # 单次尝试连接推理节点（推理会话内消费；submit 同步等回执）
+            try:
+                result = self._bus.submit(Command(CMD_INFER_CONNECT, meta={"lease_id": lease_id}), timeout=5.0)
+            except Exception as exc:  # noqa: BLE001 submit 超时（命令未被消费）→ HTTP 错误
+                raise CommandError(str(exc), status_code=504) from exc
+            return {
+                "status": result.status,
+                "command_id": command_id,
+                "executed": "infer_connect",
+                "data": result.data,
+                "error": result.error,
+            }
+
+        if capability == "capture_sync":
+            # 同步采集元信息到机器人进程（采集会话内消费；submit 同步等回执）
+            try:
+                result = self._bus.submit(
+                    Command(
+                        CMD_CAPTURE_SYNC,
+                        params={"meta": json.dumps((params or {}).get("meta"))},
+                        meta={"lease_id": lease_id},
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as exc:  # noqa: BLE001 submit 超时（命令未被消费）→ HTTP 错误
+                raise CommandError(str(exc), status_code=504) from exc
+            return {
+                "status": result.status,
+                "command_id": command_id,
+                "executed": "capture_sync",
+                "data": result.data,
+                "error": result.error,
+            }
 
         # 其他 capability：骨架（预留 Capability 校验 / 下发机器人执行）
         return {"status": "accepted", "command_id": command_id, "executed": None}
-
-    def _infer_endpoint_cmd(self, command_id, executed, name, params=None, lease_id=None) -> dict:
-        """推理端点配置命令：submit 同步等回执（node 主循环消费），回执透传。"""
-        try:
-            result = self._bus.submit(Command(name, params=params or {}, meta={"lease_id": lease_id}), timeout=5.0)
-        except Exception as exc:  # noqa: BLE001 submit 超时（命令未被消费）→ HTTP 错误
-            raise CommandError(str(exc), status_code=504) from exc
-        return {
-            "status": result.status,
-            "command_id": command_id,
-            "executed": executed,
-            "data": result.data,
-            "error": result.error,
-        }

@@ -19,7 +19,9 @@ src/motrix_edge/
 ├── node.py           # EdgeNode 生命周期状态机（NodeLifecycle / NodeState）
 ├── adapter/          # 机器人硬件适配：RobotAdapter HAL + TestRobotAdapter + 工厂
 ├── session/          # 会话：BaseSession / CaptureSession / InferSession + get_session 工厂
-├── policy/           # 推理策略客户端：BasePolicyClient / 传输 / 契约 / broker / openpi + 工厂
+├── policy/           # 推理策略客户端：BasePolicyClient + 契约 + openpi / lerobot_act + 注册工厂
+├── transport/        # 推理传输层：WsTransport（msgpack-over-ws）/ AsyncInferenceGrpcTransport
+├── rtc/              # RTCManager：动作块缓存 / 三元切分（P/E/S）/ 时序平滑 / 异步预取
 ├── frame/            # FrameManager：会话观测帧缓冲（preview / WebRTC 消费）
 ├── identity/         # Edge 本地设备身份声明：Identity + headers() + 请求元数据生成器
 ├── lease/            # Edge 级租约机制：LeaseManager

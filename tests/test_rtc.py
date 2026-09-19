@@ -970,3 +970,66 @@ def test_close_stops_prefetch_thread_and_infer_degrades_inline():
     assert rtc.status()["remaining"] > 0  # 队列已续上
     assert len(_prefetch_threads()) == before
     rtc.close()
+
+
+# ---- 兜底块长校准（calibrate）--------------------------------------------------
+
+
+class _ObservedLenPolicy(_FakePolicy):
+    """模拟「实测块长」已知的策略（服务端只返回固定长度块）——RTC 据此兜底校准 H。"""
+
+    def __init__(self, height: int):
+        super().__init__([list(range(height))])
+        self.observed_chunk_len = height
+
+
+def test_rtc_calibrates_horizon_to_observed_block_len():
+    """兜底校准：实测块长 < 配置 H → H 收敛到实测值，P/E/S 等比缩放，**首个 rollout 就按新参数**。"""
+    policy = _ObservedLenPolicy(16)
+    rtc = _rtc(policy, action_horizon=50, prefix_len=0, suffix_len=10, execution_horizon=None)
+    try:
+        assert rtc.infer(_obs()) is not None  # 首个 rollout：先校准再取本步动作
+        params = rtc.params
+        assert params["action_horizon"] == 16  # min(H=50, 实测 16)
+        assert params["prefix_len"] == 0
+        assert params["suffix_len"] == 3  # 10 × 16/50 = 3.2 → 3
+        assert params["execution_horizon"] is None  # 回到缺省推导（= H - P - S），不固化缩放后的绝对值
+        assert params["action_horizon"] - params["prefix_len"] - params["suffix_len"] == 13  # E
+        # 切分用的是校准后的参数（而非每块临时缩放）：与实测块长一致
+        assert rtc.status()["last_chunk"]["lens"] == split_lens(16, 0, 13, 3)
+    finally:
+        rtc.close()
+
+
+def test_rtc_calibrate_is_once_only_and_ignores_unusable_len():
+    """校准只做一次（实测块长是「最近一次」，可能被瞬时短块污染）；缺省 / 非法 / 更长实测都不动参数。"""
+    policy = _ObservedLenPolicy(16)
+    rtc = _rtc(policy, action_horizon=50, suffix_len=10)
+    try:
+        before = rtc.params
+        assert rtc.calibrate(None) == before  # 未观测到块长（策略不声明 / 尚未推理）
+        assert rtc.calibrate(0) == before  # 非法
+        assert rtc.calibrate(-3) == before  # 非法
+        assert rtc.calibrate(80) == before  # 实测比 H 长 → 保持（H 是执行窗口上限）
+
+        rtc.infer(_obs())  # 首次实测 16 → 校准
+        calibrated = rtc.params
+        assert calibrated["action_horizon"] == 16
+        assert rtc.calibrate(4) == calibrated  # 已校准：不再跟随（瞬时短块不把 H 继续压低）
+        assert rtc.params == calibrated
+
+        rtc.configure(action_horizon=8, suffix_len=2)  # 显式设置仍可覆盖（E 推导不冲突）
+        assert rtc.params["action_horizon"] == 8
+    finally:
+        rtc.close()
+
+
+def test_rtc_policy_without_observed_len_keeps_configured_horizon():
+    """策略未回填实测块长（``_FakePolicy`` 无该属性）→ 校准 no-op，H 保持配置值。"""
+    policy = _FakePolicy([[1] * 4])
+    rtc = _rtc(policy, action_horizon=4, suffix_len=1)
+    try:
+        assert rtc.infer(_obs()) is not None
+        assert rtc.params["action_horizon"] == 4
+    finally:
+        rtc.close()

@@ -14,7 +14,7 @@
 
 """虚拟推理端点（scripts/test_infer_point.py）测试。
 
-覆盖：随机游走动作块形态 / 有界 / 块间连续、metadata 契约，以及真实 ``MsgpackTransport``
+覆盖：随机游走动作块形态 / 有界 / 块间连续、metadata 契约，以及真实 ``WsTransport``
 连接虚拟端点的 wire 契约（metadata → 观测 → 动作块）。无硬件、无需真实推理。
 """
 
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from motrix_edge.policy.transport import MsgpackTransport
+from motrix_edge.transport import WsTransport
 
 # scripts/ 非安装包：把仓库根加入 sys.path 以便导入虚拟端点模块（与 test_robot_sdk 同为
 # 独立运行的联调脚本，非 src-layout 包内模块）。
@@ -73,10 +73,10 @@ def test_chunks_are_continuous_random_walk():
     assert np.any(np.abs(second[0] - first[-1]) > 1e-9)
 
 
-def test_chunk_adapts_to_observation_qpos_dim():
-    """观测携带 qpos 时按 qpos 维数适配动作维。"""
+def test_chunk_adapts_to_observation_state_dim():
+    """观测携带 state（openpi 官方 flat 键）时按 state 维数适配动作维（单臂 7 维）。"""
     core = SimInferCore(action_dim=14, action_horizon=16, seed=0)
-    obs = {"observations/qpos": np.zeros(7, dtype=np.float32)}
+    obs = {"state": np.zeros(7, dtype=np.float32)}
     chunk = core.chunk_for(obs)
     assert chunk.shape == (16, 7)
     assert core.action_dim == 7
@@ -91,16 +91,22 @@ def test_reset_zeros_walk_start():
     assert np.all(np.abs(chunk[0]) <= DEFAULT_STEP + 1e-9)
 
 
-def test_build_metadata_contains_action_horizon():
+def test_build_metadata_defaults_without_action_horizon():
+    """官方 metadata 默认不含 action_horizon（客户端从 policy_config 兜底）；可开关发布。"""
     core = SimInferCore(action_dim=14, action_horizon=16)
     meta = build_metadata(core)
-    assert meta["action_horizon"] == 16
-    assert meta["action_dim"] == 14
-    assert meta["model"] == "test-infer-point"
+    assert meta == {"model": "test-infer-point", "action_dim": 14}
+    assert "action_horizon" not in meta
+
+    core2 = SimInferCore(action_dim=14, action_horizon=16, publish_action_horizon=True)
+    meta2 = build_metadata(core2)
+    assert meta2["action_horizon"] == 16
+    assert meta2["action_dim"] == 14
+    assert meta2["model"] == "test-infer-point"
 
 
 # ---------------------------------------------------------------------------
-# wire 契约：真实 MsgpackTransport ↔ 虚拟端点（连接 → metadata → 观测 → 动作块）
+# wire 契约：真实 WsTransport ↔ 虚拟端点（连接 → metadata → 观测 → 动作块）
 # ---------------------------------------------------------------------------
 
 
@@ -113,24 +119,26 @@ def _serve_in_thread(core):
 
 
 def test_wire_contract_metadata_and_action_chunk():
-    """MsgpackTransport 连接虚拟端点：收到 metadata（action_horizon）→ 发观测 → 收动作块。"""
+    """WsTransport 连接虚拟端点：收到 metadata（无 action_horizon）→ 发官方 flat 观测
+    → 收 ``actions`` 动作块。"""
     core = SimInferCore(action_dim=14, action_horizon=16, seed=0)
     server, port = _serve_in_thread(core)
-    transport = MsgpackTransport(host="127.0.0.1", port=port, connect_timeout=5.0)
+    transport = WsTransport(host="127.0.0.1", port=port, connect_timeout=5.0)
     try:
         transport.connect()
-        assert transport.server_metadata["action_horizon"] == 16
+        assert transport.server_metadata["model"] == "test-infer-point"
         assert transport.server_metadata["action_dim"] == 14
+        assert "action_horizon" not in transport.server_metadata  # 官方默认不带
 
-        obs = {"observations/qpos": np.zeros(14, dtype=np.float32)}
+        obs = {"state": np.zeros(14, dtype=np.float32), "prompt": "do something"}
         resp = transport.request(obs)
-        action = np.asarray(resp["action"])
+        action = np.asarray(resp["actions"])
         assert action.shape == (16, 14)
         assert np.all(action >= DEFAULT_RANGE[0]) and np.all(action <= DEFAULT_RANGE[1])
 
         # 第二次请求：动作块从上一块末步继续（随机游走连续）
         resp2 = transport.request(obs)
-        action2 = np.asarray(resp2["action"])
+        action2 = np.asarray(resp2["actions"])
         assert action2.shape == (16, 14)
         delta = np.abs(action2[0] - action[-1])
         assert np.all(delta <= DEFAULT_STEP + 1e-9)
@@ -139,16 +147,42 @@ def test_wire_contract_metadata_and_action_chunk():
         server.shutdown()
 
 
-def test_wire_contract_adapts_to_qpos_dim():
-    """虚拟端点按观测 qpos 维数返回对应维度的动作块。"""
+def test_wire_contract_adapts_to_state_dim():
+    """虚拟端点按观测 state 维数返回对应维度的动作块。"""
     core = SimInferCore(action_dim=14, action_horizon=16, seed=0)
     server, port = _serve_in_thread(core)
-    transport = MsgpackTransport(host="127.0.0.1", port=port, connect_timeout=5.0)
+    transport = WsTransport(host="127.0.0.1", port=port, connect_timeout=5.0)
     try:
         transport.connect()
-        resp = transport.request({"observations/qpos": np.zeros(7, dtype=np.float32)})
-        action = np.asarray(resp["action"])
+        resp = transport.request({"state": np.zeros(7, dtype=np.float32)})
+        action = np.asarray(resp["actions"])
         assert action.shape == (16, 7)
     finally:
         transport.close()
+        server.shutdown()
+
+
+def test_openpi_client_e2e_official_flat_wire():
+    """OpenPIClient ↔ 官方契约 mock 端到端：metadata 无 action_horizon（配置兜底 50）、
+    ``actions`` 响应键、官方 flat 观测、prompt 动态可换。"""
+    from motrix_edge.policy.openpi.client import OpenPIClient
+
+    core = SimInferCore(action_dim=14, action_horizon=4, seed=0)
+    server, port = _serve_in_thread(core)
+    client = OpenPIClient({"host": "127.0.0.1", "port": port, "action_horizon": 50, "prompt": "pick and place"})
+    try:
+        client.connect()
+        assert client.server_metadata["model"] == "test-infer-point"
+        assert "action_horizon" not in client.server_metadata  # 官方默认不带
+
+        obs = {"observations/qpos": np.zeros(14, dtype=np.float32)}
+        # 策略只取推理结果：每次 infer_chunk 返回整块（[H, dim]）；块缓存 / 切分 / 平滑归 RTC。
+        chunks = [client.infer_chunk(obs, index=i * 4) for i in range(5)]
+        assert all(c.height == 4 and c.dim == 14 for c in chunks)  # 每块 4 步
+        assert [c.start_index for c in chunks] == [0, 4, 8, 12, 16]  # 回填绝对步号
+
+        client.prompt = "now do a different task"  # 动态 prompt 可换
+        assert client.infer_chunk(obs, index=20).dim == 14
+    finally:
+        client.disconnect()
         server.shutdown()

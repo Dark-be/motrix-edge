@@ -24,10 +24,6 @@ from motrix_edge.utils.commands import (
     CMD_CAPTURE_META_EDIT,
     CMD_CAPTURE_META_LIST,
     CMD_CAPTURE_SYNC,
-    CMD_INFER_IP,
-    CMD_INFER_IP_SET,
-    CMD_INFER_PORT,
-    CMD_INFER_PORT_SET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
@@ -103,7 +99,7 @@ class CaptureSession(BaseSession):
             elif name == CMD_ROBOT_ESTOP:  # 急停
                 self.safe_stop()
                 self.state = SessionState.ERROR
-                self._reply(cmd, CommandResult(status="error", error="estop", status_code=500))
+                self._reply(cmd, ok_result(node_state="error"))
                 return RunResult.ERROR
             elif name == CMD_ROBOT_EXECUTE:  # 直接下发 raw 动作（qpos 直接作为参数）
                 self._execute_action(cmd)
@@ -118,13 +114,7 @@ class CaptureSession(BaseSession):
             elif name == CMD_CAPTURE_EPISODE_END:  # 结束一轮采集（episode 结束）
                 self.adapter.end_capture()
                 self._reply(cmd, ok_result(state="ready", episode="end"))
-            elif name in (  # 配置级命令：任务态也可用（infer ip / infer ip set / infer port / infer port set）
-                CMD_INFER_IP,
-                CMD_INFER_IP_SET,
-                CMD_INFER_PORT,
-                CMD_INFER_PORT_SET,
-            ):
-                self._reply(cmd, self._on_infer_endpoint(cmd))
+
             elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
                 CMD_CAPTURE_META_LIST,
                 CMD_CAPTURE_META_ADD,

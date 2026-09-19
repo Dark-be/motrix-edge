@@ -14,6 +14,7 @@
 
 """server HTTP API 单元测试 —— FastAPI TestClient，无硬件、无网络可跑。"""
 
+import copy
 import json
 import threading
 import time
@@ -29,16 +30,26 @@ from motrix_edge.adapter.base import CaptureStatus
 from motrix_edge.frame import FrameManager
 from motrix_edge.lease import Lease, LeaseManager, LeaseState
 from motrix_edge.node import EdgeNode, NodeState
+from motrix_edge.policy import policy_config_runtime_keys
 from motrix_edge.server import create_app
 from motrix_edge.server.capture import CaptureService
-from motrix_edge.server.command import CommandService
+from motrix_edge.server.command import CommandError, CommandService
 from motrix_edge.server.infer import InferService
 from motrix_edge.session.base import RunResult, SessionState
 from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
+    CMD_CAPTURE_SYNC,
+    CMD_INFER_CONFIG,
+    CMD_INFER_CONFIG_SET,
+    CMD_INFER_CONNECT,
+    CMD_INFER_MODEL,
+    CMD_INFER_MODEL_SET,
+    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_RTC,
+    CMD_INFER_RTC_SET,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -46,8 +57,12 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
+    ROLLOUT_MODE_CONTINUOUS,
     CommandBus,
+    handle_policy_config,
     ok_result,
+    parse_rollout_mode,
+    policy_config_status,
 )
 
 BASE_CFG = {
@@ -74,6 +89,15 @@ def _no_discover(monkeypatch):
     monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_base_cfg():
+    """隔离共享 BASE_CFG：推理端点 / 策略配置项等内存态写入不串测（用例按序变动）。"""
+    original = copy.deepcopy(BASE_CFG)
+    yield
+    BASE_CFG.clear()
+    BASE_CFG.update(original)
+
+
 def test_health_returns_identity_and_version():
     """/v1/health：版本 / identity / node 已绑定适配器 / 磁盘 / 时钟（不实时 discover）。"""
     node = FakeNode()  # 已绑定 adapter（adapter_id/type=test_robot, name=Test Robot）
@@ -90,7 +114,25 @@ def test_health_returns_identity_and_version():
     assert "adapters" in body and "robots" in body["adapters"]
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
+    # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 预热门控 warmup_required）
+    by_type = {p["type"]: p for p in body["adapters"]["policies"]}
+    assert [item["key"] for item in by_type["openpi"]["config_items"]] == [
+        "host",
+        "port",
+        "warmup_required",
+        "prompt",
+        "image_size",
+    ]
+    assert [item["key"] for item in by_type["lerobot-act"]["config_items"]] == [
+        "host",
+        "port",
+        "warmup_required",
+        "pretrained_name_or_path",
+        "device",
+        "actions_per_chunk",
+        "image_size",
+    ]
 
 
 def test_health_without_node_returns_empty_robot():
@@ -99,7 +141,7 @@ def test_health_without_node_returns_empty_robot():
     body = client.get("/v1/health").json()
     assert body["robot"] == {"name": None, "type": None}
     assert body["adapters"]["robots"] == []
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
 
 
 def test_adapters_info_returns_capabilities():
@@ -194,12 +236,34 @@ class FakeCaptureSession:
 class FakeInferSession:
     """仿 InferSession：推理无回合概念，run 循环消费命令直到 session quit 退出。"""
 
-    def __init__(self, command_source=None):
+    def __init__(self, command_source=None, policy_type=None):
         self.state = SessionState.READY
         self.command_source = command_source
         self.pulled = []
         self.adapter = FakeRobot()
-        self.policy = SimpleNamespace(name="fake-policy")
+        self.policy = SimpleNamespace(name="fake-policy", server_metadata={}, prompt=None)
+        self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
+        self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
+        self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
+        self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-act=False 不门控）
+        # 会话使用的策略类型（决定配置项 schema）；缺省取配置 policy.type
+        self.policy_config_type = policy_type or BASE_CFG.get("policy", {}).get("type", "openpi")
+        self._rtc_params = {"enabled": True, "suffix_len": 10}  # RTC 参数（infer rtc set 可改）
+
+    def policy_config_status(self):
+        """仿 InferSession.policy_config_status（server /v1/infers 的 policy_config 字段）。"""
+        return policy_config_status(BASE_CFG, self.policy_config_type)
+
+    def rtc_status(self):
+        """仿 RTCManager.status（server /v1/infers 的 rtc 字段）。"""
+        return {
+            "enabled": bool(self._rtc_params.get("enabled", True)),
+            "params": dict(self._rtc_params),
+            "index": 0,
+            "remaining": 0,
+            "fetches": 0,
+            "last_chunk": None,
+        }
 
     def run(self):
         while True:
@@ -209,8 +273,68 @@ class FakeInferSession:
                 continue
             self.pulled.append(cmd)
             name = getattr(cmd, "name", None)
-            if name == CMD_INFER_ROLLOUT:  # 单步闭环：回执动作
-                self._reply(cmd, ok_result(state="ready", action=[1.0, 2.0]))
+            if name == CMD_INFER_CONNECT:  # 连接 + 启动异步预热（立即回执 started/warming）
+                # 镜像真实时序：命令立即回执「已启动预热」，预热跑完后由 status 报 warmed_up
+                self.connected = True
+                self.warmed_up = True
+                self.warming = False
+                self.policy.server_metadata = {"action_horizon": 16}
+                self._reply(
+                    cmd,
+                    ok_result(
+                        state="warming",
+                        started=True,
+                        connected=True,
+                        warming=True,
+                        warmed_up=False,
+                        warmup_error=None,
+                        chunk_len=None,
+                        metadata=None,
+                    ),
+                )
+            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步（缺省）/ continuous 持续
+                mode = parse_rollout_mode((cmd.params or {}).get("mode"))
+                if mode == ROLLOUT_MODE_CONTINUOUS:
+                    self._reply(cmd, ok_result(state="continuous", started=True, count=0, actions=[]))
+                else:
+                    self._reply(
+                        cmd,
+                        ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]),
+                    )
+            elif name in (  # 策略配置项：infer config(set) / infer model(set)（按策略 schema 校验）
+                CMD_INFER_CONFIG,
+                CMD_INFER_CONFIG_SET,
+                CMD_INFER_MODEL,
+                CMD_INFER_MODEL_SET,
+            ):
+                result = handle_policy_config(BASE_CFG, cmd, policy_type=self.policy_config_type)
+                if result.status == "ok" and name == CMD_INFER_CONFIG_SET:
+                    # 镜像真实会话的 runtime 轴：runtime=False 的键只写内存态 → 回执 deferred
+                    runtime = policy_config_runtime_keys(self.policy_config_type)
+                    deferred = sorted(k for k in (result.data.get("written") or {}) if k not in runtime)
+                    if deferred:
+                        result = ok_result(**{**result.data, "deferred": deferred})
+                self._reply(cmd, result)
+            elif name == CMD_INFER_PROMPT:  # 会话内预置文本指令（prompt；经策略配置校验 + 写入内存态）
+                result = handle_policy_config(BASE_CFG, cmd, policy_type=self.policy_config_type)
+                if result.status == "ok":
+                    self.prompt = (cmd.params or {}).get("prompt")
+                    self.policy.prompt = self.prompt
+                    result = ok_result(state="ready", prompt=self.prompt)
+                self._reply(cmd, result)
+            elif name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始
+                self.recording = True
+                self._reply(cmd, ok_result(state="recording", episode="start", recording=True))
+            elif name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+            elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
+                meta = json.loads((cmd.params or {}).get("meta") or "{}")
+                self._reply(cmd, ok_result(state="ready", meta=meta))
+            elif name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数：查询 / 设置
+                if name == CMD_INFER_RTC_SET:
+                    self._rtc_params.update(json.loads((cmd.params or {}).get("json") or "{}"))
+                self._reply(cmd, ok_result(state="ready", rtc=self.rtc_status()))
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
@@ -243,6 +367,13 @@ class FakeNode:
         """记录 HTTP 预留的待选适配器 id（真实 EdgeNode 为带锁槽位，此处仅记录）。"""
         self.pending_adapter = adapter_id
 
+    def _poll_critical(self):
+        """安全命令旁路（镜像真实 EdgeNode）：任务运行期间普通命令由会话消费，急停仍即时生效。"""
+        poll = getattr(self.command_source, "poll_critical", None)
+        cmd = poll() if callable(poll) else None
+        if cmd is not None:
+            self.pulled.append(cmd)
+
     @property
     def state(self):
         return self.lifecycle.state
@@ -250,6 +381,7 @@ class FakeNode:
     def run(self):
         while True:
             self._finish_task_thread()
+            self._poll_critical()  # 安全命令旁路：任务运行期间也即时消费（镜像真实 EdgeNode）
             if self._task_thread is None:
                 cmd = self.command_source()
                 if cmd is None:
@@ -262,7 +394,9 @@ class FakeNode:
                     if session_type == "capture":
                         self.session = FakeCaptureSession(command_source=self.command_source)
                     elif session_type == "infer":
-                        self.session = FakeInferSession(command_source=self.command_source)
+                        self.session = FakeInferSession(
+                            command_source=self.command_source, policy_type=(cmd.params or {}).get("policy_type")
+                        )
                     else:
                         self._reply(cmd, ok_result(status="rejected", error=f"unknown session: {session_type}"))
                         continue
@@ -610,16 +744,15 @@ def test_commands_capture_episode_start_end_pushes_command():
 
 
 # ---------------------------------------------------------------------------
-# 推理端点配置（infer ip / infer port get/set）：capability 经命令总线 submit，
-# 走真实 EdgeNode._dispatch（配置级命令任何状态可用）—— 无硬件可跑
+# 推理端点（host / port）= **普通 policy config 项**：走 POST /v1/infers/config
 # ---------------------------------------------------------------------------
 
 
 def make_endpoint_client():
     """真实 EdgeNode（IDLE，无 adapter）+ CommandBus + Command/Infer 服务。
 
-    推理端点配置命令（infer ip / infer port）经 CommandService submit 到总线 → 真实
-    EdgeNode._dispatch 消费并回执，验证 HTTP capability 到命令总线的完整链路。
+    端点配置经 ``POST /v1/infers/config`` → CommandService submit 到总线 → 真实
+    EdgeNode._dispatch 消费并回执，验证 HTTP 通道到命令总线的完整链路。
     """
     bus = CommandBus()
     node = EdgeNode({"policy": {"host": "0.0.0.0", "port": 8765}}, command_source=bus)
@@ -630,69 +763,19 @@ def make_endpoint_client():
     return TestClient(create_app(BASE_CFG, node=node, commands=commands, infers=infers, lease_manager=leases))
 
 
-def test_commands_infer_ip_and_port_get_set():
-    """capability=infer_ip / infer_ip_set / infer_port / infer_port_set → 查询 / 设置推理端点。
+def test_infers_status_reports_endpoint_as_policy_config():
+    """status.policy_config 里端点与其它配置项同形（host / port = 普通 schema 项，无专用字段）。
 
-    经同一命令总线 submit 同步回执（与本地 CLI 行为一致）；配置写入内存态 policy 段。
+    ``status.endpoint`` 已随专用命令一并移除；前端改读 ``policy_config.values``。
     """
     client = make_endpoint_client()
-    # 未持有租约：一律 409
-    for cap in ("infer_ip", "infer_port", "infer_ip_set", "infer_port_set"):
-        assert client.post("/v1/commands", json={"command_id": "c1", "capability": cap}).status_code == 409
-    lease = install_lease(client)
-
-    # 查询当前端点（host / port）
-    r = client.post("/v1/commands", json={"command_id": "c1", "lease_id": lease, "capability": "infer_ip"})
-    assert r.status_code == 200
-    assert r.json()["status"] == "accepted"
-    assert r.json()["executed"] == "infer_ip"
-    assert r.json()["data"] == {"host": "0.0.0.0", "port": 8765}
-
-    # 设置 IP：回执带回更新后端点
-    r = client.post(
-        "/v1/commands",
-        json={"command_id": "c2", "lease_id": lease, "capability": "infer_ip_set", "params": {"ip": "10.0.0.5"}},
-    )
-    assert r.status_code == 200
-    assert r.json()["executed"] == "infer_ip_set"
-    assert r.json()["data"] == {"host": "10.0.0.5", "port": 8765}
-
-    # 设置端口
-    r = client.post(
-        "/v1/commands",
-        json={"command_id": "c3", "lease_id": lease, "capability": "infer_port_set", "params": {"port": "9000"}},
-    )
-    assert r.status_code == 200
-    assert r.json()["data"] == {"host": "10.0.0.5", "port": 9000}
-
-    # 再查询确认已更新
-    r = client.post("/v1/commands", json={"command_id": "c4", "lease_id": lease, "capability": "infer_port"})
-    assert r.json()["data"] == {"host": "10.0.0.5", "port": 9000}
-
-
-def test_commands_infer_port_set_rejects_invalid():
-    """capability=infer_port_set：非法端口 → 回执 error（400 透传，配置不变）。"""
-    client = make_endpoint_client()
-    lease = install_lease(client)
-    r = client.post(
-        "/v1/commands",
-        json={"command_id": "c1", "lease_id": lease, "capability": "infer_port_set", "params": {"port": "abc"}},
-    )
-    assert r.status_code == 200  # 命令已消费，回执透传 rejected
-    body = r.json()
-    assert body["status"] == "error"
-    assert body["executed"] == "infer_port_set"
-    assert body["error"] is not None
-    # 端口未更新（仍是初始 8765）
-    r = client.post("/v1/commands", json={"command_id": "c2", "lease_id": lease, "capability": "infer_port"})
-    assert r.json()["data"]["port"] == 8765
-
-
-def test_infers_status_exposes_endpoint():
-    """GET /v1/infers status：endpoint 字段回读当前配置的推理端点（前端推理卡片显示）。"""
-    client = make_endpoint_client()
     snap = client.get("/v1/infers").json()
-    assert snap["endpoint"] == {"host": "0.0.0.0", "port": 8765}
+    assert "endpoint" not in snap
+    cfg = snap["policy_config"]
+    assert cfg["values"]["host"] == "0.0.0.0"
+    assert cfg["values"]["port"] == 8765
+    assert [item["key"] for item in cfg["items"]][:2] == ["host", "port"]
+    assert cfg["runtime_keys"] == ["image_size", "prompt"]  # 会话内即时生效的键（端点不含在内）
 
 
 def test_captures_501_when_not_enabled():
@@ -701,6 +784,25 @@ def test_captures_501_when_not_enabled():
     assert client.get("/v1/captures/precheck").status_code == 501
     assert client.post("/v1/captures", json={}).status_code == 501
     assert client.delete("/v1/captures").status_code == 501
+
+
+def test_captures_meta_returns_options(tmp_path):
+    """GET /v1/captures/meta：返回 config/capture.yml 的元信息选项（前端选择列表，免租约）。"""
+    from motrix_edge.utils.capture_meta import CaptureMetaStore
+
+    store = CaptureMetaStore(tmp_path / "capture.yml")
+    store.add("operator", "张三")
+    store.add("task_name", "桌面前移")
+    bus = CommandBus()
+    node = FakeNode()
+    node.command_source = bus
+    service = CaptureService(node, bus, capture_meta_store=store)
+    client = TestClient(create_app(BASE_CFG, captures=service))
+    resp = client.get("/v1/captures/meta")
+    assert resp.status_code == 200
+    assert resp.json() == {"meta": {"operator": ["张三"], "task_name": ["桌面前移"]}}
+    # 未注入 captures 服务 → 501
+    assert TestClient(create_app(BASE_CFG)).get("/v1/captures/meta").status_code == 501
 
 
 def test_captures_enter_exit_lifecycle():
@@ -1069,18 +1171,6 @@ def test_upload_pack_without_selection_returns_conflict(tmp_path):
     assert "no episodes selected" in resp.json()["detail"]
 
 
-def test_captures_meta_returns_options(tmp_path):
-    """/v1/captures/meta：采集元信息选项（只读，不需要租约）。"""
-    store_path = tmp_path / "capture.yml"
-    store_path.write_text("meta:\n  operator: [张三, 李四]\n", encoding="utf-8")
-    node = FakeNode()
-    captures = CaptureService(node, CommandBus(), capture_meta_store=CaptureMetaStore(store_path))
-    client = TestClient(create_app(BASE_CFG, node=node, captures=captures))
-
-    body = client.get("/v1/captures/meta").json()
-    assert body["meta"] == {"operator": ["张三", "李四"]}
-
-
 def _make_meta_client(tmp_path):
     """选项管理端点夹具：CaptureService 与 app 共享同一 LeaseManager（否则租约互不可见）。"""
     store_path = tmp_path / "capture.yml"
@@ -1134,3 +1224,410 @@ def test_captures_meta_writes_require_lease(tmp_path):
     assert client.delete("/v1/captures/meta", params={"key": "operator", "value": "张三"}).status_code == 409
     assert client.delete("/v1/captures/meta/operator").status_code == 409
     assert client.get("/v1/captures/meta").json()["meta"] == {"operator": ["张三"]}  # 读仍然免租约
+
+
+def test_infers_rollout_single_and_continuous():
+    """推理闭环模式：单步（缺省）/ continuous 持续；多步与 drain 已取消。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 单步（缺省 body）→ 回执 count=1 / action / actions
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["count"] == 1
+    assert body["action"] == [1.0, 2.0]
+    # continuous 模式：mode=continuous → 启动即回执 started
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "continuous"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "continuous"
+    # drain（缓存推理）已取消：mode 只允许 single/continuous → 422
+    assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "drain"}).status_code == 422
+    # 多步（count）已取消：字段不再存在 → 忽略，等价单步（不再有专门的 400 分支）
+    legacy = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 3})
+    assert legacy.status_code == 200
+    assert legacy.json()["count"] == 1
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_status_exposes_prompt_and_recording_defaults():
+    """status 携带 prompt / recording / capture_meta（operator=policy、task_name=prompt）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    snap = client.get("/v1/infers").json()
+    assert snap["prompt"] is None
+    assert snap["recording"] is False
+    assert snap["capture_meta"] == {"operator": "policy", "task_name": None}
+    # 会话内设置 prompt → status.prompt / capture_meta.task_name 同步
+    assert (
+        client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
+        == 200
+    )
+    snap = client.get("/v1/infers").json()
+    assert snap["prompt"] == "把零件放好"
+    assert snap["capture_meta"] == {"operator": "policy", "task_name": "把零件放好"}
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_status_reports_capture_status_meta():
+    """status.capture_status 上报机器人进程的**元信息全集**（``meta`` 单一载体，分类可拓展）。
+
+    与 ``GET /v1/captures`` 同构：``{running, meta}``——不设 ``operator`` / ``task_name``
+    同义顶层字段（那些是 ``meta`` 里的键）。
+    """
+    node = FakeNode()
+    node.capture_status = CaptureStatus(running=True, meta={"operator": "policy", "task_name": "把零件放好"})
+    _service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    snap = client.get("/v1/infers").json()
+    assert snap["capture_status"] == {"running": True, "meta": {"operator": "policy", "task_name": "把零件放好"}}
+    # 未绑定 adapter / 未缓存 → None（不臆造空 meta）
+    node.capture_status = None
+    assert client.get("/v1/infers").json()["capture_status"] is None
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_status_exposes_policy_config():
+    """status 携带 policy_config（每个策略独立配置项的 schema + 当前值 + 缺失必填项）。
+
+    前端据此动态渲染表单，并在 ``missing`` 非空时门控推理 / 录制按钮。
+    """
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    snap = client.get("/v1/infers").json()
+    cfg = snap["policy_config"]
+    assert cfg["policy_type"] == "openpi"
+    assert cfg["requires_prompt"] is True  # 语言条件策略：prompt 必填
+    assert cfg["missing"] == ["prompt"]  # 尚未预置 → 缺失
+    assert [item["key"] for item in cfg["items"]] == [
+        "host",
+        "port",
+        "warmup_required",
+        "prompt",
+        "image_size",
+    ]  # 端点公共项在前
+    assert [item["runtime"] for item in cfg["items"]] == [
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]  # 公共项会话级（进入会话时固化）
+    assert cfg["runtime_keys"] == ["image_size", "prompt"]  # 会话内即时生效的键
+    assert next(item for item in cfg["items"] if item["key"] == "prompt")["type"] == "text"
+    # 会话内设置 prompt（走 infer prompt 快捷命令）→ 写入内存态 → 缺失清空
+    assert (
+        client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
+        == 200
+    )
+    assert client.get("/v1/infers").json()["policy_config"]["missing"] == []
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_config_sets_policy_config():
+    """POST /v1/infers/config（infer config set）：按当前策略 schema 校验并写入配置项。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入会话：受控操作 → 409
+    assert (
+        client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}}).status_code
+        == 409
+    )
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "把零件放好"}})
+    assert r.status_code == 200
+    assert r.json()["policy_config"]["missing"] == []
+    assert r.json()["policy_config"]["values"]["prompt"] == "把零件放好"
+    assert r.json()["deferred"] == []  # prompt 是 runtime=True：立即生效，无延后项
+    # 非本策略的配置项（lerobot-act 的模型路径）→ 400（不静默写入）
+    bad = client.post(
+        "/v1/infers/config",
+        headers={"X-Lease-Id": lease},
+        json={"config": {"pretrained_name_or_path": "/tmp/x"}},
+    )
+    assert bad.status_code == 400
+    assert "unknown openpi config key" in bad.json()["detail"]
+    # 缺租约 → 403
+    assert client.post("/v1/infers/config", json={"config": {"prompt": "y"}}).status_code == 403
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_config_reports_deferred_for_session_level_keys():
+    """会话内改 host（runtime=False）→ 200 accepted + 回执 ``deferred`` 列出未即时生效的键。
+
+    host / port 与其它配置项同一通道、同一 ``runtime`` 轴：会话内改只写内存态、退出会话重进
+    才生效（由 ``deferred`` 提示，不报错、也不按「连接与否」分两套规则）。
+    """
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"host": "10.0.0.9"}})
+    assert r.status_code == 200
+    assert r.json()["deferred"] == ["host"]  # 未即时生效（退出会话重进才生效）
+    assert r.json()["policy_config"]["values"]["host"] == "10.0.0.9"  # 内存态已写入
+    # 空值 = 清除该项（回到缺省；必填项才会 400）
+    cleared = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"host": None}})
+    assert cleared.status_code == 200
+    assert cleared.json()["policy_config"]["values"]["host"] is None
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_enter_config_applies_endpoint():
+    """POST /v1/infers 的 config 含公共项 host / port → 进入会话前写入推理端点（进入会话时固化）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    r = client.post(
+        "/v1/infers",
+        headers={"X-Lease-Id": lease},
+        json={"policy_type": "openpi", "config": {"host": "10.0.0.7", "port": 9000, "prompt": "把零件放好"}},
+    )
+    assert r.status_code == 200
+    assert BASE_CFG["policy"]["host"] == "10.0.0.7"
+    assert BASE_CFG["policy"]["port"] == 9000
+    assert BASE_CFG["policy"]["prompt"] == "把零件放好"
+    assert r.json()["policy_config"]["values"]["host"] == "10.0.0.7"  # 回执含端点当前值
+    # 非法端口 → 400（且不进入会话）
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+    bad = client.post("/v1/infers", headers={"X-Lease-Id": lease}, json={"config": {"port": 70000}})
+    assert bad.status_code == 400
+    assert node.session is None
+
+
+def test_infers_enter_applies_policy_config():
+    """POST /v1/infers 携带 config：进入会话前写入策略配置项（lerobot-act 的模型路径运行时给定）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    r = client.post(
+        "/v1/infers",
+        headers={"X-Lease-Id": lease},
+        json={"policy_type": "lerobot-act", "config": {"pretrained_name_or_path": "/tmp/pretrained_model"}},
+    )
+    assert r.status_code == 200
+    assert BASE_CFG["policy"]["pretrained_name_or_path"] == "/tmp/pretrained_model"
+    assert node.session.policy_config_type == "lerobot-act"  # 会话按所选策略渲染配置项
+    # 会话内设置非本策略的配置项（lerobot-act 无 prompt）→ 400
+    bad_key = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}})
+    assert bad_key.status_code == 400
+    assert "unknown lerobot-act config key" in bad_key.json()["detail"]
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+    # 进入会话前下发非法键 → 400（且不进入会话）
+    bad = client.post(
+        "/v1/infers", headers={"X-Lease-Id": lease}, json={"policy_type": "lerobot-act", "config": {"prompt": "x"}}
+    )
+    assert bad.status_code == 400
+    assert "unknown lerobot-act config key" in bad.json()["detail"]
+    assert node.session is None  # 校验失败不进入会话
+
+
+def test_infers_config_available_before_session():
+    """未进入会话时 status.policy_config 由 base_cfg 计算（前端 enter 前即可渲染表单）。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    assert client.get("/v1/infers").json()["policy_config"]["policy_type"] == "openpi"
+    BASE_CFG["policy"] = {"type": "lerobot-act", "pretrained_name_or_path": "/tmp/m", "device": "cuda"}
+    cfg = client.get("/v1/infers").json()["policy_config"]
+    assert cfg["policy_type"] == "lerobot-act"
+    assert cfg["requires_model_path"] is True
+    assert cfg["missing"] == []
+
+
+def test_infers_episode_recording_start_end():
+    """推理时 rollout 录制：episode start/end → capture episode 命令 → recording 状态翻转。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入推理会话：episode → 409
+    assert client.post("/v1/infers/episode/start", headers={"X-Lease-Id": lease}).status_code == 409
+    assert client.post("/v1/infers/episode/end", headers={"X-Lease-Id": lease}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 开始录制
+    r = client.post("/v1/infers/episode/start", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["episode"] == "start"
+    assert body["recording"] is True
+    assert node.session.recording is True
+    assert client.get("/v1/infers").json()["recording"] is True
+    # 结束录制
+    r = client.post("/v1/infers/episode/end", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    assert r.json()["episode"] == "end"
+    assert r.json()["recording"] is False
+    assert node.session.recording is False
+    assert CMD_CAPTURE_EPISODE_START in [getattr(c, "name", None) for c in node.session.pulled]
+    assert CMD_CAPTURE_EPISODE_END in [getattr(c, "name", None) for c in node.session.pulled]
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_sync_syncs_capture_meta():
+    """推理录制同步采集元信息：POST /v1/infers/sync → capture sync 命令 → 回执 meta。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post(
+        "/v1/infers/sync",
+        headers={"X-Lease-Id": lease},
+        json={"meta": {"operator": "policy", "task_name": "把零件放好"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["meta"] == {"operator": "policy", "task_name": "把零件放好"}
+    assert CMD_CAPTURE_SYNC in [getattr(c, "name", None) for c in node.session.pulled]
+    # 缺租约头（已有活跃租约）→ 403
+    assert client.post("/v1/infers/sync", json={"meta": {}}).status_code == 403
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_rtc_configure_and_status():
+    """RTC 参数：POST /v1/infers/rtc → infer rtc set → 应用到会话并反映在 status。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入推理会话：rtc → 409
+    assert client.post("/v1/infers/rtc", headers={"X-Lease-Id": lease}, json={"suffix_len": 5}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 设置 RTC 参数（部分更新）：回执生效后的状态
+    r = client.post(
+        "/v1/infers/rtc",
+        headers={"X-Lease-Id": lease},
+        json={"suffix_len": 5, "aggregate_fn": "latest_only"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["rtc"]["params"]["suffix_len"] == 5
+    assert body["rtc"]["params"]["aggregate_fn"] == "latest_only"
+    # status 同步暴露 rtc（enabled / params / index / remaining / last_chunk）
+    snap = client.get("/v1/infers").json()
+    assert snap["rtc"]["params"]["suffix_len"] == 5
+    assert snap["rtc"]["enabled"] is True
+    assert CMD_INFER_RTC_SET in [getattr(c, "name", None) for c in node.session.pulled]
+    # 非法参数（负数）→ pydantic 422
+    assert client.post("/v1/infers/rtc", headers={"X-Lease-Id": lease}, json={"suffix_len": -1}).status_code == 422
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_connect_exposes_status():
+    """POST /v1/infers/connect：单次尝试连接推理节点，成功回执含 metadata；status 反映 connected。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入会话：connect → 409
+    assert client.post("/v1/infers/connect", headers={"X-Lease-Id": lease}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 初始未连接：status connected=False / metadata=None / 未预热
+    snap = client.get("/v1/infers").json()
+    assert snap["connected"] is False
+    assert snap["metadata"] is None
+    assert snap["warmed_up"] is False
+    assert snap["dropped_actions"] == 0
+    # 连接成功：**立即回执**（started / warming）+ 预热完成后 status 报 warmed_up
+    r = client.post("/v1/infers/connect", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["started"] is True  # 本次新启动了预热
+    assert body["connected"] is True
+    assert body["warming"] is True  # 不等预热跑完（加载模型可能几分钟）
+    assert body["warmed_up"] is False  # 完成状态由 status 轮询
+    assert body["warmup_error"] is None
+    snap = client.get("/v1/infers").json()
+    assert snap["connected"] is True
+    assert snap["metadata"] == {"action_horizon": 16}
+    assert snap["warmed_up"] is True  # status 同步预热状态（前端据此 enable rollout）
+    assert snap["warming"] is False
+    assert CMD_INFER_CONNECT in [getattr(c, "name", None) for c in node.session.pulled]
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_command_timeout_maps_to_504(monkeypatch):
+    """命令总线超时（submit）→ HTTP 504，而不是未处理异常 500。
+
+    ``/v1/infers/*`` 的 ``_infer_call`` 只捕 ``InferError`` 时，``CommandBus.submit`` 抛的
+    ``CommandError`` 会漏成 500（预热超时（最长几分钟）与 rollout 短超时都会撞上）——
+    对外表现从「超时可重试」变成「edge 内部错误」，所以必须有这一层映射。
+    """
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+
+    def timeout(cmd, timeout=5.0):  # noqa: ARG001
+        raise CommandError(f"command timed out: {cmd.name}", status_code=504)
+
+    monkeypatch.setattr(service, "_submit", timeout)
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease})
+    assert r.status_code == 504
+    assert "timed out" in r.json()["detail"]
+
+
+def test_infers_prompt_updates_runtime_prompt():
+    """运行时改文本指令：POST /v1/infers/prompt → 会话内 infer prompt 命令 → 回执。"""
+    node = FakeNode()
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    # 未进入推理会话：prompt → 409
+    assert client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "x"}).status_code == 409
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
+    # 运行时设置 prompt：会话内命令被执行，回执回显
+    r = client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert body["prompt"] == "把零件放好"
+    assert CMD_INFER_PROMPT in [getattr(c, "name", None) for c in node.session.pulled]
+    assert node.session.policy.prompt == "把零件放好"
+    # 缺 prompt → pydantic 422
+    assert client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={}).status_code == 422
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+
+
+def test_infers_enter_applies_endpoint_from_config():
+    """进入会话前把端点放进 ``config``：写 base_cfg，创建会话即生效（顶层 host / port 已移除）。"""
+    import copy
+
+    node = FakeNode()
+    node.base_cfg = copy.deepcopy(BASE_CFG)  # 独立配置副本，避免污染全局 BASE_CFG
+    service, client = make_infers_client(node)
+    lease = install_lease(client)
+    r = client.post("/v1/infers", headers={"X-Lease-Id": lease}, json={"config": {"host": "10.0.0.9", "port": 8765}})
+    assert r.status_code == 200
+    assert node.base_cfg["policy"]["host"] == "10.0.0.9"
+    assert node.base_cfg["policy"]["port"] == 8765
+    # 清理退出
+    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
+    wait_node_state(node, NodeState.READY)
+    # 非法端口 → 400（schema 校验：越界；且不进入会话）
+    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}, json={"config": {"port": 0}}).status_code == 400
+    assert node.session is None

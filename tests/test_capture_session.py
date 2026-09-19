@@ -121,23 +121,27 @@ def test_capture_robot_reset_during_observe(tmp_path):
     session.session_finish()
 
 
-def test_capture_infer_endpoint_during_session(tmp_path):
-    """会话内 infer ip set：写内存态 policy.host 并回执 ok（配置命令任何状态可用）。"""
+def test_capture_session_does_not_handle_policy_config(tmp_path):
+    """数采会话不处理策略配置命令（infer config / infer model / infer prompt）→ 409。
+
+    端点（host / port）就是普通 policy config 项，**不再有**会话内可用的专用命令；数采期间
+    改策略配置请在空闲态（无会话）或用 CLI / HTTP 配置通道完成。
+    """
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
     replies = []
-    infer_ip = _REGISTRY.parse_argv(["infer", "ip", "set", "1.2.3.4"])
-    infer_ip.reply_to = replies.append
+    config_set = _REGISTRY.parse_argv(["infer", "config", "set", '{"port": 9000}'])
+    config_set.reply_to = replies.append
     cfg = make_config(tmp_path)
     session = capture_session.CaptureSession(
         cfg,
-        command_source=make_signals(infer_ip, "session quit"),
+        command_source=make_signals(config_set, "session quit"),
         frame_manager=FrameManager(),
         adapter=adapter,
     )
     session.session_start()
     assert session.run() == RunResult.FINISHED
-    assert cfg["policy"]["host"] == "1.2.3.4"  # 配置已写内存态 policy 段
-    assert replies[0].status == "ok"
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 409
     session.session_finish()
 
 

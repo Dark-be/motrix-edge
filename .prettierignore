@@ -6,3 +6,6 @@ node_modules
 .gitlab-ci.yml
 docs/build/
 .pytest_cache
+
+# vendored 第三方（Apache-2.0 头，非 Motphys 专有头）：lint / format / 头检查均跳过
+src/lerobot/

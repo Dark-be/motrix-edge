@@ -30,8 +30,8 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
+    deadline_exceeded,
     handle_capture_meta,
-    handle_infer_endpoint,
     ok_result,
     parse_bool,
     parse_qpos,
@@ -147,6 +147,9 @@ class BaseSession:
                 return RunResult.FINISHED
             if name == CMD_ROBOT_ESTOP:
                 self.safe_stop()
+                # 回执与 node 的急停分支同形（ok + node_state=error）：命令**已执行**（停机），
+                # 节点随后进 ERROR——不回执会让 submit 通道的调用方白等到超时
+                self._reply(cmd, ok_result(node_state="error"))
                 return RunResult.ERROR
             if name == CMD_ROBOT_RESET:
                 self.adapter.reset()
@@ -155,15 +158,6 @@ class BaseSession:
                 self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
             time.sleep(1)
         return None
-
-    def _on_infer_endpoint(self, cmd):
-        """处理推理端点配置命令（infer ip / infer ip set / infer port / infer port set）。
-
-        会话运行期间（ACTIVE）命令由会话循环 poll，本方法让配置命令在任务态也可用——
-        委托 ``utils.commands.handle_infer_endpoint``（写内存态 ``base_cfg["policy"]``），
-        与节点主循环（非任务态）共用同一逻辑，保证「任何状态可用」。
-        """
-        return handle_infer_endpoint(self.base_cfg, cmd)
 
     def _on_capture_meta(self, cmd):
         """处理采集元信息选项命令（capture meta list/add/edit/delete/delete-key）。
@@ -188,7 +182,18 @@ class BaseSession:
         """robot execute：解析 qpos 位置参数 → ``adapter.execute(qpos)``（维度校验在 adapter）。
 
         参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action）。
+        **下发前自查回执是否已过期**（``deadline_exceeded``）：调用方超时放弃后不再动真机。
         """
+        if deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
+            self._reply(
+                cmd,
+                CommandResult(
+                    status="rejected",
+                    error="reply deadline exceeded: action dropped (robot not executed)",
+                    status_code=504,
+                ),
+            )
+            return
         try:
             qpos = parse_qpos(cmd.params.get("qpos"))
             self.adapter.execute(qpos)

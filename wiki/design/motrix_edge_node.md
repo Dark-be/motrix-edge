@@ -56,7 +56,9 @@ stateDiagram-v2
 命令由 `command_source`（默认 CLI 行输入 / 可注入 `CommandBus`）返回，`_dispatch` 按当前状态
 分发到处理器；未处理命令统一回执「not applicable」避免 submit 挂起。关键规则：
 
--   `robot estop`：**全局安全命令**，任何非 ERROR 状态先安全停止再转 ERROR。
+-   `robot estop`：**全局安全命令**，任何非 ERROR 状态先安全停止再转 ERROR；走
+    **总线旁路队列**（`CommandBus.poll_critical`）——任务运行期间主循环不 poll 普通命令，
+    但急停必须任何状态立即生效（否则一条分钟级长操作，如推理预热加载模型，会把急停一起挡住）。
 -   IDLE：拒绝 `session run` / `robot reset`（机器人未就绪）。
 -   READY：`session run <type>`（选择 + 启动一步完成 → ACTIVE）、`robot reset`、`robot execute <qpos>`、`robot teleop <bool>`。
 -   ACTIVE：`session quit`（退出 → READY）、`robot reset`、`robot execute`、`robot teleop`。
@@ -65,9 +67,9 @@ stateDiagram-v2
 ## 任务线程模型
 
 `session run <type>` 选择并启动会话后，会话 `run()` 在**后台线程**执行（任务运行期间主循环不再
-poll 命令，会话内命令由会话循环消费）；`_tick` 检测线程结束并推进状态。退出命令（`session quit`）
-回执在节点状态落定后**补发**（HTTP exit 同步等到 node READY）。节点失联 ERROR 时终止任务线程，
-让主循环恢复 poll（ERROR 恢复命令可达）。
+poll **普通**命令，会话内命令由会话循环消费；安全命令走旁路，见「命令分发」）。`_tick` 检测线程结束
+并推进状态。退出命令（`session quit`）回执在节点状态落定后**补发**（HTTP exit 同步等到 node READY）。
+节点失联 ERROR 时终止任务线程，让主循环恢复 poll（ERROR 恢复命令可达）。
 
 ## adapter 生命周期（归节点）
 

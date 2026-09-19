@@ -12,17 +12,20 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""格式契约 —— 与推理节点约定的消息结构与编解码规则。
+"""通用观测键与图像原语（**各策略客户端共用**）。
 
-契约 = wire 上 msgpack 消息的 schema。当前契约为 openpi 兼容格式，使 openpi 服务端
-无需改动即可对接；同一契约层可扩展其它策略（act / 自研），只需保证「观测进、动作出」。
+只提供两样东西：
 
-消息约定（client → server，每步一次）：
-  {"observations/qpos": ndarray, "observations/images/<name>": ndarray | bytes}
+- edge 观测键：``observations/qpos`` / ``observations/images/<name>``（与 robot-pipeline /
+  adapter 的 ``get_observation()`` 输出一致）；策略客户端直接按这些键读观测；
+- 图像原语：解码 + dtype 归一（``to_rgb_uint8``）、等比补零缩放（``resize_with_pad`` = letterbox）。
 
-响应约定（server → client）：
-  {"action": ndarray}            # [horizon, dim] 动作块 或 [dim] 单步
-  {"error": <str>}                # 出错时以该键返回
+**策略自己的 wire 契约与预处理参数在各策略目录内**（每个策略独立，互不牵连）：
+
+- openpi 官方 flat 契约（``state`` / ``images`` / ``prompt`` → ``actions``）与它的 letterbox
+  预处理 → ``motrix_edge.policy.openpi.contract``；
+- lerobot AsyncInference gRPC 的观测 / features 组装 → ``motrix_edge.policy.lerobot_act.client``
+  （wire 见 ``motrix_edge.transport.grpc`` 与 vendored ``lerobot.transport``）。
 """
 
 import cv2
@@ -30,24 +33,27 @@ import numpy as np
 
 KEY_OBS_QPOS = "observations/qpos"
 KEY_OBS_IMAGE_PREFIX = "observations/images/"
-KEY_ACTION = "action"
-KEY_ERROR = "error"
-
-IMAGE_JPEG = "jpeg"
-IMAGE_UINT8 = "uint8"
 
 
 def to_rgb_uint8(image) -> np.ndarray:
-    """jpeg bytes 或 ndarray → uint8 [h, w, 3] RGB ndarray。"""
+    """jpeg bytes 或 ndarray → uint8 ``[h, w, 3]`` RGB ndarray。
+
+    浮点图按约定归一，**不直接静默截断**（``astype`` 会把 1.0 变成 1，图像几乎全黑）：
+    取值落在 ``[0, 1]`` 视为归一化图像（×255），否则按 ``[0, 255]`` 四舍五入；
+    最后统一裁剪到 ``[0, 255]``（越界值不环绕）。
+    """
     if isinstance(image, (bytes, bytearray)):
         bgr = cv2.imdecode(np.frombuffer(bytes(image), dtype=np.uint8), cv2.IMREAD_COLOR)
         if bgr is None:
             raise ValueError("Failed to decode image as JPEG")
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     arr = np.asarray(image)
-    if arr.ndim == 2:
+    if arr.ndim == 2:  # 灰度 → 复制成 3 通道
         arr = np.stack([arr] * 3, axis=-1)
-    return arr.astype(np.uint8)
+    if np.issubdtype(arr.dtype, np.floating):
+        scale = 255.0 if arr.size and float(arr.max()) <= 1.0 else 1.0
+        arr = np.rint(arr * scale)
+    return np.clip(arr, 0, 255).astype(np.uint8)
 
 
 def resize_with_pad(image: np.ndarray, height: int, width: int, method=cv2.INTER_LINEAR) -> np.ndarray:
@@ -74,49 +80,3 @@ def resize_with_pad(image: np.ndarray, height: int, width: int, method=cv2.INTER
     left = (width - resized_w) // 2
     right = width - resized_w - left
     return cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
-
-
-def encode_image(image, image_size, image_format=IMAGE_JPEG):
-    """统一图像编码：解码（如需）→ 等比缩放补零到 image_size → jpeg bytes 或 uint8。
-
-    image_format: "jpeg"（默认，省带宽）或 "uint8"。
-    """
-    arr = to_rgb_uint8(image)
-    arr = resize_with_pad(arr, image_size[0], image_size[1])
-    if image_format == IMAGE_JPEG:
-        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
-        if not ok:
-            raise ValueError("Failed to encode image as JPEG")
-        return buf.tobytes()
-    elif image_format == IMAGE_UINT8:
-        return arr
-    raise ValueError("Invalid image format")
-
-
-def build_observation(qpos, images: dict, image_size, image_format=IMAGE_JPEG) -> dict:
-    """按格式契约组装观测消息。
-
-    Args:
-        qpos: 关节/状态向量（ndarray）。
-        images: {name: ndarray | bytes} 图像字典，key 不带前缀。
-    Returns:
-        {"observations/qpos": ndarray, "observations/images/<name>": ...}
-    """
-    obs = {KEY_OBS_QPOS: np.asarray(qpos)}
-    for name, img in images.items():
-        obs[f"{KEY_OBS_IMAGE_PREFIX}{name}"] = encode_image(img, image_size, image_format)
-    return obs
-
-
-def extract_action(response: dict) -> np.ndarray:
-    """从服务端响应中抽取动作（契约：响应含 ``"action"`` 键）。
-
-    Raises:
-        RuntimeError: 响应含 ``"error"`` 键（服务端错误）。
-        KeyError: 响应缺少 ``"action"`` 键。
-    """
-    if KEY_ERROR in response:
-        raise RuntimeError(f"Error in inference response: {response[KEY_ERROR]}")
-    if KEY_ACTION not in response:
-        raise KeyError(f"Response missing '{KEY_ACTION}' key, got: {list(response.keys())}")
-    return np.asarray(response[KEY_ACTION])

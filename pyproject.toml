@@ -18,6 +18,10 @@ dependencies = [
     "uvicorn>=0.52.1",
     "aiortc>=1.15.0,<2.0.0",  # 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），上限约束防升级静默失效
     "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
+    "grpcio>=1.62.0",  # lerobot gRPC AsyncInference 传输（act 策略；vendored lerobot 在 src/lerobot）
+    # lerobot-act：服务端动作载荷是 torch.Tensor，pickle 反序列化需 torch（client._to_numpy）。
+    # 固定官方 CPU 源（见文件末 [[tool.uv.index]]）+ `+cpu` 后缀版本，避免拉入 CUDA / nvidia-* 依赖。
+    "torch==2.9.1+cpu",
 ]
 
 [dependency-groups]
@@ -26,6 +30,8 @@ dev = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "grpcio-tools>=1.62.0",  # 重生成 vendored lerobot/transport 的 services_pb2{,_grpc}.py
+    "protobuf>=4.25",
 ]
 
 # 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装，
@@ -45,3 +51,13 @@ dual_piper = "motrix_edge.adapter.dual_piper_adapter:DualPiperAdapter"
 [[tool.uv.index]]
 name = "motphys"
 url = "http://pypi.mp/simple"
+
+# PyTorch 官方 CPU wheel 源（explicit：只服务下方 tool.uv.sources 显式指派的包，不参与其它包的解析）
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+# torch 只从官方 CPU 源取（版本形如 2.9.1+cpu），保证 edge 侧是纯 CPU 版
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

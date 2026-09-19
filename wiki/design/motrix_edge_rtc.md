@@ -2,7 +2,7 @@
 
 ## 摘要
 
-`rtc/` 是**策略无关的实时动作块管理器**：策略（openpi / act）只负责「拿到一次推理的原始动作块」，
+`rtc/` 是**策略无关的实时动作块管理器**：策略（openpi / lerobot-act）只负责「拿到一次推理的原始动作块」，
 `RTCManager` 统一负责**动作块三元切分**（`prefix` 过去已失效 / `execution` 实际执行 / `suffix` 过渡到
 下一块，只算步数不切数组）、**重叠过渡**（重叠步按「下一段权重曲线」融合）、**异步预取**（后台线程拉
 下一块，控制环不阻塞）与**绝对步号推进**。
@@ -19,7 +19,7 @@
 -   **RTC 单一职责**：块缓存、三元切分、重叠过渡（过渡策略）、预取时机、步号推进、状态上报全部收敛到 `rtc/`。
 -   **server 零改动**：纯 edge 侧切分与过渡；不向推理端传额外字段（预留后续 wire 扩展）。
 -   **可观测 / 可运行期配置**：参数经 `edge.yml` 的 `policy.rtc` 段缺省，运行期可经命令 / HTTP 查改
-    （与 `infer ip` / `adapter config` 同款机制）。
+    （与 `infer config` / `adapter config` 同款机制）。
 -   **控制环不阻塞**：预取（推理）在**后台线程**完成，`infer()` 只做「取当前步动作 + 必要时登记一次预取」，
     控制频率不受推理耗时影响；推理期间由队列里的后缀段继续供电。
 -   **无硬件可单测**：注入 fake policy 即可验证切分 / 过渡 / 预取，不碰网络。
@@ -59,6 +59,13 @@ src/motrix_edge/rtc/
     `P + E + S = 实际块长`、`E >= 1`、`P + S < 实际块长`（`S` 非 0 时保底 1 步）。不能只截断 E：
     预取提前量 `P + S` 一旦大于块长，就会**每一拍都在推理**（实测块长 16 / H=50：不缩放时 60 步要推理
     60 次，缩放后回到 6 次）。`execution_horizon: null` 时 E 本来就按实际块长推导，不涉及缩放。
+-   **兜底校准（`calibrate`，按实测块长收敛 H）**：策略服务端**不一定声明块长**——openpi 原生
+    metadata 没有 `action_horizon`，lerobot-act 的 gRPC 协议更是没有任何 metadata，`actions_per_chunk`
+    只是请求上界。`infer()` 每步按需调用 `RTCManager.calibrate(policy.observed_chunk_len)`
+    （openpi 由预热 / 首次推理回填；lerobot-act 连接前先用请求值 `actions_per_chunk` 兜底，首次推理后以实测覆盖），把 H 收敛为 `min(H, 实测)`、P/E/S 等比缩放、`E` 回到缺省推导，
+    于是**首个 rollout 就用与真实块长匹配的三段**，不必每块靠上面的临时缩放兜底。只在实测更小时**校准一次**
+    （实测块长是「最近一次」，可能被瞬时短块污染；已校准 / 已显式 `configure` 过就不再跟随），
+    参数不合法或未观测到块长时保持原配置（校准是兜底，不抛异常、不影响推理）。
 -   **预取提前量 = `P + S`**（用**本次生效**的三段，短块已缩放）：队列剩余 `<= P + S`（= 执行段还剩
     P 步）时发起下一块预取；响应大约在 P 步后到达 → 后缀段（S 步）还在队列里，重叠步数 ≈ `min(S, E)`。
 -   **上报口径**：`status().last_chunk` 的 `height` = **实际块长**（`min(H, 模型块长)`），`lens` =
@@ -133,13 +140,14 @@ rtc = build_rtc(policy, config, control_hz=None)  # 会话进入时构造（持�
 rtc.infer(observation)   # 本步动作：必要时登记预取（后台线程）→ 弹出当前步（**不阻塞**）
 rtc.reset()              # 清队列 / 作废在途预取 / 步号归零（策略连接不变）
 rtc.configure(**params)  # 运行期改参数（校验后生效，下一块起用；内部加锁）
+rtc.calibrate(block_len) # 按实测块长收敛 H（幂等，仅第一次生效；infer() 每步自动调用）
 rtc.status() -> dict     # 上报：enabled / params / index / remaining / inflight /
                          #       fetches / stale_chunks / failed_chunks /
                          #       last_chunk / last_delay / last_delay_steps / last_error
 rtc.close()              # 停止预取工作线程（会话退出调用；幂等）
 ```
 
--   **步号**：`_index` 单调递增（reset 归零）；策略按 `index` 组织观测（act 用它做 `TimedObservation.timestep`）。
+-   **步号**：`_index` 单调递增（reset 归零）；策略按 `index` 组织观测（lerobot-act 用它做 `TimedObservation.timestep`）。
 -   **前置段跳过**：块返回时从 `max(prefix_len, _index - 块首步)` 之后开始下发；跳过后同步推进 `_index`
     并丢弃队列中已过期步（步号 = 物理时刻）。实测推理耗时（`time.monotonic`）折算成的步数经
     `status().last_delay_steps` 上报，可作为 `prefix_len` 取值参考。
@@ -174,8 +182,9 @@ policy:
 生效的代码兜底缺省（`rtc.DEFAULT_RTC_CONFIG`）为 `execution_horizon: null`、`suffix_len: 10`。
 
 约束：`P + S < H`（块内必须有执行段）、`P + E + S <= H`（E 显式设置时）、`E > P`（否则每步都触发推理）；
-`H` 应对齐**模型输出块长**（act 的 `actions_per_chunk` / openpi 服务端 metadata 的 `action_horizon`）：
-H 远大于模型块长时三段会被等比缩到很小，等于把过渡与执行段都交给缩放而非配置。
+`H` 应对齐**模型输出块长**（lerobot-act 的 `actions_per_chunk` / openpi 服务端 metadata 的 `action_horizon`）：
+H 远大于模型块长时，若策略端**声明了**块长则 `calibrate` 会把它收敛到实测值（见上文「兜底校准」），
+否则三段按实际块长等比缩放（过渡与执行段都交给缩放而非配置）。
 `aggregate_fn` 必须是 `rtc.base.TRANSITION_FUNCTIONS` 已注册的策略名（见上文策略表）。
 预取提前量 = `P + S`（执行段还剩 P 步时发起；在工作线程完成）。
 `control_hz` 由会话按 `1 / step_interval`（`policy.infer_freq`）自动传入，仅用于实测耗时折算上报，不需配置。
@@ -190,7 +199,7 @@ H 远大于模型块长时三段会被等比缩到很小，等于把过渡与执
 | `infer rtc`            | —        | 查询当前 RTC 参数 + 运行状态（index / remaining / 切分）    | 全局       |
 | `infer rtc set <json>` | `json`   | 设置 RTC 参数（JSON 对象，可部分；写入内存态 `policy.rtc`） | 全局       |
 
--   与 `infer ip` / `infer port` 同款：配置级命令，任何状态可用；写内存态不写回 yaml；会话内设置同时
+-   与 `infer config` 同款：配置级命令，任何状态可用；写内存态不写回 yaml；会话内设置同时
     应用到**正在运行的** `RTCManager`（下一块生效），会话外只影响下次 `session run infer`。
 -   参数缺失 / 非法（负数、未知过渡策略）→ `rejected`（400，不崩溃）。
 

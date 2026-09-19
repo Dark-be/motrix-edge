@@ -34,6 +34,7 @@ import numpy as np
 from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.node import NodeState
+from motrix_edge.server.state import adapter_ref, adapter_state, capture_raw
 from motrix_edge.session.base import SessionState
 from motrix_edge.utils.capture_meta import CaptureMetaError, CaptureMetaStore
 from motrix_edge.utils.commands import (
@@ -152,26 +153,7 @@ class CaptureService:
             "status": "accepted",
             "state": self._session_state(),
             "lease_id": self._leases.status()["lease_id"],  # 当前租约（回显）
-            "adapter": self._adapter_ref(),  # 当前节点 active adapter 身份
-        }
-
-    def _adapter_ref(self) -> dict:
-        """当前节点 active adapter 身份（name / type）。"""
-        node = self._node
-        adapter = getattr(node, "adapter", None)
-        return {
-            "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
-            "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
-        }
-
-    def _adapter_state(self) -> dict:
-        """当前节点 active adapter 状态（身份 + 心跳缓存）。"""
-        node = self._node
-        adapter = getattr(node, "adapter", None)
-        return {
-            "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
-            "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),
-            "running": getattr(adapter, "running", None) if adapter is not None else None,
+            "adapter": adapter_ref(self._node),  # 当前节点 active adapter 身份
         }
 
     def exit(self, lease_id: str | None = None) -> dict:
@@ -252,14 +234,14 @@ class CaptureService:
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT
-        capture = self._capture_status()
+        capture = capture_raw(self._node)
         data_dir = getattr(capture, "data_dir", None) if capture is not None else None
         lease_id = self._leases.status()["lease_id"]
         return {
             "node_state": getattr(node, "state", None) if node is not None else None,
             "session_type": getattr(node, "session_type", None) if node is not None else None,
             "state": session_state,
-            "adapter": self._adapter_state(),  # 当前节点 active adapter 状态
+            "adapter": adapter_state(self._node),  # 当前节点 active adapter 状态
             "capture_running": bool(getattr(capture, "running", False)) if capture is not None else False,
             "data_dir": str(data_dir) if data_dir is not None else None,
             "disk": self._disk_info(data_dir),
@@ -287,7 +269,7 @@ class CaptureService:
         state = getattr(session, "state", SessionState.INIT)
         return {
             "state": state,
-            "adapter": self._adapter_ref(),  # 当前节点 active adapter 身份
+            "adapter": adapter_ref(self._node),  # 当前节点 active adapter 身份
             "observation": {
                 "qpos": self._to_float_list(latest.get(KEY_QPOS)),
                 "action": self._to_float_list(latest.get(KEY_ACTION)),
@@ -344,20 +326,8 @@ class CaptureService:
             code = result.status_code or 409
             raise CaptureError(result.error or "command rejected", status_code=code)
 
-    def _capture_status(self):
-        """node 缓存的采集状态（``node.capture_status``）；未绑定 adapter / 未缓存 → None。
-
-        采集状态由 **EdgeNode 主循环在 READY / ACTIVE 期间自行周期查询并缓存**（与 health
-        同节奏，不限采集会话），此处只读缓存——前端轮询 /v1/captures **不会**实时请求
-        SDK 进程（edge 运行不依赖前端）。
-        """
-        node = self._node
-        if node is None:
-            return None
-        return getattr(node, "capture_status", None)
-
     def _data_dir(self):
-        capture = self._capture_status()
+        capture = capture_raw(self._node)
         if capture is None:
             return None
         return getattr(capture, "data_dir", None)

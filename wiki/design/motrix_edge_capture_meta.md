@@ -18,7 +18,7 @@ console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类�
     `CaptureMetaStore` 读写（写回保留文件其它顶层键），无内存态副本。
 -   **可拓展**：任意分类（key）→ 选项数组；`capture meta add <新key> <值>` 自动创建新分类，
     无需改代码 / 改 schema。
--   **命令化**：`capture meta` 为**配置级命令**（与 `infer ip` 一致）——节点主循环（任何
+-   **命令化**：`capture meta` 为**配置级命令**（与 `infer config` 一致）——节点主循环（任何
     状态）与任务态会话循环共用同一处理器，保证「任何状态可用」。
 -   **线程安全**：`CaptureMetaStore` 用 `RLock` 保护读写，且**全进程只有一个实例**
     （见「分发与状态可用性」）——CLI / HTTP / 会话命令共用一把锁，并发管理不互踩。
@@ -110,7 +110,7 @@ capture meta delete-key operator
     store、节点构造参数即可替身，也不会出现「多处各自 new 一把锁」。
 -   `handle_capture_meta(cmd, store=None)`：`utils/commands.py`；`store` 缺省用默认路径。
 -   `EdgeNode._dispatch`：配置级命令，任何状态（INIT/IDLE/READY/ACTIVE/ERROR）先于状态机
-    处理器响应（与 `infer ip / infer port` 同一位置）。
+    处理器响应（与 `infer config` 同一位置）。
 -   会话循环（CaptureSession / InferSession）：任务态（ACTIVE）同样响应 `capture meta`
     （经 `BaseSession._on_capture_meta`），保证 ACTIVE 期间命令不因主循环不 poll 而被拒。
 

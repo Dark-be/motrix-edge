@@ -45,8 +45,16 @@ class CommandResult:
 单总线多生产者（web handler + CLI 键盘线程）、单消费者（EdgeNode 主循环）：
 
 -   `push(cmd)`：即发即忘（急停等安全命令）。
+-   **双队列**：安全命令（`CRITICAL_COMMANDS`，现为 `robot estop`）进**旁路队列**，其余进普通队列。
+    任务运行期间 node 主循环只 poll 旁路（普通命令由会话消费）——否则一条分钟级长操作
+    （如推理预热加载模型）会把急停一起挡在队列里。因此任务运行期间 `robot estop` **不再经过会话**
+    （会话内的 estop 分支只在命令源不是总线时命中，属兜底；回执形状与 node 一致：`ok` + `node_state=error`）。
 -   `submit(cmd, timeout)`：同步等回执（CLI / HTTP）；内部把 `reply_to` 接到结果队列，处理器经
-    `cmd.reply_to(result)` 返回；超时抛 `CommandError`（504）。
+    `cmd.reply_to(result)` 返回；超时抛 `CommandError`（504）。**超时 ≠ 取消**：命令已被消费、
+    处理器会继续执行——故提交时在 `cmd.meta.reply_deadline` 写截止时刻，需要「调用方已放弃就
+    不要产生副作用」的处理器（`infer rollout` / `robot execute`：下发动作到真机）在下发前用
+    `deadline_exceeded(cmd)` 自查，过期则**丢弃动作**（否则会出现「调用方看到失败、机器人却动了」）；
+    迟到回执由内部 sink **丢弃**（不阻塞会话线程）。
 -   `__call__()`：非阻塞取下一个命令或 `None`（`command_source` 契约，命令源可替换）。
 
 处理器执行完统一 `reply(cmd.request_id, result)`；`EdgeNode._handle` 统一：查注册表 → 校验
@@ -54,35 +62,31 @@ class CommandResult:
 
 ## 命令清单（build_command_registry）
 
-| 命令名                    | 位置参数        | 层级   | 语义                                                           | auth |
-| ------------------------- | --------------- | ------ | -------------------------------------------------------------- | ---- |
-| `session run`             | `session`       | 任务级 | 启动会话（选择 + 启动一步完成；capture / infer）               | none |
-| `session quit`            | —               | 任务级 | 退出当前会话（→ READY）                                        | none |
-| `robot reset`             | —               | 机器人 | 复位机器人（仅 adapter 可用）                                  | none |
-| `robot estop`             | —               | 全局   | 急停（安全停止 + 转 ERROR）                                    | none |
-| `robot execute`           | `qpos`          | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点）              | none |
-| `robot teleop`            | `enabled`       | 机器人 | 遥操作开关（true/false）                                       | none |
-| `capture episode start`   | —               | 任务级 | 开始一轮采集（adapter.start_capture）                          | none |
-| `capture episode end`     | —               | 任务级 | 结束一轮采集（adapter.end_capture）                            | none |
-| `node reset`              | —               | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                   | none |
-| `infer rollout`           | —               | 任务级 | 单步推理闭环（上传观测 → 下发动作）                            | none |
-| `infer connect`           | —               | 任务级 | 单次尝试连接推理节点（推理会话内；成功回执含 metadata）        | none |
-| `infer ip`                | —               | 配置级 | 查询推理节点 IP（内存态 `policy.host`）                        | none |
-| `infer ip set`            | `ip`            | 配置级 | 设置推理节点 IP（下次 `session run infer` 生效）               | none |
-| `infer port`              | —               | 配置级 | 查询推理节点端口（内存态 `policy.port`）                       | none |
-| `infer port set`          | `port`          | 配置级 | 设置推理节点端口（下次 `session run infer` 生效）              | none |
-| `capture sync`            | `meta`          | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集会话内消费） | none |
-| `capture meta list`       | `key`（可选）   | 配置级 | 列出采集元信息选项（全部分类或某分类）                         | none |
-| `capture meta add`        | `key, value`    | 配置级 | 新增采集元信息选项（分类不存在则创建；重复 → rejected）        | none |
-| `capture meta edit`       | `key, old, new` | 配置级 | 重命名采集元信息选项（不存在 → rejected）                      | none |
-| `capture meta delete`     | `key, value`    | 配置级 | 删除某分类下的采集元信息选项（分类清空则删除分类）             | none |
-| `capture meta delete-key` | `key`           | 配置级 | 删除整个采集元信息分类                                         | none |
+| 命令名                    | 位置参数        | 层级   | 语义                                                                        | auth |
+| ------------------------- | --------------- | ------ | --------------------------------------------------------------------------- | ---- |
+| `session run`             | `session`       | 任务级 | 启动会话（选择 + 启动一步完成；capture / infer）                            | none |
+| `session quit`            | —               | 任务级 | 退出当前会话（→ READY）                                                     | none |
+| `robot reset`             | —               | 机器人 | 复位机器人（仅 adapter 可用）                                               | none |
+| `robot estop`             | —               | 全局   | 急停（安全停止 + 转 ERROR）                                                 | none |
+| `robot execute`           | `qpos`          | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点）                           | none |
+| `robot teleop`            | `enabled`       | 机器人 | 遥操作开关（true/false）                                                    | none |
+| `capture episode start`   | —               | 任务级 | 开始一轮采集（adapter.start_capture）                                       | none |
+| `capture episode end`     | —               | 任务级 | 结束一轮采集（adapter.end_capture）                                         | none |
+| `node reset`              | —               | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                                | none |
+| `infer rollout`           | —               | 任务级 | 单步推理闭环（上传观测 → 下发动作）                                         | none |
+| `infer connect`           | —               | 任务级 | 连接 + **启动异步预热**（prepare + 取一块丢弃，不下发动作；立即回执，幂等） | none |
+| `capture sync`            | `meta`          | 任务级 | 同步采集元信息（JSON，`--meta`）到机器人进程（采集会话内消费）              | none |
+| `capture meta list`       | `key`（可选）   | 配置级 | 列出采集元信息选项（全部分类或某分类）                                      | none |
+| `capture meta add`        | `key, value`    | 配置级 | 新增采集元信息选项（分类不存在则创建；重复 → rejected）                     | none |
+| `capture meta edit`       | `key, old, new` | 配置级 | 重命名采集元信息选项（不存在 → rejected）                                   | none |
+| `capture meta delete`     | `key, value`    | 配置级 | 删除某分类下的采集元信息选项（分类清空则删除分类）                          | none |
+| `capture meta delete-key` | `key`           | 配置级 | 删除整个采集元信息分类                                                      | none |
 
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
-`node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer ip / infer port`、`capture meta *`
+`node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer config`、`capture meta *`
 （配置级，与节点状态机解耦）全局可用——`capture meta` 读写 `capture.yml` 的 `meta` 段，见
 [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、
-`infer ip set 192.168.1.10`、`infer port set 8765`。
+`infer config set '{"host":"10.0.0.9"}'`。
 
 ## 本地 vs HTTP（行为对齐）
 

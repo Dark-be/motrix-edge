@@ -23,6 +23,7 @@
                     RobotAdapter；见 wiki/design/motrix_edge_upload_session.md）
   /v1/infers/*     推理会话控制（无回合概念：enter → 持续推理 → exit；注入 InferService 绑定
                    正在运行的 EdgeNode + 共享 CommandBus）
+  /v1/uploads/*    本地采集 episode 扫描、选择、上传队列与打包（pack）
 
 identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` 作为请求元数据上报，
 具体发送（访问控制面 / 推理 / 上传）由后续客户端层实现。
@@ -37,6 +38,7 @@ identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` �
 
 import shutil
 from datetime import datetime
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,10 +74,11 @@ def _adapters(node) -> dict:
 
     - robots：node 当前绑定的唯一机器人（``[{name, type}]``，单 adapter 包；只读
       node 内存状态，**不实时 discover**）。
-    - policies：全部已注册策略适配器（``[{type, class, module}]``，前端策略选择用；
-      不触发第三方包导入）。
+    - policies：全部已注册策略适配器（``[{type, class, module, config_items}]``，前端策略
+      选择用；``config_items`` 为该策略的配置项 schema——前端选择策略后**动态渲染表单**、
+      进入会话前即可填写；不触发第三方包导入）。
     """
-    from motrix_edge.policy import policy_adapters
+    from motrix_edge.policy import policy_adapters, policy_config_items
 
     robots = []
     adapter = getattr(node, "adapter", None) if node is not None else None
@@ -87,7 +90,9 @@ def _adapters(node) -> dict:
             }
         ]
 
-    policies = [{"type": t, "class": c, "module": m} for t, c, m in policy_adapters()]
+    policies = [
+        {"type": t, "class": c, "module": m, "config_items": policy_config_items(t)} for t, c, m in policy_adapters()
+    ]
 
     return {"robots": robots, "policies": policies}
 
@@ -152,15 +157,97 @@ class WebRTCOfferRequest(BaseModel):
 
 
 class InferEnterRequest(BaseModel):
-    """POST /v1/infers 请求体：可选推理策略类型（缺省用配置 policy.type）。"""
+    """POST /v1/infers 请求体：可选推理策略类型 + 进入会话前的策略配置项。
+
+    ``config`` 为**该策略的配置项**（含公共项 ``host`` / ``port`` 推理节点端点；openpi → prompt；
+    lerobot-act → pretrained_name_or_path / device / actions_per_chunk），见
+    ``policy.POLICY_CONFIG_ITEMS``；前端按 ``/v1/health`` 的 ``policy_config_items``
+    （或在会话内按 ``GET /v1/infers`` 的 ``policy_config.items``）动态渲染表单，提交时随本字段下发。
+    """
 
     policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
+    config: dict | None = Field(default=None, description="策略配置项（含 host / port；按所选策略 schema 校验）")
+
+
+class InferRolloutRequest(BaseModel):
+    """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续）。
+
+    多步（count）与 drain（缓存推理）模式已取消（多余字段被忽略）；prompt 不随 rollout 传，
+    由会话内 ``infer prompt`` 预置（为空不能开始推理 / 录制）。
+    """
+
+    mode: Literal["single", "continuous"] | None = Field(
+        default=None, description="推理模式：single（缺省）/ continuous"
+    )
+
+
+class InferPromptRequest(BaseModel):
+    """POST /v1/infers/prompt 请求体：文本指令（仅需要 prompt 的策略，如 openpi）。"""
+
+    prompt: str = Field(..., min_length=1, description="文本指令（需要 prompt 的策略推理前必须设置）")
+
+
+class InferSyncRequest(BaseModel):
+    """POST /v1/infers/sync 请求体：录制 rollout 时同步的采集元信息（operator / task_name 等）。"""
+
+    meta: dict = Field(default_factory=dict, description="采集元信息（默认 operator=policy、task_name=prompt）")
+
+
+class InferRTCRequest(BaseModel):
+    """POST /v1/infers/rtc 请求体：RTC（实时动作块）参数（可部分更新）。
+
+    对应命令 ``infer rtc set <json>``；参数写入内存态 ``policy.rtc`` 并应用到正在运行的
+    RTCManager（下一块起生效）；见 wiki/design/motrix_edge_rtc.md。
+    """
+
+    enabled: bool | None = Field(default=None, description="是否启用 RTC（关闭 → 每步一次推理只取块首步）")
+    action_horizon: int | None = Field(default=None, ge=1, description="块长上限 H（一次推理只取块的前 H 步）")
+    prefix_len: int | None = Field(
+        default=None, ge=0, description="前置段 P（额外强制跳过的前 P 步；真实过期步自动跳过）"
+    )
+    execution_horizon: int | None = Field(default=None, ge=1, description="执行段 E（缺省 = H - P - S）；须 > P")
+    suffix_len: int | None = Field(
+        default=None, ge=0, description="后缀段 S（与下一块执行段的重叠窗口，也是预取提前量）；须满足 P + S < H"
+    )
+    aggregate_fn: str | None = Field(
+        default=None,
+        description=(
+            "重叠过渡策略：weighted_average(0.3 本段+0.7 下一段)/conservative(0.7+0.3)/"
+            "average/latest_only/continuous(按步号 0→1 线性过渡)"
+        ),
+    )
+
+
+class InferConfigRequest(BaseModel):
+    """POST /v1/infers/config 请求体：策略配置项（可部分更新）。
+
+    对应命令 ``infer config set <json>``；按**当前策略**的配置项 schema 白名单校验并写入
+    内存态 ``policy`` 段：``runtime: True`` 的键立即应用到运行中的策略客户端（下一请求生效），
+    ``runtime: False`` 的键（host / port、模型路径…）要退出会话重进才生效，回执 ``deferred``
+    列出这些键。未知键 / 类型不符 / 必填为空 → 400；空值（``null`` / 空串）表示清除该项。
+    仅需 prompt 的策略也可用 ``POST /v1/infers/prompt`` 快捷入口。
+    """
+
+    config: dict = Field(default_factory=dict, description="策略配置项（按当前策略 schema 校验）")
 
 
 class UploadScanRequest(BaseModel):
     """POST /v1/uploads 请求体：可覆盖配置的默认采集目录。"""
 
     folder_path: str | None = Field(default=None, description="待扫描目录；缺省使用 upload.data_dir")
+
+
+class CaptureSyncRequest(BaseModel):
+    """POST /v1/captures/sync 请求体：采集元信息（采集员 / 任务名等，进程保存数据时附加）。"""
+
+    meta: dict = Field(default_factory=dict, description="采集元信息（operator / task_name 等）")
+
+
+class AdapterConfigRequest(BaseModel):
+    """POST /v1/adapters/config 请求体：运行时 adapter 能力配置（可部分更新）。"""
+
+    enabled_arms: list[str] | None = Field(default=None, description="启用的机械臂（right / left）；缺省全部")
+    enabled_cameras: list[str] | None = Field(default=None, description="启用的相机（IMAGES 子集）")
 
 
 class UploadSelectRequest(BaseModel):
@@ -177,12 +264,6 @@ class UploadPackRequest(BaseModel):
     """
 
     name: str | None = Field(default=None, description="包名（单个目录名）；缺省 pack<选中数量>")
-
-
-class CaptureSyncRequest(BaseModel):
-    """POST /v1/captures/sync 请求体：采集元信息（采集员 / 任务名等，进程保存数据时附加）。"""
-
-    meta: dict = Field(default_factory=dict, description="采集元信息（operator / task_name 等）")
 
 
 class CaptureMetaAddRequest(BaseModel):
@@ -607,6 +688,9 @@ def create_app(
             return fn()
         except InferError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except CommandError as exc:
+            # 命令总线 submit 超时（如 infer connect 预热超时）：透出 504 而不是未处理异常 500
+            raise HTTPException(status_code=exc.status_code or 504, detail=str(exc)) from exc
 
     @app.get("/v1/infers")
     def infers_status():
@@ -617,15 +701,92 @@ def create_app(
     def infers_enter(req: InferEnterRequest | None = None, x_lease_id: str | None = Header(default=None)):
         """进入推理会话（READY → ACTIVE）：连接推理会话并启动任务循环，需先持有有效租约。
 
-        请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）。
+        请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）、``config`` 指定
+        **该策略的配置项**（含公共项 ``host`` / ``port`` 推理节点端点，如 lerobot-act 的模型路径 /
+        openpi 的 prompt）；非法键、类型不符、越界或必填项为空 → 400。
         """
         policy_type = req.policy_type if req is not None else None
-        return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type))
+        config = req.config if req is not None else None
+        return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type, config=config))
+
+    @app.post("/v1/infers/connect")
+    def infers_connect(x_lease_id: str | None = Header(default=None)):
+        """启动 / 查询**异步预热**（infer connect）。须已在推理会话且持有租约。
+
+        立即回执（`started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等）：预热可能
+        持续几十秒～几分钟（加载 checkpoint），进度由 `GET /v1/infers` 轮询；预热**不下发动作**，
+        且可被急停（`POST /v1/commands` capability=estop）或退出会话立即中断。
+        """
+        return _infer_call(lambda: _infers().connect(lease_id=x_lease_id))
 
     @app.post("/v1/infers/rollout")
-    def infers_rollout(x_lease_id: str | None = Header(default=None)):
-        """单步推理闭环（infer rollout）：上传观测 → 推理 → 下发动作。须已在推理会话且持有租约。"""
-        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id))
+    def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
+        """推理闭环（infer rollout）：单步（缺省）或 continuous 持续。
+
+        body：``mode``（single 缺省 / continuous）。
+        需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（会话内 ``infer prompt`` 预置）；lerobot-act 不需要。
+        须已在推理会话且持有租约；continuous 启动即回执 started，直到 session quit / estop。
+        """
+        mode = req.mode if req is not None else None
+        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode))
+
+    @app.post("/v1/infers/episode/start")
+    def infers_episode_start(x_lease_id: str | None = Header(default=None)):
+        """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
+
+        需要 prompt 的策略（如 openpi）：prompt 为空 → 400（先 ``infer prompt`` 预置）；lerobot-act 不需要。
+        录制前由调用方 ``POST /v1/infers/sync`` 显式同步采集元信息（默认 operator=policy、
+        task_name=prompt）。受控操作：须持有租约。
+        """
+        return _infer_call(lambda: _infers().episode_start(lease_id=x_lease_id))
+
+    @app.post("/v1/infers/episode/end")
+    def infers_episode_end(x_lease_id: str | None = Header(default=None)):
+        """结束一轮推理 rollout 录制（capture episode end）：robot 保存该 episode。受控操作。"""
+        return _infer_call(lambda: _infers().episode_end(lease_id=x_lease_id))
+
+    @app.post("/v1/infers/sync")
+    def infers_sync(req: InferSyncRequest, x_lease_id: str | None = Header(default=None)):
+        """同步采集元信息（capture sync）：录制 rollout 时把 operator/task_name 同步到进程。
+
+        默认元信息 = ``{operator: "policy", task_name: <prompt>}``（见 GET /v1/infers 的
+        capture_meta），由调用方显式提交（Edge 不自动 sync）。受控操作：须持有租约。
+        """
+        return _infer_call(lambda: _infers().sync(meta=req.meta, lease_id=x_lease_id))
+
+    @app.post("/v1/infers/rtc")
+    def infers_rtc(req: InferRTCRequest, x_lease_id: str | None = Header(default=None)):
+        """运行期设置 RTC（实时动作块）参数（``infer rtc set``）。
+
+        body 为参数对象（可部分：enabled / action_horizon / prefix_len / execution_horizon /
+        suffix_len / aggregate_fn）→ 写入内存态 ``policy.rtc`` 并应用到正在运行的
+        RTCManager（下一块起生效）；非法参数或违反交叉约束（P + S < H、E > P）→ 400。
+        受控操作：须持有租约。
+        """
+        params = {key: value for key, value in req.model_dump().items() if value is not None}
+        return _infer_call(lambda: _infers().configure_rtc(params=params, lease_id=x_lease_id))
+
+    @app.post("/v1/infers/config")
+    def infers_config(req: InferConfigRequest, x_lease_id: str | None = Header(default=None)):
+        """运行期设置**策略配置项**（``infer config set``）。
+
+        body 为配置项对象（可部分：openpi → prompt；lerobot-act → pretrained_name_or_path / device /
+        actions_per_chunk）→ 按当前策略 schema 白名单校验并写入内存态 ``policy`` 段：
+        ``runtime: True`` 的键同样应用到运行中的策略客户端（下一请求生效），``runtime: False``
+        的键（host / port、模型路径…）退出会话重进才生效并在回执 ``deferred`` 列出。
+        未知键 / 类型不符 / 必填为空 → 400。受控操作：须已在推理会话且持有租约。
+        """
+        return _infer_call(lambda: _infers().configure_policy_config(params=dict(req.config), lease_id=x_lease_id))
+
+    @app.post("/v1/infers/prompt")
+    def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):
+        """会话内预置/更新推理文本指令（统一 prompt；推理/录制前必须非空）。
+
+        须已在推理会话且持有租约；持续推理中亦可修改（下个请求生效）。仅对声明 prompt
+        配置项的策略（语言条件，如 openpi）有效；等价于 ``POST /v1/infers/config``
+        提交 ``{"prompt": ...}``。
+        """
+        return _infer_call(lambda: _infers().set_prompt(lease_id=x_lease_id, prompt=req.prompt))
 
     @app.delete("/v1/infers")
     def infers_exit(lease_id: str | None = None):

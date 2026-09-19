@@ -1,0 +1,16 @@
+# 头文件检查（unified-ci add-header）忽略清单。
+# 工具优先读本文件，其次 .prettierignore / .gitignore。
+
+# vendored 第三方：lerobot 子集（Apache-2.0 头，非 Motphys 专有头；见
+# wiki/design/motrix_edge_policy.md「vendored lerobot」）
+src/lerobot/
+
+# 工具 / 环境目录（不参与头检查）
+node_modules/
+.venv/
+.pytest_cache/
+docs/build/
+CHANGELOG.md
+package-lock.json
+packages-lock.json
+.gitlab-ci.yml

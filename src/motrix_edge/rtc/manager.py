@@ -187,6 +187,7 @@ class RTCManager:
         self._failed_chunks = 0  # 策略未返回动作 / 抛异常的块数
         self._last_delay = 0.0  # 最近一次实测推理耗时（秒；供调 P 参考，不参与切分）
         self._last_error: str | None = None  # 最近一次策略异常（异步路径不外抛，经 status 暴露）
+        self._calibrated_len: int | None = None  # 已据以校准 H 的实测块长（None = 尚未校准，见 calibrate）
         # 异步预取：单飞 = 「待执行的登记」+「策略端正在被调用」两态（见 _claim_locked）
         self._job: tuple | None = None  # 已登记、待执行的请求 （观测快照, 步号, 世代）
         self._running = False  # 策略端正在被调用（互斥；只有执行者能结清，见 _infer_and_apply）
@@ -221,27 +222,78 @@ class RTCManager:
             self._transition_fn = get_aggregate_fn(self._config["aggregate_fn"])
             return self.params
 
+    def _scaled_segments(self, height: int) -> tuple[int, int, int]:
+        """把配置的 ``(P, S)`` 按 ``height / H`` 等比缩放到块长 ``height``，并补足执行段 E。
+
+        ``P + E + S = height``、``P + S < height``（``S`` 配置非 0 时保底 1 步，避免过渡被静默
+        关掉）；``height = H``（常态）时与配置完全一致。
+        """
+        horizon = int(self._config["action_horizon"])
+        prefix = int(self._config["prefix_len"])
+        suffix = int(self._config["suffix_len"])
+        scale = int(height) / horizon if horizon else 1.0
+        scaled_suffix = max(1, round(suffix * scale)) if suffix > 0 else 0
+        scaled_suffix = min(scaled_suffix, max(0, int(height) - 1))
+        scaled_prefix = min(round(prefix * scale), max(0, int(height) - 1 - scaled_suffix))
+        return scaled_prefix, int(height) - scaled_prefix - scaled_suffix, scaled_suffix
+
     def _segments(self, height: int) -> tuple[int, int, int]:
         """本次块的三段 ``(P, E, S)``：配置装得进**实际块长**就用配置，装不下则按 ``块长 / H`` 等比缩放。
 
         ``H`` 只是上限（``head`` 已把块截到 ``min(H, 实际块长)``）：策略返回的块比 H 短时（openpi 的
         16 步 vs H=50），配置的绝对步数放不进这一块——照搬会让预取提前量 ``P + S`` 大于块长 →
-        **每一拍都在推理**，且上报与实际重叠步数对不上。故按比例缩放，并保证
-        ``P + E + S = 实际块长``、``E >= 1``、``P + S < 实际块长``（``S`` 配置非 0 时保底 1 步，
-        避免过渡被静默关掉）。实际块长 = H（常态）时与配置完全一致。
+        **每一拍都在推理**，且上报与实际重叠步数对不上。故按比例缩放（见 ``_scaled_segments``）。
         """
-        horizon = int(self._config["action_horizon"])
         prefix = int(self._config["prefix_len"])
         suffix = int(self._config["suffix_len"])
         configured_e = self._config["execution_horizon"]
         execution = (int(height) - prefix - suffix) if configured_e is None else int(configured_e)
         if execution >= 1 and prefix + execution + suffix <= int(height):
             return prefix, execution, suffix
-        scale = int(height) / horizon if horizon else 1.0
-        scaled_suffix = max(1, round(suffix * scale)) if suffix > 0 else 0
-        scaled_suffix = min(scaled_suffix, max(0, int(height) - 1))
-        scaled_prefix = min(round(prefix * scale), max(0, int(height) - 1 - scaled_suffix))
-        return scaled_prefix, int(height) - scaled_prefix - scaled_suffix, scaled_suffix
+        return self._scaled_segments(height)
+
+    def calibrate(self, block_len: int | None) -> dict:
+        """按**实测块长**把块长上限 H 收敛为 ``min(H, block_len)``（``P/E/S`` 等比缩放）；返回参数。
+
+        服务端不一定声明块长：openpi 官方 metadata **没有** action_horizon（``policy.action_horizon``
+        缺省 50 只是猜测），lerobot-act 的 ``actions_per_chunk`` 也只是请求值。H 大于真实块长时
+        三段划分没有意义（永远填不满，预取提前量 ``P + S`` 相对真实块长偏大、上报的切分与实测
+        对不上）——按实测收敛后，``P/E/S`` 的相对结构与推理提前量一次性对齐真实块长，不必每块
+        靠 ``_segments`` 兜底缩放。
+
+        规则（均**不改参数**、不抛异常——校准只是兜底，不该让推理失败）：
+
+        - ``block_len`` 缺省 / 非法（None / < 1）→ 按未观测到处理；
+        - 实测 ``>=`` 当前 H → 保持（H 是我们要的执行窗口上限，实测更长不需要动）；
+        - **只校准一次**（``observed_chunk_len`` 是「最近一次」实测，可能被瞬时短块污染；
+          已校准 / 已显式 ``configure`` 过就不再跟随）；
+        - 缩放结果不满足交叉约束（``E > P`` 等）→ 保持原参数。
+
+        校准后 ``execution_horizon`` 回到缺省（= ``H - P - S`` 推导）：不把缩放后的绝对步数固化，
+        否则后续只改 H（``infer rtc set``）会与固化的 E 冲突而被校验拒绝。
+
+        实测块长取 ``policy.observed_chunk_len``（客户端每次拿到块回填，见
+        ``BasePolicyClient._note_chunk_len``）；``infer()`` 每步按需调用（幂等）。
+        """
+        try:
+            length = int(block_len) if block_len is not None else 0
+        except (TypeError, ValueError):
+            return self.params
+        with self._lock:
+            params = self.params
+            horizon = int(params["action_horizon"])
+            if self._calibrated_len is not None or length < 1 or length >= horizon:
+                return params
+            prefix, _execution, suffix = self._scaled_segments(length)
+            # 取整可能让「填满整块」的 E 反而不大于 P（小整数）：压低前缀步保证 E > P
+            prefix = min(prefix, max(0, (length - suffix - 1) // 2))
+            self._calibrated_len = length  # 先记：即使下方校验不过也不再反复尝试
+            try:
+                return self.configure(
+                    action_horizon=length, prefix_len=prefix, suffix_len=suffix, execution_horizon=None
+                )
+            except ValueError:  # 缩放结果非法（理论上已被上面的压低覆盖）→ 保持原参数
+                return params
 
     def _age(self, chunk) -> int:
         """当前步相对块首步已「迟到」几步（``>= 0``）；``>= chunk.height`` = 整块落在过去。
@@ -344,6 +396,10 @@ class RTCManager:
         - 队列仍无当前步 → 返回 ``None``（会话跳过本步，不升级为任务错误）；
         - ``enabled=False`` → 退化：每步请求一次、只取块首步。
         """
+        # 兜底校准块长上限 H：策略不一定声明块长（openpi 官方 metadata 无 action_horizon），
+        # 按**首次实测块长**收敛（一次，幂等；见 ``calibrate``）——放在最前，让首个 rollout
+        # 就用校准后的 H / P / E / S，而不是先跑一块短块的降级切分。
+        self.calibrate(getattr(self._policy, "observed_chunk_len", None))
         if not self.enabled:
             return self._infer_direct(observation)
         inline = None
