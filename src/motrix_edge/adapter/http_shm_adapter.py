@@ -36,8 +36,10 @@ import numpy as np
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
     KEY_ACTION,
+    KEY_POSE,
     KEY_QPOS,
     Action,
+    ActionSpace,
     CaptureStatus,
     HealthStatus,
     RobotAdapter,
@@ -45,6 +47,7 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_ACTION_SPACE,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
     FIELD_DETAIL,
@@ -143,14 +146,28 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- capabilities ----------------------------------------------------------
     @property
+    def pose_dim(self) -> int:
+        """位姿观测维度（启用臂 × 每臂位姿维数；不提供位姿的适配器为 0）。"""
+        if not self.POSE_DIM_PER_ARM:
+            return 0
+        if not self.ARM_NAMES:
+            return int(self.POSE_DIM_PER_ARM)
+        return int(self.POSE_DIM_PER_ARM) * len(self.enabled_arms)
+
+    @property
     def capabilities(self) -> RobotCapabilities:
-        # 观测键 = ``observe()`` 实际返回的键（qpos + 进程侧目标 action + 启用相机），
-        # 随 configure 实时变化
-        obs_keys = [KEY_QPOS, KEY_ACTION] + [f"{CAMERA_PREFIX}{img}" for img in self.enabled_images]
+        # 观测键 = ``observe()`` 实际返回的键（qpos + 进程侧目标 action + 位姿 + 启用相机），
+        # 随 configure 实时变化；顺序与 SHM 布局一致（qpos → action → pose → images），便于比对
+        obs_keys = [KEY_QPOS, KEY_ACTION]
+        if self.pose_dim > 0:
+            obs_keys.append(KEY_POSE)  # 提供末端位姿（笛卡尔策略的观测输入）
+        obs_keys += [f"{CAMERA_PREFIX}{img}" for img in self.enabled_images]
         return RobotCapabilities(
             robot_model_id=self.robot_model_id,
             robot_model_version=self.robot_model_version,
             action_dim=self.action_dim,
+            action_spaces=[space.value for space in self.ACTION_SPACES],
+            pose_dim=self.pose_dim,
             observation_keys=obs_keys,
             capabilities=dict(self._capabilities),
         )
@@ -208,15 +225,22 @@ class HttpShmAdapter(RobotAdapter):
         debug_print(self.name, f"teleop set to {self.teleop_enabled} (mode={self.teleop_mode})", "INFO")
         self._client().post(PATH_TELEOP, json=body)
 
-    def rollout(self, action: Action) -> bool:
+    def rollout(self, action: Action, action_space: ActionSpace | str | None = None) -> bool:
         """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。
+
+        ``action_space`` 声明 ``action`` 的语义（缺省 ``joint``，与仅下发关节动作的调用方
+        等价）；非关节空间时随 body 下发 ``action_space`` 字段，由机器人进程做 IK。
 
         遥操作（人工接管）中 SDK 返回 **409**：本拍不下发（返回 False）。持续推理（30Hz）会反复
         命中，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
         """
+        space = self.normalize_action_space(action_space)
         target = self._expand_action(action, "rollout")
         self.rollout_calls += 1
-        resp = self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
+        body: dict = {FIELD_ACTION: target.tolist()}
+        if space is not ActionSpace.JOINT:
+            body[FIELD_ACTION_SPACE] = space.value
+        resp = self._client().post(PATH_ROLLOUT, json=body)
         if resp.status_code == httpx.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
             self.rollout_refused_calls += 1
             if not self._rollout_refused_logged:
@@ -290,6 +314,9 @@ class HttpShmAdapter(RobotAdapter):
             # 与 qpos **同一裁剪口径**（启用臂），保证观测内各臂维度自洽
             KEY_ACTION: self._select_qpos(np.asarray(frame["action"], dtype=np.float32)),
         }
+        # 末端位姿（机器人提供时）：按启用臂挑选，与 qpos / action 同一裁剪口径
+        if frame.get("pose") is not None and self.POSE_DIM_PER_ARM:
+            obs[KEY_POSE] = self._select_arm_segments(frame["pose"], self.POSE_DIM_PER_ARM)
         # strict=True：路数由两侧各自声明（SHM header 的 image_count ↔ 类常量 IMAGES），
         # 不一致时显式报错，避免静默少一路相机；只暴露 configure 启用的相机
         for image, name in zip(frame["images"], self.IMAGES, strict=True):

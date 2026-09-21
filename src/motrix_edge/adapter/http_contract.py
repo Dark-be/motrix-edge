@@ -28,7 +28,7 @@
 | GET  | ``/v1/health``           | —                      | ``{ok, detail, control_hz, measured_hz}``      |
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
 | POST | ``/v1/execute``          | ``{action}``           | ``{status}``                                   |
-| POST | ``/v1/rollout``          | ``{action: [dim]}``    | ``{status}``                                   |
+| POST | ``/v1/rollout``          | ``{action, action_space?}``  | ``{status}``                                   |
 | POST | ``/v1/teleop``           | ``{enabled, mode?}``   | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
 | GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录）        |
@@ -50,6 +50,11 @@
   位姿为锚点，只把主臂**增量**叠加到从臂 target（从臂不突变）。只发 ``{enabled}`` 的调用方
   行为不变；robot-pipeline 侧语义见
   [robot-pipeline 遥操作](../../../wiki/design/robot_pipeline_teleop.md)。
+- ``/v1/rollout`` 的 ``action_space``（取值 ``joint`` / ``cartesian_pose``，缺省 ``joint``）：
+  声明 ``action`` 的语义——``joint`` 为关节空间绝对目标（每臂 6 关节 + 夹爪），
+  ``cartesian_pose`` 为末端位姿（每臂 xyz + rpy + 夹爪），由机器人侧 IK 转关节后执行。
+  不传该字段的调用方行为不变；笛卡尔动作见
+  [边缘原语接口](../../../wiki/design/motrix_edge_primitives.md)。
 """
 
 from __future__ import annotations
@@ -69,6 +74,7 @@ PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
 
 # ---- 请求 body 字段 ----
 FIELD_ACTION = "action"  # execute / rollout：动作数据
+FIELD_ACTION_SPACE = "action_space"  # rollout：动作语义（joint | cartesian_pose；缺省 joint）
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
 FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
@@ -104,10 +110,17 @@ VALUE_TELEOP_MODE_DELTA = "delta"  # 人工接管：锚点增量（target = slav
 TELEOP_MODES = (VALUE_TELEOP_MODE_ABSOLUTE, VALUE_TELEOP_MODE_DELTA)
 DEFAULT_TELEOP_MODE = VALUE_TELEOP_MODE_ABSOLUTE  # 不传 mode 时保持旧行为
 
+# ---- 动作空间取值（与 adapter/base.py 的 ActionSpace 一一对应；两端引用不硬编码）----
+VALUE_ACTION_SPACE_JOINT = "joint"  # 关节空间（每臂 6 关节 + 夹爪，绝对目标）
+VALUE_ACTION_SPACE_CARTESIAN_POSE = "cartesian_pose"  # 末端位姿（每臂 xyz + rpy + 夹爪）
+DEFAULT_ACTION_SPACE = VALUE_ACTION_SPACE_JOINT  # 不发该字段时机器人按关节空间解释（向后兼容）
+
 __all__ = [
+    "DEFAULT_ACTION_SPACE",
     "DEFAULT_TELEOP_MODE",
     "FIELD_ACTION",
     "FIELD_ACTION_DIM",
+    "FIELD_ACTION_SPACE",
     "FIELD_CAPABILITIES",
     "FIELD_CONTROL_HZ",
     "FIELD_CONTROLLERS",
@@ -142,6 +155,8 @@ __all__ = [
     "PATH_SAFE_STOP",
     "PATH_TELEOP",
     "TELEOP_MODES",
+    "VALUE_ACTION_SPACE_CARTESIAN_POSE",
+    "VALUE_ACTION_SPACE_JOINT",
     "VALUE_STATUS_ACCEPTED",
     "VALUE_TELEOP_MODE_ABSOLUTE",
     "VALUE_TELEOP_MODE_DELTA",

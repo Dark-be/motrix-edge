@@ -28,11 +28,10 @@
 本类只声明类常量：身份（discover 解析传入，缺省回退类常量）、能力（动作维度 / 相机
 布局 / 支持的 ``AdapterCapability``）、连接参数（SDK URL / 共享内存名 / 超时）。身份由
 机器人进程 discover 解析（``name`` / ``id`` / ``type``）传入构造函数；能力与连接参数
-**全部由类级常量定义**（自包含，不随 discover 传输）；运行时能力裁剪（``configure()``：启用
-臂 / 相机）由 ``HttpShmAdapter`` / ``RobotAdapter`` 基类提供。
+**全部由类级常量定义**（自包含，不随 discover 传输、不接收 Edge 配置）。
 """
 
-from motrix_edge.adapter.base import AdapterCapability
+from motrix_edge.adapter.base import ActionSpace, AdapterCapability
 from motrix_edge.adapter.dual_piper_adapter import (
     DUAL_ARM_ACTION_DIM,
     DUAL_ARM_ACTION_DIM_PER_ARM,
@@ -54,6 +53,9 @@ class TestRobotAdapter(HttpShmAdapter):
     ACTION_DIM = DUAL_ARM_ACTION_DIM  # 完整动作维度
     # 臂布局（与 DualPiperAdapter 同一组常量：双臂结构一致，避免两处重复声明）
     ACTION_DIM_PER_ARM = DUAL_ARM_ACTION_DIM_PER_ARM
+    # 支持的动作空间：关节空间 + 末端位姿（位姿由机器人进程 IK 转关节后执行）
+    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.CARTESIAN_POSE)
+    POSE_DIM_PER_ARM = 6  # 每臂位姿维数（xyz + rpy）
     ARM_NAMES = DUAL_ARM_NAMES
     ARM_QPOS_SLICES = DUAL_ARM_QPOS_SLICES
     HOME_QPOS = DUAL_ARM_HOME_QPOS

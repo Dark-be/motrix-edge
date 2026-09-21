@@ -62,6 +62,7 @@ class FakeRobotAdapter(RobotAdapter):
         self.safe_stop_calls = 0
         self.release_calls = 0
         self.executed: list = []  # execute / rollout 记录（供测试断言）
+        self.rollout_spaces: list = []  # rollout 收到的动作空间（None = 未指定，按关节空间）
         self.teleop_calls: list[tuple[bool, str | None]] = []  # set_teleop 记录（enabled, mode）
         self.capture_episodes: list[str] = []  # start_capture / end_capture 记录（供测试断言）
         self.capture_running = False  # 进程是否在采集（录制中）
@@ -112,9 +113,10 @@ class FakeRobotAdapter(RobotAdapter):
         self._action = np.asarray(action, dtype=float)
         self.executed.append(np.asarray(action, dtype=float).tolist())
 
-    def rollout(self, action) -> bool:
+    def rollout(self, action, action_space=None) -> bool:
         self._action = np.asarray(action, dtype=float)
         self.executed.append(np.asarray(action, dtype=float).tolist())
+        self.rollout_spaces.append(None if action_space is None else str(action_space))
         return True
 
     def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
