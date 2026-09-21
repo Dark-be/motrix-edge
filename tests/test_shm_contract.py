@@ -14,7 +14,8 @@
 
 """共享内存观测契约测试（真实 /dev/shm）—— 陈旧检测与写者重启后重新 attach。
 
-覆盖：正常读帧、写者停更时**不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach。
+覆盖：正常读帧、写者停更时**不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach、
+位姿区（pose_dim > 0 时布局 v3 且读到 ``pose``；= 0 时与 v2 兼容且无 ``pose`` 键）。
 """
 
 import time
@@ -28,6 +29,7 @@ _IMAGE_SIZE = (4, 3)  # (width, height)
 _IMAGE_COUNT = 1
 _QPOS_DIM = 2
 _ACTION_DIM = 2
+_POSE_DIM = 6  # 位姿区（v3）；0 = 不启用（v2 兼容）
 _STALE = 0.05  # 测试用陈旧阈值（秒）
 
 
@@ -44,14 +46,53 @@ def _write(writer: ObsShmWriter, value: int, action: int | None = None) -> None:
     )
 
 
-def _make_writer(name: str) -> ObsShmWriter:
+def _make_writer(name: str, pose_dim: int = 0) -> ObsShmWriter:
     return ObsShmWriter(
         name=name,
         image_count=_IMAGE_COUNT,
         image_size=_IMAGE_SIZE,
         qpos_dim=_QPOS_DIM,
         action_dim=_ACTION_DIM,
+        pose_dim=pose_dim,
     )
+
+
+def test_pose_region_roundtrip():
+    """pose_dim > 0：布局升到 v3，读者拿到位姿（与 qpos / action 同一帧）。"""
+    name = _new_name()
+    writer = _make_writer(name, pose_dim=_POSE_DIM)
+    reader = ObsShmReader(name)
+    try:
+        assert reader.pose_dim == _POSE_DIM
+        writer.write(
+            np.full(_QPOS_DIM, 1, dtype="<f8"),
+            np.full(_ACTION_DIM, 2, dtype="<f8"),
+            [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+            pose=np.arange(_POSE_DIM, dtype="<f8"),
+        )
+        frame = reader.read()
+        assert frame is not None
+        assert frame["pose"].tolist() == [0, 1, 2, 3, 4, 5]
+    finally:
+        reader.close()
+        writer.close()
+        writer.unlink()
+
+
+def test_pose_dim_zero_keeps_v2_layout():
+    """pose_dim = 0：不占位姿区（版本保持 v2），读数不含 ``pose`` 键（向后兼容）。"""
+    name = _new_name()
+    writer = _make_writer(name)
+    reader = ObsShmReader(name)
+    try:
+        assert reader.pose_dim == 0
+        _write(writer, 5)
+        frame = reader.read()
+        assert frame is not None and "pose" not in frame
+    finally:
+        reader.close()
+        writer.close()
+        writer.unlink()
 
 
 def test_read_returns_latest_frame():

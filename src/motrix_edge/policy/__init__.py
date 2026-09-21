@@ -39,7 +39,7 @@ POLICY_REGISTRY = {
 # 元素字段：
 #   key         配置键（写入 base_cfg["policy"][key]；运行时经 infer config set / POST /v1/infers/config）
 #   label       展示名（前端表单标签）
-#   type        text | int | bool（校验 / 控件类型）
+#   type        text | int | float | bool（校验 / 控件类型）
 #   required    是否必填（缺失时前端提示；后端在设置时校验非空）
 #   runtime     会话内能否运行时修改（True = 会话内改**立即生效**——客户端每次请求现读；
 #               False = 握手级配置（只在进入会话 / 重连时随策略指令下发），会话内改需退出重进；
@@ -58,7 +58,7 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "key": "host",
         "label": "推理节点地址 host",
         "type": "text",
-        "required": False,  # llm 类策略走 base_url，不需要端点（前端按 host/port 是否填齐门控「进入推理」）
+        "required": False,  # 后端不硬性要求：前端按 host/port 是否填齐门控「进入推理」
         "runtime": False,  # 会话级：进入会话时构造传输层，会话内改需退出重进
         "group": "endpoint",
         "default": None,
