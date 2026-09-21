@@ -198,7 +198,7 @@ def test_policy_config_runtime_keys_by_policy():
     endpoint = {item["key"]: item for item in policy_config_items("openpi") if item.get("group") == "endpoint"}
     assert set(endpoint) == {"host", "port"}
     assert all(item["runtime"] is False for item in endpoint.values())  # 会话级（进入会话时固化）
-    assert all(item["required"] is False for item in endpoint.values())  # llm 类策略不需要端点（前端单独门控）
+    assert all(item["required"] is False for item in endpoint.values())  # 后端不硬性要求（前端按 group=endpoint 门控）
     assert (endpoint["port"]["min"], endpoint["port"]["max"]) == (1, 65535)
     # 预热门控（公共项）：缺省要求先 infer connect（连接 + prepare + 取一块丢弃，不下发动作）
     warmup = next(item for item in policy_config_items("openpi") if item["key"] == "warmup_required")
