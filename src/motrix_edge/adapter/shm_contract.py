@@ -25,6 +25,9 @@
 - ``qpos``：``float64[dim]`` 关节数据。
 - ``action``：``float64[dim]`` **当前目标动作**（SDK 侧 "正在执行的指令"，无指令时回退 qpos）——
   与 qpos 分开传输，edge 侧观测的 ``action`` 才是真指令，而不是实测关节值的副本。
+- ``pose``：``float64[pose_dim]`` **末端位姿**（每臂 6 维 xyz + rpy，物理顺序同臂布局）——
+  笛卡尔原语（见 wiki/design/motrix_edge_primitives.md）的观测输入。``pose_dim = 0``
+  表示机器人不提供位姿：此时**不占用位姿区**，布局与版本保持 v2 不变（向后兼容）。
 - ``images``：``uint8[N][H][W][3]`` **raw RGB**（N 张相机帧连续排布）。
 
 一致性：无锁、单写者单读者。写者先写数据区、最后更新 header 动态字段
@@ -58,6 +61,8 @@ OBS_SHM_HEADER = np.dtype(
         ("qpos_offset", "<i8"),
         ("action_dim", "<i8"),
         ("action_offset", "<i8"),
+        ("pose_dim", "<i8"),
+        ("pose_offset", "<i8"),
         ("image_data_offset", "<i8"),
         ("image_data_size", "<i8"),
         ("running", "<i8"),
@@ -66,11 +71,12 @@ OBS_SHM_HEADER = np.dtype(
 )
 
 _OBS_SHM_MAGIC = 0x4D4F544F4E474F  # "MOTONGO"
-_OBS_SHM_VERSION = 2  # 2：布局新增 action 区（1：仅 qpos + images）
+_OBS_SHM_VERSION = 2  # 2：qpos + action + images（无位姿区）
+_OBS_SHM_VERSION_POSE = 3  # 3：在 action 后新增位姿区（pose_dim > 0 时使用）
 
 
-def _layout(image_count: int, image_size: tuple[int, int], qpos_dim: int, action_dim: int) -> dict:
-    """计算共享内存块布局（各数据区偏移 / 大小 / 总大小）。"""
+def _layout(image_count: int, image_size: tuple[int, int], qpos_dim: int, action_dim: int, pose_dim: int = 0) -> dict:
+    """计算共享内存块布局（各数据区偏移 / 大小 / 总大小）；``pose_dim=0`` 时不占位姿区。"""
     w, h = image_size
     channels = 3
     header_size = OBS_SHM_HEADER.itemsize
@@ -78,12 +84,15 @@ def _layout(image_count: int, image_size: tuple[int, int], qpos_dim: int, action
     qpos_bytes = qpos_dim * np.dtype("<f8").itemsize
     action_offset = qpos_offset + qpos_bytes
     action_bytes = action_dim * np.dtype("<f8").itemsize
-    image_data_offset = action_offset + action_bytes
+    pose_offset = action_offset + action_bytes
+    pose_bytes = pose_dim * np.dtype("<f8").itemsize
+    image_data_offset = pose_offset + pose_bytes
     image_data_size = image_count * h * w * channels
     return {
         "header_size": header_size,
         "qpos_offset": qpos_offset,
         "action_offset": action_offset,
+        "pose_offset": pose_offset,
         "image_data_offset": image_data_offset,
         "image_data_size": image_data_size,
         "total_size": image_data_offset + image_data_size,
@@ -97,19 +106,29 @@ class ObsShmWriter:
     - ``close()`` 释放本进程句柄；``unlink()`` 删除共享内存（由 SDK 进程退出时调用）。
     """
 
-    def __init__(self, name: str, image_count: int, image_size: tuple[int, int], qpos_dim: int, action_dim: int):
+    def __init__(
+        self,
+        name: str,
+        image_count: int,
+        image_size: tuple[int, int],
+        qpos_dim: int,
+        action_dim: int,
+        pose_dim: int = 0,
+    ):
+        """``pose_dim > 0`` 时启用位姿区（布局版本 3）；缺省 0 = 布局与版本保持 v2。"""
         self.name = name
         self.image_count = image_count
         self.image_size = tuple(image_size)  # (width, height)
         self.qpos_dim = qpos_dim
         self.action_dim = action_dim
-        self._layout = _layout(image_count, self.image_size, qpos_dim, action_dim)
+        self.pose_dim = int(pose_dim)
+        self._layout = _layout(image_count, self.image_size, qpos_dim, action_dim, self.pose_dim)
 
         self._shm = shared_memory.SharedMemory(name=name, create=True, size=self._layout["total_size"])
         self._header = np.ndarray((), dtype=OBS_SHM_HEADER, buffer=self._shm.buf)
         h = self._header
         h["magic"] = _OBS_SHM_MAGIC
-        h["version"] = _OBS_SHM_VERSION
+        h["version"] = _OBS_SHM_VERSION_POSE if self.pose_dim > 0 else _OBS_SHM_VERSION
         h["frame_seq"] = 0
         h["timestamp"] = 0.0
         h["image_count"] = image_count
@@ -118,6 +137,8 @@ class ObsShmWriter:
         h["qpos_offset"] = self._layout["qpos_offset"]
         h["action_dim"] = action_dim
         h["action_offset"] = self._layout["action_offset"]
+        h["pose_dim"] = self.pose_dim
+        h["pose_offset"] = self._layout["pose_offset"]
         h["image_data_offset"] = self._layout["image_data_offset"]
         h["image_data_size"] = self._layout["image_data_size"]
         h["running"] = 0
@@ -127,6 +148,11 @@ class ObsShmWriter:
         self._action = np.ndarray(
             (action_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["action_offset"]
         )
+        self._pose = (
+            np.ndarray((self.pose_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["pose_offset"])
+            if self.pose_dim > 0
+            else None
+        )
         self._images = np.ndarray(
             (image_count, self.image_size[1], self.image_size[0], 3),
             dtype="<u1",
@@ -134,10 +160,20 @@ class ObsShmWriter:
             offset=self._layout["image_data_offset"],
         )
 
-    def write(self, qpos: np.ndarray, action: np.ndarray, images: list[np.ndarray]) -> None:
-        """写入最新观测帧：先写数据区（qpos / action / images），最后更新 header 动态字段。"""
+    def write(
+        self, qpos: np.ndarray, action: np.ndarray, images: list[np.ndarray], pose: np.ndarray | None = None
+    ) -> None:
+        """写入最新观测帧：先写数据区（qpos / action / pose / images），最后更新 header 动态字段。
+
+        ``pose`` 仅在构造时 ``pose_dim > 0`` 时生效（None → 本帧位姿保持旧值）。
+        """
         self._qpos[:] = np.asarray(qpos, dtype="<f8")
         self._action[:] = np.asarray(action, dtype="<f8")
+        if self._pose is not None and pose is not None:
+            arr = np.asarray(pose, dtype="<f8")
+            if arr.shape[0] != self.pose_dim:
+                raise ValueError(f"pose dim {arr.shape[0]} != pose_dim {self.pose_dim}")
+            self._pose[:] = arr
         for i, img in enumerate(images[: self.image_count]):
             self._images[i] = np.asarray(img, dtype="<u1")
         self._header["timestamp"] = time.time()
@@ -166,7 +202,8 @@ class ObsShmReader:
     """共享内存观测读者（adapter 侧）：attach 已存在的共享内存块并读取最新观测。
 
     - 几何字段（图像数量 / 尺寸 / qpos 与 action 维度）与各数据区偏移从 header 读取（writer 已初始化）。
-    - ``read()`` 返回 ``{KEY_QPOS, "action", "images": [rgb, ...]}``；无帧 / 撕裂帧 / **陈旧帧**返回 None。
+    - ``read()`` 返回 ``{KEY_QPOS, "action", "images": [rgb, ...]}``（机器人提供位姿时额外含
+      ``"pose"``）；无帧 / 撕裂帧 / **陈旧帧**返回 None。
     - ``running`` / ``capturing`` 属性：只读 SDK 侧状态位。
     - **陈旧检测**：写者每帧更新 header ``timestamp``；超过 ``STALE_AFTER`` 秒未更新即视为无帧，
       并按该节奏尝试重新 attach 同名新段（写者快速重启后旧段冻结的场景）。
@@ -203,7 +240,7 @@ class ObsShmReader:
             shm.close()
             raise ValueError(f"Invalid observation shared memory '{self.name}' (bad magic)")
         version = int(header["version"])
-        if version != _OBS_SHM_VERSION:
+        if version not in (_OBS_SHM_VERSION, _OBS_SHM_VERSION_POSE):
             shm.close()
             raise ValueError(
                 f"Observation shared memory '{self.name}' version {version} != {_OBS_SHM_VERSION}："
@@ -215,8 +252,14 @@ class ObsShmReader:
         self.image_size = (int(header["image_width"]), int(header["image_height"]))  # (width, height)
         self.qpos_dim = int(header["qpos_dim"])
         self.action_dim = int(header["action_dim"])
+        self.pose_dim = int(header["pose_dim"])
         self._qpos = np.ndarray((self.qpos_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["qpos_offset"]))
         self._action = np.ndarray((self.action_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["action_offset"]))
+        self._pose = (
+            np.ndarray((self.pose_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["pose_offset"]))
+            if self.pose_dim > 0
+            else None
+        )
         self._images = np.ndarray(
             (self.image_count, self.image_size[1], self.image_size[0], 3),
             dtype="<u1",
@@ -258,7 +301,9 @@ class ObsShmReader:
         return bool(self._header["capturing"]) if self._header is not None else False
 
     def read(self) -> dict | None:
-        """读取最新观测帧：``{KEY_QPOS, "images": [rgb, ...]}``；无帧 / 撕裂 / 陈旧帧返回 None。
+        """读取最新观测帧：``{"qpos", "action", "pose", "images"}``；无帧 / 撕裂 / 陈旧帧返回 None。
+
+        ``pose`` 仅在写者启用位姿区（``pose_dim > 0``）时出现（否则该键缺失）。
 
         帧一致性用 frame_seq 乒乓校验：写者先写数据后递增 seq，若读前后 seq
         不一致说明数据写入中途被读到，丢弃。陈旧判定见 ``STALE_AFTER``：写者已停机
@@ -276,10 +321,14 @@ class ObsShmReader:
             return None
         qpos = self._qpos.copy()
         action = self._action.copy()
+        pose = self._pose.copy() if self._pose is not None else None
         images = [self._images[i].copy() for i in range(self.image_count)]
         if int(self._header["frame_seq"]) != seq0:
             return None  # 撕裂帧（写入中途），丢弃
-        return {"qpos": qpos, "action": action, "images": images}
+        frame = {"qpos": qpos, "action": action, "images": images}
+        if pose is not None:
+            frame["pose"] = pose
+        return frame
 
     def close(self) -> None:
         """释放本进程的共享内存句柄（reader 不 unlink，由 writer / SDK 进程删除）。"""

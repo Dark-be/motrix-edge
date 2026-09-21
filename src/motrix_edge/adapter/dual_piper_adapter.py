@@ -24,7 +24,7 @@ Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 /
 不占位（``execute`` 按启用臂数接收动作，未启用臂用 ``HOME_QPOS`` 填充）。
 """
 
-from motrix_edge.adapter.base import AdapterCapability
+from motrix_edge.adapter.base import ActionSpace, AdapterCapability
 from motrix_edge.adapter.http_shm_adapter import HttpShmAdapter
 
 # ---- 双臂 14 维布局（left = qpos[0:7]，right = qpos[7:14]；物理顺序）----
@@ -47,6 +47,9 @@ class DualPiperAdapter(HttpShmAdapter):
     # 双臂 Piper：左 + 右臂，各 6 关节 + 1 夹爪 = 7，共 14
     ACTION_DIM = DUAL_ARM_ACTION_DIM
     ACTION_DIM_PER_ARM = DUAL_ARM_ACTION_DIM_PER_ARM  # 运行时 action_dim = 启用臂数 × 7
+    # 支持的动作空间：关节空间 + 末端位姿（位姿由机器人进程 IK 转关节后执行）
+    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.CARTESIAN_POSE)
+    POSE_DIM_PER_ARM = 6  # 每臂位姿维数（xyz + rpy）
     # 臂布局（基类 configure / _select_qpos / _expand_action 消费）
     ARM_NAMES = DUAL_ARM_NAMES  # 物理顺序臂名
     ARM_QPOS_SLICES = DUAL_ARM_QPOS_SLICES  # 臂名 → qpos 切片

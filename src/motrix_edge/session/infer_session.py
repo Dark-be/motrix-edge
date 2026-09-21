@@ -143,7 +143,11 @@ class InferSession(BaseSession):
         # 上报（/v1/infers 的 continuous），前端据此门控「持续推理 / 停止推理」。
         self._continuous = False
 
-        debug_print(self.name, f"Policy config: {self.policy_config} (type={self.policy_type})", "INFO")
+        debug_print(
+            self.name,
+            f"Policy config: {self.policy_config} (type={self.policy_type})",
+            "INFO",
+        )
 
     @property
     def connected(self) -> bool:
@@ -499,7 +503,7 @@ class InferSession(BaseSession):
         if cmd.name == CMD_INFER_PROMPT:  # 保持既有回执形状（prompt=...）
             return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
         extra = {"deferred": deferred} if deferred else {}
-        return ok_result(state=getattr(self, "state", "ready"), **result.data, **extra)
+        return ok_result(state=getattr(self, "state", "ready"), **(result.data or {}), **extra)
 
     def _effective_policy_type(self) -> str:
         """本会话实际使用的策略类型（显式选择优先，否则配置 ``policy.type``；非法 → 空串）。"""

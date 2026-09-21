@@ -51,10 +51,25 @@ import numpy as np
 # ---- 观测键契约（standard_obs 字典的键名，与 ACT 采集格式一致）----------------
 KEY_QPOS = "observations/qpos"
 KEY_ACTION = "action"
+# 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ARM_NAMES；单位米 / 弧度）——笛卡尔原语
+# （见 wiki/design/motrix_edge_primitives.md）的输入；机器人不提供位姿时该键不出现。
+KEY_POSE = "observations/pose"
 CAMERA_PREFIX = "observations/images/"
 
 # execute / rollout 的一维动作输入：CLI/HTTP 常用 list，policy 常用 ndarray。
 Action = Sequence[float] | np.ndarray
+
+
+class ActionSpace(str, Enum):
+    """动作空间（flat 动作向量的语义）——策略声明、adapter 校验、机器人进程最终解释。
+
+    - ``JOINT``（缺省）：每臂 7 维（6 关节角 + 夹爪），**绝对目标**（关节空间）；
+    - ``CARTESIAN_POSE``：每臂 7 维（xyz + rpy + 夹爪），末端位姿目标；由机器人侧 IK
+      转成关节目标后执行（运动学归机器人侧，edge 不解释机器人结构）。
+    """
+
+    JOINT = "joint"
+    CARTESIAN_POSE = "cartesian_pose"
 
 
 class AdapterCapability(str, Enum):
@@ -110,11 +125,18 @@ def image_names_of(keys) -> list[str]:
 
 @dataclass
 class RobotCapabilities:
-    """适配器声明的能力（数据布局声明）。"""
+    """适配器声明的能力（数据布局声明）。
+
+    ``action_spaces`` = **支持的动作空间**列表（缺省仅关节空间）：会话按策略声明的空间选择，
+    适配器校验、机器人进程最终解释；``pose_dim`` = 位姿观测维数（0 = 机器人不提供末端位姿，
+    观测无 ``observations/pose`` 键）。
+    """
 
     robot_model_id: str = "unknown"
     robot_model_version: str = "0.0.0"
     action_dim: int = 0
+    action_spaces: list[str] = field(default_factory=lambda: [ActionSpace.JOINT.value])
+    pose_dim: int = 0
     # 观测键（如 observations/qpos、observations/images/cam_head）
     observation_keys: list[str] = field(default_factory=list)
     # 能力描述 dict：capability -> 是否支持（子类必须显式声明；缺省不支持任何能力）
@@ -171,6 +193,10 @@ class RobotAdapter(ABC):
     ACTION_DIM: int = 0
     # 每臂动作维度（如 7；无臂概念 = 0）
     ACTION_DIM_PER_ARM: int = 0
+    # 本适配器接受的动作空间（缺省仅关节空间）；不支持的空间 → rollout / execute 报错
+    ACTION_SPACES: tuple[ActionSpace, ...] = (ActionSpace.JOINT,)
+    # 每臂位姿维数（xyz + rpy = 6）；0 = 本适配器不提供末端位姿观测
+    POSE_DIM_PER_ARM: int = 0
     # 臂名（物理顺序，如 ("left", "right")；空 = 无臂概念，不做臂裁剪）
     ARM_NAMES: tuple[str, ...] = ()
     # 臂名 → qpos 切片（如 {"left": slice(0, 7), "right": slice(7, 14)}）
@@ -323,6 +349,22 @@ class RobotAdapter(ABC):
         parts = [qpos[self.ARM_QPOS_SLICES[arm]] for arm in self.enabled_arms]
         return np.concatenate(parts) if parts else np.asarray([], dtype=np.float32)
 
+    def _select_arm_segments(self, values, per_arm_dim: int) -> np.ndarray:
+        """按启用臂挑选**等长分段**状态（如末端位姿：每臂 ``per_arm_dim`` 维）。
+
+        与 ``_select_qpos`` 同口径（物理顺序 = ``ARM_NAMES``），用于 qpos 之外的按臂布局
+        状态（位姿）；无臂概念 / 维数不足 → 原样返回（不猜布局）。
+        """
+        values = np.asarray(values, dtype=np.float32)
+        per_arm_dim = int(per_arm_dim)
+        if not self.ARM_NAMES or per_arm_dim <= 0 or values.shape[0] < len(self.ARM_NAMES) * per_arm_dim:
+            return values
+        parts = []
+        for arm in self.enabled_arms:
+            start = self.ARM_NAMES.index(arm) * per_arm_dim
+            parts.append(values[start : start + per_arm_dim])
+        return np.concatenate(parts) if parts else np.asarray([], dtype=np.float32)
+
     def _expand_action(self, action: Action, operation: str) -> np.ndarray:
         """校验启用臂维度并展开回完整动作空间（未启用臂用 home_qpos 填充，float64）。
 
@@ -437,14 +479,29 @@ class RobotAdapter(ABC):
 
     # ---- rollout（推理闭环，被推理任务消费）-----------------------------------
     @abstractmethod
-    def rollout(self, action: Action) -> bool:
+    def rollout(self, action: Action, action_space: ActionSpace | str | None = None) -> bool:
         """接收一维 array-like 模型动作，按 capabilities.action_dim 解析并推进一帧。
+
+        ``action_space`` = 动作语义（缺省 / ``None`` → ``ActionSpace.JOINT``，与仅下发关节
+        动作的调用方等价）；不在本适配器 ``ACTION_SPACES`` 内的空间 → ``ValueError``
+        （调用方应回执拒绝，不要猜语义下发）。笛卡尔动作的 IK 由机器人进程负责。
 
         返回是否**已下发**：``False`` = 进程侧拒绝本拍（遥操作 / 人工接管中，见
         `wiki/design/robot_pipeline_teleop.md`），调用方应跳过本拍、下拍重试（遥操作关闭后
         自动恢复）；``True`` / 无返回（旧实现）均视为已下发。
         """
         raise NotImplementedError
+
+    # ---- 动作空间校验（子类在 execute / rollout 内调用）------------------------
+    @classmethod
+    def normalize_action_space(cls, action_space: ActionSpace | str | None) -> ActionSpace:
+        """规范化并校验动作空间：``None`` → ``JOINT``；不支持 → ``ValueError``。"""
+        space = ActionSpace.JOINT if action_space is None else ActionSpace(action_space)
+        if space not in cls.ACTION_SPACES:
+            raise ValueError(
+                f"action space {space.value!r} not supported (available: {[s.value for s in cls.ACTION_SPACES]})"
+            )
+        return space
 
     # ---- safe_stop（安全停止）-------------------------------------------------
     @abstractmethod
