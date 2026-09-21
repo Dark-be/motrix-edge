@@ -113,6 +113,7 @@ class _FakeAdapter:
         self.ready = ready
         self.safe_stop_calls = 0
         self.executed = []
+        self.rollout_spaces: list = []  # rollout 收到的动作空间（None = 未指定）
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
         self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
@@ -145,10 +146,11 @@ class _FakeAdapter:
     def set_teleop(self, enabled, mode=None):
         self.teleop_calls.append((bool(enabled), mode))
 
-    def rollout(self, action) -> bool:
+    def rollout(self, action, action_space=None) -> bool:
         if self.teleop_refused:  # 模拟 SDK 409（遥操作 / 人工接管中）：本拍不下发
             return False
         self.executed.append(action)
+        self.rollout_spaces.append(None if action_space is None else str(action_space))
         return True
 
     def start_capture(self):

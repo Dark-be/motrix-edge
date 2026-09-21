@@ -418,7 +418,8 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
 
     - 空值（``None`` / 空串）：必填项 → ``ValueError``；非必填 → 返回 ``None``（调用方删键回缺省）；
     - ``int`` 项只接受整数（``bool`` / 带小数的浮点 → ``ValueError``，端口等参数不静默截断），
-      并校验 schema 的 ``min`` / ``max``；
+      ``float`` 项接受数字（如 timeout / max_pose_step），两者都校验
+      schema 的 ``min`` / ``max``；
     - ``bool`` / 文本项按声明类型归一化（文本只去空白，不做格式校验：``host`` 可为裸 host 或
       完整 ``ws://host:port``）。
     """
@@ -427,13 +428,14 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
             raise ValueError(f"{key} is required (non-empty)")
         return None
     kind = item.get("type", "text")
-    if kind == "int":
-        if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+    if kind in ("int", "float"):
+        if kind == "int" and (isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer())):
             raise ValueError(f"{key} must be an integer, got {raw!r}")
         try:
-            value = int(raw)
+            value = int(raw) if kind == "int" else float(raw)
         except (TypeError, ValueError):
-            raise ValueError(f"{key} must be an integer, got {raw!r}") from None
+            expect = "an integer" if kind == "int" else "a number"
+            raise ValueError(f"{key} must be {expect}, got {raw!r}") from None
         low, high = item.get("min"), item.get("max")
         if (low is not None and value < low) or (high is not None and value > high):
             raise ValueError(f"{key} must be within [{low}, {high}], got {value}")
