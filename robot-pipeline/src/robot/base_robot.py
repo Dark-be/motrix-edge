@@ -15,18 +15,25 @@
 """BaseRobot —— 机器人基类（**无 profile**；obs/action 形态由各机器人类常量固定）。
 
 机器人是「会动」的一层：持有 ``action``（当前指令）与 ``target_action``（目标），由运行
-环境（env）每帧调用 ``step()`` 限速接近 target 并执行。本基类**不依赖 motrix_edge.profile**
-——每个机器人的 obs/action 形态（动作维度 / 相机布局）由子类**类常量固定声明**，
-与对应 adapter 协定一致。
+环境（env）控制线程每拍调用 ``step()`` 限速接近 target 并执行。本基类**不依赖
+motrix_edge.profile**——每个机器人的 obs/action 形态（动作维度 / 相机布局）由子类
+**类常量固定声明**，与对应 adapter 协定一致。
 
 约定：
 - **扁平动作**：一维数组，维度由 ``QPOS`` 声明（各臂关节 + 夹爪拼接）。
   例：双臂 6 关节 + 1 夹爪 → ``QPOS`` = 14，动作 ``[左6关节, 左夹爪, 右6关节, 右夹爪]``。
-- **原始观测 ``get_observation()``**：``{qpos, images, action}``（**无契约键**）——观测键
-  （qpos 布局、``observations/images/<cam>``）由 robot server（contract_server）按
-  adapter 约定组装并写入共享内存。
+- **原始观测**：``sample_qpos()`` / ``build_observation()``（单线程调试可用 ``get_observation()``）
+  产出 ``{observations/qpos, observations/images/<cam>, action, timestamp}``——键名复用 adapter
+  契约常量（``KEY_QPOS`` / ``CAMERA_PREFIX`` / ``KEY_TIMESTAMP``）；robot server
+  （contract_server）据此组装 standard_obs 并写入共享内存。
+- **控制 / 观测分线程（env 双线程序列）**：控制线程每拍 ``step()`` 限速推进 +
+  ``sample_qpos()`` 采样机械臂状态（qpos / action）缓存进 ``motion_state``；观测线程每拍
+  ``build_observation()``（= 缓存状态 + 本拍相机帧），观测帧的 ``timestamp`` 由**观测线程**
+  在打帧时写入（不是控制拍的采样时刻）。
+  机械臂读取与相机取帧因此分处两线程，相机卡顿只会让观测丢帧，不会拖慢机械臂步进；
+  单线程脚本仍可用 ``get_observation()`` 一次取整帧。
 - **控制**：``reset()`` / ``execute()`` / ``rollout()`` / ``safe_stop()`` 只修改
-  ``target_action``，实际运动由 env 主循环每帧 ``step()`` 限速推进（单一目标模型）。
+  ``target_action``，实际运动由 env 控制线程每拍 ``step()`` 限速推进（单一目标模型）。
 - **遥操作**：``teleop_enabled`` 默认 **False**（adapter 通讯控制中暂时均处于 false）；
   接入位由子类在 ``_get_teleop_target()`` 实现，``step()`` 仅在开启时刷新 target_action。
 """
@@ -54,6 +61,7 @@ class BaseRobot:
     # ---- 观测键（adapter 契约约定，与 Edge 侧 / robot server 保持一致；勿改）----
     KEY_QPOS = "observations/qpos"  # 关节 qpos 键
     CAMERA_PREFIX = "observations/images/"  # 相机图像键前缀（<prefix><cam_name>）
+    KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打帧时写入，非控制拍采样时刻）
 
     def __init__(self, robot_config: dict | None = None):
         self.robot_config = dict(robot_config or {})
@@ -74,12 +82,16 @@ class BaseRobot:
         # 遥操作开关：adapter 通讯控制中暂时均处于 False（真实接入位见子类）
         self.teleop_enabled = False
 
-        # 帧计数（get_observation() 每帧自增；server 组装 standard_obs 时附带）
+        # 控制拍计数（env 控制线程每拍 ``sample_qpos()`` 自增；server 组装 standard_obs 时附带）
+        # ——与观测发布频率（``OBS_HZ``）解耦，不是观测帧号
         self.seq = 0
 
         # 控制器 / 传感器（真实机器人填充；虚拟机器人可为空）
         self.controllers: dict = {}
         self.sensors: dict = {}
+
+        # 机械臂侧状态缓存（控制线程每拍 sample_qpos() 覆盖；观测线程只读）
+        self.motion_state: dict | None = None
 
     # ---- 布局 / 解析（无 profile；obs/action 形态由类常量固定）------------------
     @classmethod
@@ -159,24 +171,64 @@ class BaseRobot:
         """把 action 下发 / 应用到硬件（子类实现；虚拟机器人同步到合成状态）。"""
         raise NotImplementedError
 
-    # ---- 每帧观测（**原始数据，无契约键**；由 robot server 组装 standard_obs + 写共享内存）----
-    def get_observation(self) -> dict:
-        """读取当前帧原始观测（契约键：observations/qpos + 每相机 observations/images/<cam> + action）。
+    # ---- 每拍状态采样 / 观测组装（键名复用 adapter 契约常量，不依赖 profile；由 robot server 组装 standard_obs）----
+    def sample_qpos(self) -> dict:
+        """采样机械臂侧状态（qpos + action）并缓存进 ``motion_state``。
 
-        seq 自增，供 server 上报。子类实现 get_observation_qpos() / get_observation_images()
-        ——直接从控制器 / 传感器「手搓」取数据；本方法负责按契约键组装。
+        **由 env 控制线程每拍调用**（本线程是控制器唯一写者 / 读者）；``seq`` 自增（控制拍
+        计数，与观测发布频率无关），供 server 上报。
+        观测组装只读本缓存，故相机 / 磁盘卡顿不会拖慢机械臂读取与步进。
+        子类实现 ``get_observation_qpos()``——直接从控制器「手搓」取数据。
+
+        帧时刻不由本方法写入：观测的 ``KEY_TIMESTAMP`` 由观测线程在 ``build_observation()``
+        打点（观测拍时刻），故本缓存只有状态、没有时间戳。
         """
         self.seq += 1
         qpos = self.get_observation_qpos()
         action = self.get_action()
-        timestamp = time.time()
         if action is None:
             action = qpos  # 无指令时以当前 qpos 作为 action（保证观测含有效 action）
-        obs = {self.KEY_QPOS: qpos, "action": action, "timestamp": timestamp}
+        self.motion_state = {self.KEY_QPOS: qpos, "action": action}
+        return self.motion_state
+
+    def capture_images(self) -> dict:
+        """读取各相机帧并组装为契约键（``observations/images/<cam_name>``）——观测线程调用。
+
+        子类实现 ``get_observation_images()``（返回顺序对齐 IMAGE_NAMES 的帧列表）。
+        """
         # 相机成员：observations/images/<cam_name>（顺序对齐 IMAGE_NAMES）
-        for name, img in zip(self.IMAGE_NAMES, self.get_observation_images()):
-            obs[f"{self.CAMERA_PREFIX}{name}"] = img
-        return obs
+        return {
+            f"{self.CAMERA_PREFIX}{name}": img for name, img in zip(self.IMAGE_NAMES, self.get_observation_images())
+        }
+
+    def build_observation(self) -> dict | None:
+        """组装完整观测 = 最新缓存机械臂状态 + 本拍相机帧（**观测线程调用**）。
+
+        帧时刻 ``KEY_TIMESTAMP`` 由**本线程**在此打点（= 观测拍时刻，取帧之前）：相机帧即本拍取，
+        机械臂状态（qpos / action）来自上一个控制拍（最多早约 1 个控制周期）。
+
+        控制线程尚未采到第一拍（启动瞬间）或机械臂读取持续失败时 ``motion_state`` 为空，
+        此时返回 None（本拍不出观测，由 env 观测线程跳过，下一拍重试）。
+        """
+        state = self.motion_state
+        if state is None:
+            return None
+        timestamp = time.time()  # 观测拍时刻（取帧前打点；取帧 / 落盘耗时不计入）
+        return {**state, **self.capture_images(), self.KEY_TIMESTAMP: timestamp}
+
+    def get_observation(self) -> dict:
+        """完整观测 = 现场采样机械臂状态 + 相机帧（**单线程调用**）。
+
+        ⚠️ 相机取帧会阻塞，故**勿在控制线程调用**（会拖慢机械臂步进）；env 双线程序列下
+        控制线程用 ``sample_qpos()``、观测线程用 ``build_observation()``，
+        本方法供单线程脚本 / 调试整体取一帧。
+
+        帧时刻与 ``build_observation()`` **同口径**：采完机械臂状态、**取相机帧之前**打点
+        （取帧阻塞不计入帧时刻）。
+        """
+        state = self.sample_qpos()
+        timestamp = time.time()  # 帧时刻（取帧前打点，与 build_observation 同口径）
+        return {**state, **self.capture_images(), self.KEY_TIMESTAMP: timestamp}
 
     def get_observation_qpos(self) -> np.ndarray:
         """读取当前帧原始观测的 qpos（扁平 QPOS 维；子类实现）。"""
@@ -185,7 +237,7 @@ class BaseRobot:
     def get_observation_images(self) -> list:
         """读取各相机 raw RGB 帧（list，顺序对齐 IMAGE_NAMES；子类实现）。
 
-        由 get_observation() 组装为 observations/images/<cam_name> 成员。
+        由 ``capture_images()`` 组装为 observations/images/<cam_name> 成员（观测线程调用）。
         """
         raise NotImplementedError
 

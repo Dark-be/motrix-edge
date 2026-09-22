@@ -187,9 +187,11 @@ class EdgeNode:
         self._last_alive_check = 0.0
         self._last_capture_status = 0.0
         self._last_observe = 0.0
+        # adapter.health() 缓存（含 robot 名义/实测控制频率）：由 _check_adapter_alive 周期刷新，
+        # server /v1/captures|infers 只读缓存，**不因前端轮询而实时请求 SDK**。
+        self.adapter_health = None
         # 采集状态缓存（adapter.capture_status()）：运行位 + 采集员 / 任务名等元信息 +
-        # 数据目录 / 列表。由主循环在 READY / ACTIVE 期间周期刷新（与 health 同节奏，
-        # **不限采集会话**），server /v1/captures 只读缓存——不因前端轮询而实时请求 SDK。
+        # 数据目录；主循环（READY / ACTIVE）周期刷新，server /v1/captures 只读缓存。
         self._capture_status = None
         # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令读写；缺省用
         # 默认路径（与 server / 会话同源），测试可注入临时 store。
@@ -207,7 +209,7 @@ class EdgeNode:
     def capture_status(self):
         """采集状态缓存（adapter.capture_status()；主循环周期刷新，server 只读）。
 
-        含运行位（进程是否正在采集）+ 采集员 / 任务名等元信息 + 数据目录 / 列表。
+        含运行位（进程是否正在采集）+ 采集员 / 任务名等元信息 + 数据目录。
         Edge 主循环在 READY / ACTIVE 期间自行周期查询并缓存（**不限采集会话**），前端
         轮询 /v1/captures 只读本缓存——edge 运行不依赖前端。
         """
@@ -680,9 +682,14 @@ class EdgeNode:
             return
         self._last_alive_check = now
         try:
-            if not self.adapter.health().ok:
-                self._enter_error("robot process unreachable")
+            self.adapter_health = self.adapter.health()  # 缓存整个 HealthStatus（含频率）
+            if not self.adapter_health.ok:
+                # detail = robot server 给出的原因（env 持续 step 失败 / 机器人未就绪等）；
+                # 为空时退回固定文案，避免出现「unreachable: 」这种半截消息
+                detail = self.adapter_health.detail or "unreachable"
+                self._enter_error(f"robot process {detail}")
         except Exception as exc:  # noqa: BLE001
+            self.adapter_health = None
             self._enter_error(f"adapter health check failed: {exc}")
 
     def _refresh_capture_status(self) -> None:

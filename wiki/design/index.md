@@ -20,5 +20,6 @@
 -   [配置与命令行（config / CLI）](./motrix_edge_config.md)
 -   [HTTP 控制面（server）](./motrix_edge_server.md)
 -   [Edge 级租约（lease）](./motrix_edge_lease.md)
+-   [robot-pipeline 运行时（env / robot 双线程）](./robot_pipeline_runtime.md)
 
 <!-- 新增设计文档后在此登记标题链接。 -->

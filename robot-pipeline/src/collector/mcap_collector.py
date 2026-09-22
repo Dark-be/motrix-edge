@@ -30,6 +30,13 @@
 帧时间以 obs 内 ``timestamp``（秒）为准：作消息 ``log_time``/``publish_time``（ns），
 并填入 CompressedImage 的 ``header.stamp``。可在 Foxglove 中按时间轴查看。
 
+⚠️ 该 ``timestamp`` 是**观测拍时刻**（观测线程 ``build_observation()`` 在取帧前打点）：
+相机帧即本拍取，机械臂状态（qpos / action）来自**上一个控制拍**——与该时刻的偏移**有界**
+（≤ ``1/HZ`` ≈ 33ms）但**逐帧小幅波动**（控制 / 观测是两条独立限速循环，线程唤醒抖动逐帧
+不同；控制拍超时会让「最近一个控制拍」跳档）。故对 ``dt`` 推导与 episode 时长（末帧 −
+首帧）无影响；但下游（ACT / LeRobot 转换）**不要按固定滞后做时间平移校正**，需要严格对齐时
+须知该滞后并非定值。
+
 **流式写入**：``start()`` 打开文件 → 每次 ``collect()`` 直接落盘（不缓冲整段 episode，
 内存开销只随单帧大小）→ ``finish()`` 写入 footer 并返回文件路径：:
 
@@ -58,7 +65,7 @@ from utils.base.data_handler import debug_print
 KEY_QPOS = "observations/qpos"
 KEY_ACTION = "action"
 CAMERA_PREFIX = "observations/images/"
-KEY_TIMESTAMP = "timestamp"  # obs 内帧采集时刻（秒，float；由 Robot.get_observation() 提供）
+KEY_TIMESTAMP = "timestamp"  # obs 内观测拍时刻（秒，float；观测线程 build_observation() 打点）
 
 # ROS2 官方消息定义（.msg 展开文本，register_msgdef 使用）
 MSG_FLOAT64_MULTI_ARRAY = """\
@@ -194,8 +201,8 @@ class ActMcapCollector:
     def collect(self, standard_obs: dict):
         """写入一帧观测（**直接落盘**，不缓冲内存）。需先 ``start()``。
 
-        帧时间以 obs 内 ``timestamp``（秒）为准，转 ns 作 MCAP log_time / header.stamp；
-        obs 缺失 timestamp 时回退本地时钟。
+        帧时间以 obs 内 ``timestamp``（秒）为准（= **观测拍时刻**，由观测线程打点，见模块
+        docstring），转 ns 作 MCAP log_time / header.stamp；obs 缺失 timestamp 时回退本地时钟。
         """
         if self._writer is None:
             raise RuntimeError("ActMcapCollector not started; call start() first")

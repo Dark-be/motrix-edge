@@ -230,7 +230,11 @@ class CaptureService:
         return {"meta": self._meta_store.list_meta()}
 
     def status(self) -> dict:
-        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。"""
+        """状态快照（只读）：node_state / 当前会话类型 / session state / adapter / 采集状态。
+
+        ``capture_status`` = adapter 上报的采集状态缓存（运行位 + 元信息 + 数据目录，见
+        ``node.capture_status``）；未绑定 / 未缓存 → None。
+        """
         node = self._node
         session = self._session()
         session_state = getattr(session, "state", SessionState.INIT) if session is not None else SessionState.INIT

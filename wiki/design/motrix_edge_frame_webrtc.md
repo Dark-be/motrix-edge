@@ -65,7 +65,9 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
     所有 `<video>` 显示同一路。修复：`setRemoteDescription` 后、`createAnswer` 前，为每路 video
     sender 覆盖**独立** `_stream_id`（aiortc 生成 answer 时读取），使每路 track 有独立 msid →
     浏览器分别为每路相机建 MediaStream（逐相机分离显示）。
--   **无新帧重发最近一帧**（缓存 `_last_rgb`，避免黑帧闪烁）；按 30fps 节流对齐 PTS。
+-   **无新帧重发最近一帧**（缓存 `_last_rgb`，避免黑帧闪烁）；按 30fps 节流对齐 PTS —— 新帧来自
+    robot 侧观测发布（`OBS_HZ`，默认 10Hz，见 [robot-pipeline 运行时](./robot_pipeline_runtime.md)），
+    故**有效画面帧率 ≈ 观测频率**，其余为重复帧。
 -   **必须交换含候选的 SDP**：aiortc 的 ICE 候选在 `setLocalDescription` 内部 gather 后才写入
     `localDescription.sdp`；返回 `pc.localDescription.sdp`（而非 createAnswer 的原始 SDP），否则
     连接卡 `checking`。
