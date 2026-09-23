@@ -19,6 +19,19 @@ lease:
 server:
   host: 0.0.0.0
   port: 8000
+  # RPent 兼容的 RPC 面（POST /call；见 wiki/design/motrix_edge_rpent_bridge.md）：
+  # 外部 agent（LLM 当大脑 + 冻 VLA 当小脑，多轮工具调用）经它驱动 edge 执行原语。
+  # 可选项**不在这里列全**（写了才生效；缺键取代码兜底 = rpent/service.py + rpent/settle.py）：
+  #   lease_id（固定租约；缺省 = 当前活跃租约）/ step_hz（缺省 = 机器人上报的 control_hz）/
+  #   action_layout（外部动作块布局，如 rpent/dual_franka）/ dry_run（只转换不下发）/
+  #   image_source（native = 原图 | preview = 320x240 缓存）/ settle 的其余键（超时 / 停滞 / 轮询…）。
+  # 下面只留**部署值**：按 MIT 实际稳态误差（t_ff = 0）标定的到位容差——容差小于稳态误差时
+  # reached 永远不成立（每个写原语都走满 stall_s / timeout_s）；标定与收紧见上述文档。
+  rpent:
+    settle:
+      pos_tol: 0.05 # 位置容差（米）：与姿态**分别**判定，不把米和弧度混进一个阈值
+      rot_tol: 0.4 # 姿态 / 关节容差（弧度）：≈23°，盖住 MIT 静态误差
+
 # 上传会话（UploadSession，/v1/uploads/*；见 wiki/design/motrix_edge_upload_session.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。
 # **本版本只做本地文件查看与打包**：临时性的数据查看与筛选由数采人员经前端进行，打包后

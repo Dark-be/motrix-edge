@@ -28,6 +28,7 @@ from motrix_edge.server.routes.commands import build_router as build_commands_ro
 from motrix_edge.server.routes.health import build_router as build_health_router
 from motrix_edge.server.routes.infers import build_router as build_infers_router
 from motrix_edge.server.routes.leases import build_router as build_leases_router
+from motrix_edge.server.routes.rpent import build_router as build_rpent_router
 from motrix_edge.server.routes.uploads import build_router as build_uploads_router
 from motrix_edge.server.routes.webrtc import build_router as build_webrtc_router
 
@@ -42,6 +43,7 @@ def build_routers(services: Services) -> list[APIRouter]:
         build_captures_router(services),  # /v1/captures/* + /v1/preview
         build_infers_router(services),  # /v1/infers/*
         build_webrtc_router(services),  # /v1/webrtc/offer
+        build_rpent_router(services),  # /call + /v1/rpent
     ]
 
 

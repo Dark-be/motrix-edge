@@ -148,11 +148,14 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
 -   **外部动作块布局转换**（可选）：`server.rpent.action_layout: rpent/dual_franka` 把对方的
     20 维 `xyz + rot6d + 夹爪` 块转成 edge 每臂 `[xyz, rpy, gripper]` 绝对目标；
     `dry_run: true` → **任何下发都被拦住**（`step` / `chunk_step` 只回转换结果；`reset` 与四条
-    写原语回 `sent: false` + `reached: null` + `reason: dry_run`；`_push_action` 兜底报错），
+    写原语回 `sent: false` + `reached: null` + `reason: dry_run`；`_push_qpos` 兜底报错），
     真机联调先对数值、机器人不动；是否 dry-run 可从 `settle.dry_run` 看出。
 -   **到位等待**：写原语（`move_delta` / `rotate_delta` / `set_gripper` / `recover_joint_posture`）
-    默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞（`server.rpent.settle.{pos_tol,rot_tol,timeout_s,stall_s,target_wait_s}`，
-    默认 **1cm / 0.05rad / 5s / 1s**），回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /
+    默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞。**只有部署容差写在 `edge.yml`**（`server.rpent.settle`
+    的 5cm / 0.4rad ≈ 23°，按 MIT 静态误差有意放宽），其余键（`enabled` / `timeout_s` /
+    `max_timeout_s` / `stall_s` / `stall_eps` / `poll_s` / `target_wait_s`）**缺键即取
+    `rpent/settle.py::SettleConfig` 的兜底**（5s / 90s / 1s / 1e-4 / 0.02s / 1s）——不必写进 yml。
+    回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /
     `final_err_rad` 姿态或关节弧度）/ `elapsed_s`（+ `stalled` / `timeout`）与生效容差
     `settle_pos_tol` / `settle_rot_tol`——外部 agent 靠它判成败，不等就会读到未动的那一帧，
     凭 `final_err` 与容差又能区分「还差一点」与「`stalled` 受阻」。**位置与姿态分别比容差**
@@ -183,7 +186,7 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
 | POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                                                  |
 | GET    | `/v1/captures`            | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id |
 | GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                                                    |
-| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段，前端选择列表）                                                                                  |
+| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`capture.yml` 的 `meta` 段，前端选择列表）                                                                                         |
 | POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                                                        |
 | PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                                                          |
 | DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                                                     |
