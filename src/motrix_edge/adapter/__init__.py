@@ -36,6 +36,8 @@ from motrix_edge.utils.data_handler import debug_print
 from .base import (
     CAMERA_PREFIX,
     KEY_ACTION,
+    KEY_GRIPPER,
+    KEY_POSE,
     KEY_QPOS,
     Action,
     AdapterCapability,
@@ -203,6 +205,10 @@ def adapter_details() -> list[dict]:
                     "robot_model_id": caps.robot_model_id,
                     "robot_model_version": caps.robot_model_version,
                     "action_dim": caps.action_dim,
+                    # 各动作空间维度（joint / pose / gripper）：调用方据此判断能否下发该空间
+                    "action_dims": dict(caps.action_dims),
+                    # 支持的动作空间（joint / pose / gripper）
+                    "action_spaces": list(caps.action_spaces),
                     "observation_keys": caps.observation_keys,
                     "image_names": caps.image_names,
                     "capabilities": {c.value: ok for c, ok in caps.capabilities.items()},
@@ -213,11 +219,7 @@ def adapter_details() -> list[dict]:
 
 
 def adapter_classes():
-    """遍历**已注册且可导入**的 adapter 类（不实例化：无副作用、不触 SDK / 共享内存）。
-
-    导入失败（缺失 SDK / 依赖）自动跳过。供**未绑定 adapter 时的能力配置预校验**
-    （类常量 ``ARM_NAMES`` / ``IMAGES``）与按能力列出 adapter 使用（不用于展示默认机型）。
-    """
+    """遍历**已注册且可导入**的 adapter 类（不实例化：无副作用、不触 SDK / 共享内存）。"""
     for ep in entry_points(group=ADAPTER_EP_GROUP):
         try:
             yield ep.load()  # 只取类：不实例化
@@ -229,6 +231,7 @@ __all__ = [
     "ADAPTER_EP_GROUP",
     "CAMERA_PREFIX",
     "KEY_ACTION",
+    "KEY_GRIPPER",
     "KEY_QPOS",
     "Action",
     "AdapterCapability",

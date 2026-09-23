@@ -28,7 +28,7 @@ upload:
 
 # 机器人适配器连接配置：Edge 向 adapter.host:adapter.port 发 POST /v1/discover
 # 寻找机器人进程；进程启动后自描述返回 id / name / type / 能力 / 相机 / 控制器等。
-# 启用臂 / 相机 / home_qpos 等能力配置**运行时**设置（命令 adapter config set 或前端
+# 启用臂 / 相机等能力配置**运行时**设置（命令 adapter config set 或前端
 # POST /v1/adapters/config），不在此配置。
 adapter:
   host: 127.0.0.1
@@ -38,7 +38,7 @@ adapter:
 # 推理会话时由调用方显式选择；host / port 是**会话级**策略配置项（进入会话时固化，改需退出重进），
 # 与 prompt / 模型路径同一 schema、同一通道：infer config set / POST /v1/infers 的 config。
 # **策略要连 TCP 端点**（openpi → ws、lerobot-act → gRPC）；host / port 排在其配置项清单最前，
-# 单臂任务：策略用通用 lerobot-act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 运行时配置承载。
+# 单臂任务：策略用通用 lerobot-act（按启用臂数直通）；「哪条臂 / 怎么映射回全臂维度」由 adapter 运行时配置承载。
 policy:
   host: 127.0.0.1
   port: 8080

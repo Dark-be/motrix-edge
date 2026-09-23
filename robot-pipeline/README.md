@@ -27,6 +27,7 @@ src/                      # robot-pipeline 包（src 布局，包名 config/env/
     *.yml                 # test_robot / dual_piper / dual_alicia_piper / single_piper
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
+    kinematics/           # 运动学（纯 numpy Modified DH）：正解 / 雅可比 / 逆解
   server/                 # robot_server.py 入口 + contract_server.py（/v1 契约服务器）
   collector/              # 数据采集（act_mcap：MCAP 流式写入 + 元信息 JSON）
   utils/                  # 工具（data_handler / load_file）
@@ -61,8 +62,9 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 **队列 / 单写者 / 频率与诊断 / 停机语义等设计细节**见
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
-一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos`、`action`、
-`observations/images/<cam>`、机器人提供末端位姿时另有 `observations/pose`）、HTTP 端点、
+一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos` 关节角、`action` 关节段目标、
+`observations/gripper` 夹爪、`observations/images/<cam>`、机器人提供末端位姿时另有
+`observations/pose`）、HTTP 端点、
 共享内存布局都由 **motrix_edge.adapter** 下的
 契约文件单点定义；robot server 复用这些定义，env 只负责控制 robot，不碰 HTTP / 共享内存。
 
@@ -100,7 +102,7 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
 `INFO_LEVEL`（日志级别 DEBUG / INFO / ERROR，robot server 启动时读）、`server`（监听
-host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras`）、`collector`：
+host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `cameras`）、`collector`：
 
 -   `test_robot.yml` —— `robot.type: test_robot`（默认，虚拟机器人无硬件）
 -   `dual_piper.yml` —— `robot.type: dual_piper_robot`
@@ -116,21 +118,35 @@ host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras
 
 ## 接入机器人
 
-1.  在 `src/robot/controller/` 接入机械臂控制器，在 `src/robot/sensor/` 接入传感器；
+**职责边界（依赖方向：robot → controller → kinematics）**：`robot/kinematics` 是纯运动学 / 求解器
+（无状态）；`PiperController` 只管**关节 / 夹爪读写 + 限位把关**，并对外提供**静态**位姿转换
+（`joint_to_pose` / `pose_to_joint`）；`BaseRobot` **只有骨架**（目标状态机、逐拍限速、遥操作映射、
+观测组装）；机器人类**编排**——robot 收到 `pose` 目标时自己调解算得到关节角，再进同一条控制通路。
+
+1.  在 `src/robot/controller/` 接入机械臂控制器（需提供 `get_joint` / `set_joint` / `get_gripper` /
+    `set_gripper`；要支持 `pose` 动作还需**静态** `joint_to_pose`（正解）/ `pose_to_joint`（解算，
+    只解算不下发）），在 `src/robot/sensor/` 接入传感器；
 2.  在 `src/robot/` 组装机器人（`BaseRobot` 子类），用**类常量**固定 obs/action 形态：
-    -   `QPOS`：扁平动作维度（各臂关节 + 夹爪拼接）
-    -   `POSE`：扁平末端位姿维度（各臂 `xyz + rpy`；**0 = 不提供位姿观测**）——实现
-        `get_observation_pose()` 返回它，robot server 据此把位姿写入共享内存（布局 v3）
+    -   `QPOS` / `GRIPPER`：`joint` 空间维度（各臂关节角拼接）与 `gripper` 空间维度（每臂 1 夹爪）
+    -   `ARM_NAMES` / `ARM_CONTROLLERS`：臂名（物理顺序）与「臂 → `controllers` 键」映射——自己的取数 /
+        下发按它遍历
+    -   `JOINTS_PER_ARM` / `POSE_DIM_PER_ARM`：每臂关节数（6）与每臂位姿维数（6）；每臂夹爪 1
+    -   `POSE`：扁平末端位姿维度（各臂 `xyz + rpy`；**0 = 不提供位姿观测**）——由静态正解给出，
+        robot server 据此把**实测位姿**与**目标位姿**写入共享内存（布局 v5 的 pose / pose_target 区）
+    -   `GRIPPER_DEADZONE`：夹爪死区（piper 为 0.2；缺省 0）
     -   `IMAGE_NAMES` / `IMAGES`：相机名与分辨率
     -   `SHM_NAME`：观测共享内存名
+    -   `ACTION_SPACES`：支持的动作空间（四个：`joint` / `pose` / `pose_delta` / `gripper`；缺省
+        `joint` + `gripper`）——控制器能解算 `pose` 时才声明它（`pose_delta` 依赖
+        `get_target_pose()`），Edge 侧 adapter 才能宣称
     -   `CAPABILITIES`：能力声明（capture / execute / streaming）
     -   身份常量：`NAME`（展示名缺省值，配置 `robot.name` 可覆盖）/ `ADAPTER_TYPE` /
         `ROBOT_MODEL_ID` / `ROBOT_MODEL_VERSION`
 3.  在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册；在 `src/config/*.yml` 配置
     `robot.type` 即按此自动匹配。
 
-机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_qpos`）。**硬件接线参数**
-也在此段描述（现场接线不同时只改这里，无需改代码）：
+机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_joint` / `cartesian`）。
+**硬件接线参数**也在此段描述（现场接线不同时只改这里，无需改代码）：
 
 ```yaml
 robot:
@@ -196,19 +212,19 @@ ROBOT_SERVER_CFG=dual_piper.yml uv run uvicorn server.robot_server:app --host 0.
 robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 `motrix_edge.adapter.http_contract`）：
 
-| 方法 | 路径                 | 请求 body         | 说明                                                                            |
-| ---- | -------------------- | ----------------- | ------------------------------------------------------------------------------- |
-| POST | `/v1/discover`       | —                 | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
-| GET  | `/v1/health`         | —                 | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
-| POST | `/v1/reset`          | —                 | 复位到 home（非阻塞）                                                           |
-| POST | `/v1/execute`        | `{action: [...]}` | 直接下发 raw 动作                                                               |
-| POST | `/v1/rollout`        | `{action: [...]}` | 推理动作                                                                        |
-| POST | `/v1/teleop`         | `{enabled: bool}` | 遥操作开关                                                                      |
-| POST | `/v1/safe_stop`      | —                 | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
-| POST | `/v1/capture/start`  | —                 | 开始一轮采集（episode 开始）                                                    |
-| POST | `/v1/capture/end`    | —                 | 结束一轮采集（episode 结束）                                                    |
-| POST | `/v1/capture/sync`   | `{meta: {...}}`   | 同步采集元信息（operator / task_name 等）                                       |
-| GET  | `/v1/capture/status` | —                 | 采集状态（运行位 / 元信息 / 数据目录）                                          |
+| 方法 | 路径                 | 请求 body                        | 说明                                                                            |
+| ---- | -------------------- | -------------------------------- | ------------------------------------------------------------------------------- |
+| POST | `/v1/discover`       | —                                | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
+| GET  | `/v1/health`         | —                                | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
+| POST | `/v1/reset`          | —                                | 复位到 home（非阻塞）                                                           |
+| POST | `/v1/execute`        | `{action: [...], action_space?}` | 直接下发 raw 动作（`pose` → 机器人侧解算）                                      |
+| POST | `/v1/rollout`        | `{action: [...], action_space?}` | 推理动作（**遥操作中 → 409**：推理让位；IK 失败 → 422）                         |
+| POST | `/v1/teleop`         | `{enabled, mode?}`               | 遥操作（`mode` 缺省 `absolute`；`delta` = 人工接管增量）                        |
+| POST | `/v1/safe_stop`      | —                                | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
+| POST | `/v1/capture/start`  | —                                | 开始一轮采集（episode 开始）                                                    |
+| POST | `/v1/capture/end`    | —                                | 结束一轮采集（episode 结束）                                                    |
+| POST | `/v1/capture/sync`   | `{meta: {...}}`                  | 同步采集元信息（operator / task_name 等）                                       |
+| GET  | `/v1/capture/status` | —                                | 采集状态（运行位 / 元信息 / 数据目录）                                          |
 
 另有调试端点 `GET /observe`（最新观测 qpos + 末端位姿（提供时）+ 相机 JPEG base64）。
 
@@ -225,7 +241,7 @@ collector:
 
 -   `act_mcap`：Foxglove MCAP（**ROS2 官方消息格式**，CDR 编码），每条 episode 保存为
     `{uuid}.mcap`（文件名用 UUID，全局唯一）；每信号一个 topic——`observations/qpos` /
-    `action` 用 `std_msgs/msg/Float64MultiArray`，`observations/images/<cam>` 用
+    `observations/gripper` / `action` 用 `std_msgs/msg/Float64MultiArray`，`observations/images/<cam>` 用
     `sensor_msgs/msg/CompressedImage`（JPEG）。帧时间取 obs 内 `timestamp` 作
     `log_time`，可在 Foxglove 中按时间轴查看；该 `timestamp` 是**观测拍时刻**（观测线程
     `build_observation()` 在取帧前打点），qpos / action 来自上一个控制拍——滞后**有界**（≤ 1/`HZ`
@@ -261,6 +277,49 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 -   同步字段（`operator` / `task_name` / `description` 等）：默认留空（null），由 Edge
     侧 adapter 的 `capture sync` 同步——`POST /v1/capture/sync`，body `{"meta": {...}}`，
     在采集开始前或采集中同步均可；结束写 JSON 时附加。
+
+## 位姿动作（末端位姿）
+
+机器人只暴露**一条**控制通路：关节目标 + MIT（`move_mit`）。`action_space=pose` 是
+**动作语义**，不是控制模式——机器人收到每臂 `xyz + rpy + 夹爪` 后，由**自己**用仓库内运动学
+（`src/robot/kinematics/`，纯 numpy Modified DH）通过控制器的**静态**转换函数**解算一次**，
+再按关节目标下发（限速、采样、观测全部不变），**不切 `move_p`**（SDK 的 `move_mit` / `move_j` /
+`move_p` 互斥，交替下发会逐帧互切）。
+
+运动学转换是**无状态静态函数**（`PiperController.joint_to_pose` / `pose_to_joint`），机器人类负责
+编排（按臂拆包 → 解算 → 写目标）——新增带位姿动作的机器人只需提供同形静态函数，不碰控制循环。
+
+-   `POST /v1/execute` / `POST /v1/rollout` 的 body 可带 `"action_space": "pose"`
+    （缺省 `joint`，向后兼容）；两种空间**每臂都 7 维**（关节 = 6 关节 + 夹爪；位姿 = xyz + rpy + 夹爪）。
+-   **末端位姿观测**（`observations/pose`）由**同一套运动学**正解给出：观测与解算同模型、
+    同坐标系，所以「读到的位姿」与「下发的目标」可直接比对；SDK 的 `get_flange_pose()` 仅用于
+    **标定对照**（`scripts/verify_cartesian.py`），**不是运行时依赖**（底层只需关节读写 + MIT）。
+-   **解算失败**（超限位 / 不收敛）→ HTTP `422` 且**不改既有目标**（机械臂保持原动作）；
+    `action_space` 未被机器人声明时同样报错，不会把位姿向量当关节角静默下发。
+-   **限位只有一份**：解算用的限位与 `set_joint` **下发前**的裁切共用 `PIPER_JOINT_LIMITS`
+    （同一份，**不经配置覆盖**）——越界值一帧都不交给 SDK（否则 SDK 会报错并打印），裁到时打一条
+    WARNING（同一组超限关节只打一条）。
+-   **只下关节角**：`set_joint` 只给 MIT 的 `p_des`，`kp` / `kd` / `t_ff` 全用缺省值
+    （**本次位姿（阻抗）控制无力矩前馈**：`t_ff = 0` / `v_des = 0`，不补重力 / 摩擦、不做力控）。
+
+配置（`robot` 段，全部可选）：
+
+```yaml
+robot:
+    cartesian:
+        ik: { pos_tol: 0.0001, rot_tol: 0.001, max_iters: 200, damping: 0.01, step_limit: 0.2 }
+```
+
+**现场标定**：DH 参数 / 关节零位必须与真机一致，用 `scripts/verify_cartesian.py` 对照 `fk(q)`
+与 SDK 法兰位姿（默认**只读**，`--cycles` 才小幅摆动）：
+
+```bash
+python scripts/verify_cartesian.py --port left           # 只读对照 + IK 往返（推荐先跑）
+python scripts/verify_cartesian.py --port left --cycles 3 --role follower
+```
+
+坐标系约定（米 / 弧度、`R = Rz(yaw)Ry(pitch)Rx(roll)`、法兰系）、求解器与失败语义见
+[robot-pipeline 位姿动作](../wiki/design/robot_pipeline_cartesian.md)。
 
 ## 遥操作
 

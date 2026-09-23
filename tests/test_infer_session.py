@@ -118,6 +118,7 @@ class _FakeAdapter:
         self.teleop_values: list[bool] = []
         self.teleop_calls: list[tuple[bool, str | None]] = []
         self.rollout_spaces: list[str | None] = []
+        self.execute_spaces: list[str | None] = []
         self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
         self.images = list(images) if images is not None else None  # 启用相机（adapter config 决定）
         self.action_dim = action_dim  # 启用臂 qpos 维数
@@ -142,8 +143,9 @@ class _FakeAdapter:
             return next(self._observations, None)
         return {"observations/qpos": np.zeros(14, dtype=np.float32)}
 
-    def execute(self, action):
+    def execute(self, action, action_space=None):
         self.executed.append(action)
+        self.execute_spaces.append(None if action_space is None else str(action_space))
 
     def set_teleop(self, enabled, mode=None):
         self.teleop_values.append(bool(enabled))
@@ -777,6 +779,17 @@ def test_robot_execute_in_infer_loop(monkeypatch):
     session = _build_session(adapter, policy, ("robot execute 0,0,0,0,0,0,0", "session quit"))
     assert session.run() == RunResult.FINISHED
     assert adapter.executed == [[0.0] * 7]  # qpos 直接作为参数传给 adapter.execute
+
+
+def test_robot_execute_forwards_action_space_in_infer_loop(monkeypatch):
+    """推理循环中 robot execute：动作空间参数透传（pose → 机器人侧解算成关节目标）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("robot execute 0,0,0,0,0,0,0 pose", "session quit"))
+    assert session.run() == RunResult.FINISHED
+    assert adapter.executed == [[0.0] * 7]
+    assert adapter.execute_spaces == ["pose"]
 
 
 def test_infer_rollout_auto_connects(monkeypatch):

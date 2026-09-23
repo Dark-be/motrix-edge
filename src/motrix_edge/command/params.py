@@ -21,7 +21,7 @@
 
 import json
 
-from motrix_edge.adapter.http_contract import TELEOP_MODES
+from motrix_edge.adapter.http_contract import ACTION_SPACES, DEFAULT_ACTION_SPACE, TELEOP_MODES
 
 
 def parse_qpos(raw) -> list[float]:
@@ -42,6 +42,22 @@ def parse_qpos(raw) -> list[float]:
         return [float(tok) for tok in tokens]
     except ValueError:
         raise ValueError(f"invalid qpos: {raw!r}") from None
+
+
+def parse_action_space(raw) -> str:
+    """解析 ``robot execute`` 的可选动作空间参数 → ``joint`` / ``pose``。
+
+    缺失 / 空 → ``joint``（不发该参数 = 关节空间，与只用 ``<qpos>`` 的旧调用方等价）；
+    取值校验只做**词表**（``http_contract.ACTION_SPACES``，与 ``/v1/execute`` 契约同源）；
+    "本适配器是否支持该空间" 由 ``adapter.normalize_action_space`` 判（不在 ``ACTION_SPACES``
+    → ``ValueError``）；非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+    """
+    text = str("" if raw is None else raw).strip().lower()
+    if not text:
+        return DEFAULT_ACTION_SPACE
+    if text not in ACTION_SPACES:
+        raise ValueError(f"invalid action space: {raw!r} (expect {'|'.join(ACTION_SPACES)})")
+    return text
 
 
 def parse_bool(raw) -> bool:

@@ -51,9 +51,16 @@ import numpy as np
 # ---- 观测键契约（standard_obs 字典的键名，与 ACT 采集格式一致）----------------
 KEY_QPOS = "observations/qpos"
 KEY_ACTION = "action"
-# 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ARM_NAMES；单位米 / 弧度）——笛卡尔策略
-# （见 wiki/design/motrix_edge_primitives.md）的输入；机器人不提供位姿时该键不出现。
+# 夹爪观测键（每臂 1 维，物理顺序同 ``ARM_NAMES``）：夹爪是**独立动作空间**（``gripper``），
+# 故观测也独立成键，不混进 ``observations/qpos``。
+KEY_GRIPPER = "observations/gripper"
+# 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ``ARM_NAMES``；单位米 / 弧度）——位姿原语的输入；
+# 机器人不提供位姿时该键不出现（``POSE = 0``）。
 KEY_POSE = "observations/pose"
+# **目标位姿** = ``FK(关节段目标)``——底层位姿目标（与 ``KEY_POSE`` 同一套 FK、同一拍）。
+# 用途：``pose_delta`` 的解算结果对上位可见（``settle`` 判到位拿它当参考，不必自己攒基准）；
+# 「目标 − 实测」即 MIT 稳态误差。同样随位姿存在（``POSE = 0`` 时无此键）。
+KEY_POSE_TARGET = "observations/pose_target"
 CAMERA_PREFIX = "observations/images/"
 
 # execute / rollout 的一维动作输入：CLI/HTTP 常用 list，policy 常用 ndarray。
@@ -63,13 +70,29 @@ Action = Sequence[float] | np.ndarray
 class ActionSpace(str, Enum):
     """动作空间（flat 动作向量的语义）——策略声明、adapter 校验、机器人进程最终解释。
 
-    - ``JOINT``（缺省）：每臂 7 维（6 关节角 + 夹爪），**绝对目标**（关节空间）；
-    - ``CARTESIAN_POSE``：每臂 7 维（xyz + rpy + 夹爪），末端位姿目标；由机器人侧 IK
-      转成关节目标后执行（运动学归机器人侧，edge 不解释机器人结构）。
+    四个空间**各自只表达一件事**，值都按 ``ARM_NAMES`` 逐臂展开（每臂等长）：
+
+    - ``JOINT``（缺省）：每臂 6 关节角，**绝对目标**；
+    - ``POSE``：每臂 ``xyz + rpy`` 末端位姿**绝对目标**；由机器人侧求解器转成关节目标后执行
+      （运动学归机器人侧，edge 不解释机器人结构）；
+    - ``POSE_DELTA``：每臂 ``xyz + rpy`` 位姿**增量**；机器人侧叠加在**当前关节段目标**的正解
+      位姿上再解一次（基准取目标而非实测——底层 MIT 有稳态误差，以实测为基准会把误差写进
+      新目标、逐步累积）；
+    - ``GRIPPER``：每臂 1 夹爪开合（归一化 ``[0, 1]``）。
     """
 
     JOINT = "joint"
-    CARTESIAN_POSE = "cartesian_pose"
+    POSE = "pose"
+    POSE_DELTA = "pose_delta"
+    GRIPPER = "gripper"
+
+
+# 与机器人侧（``BaseRobot.ACTION_SPACE_*``）同名同值的字符串别名：共享内存 / 机器进程
+# 契约层（不依赖枚举实例的场合）直接用字符串常量。
+ACTION_SPACE_JOINT = ActionSpace.JOINT.value
+ACTION_SPACE_POSE = ActionSpace.POSE.value
+ACTION_SPACE_POSE_DELTA = ActionSpace.POSE_DELTA.value
+ACTION_SPACE_GRIPPER = ActionSpace.GRIPPER.value
 
 
 class AdapterCapability(str, Enum):
@@ -127,16 +150,20 @@ def image_names_of(keys) -> list[str]:
 class RobotCapabilities:
     """适配器声明的能力（数据布局声明）。
 
-    ``action_spaces`` = **支持的动作空间**列表（缺省仅关节空间）：会话按策略声明的空间选择，
-    适配器校验、机器人进程最终解释；``pose_dim`` = 位姿观测维数（0 = 机器人不提供末端位姿，
-    观测无 ``observations/pose`` 键）。
+    ``action_spaces`` = **支持的动作空间**列表（缺省仅关节空间）：各个空间的值都按臂展开、
+    维度**各不相同**（joint / pose / pose_delta = 每臂 6，gripper = 每臂 1），故维度以
+    ``action_dims`` 字典给出（``action_dim`` 保留为关节空间维度的兼容字段）。
+
+    观测**常驻**（与动作空间无关）：``observations/qpos`` = 关节角、``observations/gripper``
+    = 夹爪、``observations/pose`` = 实测末端位姿、``observations/pose_target`` = 目标位姿
+    （机器人不提供位姿时后两个键不出现）。
     """
 
     robot_model_id: str = "unknown"
     robot_model_version: str = "0.0.0"
-    action_dim: int = 0
+    action_dim: int = 0  # 关节空间维度（兼容字段）
+    action_dims: dict[str, int] = field(default_factory=dict)  # 各动作空间维度
     action_spaces: list[str] = field(default_factory=lambda: [ActionSpace.JOINT.value])
-    pose_dim: int = 0
     # 观测键（如 observations/qpos、observations/images/cam_head）
     observation_keys: list[str] = field(default_factory=list)
     # 能力描述 dict：capability -> 是否支持（子类必须显式声明；缺省不支持任何能力）
@@ -178,7 +205,7 @@ class RobotAdapter(ABC):
     **连接进程**并转发指令 / 读取观测——不自带 discover / probe（发现由 ``discover_adapter``
     完成）。运行时可经 ``configure()`` 应用 Edge 配置（``adapter`` 段）裁剪能力：启用臂 /
     相机、未启用臂用 home 填充——只影响维度 / 观测布局，不重启、不新建连接
-    （``_select_qpos`` / ``_expand_action`` 为通用臂映射助手）。
+    （``_select_arm_segments`` / ``_expand_action`` 为通用臂映射助手）。
     """
 
     # 本 adapter 的 entry point 类型（类确定，用于匹配 discover 的 type 加载类）；子类覆盖。
@@ -188,49 +215,26 @@ class RobotAdapter(ABC):
     # 实例 ``capabilities`` 属性把本声明并入 RobotCapabilities.capabilities。
     CAPABILITIES: dict[AdapterCapability, bool] = {}
 
-    # ---- 动作布局声明（子类覆盖；供 configure 的臂裁剪 / qpos 挑选 / 动作展开）----
-    # **完整**动作维度（如双臂 14）；启用臂下的实际维度见 ``action_dim``
-    ACTION_DIM: int = 0
-    # 每臂动作维度（如 7；无臂概念 = 0）
-    ACTION_DIM_PER_ARM: int = 0
+    # ---- 动作布局声明（子类覆盖；供 configure 的臂裁剪 / 动作展开）----
+    # **按动作空间**声明每臂维度：``{"joint": 6, "pose": 6, "gripper": 1}``——三个空间
+    # 各自只表达一件事，值都按 ``ARM_NAMES`` 逐臂展开（每臂等长），故臂段切片可由
+    # 「每臂维度」直接算出（无需再单独维护切片表）。只有已声明的空间才可下发。
+    ACTION_DIM_PER_ARM: dict[str, int] = {}
+    # 各空间的**全臂 home**（长度 = 每臂维度 × 臂数）：未启用臂用**同空间**的 home 填充
+    # （关节 home 填关节、夹爪 home 填夹爪；``pose`` 不给 home —— 未启用臂时直接拒绝，见
+    # ``_require_full_arms_for_cartesian``）。
+    HOME: dict[str, list[float]] = {}
     # 本适配器接受的动作空间（缺省仅关节空间）；不支持的空间 → rollout / execute 报错
     ACTION_SPACES: tuple[ActionSpace, ...] = (ActionSpace.JOINT,)
-    # 每臂位姿维数（xyz + rpy = 6）；0 = 本适配器不提供末端位姿观测
-    POSE_DIM_PER_ARM: int = 0
-    # 臂名（物理顺序，如 ("left", "right")；空 = 无臂概念，不做臂裁剪）
+    # ``pose`` 值所在的坐标系（如 "flange" / "tcp" / "fk"）：下发的位姿目标与读到的位姿
+    # **必须同系**，否则 ``move_delta`` 这类「当前位姿 + 增量」会偏一个常量。
+    POSE_FRAME: str = "unknown"
+    # 启用的臂（物理顺序，如 ("left", "right")；空 = 无臂概念，不做臂裁剪）
     ARM_NAMES: tuple[str, ...] = ()
-    # 臂名 → qpos 切片（如 {"left": slice(0, 7), "right": slice(7, 14)}）
-    ARM_QPOS_SLICES: dict[str, slice] = {}
-    # 全动作 home 位姿（长度 = ACTION_DIM；未启用臂动作填充用）
-    HOME_QPOS: list[float] = []
     # 缺省启用臂（物理顺序；空 = 默认全部 ARM_NAMES）
     DEFAULT_ENABLED_ARMS: tuple[str, ...] = ()
     # 相机布局：{相机名: 分辨率 (width, height)}（configure 校验 / 挑选用）
     IMAGES: dict[str, tuple[int, int]] = {}
-
-    def __init_subclass__(cls, **kwargs):
-        """子类布局声明自洽性校验（导入期报错，不让错误拖到运行时的数组赋值）。
-
-        - ``ARM_QPOS_SLICES`` 的键必须与 ``ARM_NAMES`` 一致；
-        - 每个切片的长度必须等于 ``ACTION_DIM_PER_ARM``；
-        - ``HOME_QPOS``（非空时）长度必须等于 ``ACTION_DIM``。
-        """
-        super().__init_subclass__(**kwargs)
-        names = tuple(cls.ARM_NAMES)
-        if names and set(cls.ARM_QPOS_SLICES) != set(names):
-            raise TypeError(
-                f"{cls.__name__}: ARM_QPOS_SLICES keys {sorted(cls.ARM_QPOS_SLICES)} != ARM_NAMES {list(names)}"
-            )
-        if names and cls.ACTION_DIM_PER_ARM:
-            for arm, segment in cls.ARM_QPOS_SLICES.items():
-                length = (segment.stop or 0) - (segment.start or 0)
-                if segment.stop is not None and length != cls.ACTION_DIM_PER_ARM:
-                    raise TypeError(
-                        f"{cls.__name__}: ARM_QPOS_SLICES[{arm!r}] length != ACTION_DIM_PER_ARM"
-                        f" ({cls.ACTION_DIM_PER_ARM})"
-                    )
-        if cls.HOME_QPOS and cls.ACTION_DIM and len(cls.HOME_QPOS) != cls.ACTION_DIM:
-            raise TypeError(f"{cls.__name__}: HOME_QPOS length {len(cls.HOME_QPOS)} != ACTION_DIM {cls.ACTION_DIM}")
 
     def __init__(self, name: str = "", *, endpoint: str | None = None, shm_name: str | None = None):
         """身份与连接参数由 discover 赋予（缺省为空 = 进程内测试，回退类常量）。
@@ -238,40 +242,45 @@ class RobotAdapter(ABC):
         ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（不随 discover 传输）；能力由子类类常量
         定义；``endpoint`` / ``shm_name`` 为进程自报的连接参数（指令地址 / 共享内存名），
         子类缺省回退自己的类常量（``SDK_URL`` / ``SHM_NAME``）。此处初始化能力裁剪状态
-        （启用臂 / 启用相机 / home），后续由 ``configure()`` 裁剪；
-        ``action_dim`` 为按当前启用臂推导的只读属性。
+        （启用臂 / home / 完整相机顺序）；``action_dim`` / ``images`` 由子类初始化
+        （部分测试替身用只读 property，此处不写）。
         """
         self.name = name
         self.type = self.ADAPTER_TYPE
         self.endpoint = endpoint
         self.shm_name = shm_name
-        # 能力裁剪状态（configure 应用）：启用臂 / 启用相机均**按声明顺序**排列，
-        # 未启用臂动作用类常量 HOME_QPOS 填充
+        # 能力裁剪状态（configure 应用）：启用臂（物理顺序）/ 完整相机顺序
         self.enabled_arms = list(self.DEFAULT_ENABLED_ARMS or self.ARM_NAMES)
-        self.enabled_images = list(self.IMAGES)
-        self._home_qpos = np.asarray(self.HOME_QPOS or [0.0] * self.ACTION_DIM, dtype=np.float64)
+        self._home: dict[str, np.ndarray] = {
+            str(space): np.asarray(values, dtype=np.float64) for space, values in self.HOME.items()
+        }
+        for space, values in self._home.items():
+            expected = self.ACTION_DIM_PER_ARM.get(space, 0) * max(len(self.ARM_NAMES), 1)
+            if values.shape[0] != expected:
+                raise ValueError(f"{self.type}: HOME[{space!r}] dim {values.shape[0]} != {expected}")
+        self._full_image_names = list(self.IMAGES)
+        # 各空间**启用臂**维度（serve / 配置 / 前端）＋ 兼容字段 ``action_dim`` = 关节空间维度
+        self.action_dims = {space.value: self.action_dim_for(space) for space in self.ACTION_SPACES}
+        self.action_dim = self.action_dims.get(ActionSpace.JOINT.value, 0)
         # 遥操作 / 人工接管状态：**由真正支持遥操作的子类**在 set_teleop 里记录（基类 no-op
         # 不写——否则「不支持遥操作的适配器」会被上报成遥操作中）；server 据此在状态里
         # 暴露 ``teleop`` / ``teleop_mode``（见 server/state.py）。
         self.teleop_enabled = False
         self.teleop_mode: str | None = None
 
-    # ---- 能力裁剪（configure：启用臂 / 相机；home 固定由 HOME_QPOS 定义）----------
+    # ---- 能力裁剪（configure：启用臂 / 相机；各空间 home 固定由 HOME 定义）----------
     def configure(self, enabled_arms=None, enabled_cameras=None) -> None:
         """应用 Edge 配置（``adapter`` 段）裁剪能力：启用臂 / 相机。
 
-        - ``enabled_arms``：启用的臂（``ARM_NAMES`` 子集，如 right / left）；**缺省不
-          改变当前设置**（部分更新语义；初始值取 ``DEFAULT_ENABLED_ARMS``，如双臂）。
-          运行时 ``action_dim = 启用臂数 × ACTION_DIM_PER_ARM``，动作段按**物理顺序**
-          （``ARM_NAMES``）映射，未启用臂用类常量 ``HOME_QPOS`` 填充（home 位姿**固定由
-          adapter 定义**，不可运行时覆盖）；
-        - ``enabled_cameras``：启用的相机（``IMAGES`` 子集）；**缺省不改变当前设置**
-          （初始值 = 全部相机）；结果按 ``IMAGES`` 声明顺序排列（与臂同口径，
-          不随调用方传参顺序变化）。
+        - ``enabled_arms``：启用的臂（``ARM_NAMES`` 子集，如 right / left）；缺省启用全部
+          （``DEFAULT_ENABLED_ARMS``，如双臂）。运行时 ``action_dim = 启用臂数 ×
+          ACTION_DIM_PER_ARM``，动作段按**物理顺序**（``ARM_NAMES``）映射，未启用臂用
+          类常量 ``HOME[space]`` 填充（各空间 home**固定由 adapter 定义**，不可运行时覆盖）；
+        - ``enabled_cameras``：启用的相机（``IMAGES`` 子集）；缺省全部（如三相机）。
 
-        无臂概念（``ARM_NAMES`` 为空）时 ``enabled_arms`` 忽略（声明即全臂）。参数
-        **原子校验**：任一非法（未知臂 / 未知相机）→ ``ValueError``，不改变当前能力。
-        只影响本实例的维度 / 观测布局，不重启 / 不新建连接。
+        无臂概念（``ARM_NAMES`` 为空）时 ``enabled_arms`` 忽略。参数**原子校验**：任一非法
+        （未知臂 / 未知相机）→ ``ValueError``，不改变当前能力。只影响本实例的维度 /
+        观测布局，不重启 / 不新建连接。
 
         校验与归一化在 ``normalize_capability_config()``（类方法）——未绑定 adapter 时
         （只有类常量、无实例）也用它预先校验运行时配置。
@@ -281,7 +290,9 @@ class RobotAdapter(ABC):
         if arms is not None:
             self.enabled_arms = arms
         if cameras is not None:
-            self.enabled_images = cameras
+            self.images = cameras
+        self.action_dims = {space.value: self.action_dim_for(space) for space in self.ACTION_SPACES}
+        self.action_dim = self.action_dims.get(ActionSpace.JOINT.value, 0)
 
     @classmethod
     def normalize_capability_config(
@@ -304,56 +315,56 @@ class RobotAdapter(ABC):
                     raise ValueError(f"unknown arm: {a!r} (available: {list(cls.ARM_NAMES)})")
             if not requested:
                 raise ValueError("enabled_arms must not be empty")
-            arms = [a for a in cls.ARM_NAMES if a in requested]
+            arms = [a for a in cls.ARM_NAMES if a in requested]  # 物理顺序
         cameras = None
         if enabled_cameras is not None:
             requested_cameras = [str(c).strip() for c in enabled_cameras]
             unknown = [c for c in requested_cameras if c not in cls.IMAGES]
             if unknown:
                 raise ValueError(f"unknown camera(s): {unknown} (available: {list(cls.IMAGES)})")
-            cameras = [c for c in cls.IMAGES if c in requested_cameras]
+            cameras = [c for c in cls.IMAGES if c in requested_cameras]  # 声明顺序
         return arms, cameras
 
     def enabled_map(self) -> dict[str, dict[str, bool]]:
         """能力启用状态（分组字典，前端勾选展示 / 同步用）。
 
         返回 ``{"arms": {臂名: 是否启用}, "cameras": {相机名: 是否启用}}``，由当前
-        ``enabled_arms`` / ``enabled_images``（``configure()`` 应用后）推导。
+        ``enabled_arms`` / ``images``（``configure()`` 应用后）推导。
         """
         return {
             "arms": {arm: arm in self.enabled_arms for arm in self.ARM_NAMES},
-            "cameras": {cam: cam in self.enabled_images for cam in self.IMAGES},
+            "cameras": {cam: cam in self.images for cam in self.IMAGES},
         }
 
-    @property
-    def action_dim(self) -> int:
-        """当前启用臂下的动作维度（``configure()`` 应用后）；无臂概念 → 完整维度。"""
-        return self._dim_for(self.enabled_arms)
-
     @classmethod
-    def _dim_for(cls, arms) -> int:
-        """给定启用臂的动作维度；无臂概念 → 完整维度。"""
-        if cls.ARM_NAMES and cls.ACTION_DIM_PER_ARM:
-            return cls.ACTION_DIM_PER_ARM * len(arms)
-        return cls.ACTION_DIM
+    def default_enabled_map(cls) -> dict[str, dict[str, bool]]:
+        """类级**默认**能力启用字典（不依赖实例 / 绑定状态）。
 
-    def _select_qpos(self, qpos) -> np.ndarray:
-        """按启用臂（物理顺序）挑选 / 拼接 qpos（观测口径，统一 float32）；无臂概念 → 原样。
-
-        观测三件套（qpos / action / pose）共用本方法，保证同一裁剪口径；下发方向的
-        维度校验 / 展开用 ``_expand_action``（float64，做数值计算）。
+        基于类常量推导：臂 = ``DEFAULT_ENABLED_ARMS``（缺省 ``ARM_NAMES``，如双臂），
+        相机 = ``IMAGES`` 全部启用（如三相机）。供**未绑定 adapter** 时前端 / CLI 展示
+        默认勾选（刷新即可见）。与 ``enabled_map()``（实例实际生效）区分。
         """
-        qpos = np.asarray(qpos, dtype=np.float32)
-        if not self.ARM_NAMES:
-            return qpos
-        parts = [qpos[self.ARM_QPOS_SLICES[arm]] for arm in self.enabled_arms]
-        return np.concatenate(parts) if parts else np.asarray([], dtype=np.float32)
+        arms = cls.DEFAULT_ENABLED_ARMS or cls.ARM_NAMES
+        return {
+            "arms": {arm: arm in arms for arm in cls.ARM_NAMES},
+            "cameras": {cam: True for cam in cls.IMAGES},
+        }
+
+    def action_dim_for(self, action_space: ActionSpace | str | None = None) -> int:
+        """**启用臂**下该动作空间的值维度（= 每臂维度 × 启用臂数）；无臂概念 → 每臂维度。"""
+        space = self.normalize_action_space(action_space)
+        per_arm = self.ACTION_DIM_PER_ARM.get(space.value, 0)
+        if not per_arm:
+            raise ValueError(f"{self.type}: action space {space.value!r} has no dimension declared")
+        if self.ARM_NAMES:
+            return per_arm * len(self.enabled_arms)
+        return per_arm
 
     def _select_arm_segments(self, values, per_arm_dim: int) -> np.ndarray:
-        """按启用臂挑选**等长分段**状态（如末端位姿：每臂 ``per_arm_dim`` 维）。
+        """按启用臂挑选**等长分段**状态（每臂 ``per_arm_dim`` 维，物理顺序 = ``ARM_NAMES``）。
 
-        与 ``_select_qpos`` 同口径（物理顺序 = ``ARM_NAMES``），用于 qpos 之外的按臂布局
-        状态（位姿）；无臂概念 / 维数不足 → 原样返回（不猜布局）。
+        各动作空间的值都按臂等长展开，故一份助手同时服务关节角 / 夹爪 / 位姿；
+        无臂概念 / 维数不足 → 原样返回（不猜布局）。
         """
         values = np.asarray(values, dtype=np.float32)
         per_arm_dim = int(per_arm_dim)
@@ -365,23 +376,33 @@ class RobotAdapter(ABC):
             parts.append(values[start : start + per_arm_dim])
         return np.concatenate(parts) if parts else np.asarray([], dtype=np.float32)
 
-    def _expand_action(self, action: Action, operation: str) -> np.ndarray:
-        """校验启用臂维度并展开回完整动作空间（未启用臂用 home_qpos 填充，float64）。
+    def _expand_action(
+        self, action: Action, operation: str, action_space: ActionSpace | str | None = None
+    ) -> np.ndarray:
+        """校验维度并展开回该空间的**完整**动作（未启用臂用**同空间 home** 填充）。
 
-        无臂概念 / 全臂启用 → 原样返回（动作即完整维度）；仅启用部分臂时，动作段
-        按物理顺序（``ARM_NAMES``）写入对应切片，其余切片填充 ``self._home_qpos``。
+        无臂概念 / 全臂启用 → 原样返回（动作即完整维度）；仅启用部分臂时，动作段按物理
+        顺序（``ARM_NAMES``）写入对应臂块，其余臂块填 ``HOME[space]``（同空间，不会把关节
+        值当位姿发）。
         """
+        space = self.normalize_action_space(action_space)
+        expected = self.action_dim_for(space)
         target = np.asarray(action, dtype=np.float64)
-        if target.ndim != 1 or target.shape[0] != self.action_dim:
+        if target.ndim != 1 or target.shape[0] != expected:
             actual = target.shape[0] if target.ndim > 0 else 0
-            raise ValueError(f"{operation} action dim {actual} != action_dim {self.action_dim}")
+            raise ValueError(f"{operation} {space.value} action dim {actual} != {expected}")
+        per_arm = self.ACTION_DIM_PER_ARM[space.value]
         if not self.ARM_NAMES or len(self.enabled_arms) == len(self.ARM_NAMES):
             return target
-        full = self._home_qpos.copy()
-        cursor = 0
-        for arm in self.enabled_arms:
-            full[self.ARM_QPOS_SLICES[arm]] = target[cursor : cursor + self.ACTION_DIM_PER_ARM]
-            cursor += self.ACTION_DIM_PER_ARM
+        home = self._home.get(space.value)
+        if home is None:
+            raise ValueError(
+                f"{operation} {space.value} requires all arms enabled (enabled: {list(self.enabled_arms)})"
+            )
+        full = home.copy()
+        for cursor, arm in enumerate(self.enabled_arms):
+            start = self.ARM_NAMES.index(arm) * per_arm
+            full[start : start + per_arm] = target[cursor * per_arm : (cursor + 1) * per_arm]
         return full
 
     # ---- health / release（硬件由 SDK 进程自维护，Edge 只查询 / 释放本地资源）-----
@@ -406,6 +427,29 @@ class RobotAdapter(ABC):
         """声明能力：动作维度 / 观测布局 / 相机。"""
         raise NotImplementedError
 
+    def effective_pose_dim_per_arm(self) -> int:
+        """**生效**的每臂位姿维数（0 = 本机/本适配器不提供位姿）。
+
+        位姿是 ``observations/pose``（每臂 ``xyz + rpy``），与动作空间无关、随时可读；
+        故这里 = 适配器声明的 ``pose`` 每臂维数；未声明 ``pose`` → 0。
+        """
+        if ActionSpace.POSE not in self.ACTION_SPACES:
+            return 0
+        return int(self.ACTION_DIM_PER_ARM.get(ActionSpace.POSE.value, 0) or 0)
+
+    @property
+    def pose_dim(self) -> int:
+        """位姿值维度（启用臂 × 每臂位姿维数；不提供位姿的适配器为 0）。
+
+        位姿不再是独立观测键——本值只用于声明「能不能吃 / 给位姿值」。
+        """
+        per_arm = self.effective_pose_dim_per_arm()
+        if per_arm <= 0:
+            return 0
+        if not self.ARM_NAMES:
+            return per_arm
+        return per_arm * len(self.enabled_arms)
+
     # ---- observe（读取最新观测缓存，被预览 / policy 推理消费）------------------
     @abstractmethod
     def observe(self) -> dict | None:
@@ -422,8 +466,13 @@ class RobotAdapter(ABC):
 
     # ---- execute（执行动作指令）-----------------------------------------------
     @abstractmethod
-    def execute(self, action: Action) -> None:
-        """直接下发一维 array-like 动作指令（raw 指令，立即执行）。"""
+    def execute(self, action: Action, action_space: ActionSpace | str | None = None) -> None:
+        """直接下发一维 array-like 动作指令（raw 指令，立即执行）。
+
+        ``action_space`` = 动作语义（缺省 / ``None`` → ``ActionSpace.JOINT``），与 ``rollout``
+        同口径：不在本适配器 ``ACTION_SPACES`` 内的空间 → ``ValueError``；笛卡尔动作的 IK 归
+        机器人进程（机器人在收到目标时解算一次，失败则拒绝该条指令）。
+        """
         raise NotImplementedError
 
     # ---- teleop（遥操作 / 人工接管）-------------------------------------------

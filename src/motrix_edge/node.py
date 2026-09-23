@@ -64,6 +64,7 @@ from motrix_edge.command import (
     handle_infer_rtc,
     handle_policy_config,
     ok_result,
+    parse_action_space,
     parse_bool,
     parse_meta,
     parse_qpos,
@@ -379,13 +380,15 @@ class EdgeNode:
         adapter = self.adapter
         if adapter is None:
             return None
-        home = getattr(adapter, "_home_qpos", None)
+        home = getattr(adapter, "_home", None)
         enabled_map = getattr(adapter, "enabled_map", None)
         return {
             "adapter": self.adapter_ref,
             "enabled": enabled_map() if callable(enabled_map) else {},
             "action_dim": getattr(adapter, "action_dim", None),
-            "home_qpos": [float(v) for v in home] if home is not None else None,
+            "action_dims": dict(getattr(adapter, "action_dims", None) or {}),
+            # 各空间的**全臂 home**（未启用臂填充用；与动作空间同名，前端 / CLI 直接展示）
+            "home": {space: [float(v) for v in values] for space, values in (home or {}).items()},
         }
 
     def _adapter_config_current(self):
@@ -550,11 +553,12 @@ class EdgeNode:
         if cmd.name == CMD_ROBOT_EXECUTE:
             try:
                 qpos = parse_qpos(cmd.params.get("qpos"))
-                self.adapter.execute(qpos)  # 维度校验在 adapter.execute
+                space = parse_action_space(cmd.params.get("action_space"))
+                self.adapter.execute(qpos, space)  # 维度 / 动作空间校验在 adapter.execute
             except ValueError as exc:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
-            self._reply(cmd, ok_result(node_state=self.state, action=qpos))
+            self._reply(cmd, ok_result(node_state=self.state, action=qpos, action_space=space))
             return True
         if cmd.name == CMD_ROBOT_TELEOP:
             try:
@@ -801,11 +805,11 @@ class EdgeNode:
         ``config`` 只更新提供的键（缺省 / ``None`` = 用已存配置重放，供 discover 绑定时应用）。
         **已绑定** → 对当前 adapter 用 ``configure()`` 原子校验（未知臂 / 相机 → 打印 ERROR、
         返回 False）；**未绑定** → 按已注册 adapter 的**类常量**静态校验（同类错误同样拒绝）。
-        两种情况下配置状态都不更新。home_qpos 固定由 adapter 类常量 ``HOME_QPOS`` 定义
+        两种情况下配置状态都不更新。各空间 home 固定由 adapter 类常量 ``HOME`` 定义
         （不参与运行时配置）。adapter 未实现 ``configure()`` 时只存状态（True）。
 
         **会话进行中（采集 / 推理）一律拒绝**（返回 False）：``configure()`` 立即改变
-        ``action_dim`` 与 ``observe()`` 布局，episode 中途改会让同一 episode 内
+        ``action_dims`` 与 ``observe()`` 布局，episode 中途改会让同一 episode 内
         qpos / action 维度不一致（mcap 下游按固定维度解析），推理侧按旧维度下发的动作
         也会被 ``_expand_action`` 的维度校验拒绝。调用方据此回 409（HTTP）/ rejected
         （命令）；先 ``session quit`` 再改。

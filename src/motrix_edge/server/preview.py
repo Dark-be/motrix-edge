@@ -22,7 +22,7 @@
 推流到前端，这里只返回摄像头名列表。
 """
 
-from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_QPOS, image_names_of
+from motrix_edge.adapter.base import KEY_ACTION, KEY_GRIPPER, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS, image_names_of
 from motrix_edge.errors import ErrorCode, ServiceError
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.server.state import adapter_ref
@@ -48,12 +48,14 @@ class PreviewService:
         self._leases = leases
 
     def preview(self, lease_id: str | None = None) -> dict:
-        """最新观测预览：adapter 身份 / observation（qpos / action / pose + 摄像头名列表 + 臂名）。
+        """最新观测预览：adapter 身份 / observation（qpos / gripper / pose / pose_target / action +
+        臂名）。
 
         不要求会话 —— 无会话时返回当前观测缓存（可能为空），预览随时可开。
-        ``pose`` = **末端位姿**（每臂 ``xyz + rpy``，物理顺序与 ``arms`` 一致，保留 3 位小数）：
-        机器人不提供位姿（``pose_dim = 0``）→ ``None``。``arms`` = adapter 的启用臂名
-        （前端据此给 pose 分行标注，不自带布局知识）。
+        〚qpos〛= 关节角（每臂 6）、〚gripper〛= 夹爪（每臂 1）、〚pose〛= **实测**末端位姿、
+        〚pose_target〛= **目标**位姿（每臂 ``xyz + rpy``，米 / 弧度；机器人提供时才有）——
+        「目标 − 实测」即当前稳态误差；它们**与动作空间无关**（下发什么都不会改）。
+        ``arms`` = adapter 的启用臂名（前端据此分行，不自带布局知识）。
         """
         try:
             self._leases.require(lease_id)
@@ -71,8 +73,10 @@ class PreviewService:
             "adapter": adapter_ref(node),  # 与 /v1/captures · /v1/infers 的 adapter 段同源
             "observation": {
                 "qpos": self._to_float_list(latest.get(KEY_QPOS)),
-                "action": self._to_float_list(latest.get(KEY_ACTION)),
+                "gripper": self._to_float_list(latest.get(KEY_GRIPPER)),
                 "pose": self._to_float_list(latest.get(KEY_POSE)),
+                "pose_target": self._to_float_list(latest.get(KEY_POSE_TARGET)),
+                "action": self._to_float_list(latest.get(KEY_ACTION)),
                 "images": image_names_of(latest),
                 "arms": self._arms(node),
             },

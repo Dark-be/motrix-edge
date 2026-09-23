@@ -163,7 +163,8 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_SESSION_QUIT),
         CommandSpec(name=CMD_ROBOT_RESET),
         CommandSpec(name=CMD_ROBOT_ESTOP),
-        CommandSpec(name=CMD_ROBOT_EXECUTE, positional=("qpos",)),  # robot execute <qpos>
+        # robot execute <qpos> [joint|pose]
+        CommandSpec(name=CMD_ROBOT_EXECUTE, positional=("qpos", "action_space")),
         CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),  # robot teleop <true|false> [mode]
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end

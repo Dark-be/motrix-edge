@@ -31,6 +31,7 @@ from motrix_edge.command import (
     deadline_exceeded,
     handle_capture_meta,
     ok_result,
+    parse_action_space,
     parse_bool,
     parse_qpos,
     parse_teleop_mode,
@@ -183,10 +184,13 @@ class BaseSession:
             cmd.reply_to(result)
 
     def _execute_action(self, cmd) -> None:
-        """robot execute：解析 qpos 位置参数 → ``adapter.execute(qpos)``（维度校验在 adapter）。
+        """robot execute：解析 qpos + 可选动作空间 → ``adapter.execute``（维度 / 空间校验在 adapter）。
 
-        参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action，3 位小数）。
-        **下发前自查回执是否已过期**（``deadline_exceeded``）：调用方超时放弃后不再动真机。
+        ``action_space``（``joint`` 缺省 / ``pose``）声明 ``qpos`` 位置参数的语义：``pose`` 时
+        机器人进程按位姿解算成关节目标再运行（见 ``/v1/execute`` 契约）。
+        参数缺失 / 非法 / 维度不符 / 空间不支持 → 回执 rejected（不崩溃）；成功 → 回执 ok
+        （回显 action 与动作空间，数值 3 位小数）。**下发前自查回执是否已过期**
+        （``deadline_exceeded``）：调用方超时放弃后不再动真机。
         """
         if deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
             self._reply(
@@ -200,11 +204,12 @@ class BaseSession:
             return
         try:
             qpos = parse_qpos(cmd.params.get("qpos"))
-            self.adapter.execute(qpos)
+            space = parse_action_space(cmd.params.get("action_space"))
+            self.adapter.execute(qpos, space)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return
-        self._reply(cmd, ok_result(state="ready", action=round_floats(qpos)))
+        self._reply(cmd, ok_result(state="ready", action=round_floats(qpos), action_space=space))
 
     def _set_teleop(self, cmd) -> None:
         """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。

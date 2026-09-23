@@ -14,10 +14,11 @@
 
 import threading
 
+import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from motrix_edge.command import CommandBus, CommandResult, build_command_registry
+from motrix_edge.command import CommandBus, CommandResult, build_command_registry, parse_action_space
 from motrix_edge.errors import ErrorCode
 from motrix_edge.utils import cli as cli_module
 from motrix_edge.utils.cli import CliSession, CommandCompleter
@@ -42,9 +43,28 @@ def test_registry_match_spec_returns_positional_hint():
     spec = registry.match_spec("robot execute 0,0,0")
     assert spec is not None
     assert spec.name == "robot execute"
-    assert spec.positional == ("qpos",)
+    assert spec.positional == ("qpos", "action_space")
     # 未匹配命令返回 None
     assert registry.match_spec("unknown foo") is None
+
+
+def test_parse_argv_binds_execute_action_space():
+    """robot execute：动作空间可位置书写，也可 key=value（CLI 与 HTTP params 同源）。"""
+    registry = build_command_registry()
+    cmd = registry.parse_argv(["robot", "execute", "0,0,0", "pose"])
+    assert cmd.params == {"qpos": "0,0,0", "action_space": "pose"}
+    cmd = registry.parse_argv(["robot", "execute", "qpos=0,0,0", "action_space=joint"])
+    assert cmd.params == {"qpos": "0,0,0", "action_space": "joint"}
+
+
+def test_parse_action_space_defaults_and_validates():
+    """parse_action_space：缺失 / 空 → joint；词表内原样返回（大小写宽容）；非法 → ValueError。"""
+    assert parse_action_space(None) == "joint"
+    assert parse_action_space("") == "joint"
+    assert parse_action_space("POSE") == "pose"
+    assert parse_action_space("joint") == "joint"
+    with pytest.raises(ValueError, match="invalid action space"):
+        parse_action_space("cartesian")
 
 
 def test_execute_line_submits_command_and_formats_result():

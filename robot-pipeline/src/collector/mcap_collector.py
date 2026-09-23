@@ -23,9 +23,13 @@
 
     topic                        schema                               内容
     ---------------------------  -----------------------------------  --------------------------
-    observations/qpos            std_msgs/msg/Float64MultiArray       qpos（float64[]）
+    observations/qpos            std_msgs/msg/Float64MultiArray       关节角（当前值，与动作空间无关）
+    observations/gripper         std_msgs/msg/Float64MultiArray       夹爪（每臂 1）
     observations/images/<cam>    sensor_msgs/msg/CompressedImage      JPEG（format='jpeg'）
-    action                       std_msgs/msg/Float64MultiArray       动作（float64[]）
+    action                       std_msgs/msg/Float64MultiArray       关节段目标（float64[]）
+
+> 数采请留意：``observations/qpos`` **始终是关节角**（下发 ``pose`` 目标也不会改它的语义），
+> 夹爪在独立 topic 里；位姿**不入 mcap**（见 wiki/design/robot_pipeline_action_spaces.md）。
 
 帧时间以 obs 内 ``timestamp``（秒）为准：作消息 ``log_time``/``publish_time``（ns），
 并填入 CompressedImage 的 ``header.stamp``。可在 Foxglove 中按时间轴查看。
@@ -63,6 +67,7 @@ from utils.base.data_handler import debug_print
 
 # standard_obs keys (see Robot.get_standard_obs())
 KEY_QPOS = "observations/qpos"
+KEY_GRIPPER = "observations/gripper"  # 夹爪（独立动作空间 → 独立观测键）
 KEY_ACTION = "action"
 CAMERA_PREFIX = "observations/images/"
 KEY_TIMESTAMP = "timestamp"  # obs 内观测拍时刻（秒，float；观测线程 build_observation() 打点）
@@ -102,6 +107,7 @@ TYPE_COMPRESSED_IMAGE = "sensor_msgs/msg/CompressedImage"
 
 # topic 名（每信号一个）
 TOPIC_QPOS = "observations/qpos"
+TOPIC_GRIPPER = "observations/gripper"
 TOPIC_ACTION = "action"
 TOPIC_IMAGE_PREFIX = "observations/images/"
 
@@ -218,11 +224,16 @@ class ActMcapCollector:
         sec, nanosec = divmod(ts_ns, 1_000_000_000)
         qpos = np.asarray(standard_obs[KEY_QPOS], dtype=np.float64).tolist()
         action = np.asarray(standard_obs[KEY_ACTION], dtype=np.float64).tolist()
+        gripper = standard_obs.get(KEY_GRIPPER)
+        gripper = None if gripper is None else np.asarray(gripper, dtype=np.float64).tolist()
         seq = self._step_count
         self._step_count += 1
 
-        # qpos / action：std_msgs/msg/Float64MultiArray
-        for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
+        # qpos / action / gripper：std_msgs/msg/Float64MultiArray
+        signals = [(TOPIC_QPOS, qpos), (TOPIC_ACTION, action)]
+        if gripper is not None:
+            signals.append((TOPIC_GRIPPER, gripper))
+        for topic, data in signals:
             self._writer.write_message(
                 topic=topic,
                 schema=self._schema_qpos,

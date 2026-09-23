@@ -14,7 +14,7 @@
 
 """TestRobotAdapter —— 测试 / 无硬件联调用适配器（HTTP + 共享内存**薄客户端**）。
 
-机器人硬件初始化和连接由 SDK 进程（``robot-pipeline``）自行维护；本适配器
+机器人硬件初始化和连接由 SDK 进程（``robot-pipeline/server``）自行维护；本适配器
 只是 Edge 侧薄客户端，**不实现任何硬件 / 连接逻辑**：
 
 - **指令走 HTTP**：``execute`` / ``rollout`` / ``safe_stop`` / ``reset`` 等经 HTTP POST
@@ -33,11 +33,9 @@
 
 from motrix_edge.adapter.base import ActionSpace, AdapterCapability
 from motrix_edge.adapter.dual_piper_adapter import (
-    DUAL_ARM_ACTION_DIM,
     DUAL_ARM_ACTION_DIM_PER_ARM,
-    DUAL_ARM_HOME_QPOS,
+    DUAL_ARM_HOME,
     DUAL_ARM_NAMES,
-    DUAL_ARM_QPOS_SLICES,
 )
 from motrix_edge.adapter.http_shm_adapter import HttpShmAdapter
 
@@ -50,15 +48,14 @@ class TestRobotAdapter(HttpShmAdapter):
     # ---- 能力 / 连接参数（类级常量，自包含，不随 discover 传输）----
     ROBOT_MODEL_ID = "test-robot"
     ROBOT_MODEL_VERSION = "0.0.0"
-    ACTION_DIM = DUAL_ARM_ACTION_DIM  # 完整动作维度
+    ACTION_DIM_PER_ARM = DUAL_ARM_ACTION_DIM_PER_ARM  # 各空间每臂维度
     # 臂布局（与 DualPiperAdapter 同一组常量：双臂结构一致，避免两处重复声明）
-    ACTION_DIM_PER_ARM = DUAL_ARM_ACTION_DIM_PER_ARM
-    # 支持的动作空间：关节空间 + 末端位姿（位姿由机器人进程 IK 转关节后执行）
-    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.CARTESIAN_POSE)
-    POSE_DIM_PER_ARM = 6  # 每臂位姿维数（xyz + rpy）
+    # 支持的动作空间：关节 + 末端位姿（绝对 / 增量）+ 夹爪（位姿由机器人进程 IK 转关节后执行）
+    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.POSE, ActionSpace.POSE_DELTA, ActionSpace.GRIPPER)
+    # test robot 无真实运动学：位姿由同一拍 qpos 经固定映射派生
+    POSE_FRAME = "fk"
     ARM_NAMES = DUAL_ARM_NAMES
-    ARM_QPOS_SLICES = DUAL_ARM_QPOS_SLICES
-    HOME_QPOS = DUAL_ARM_HOME_QPOS
+    HOME = DUAL_ARM_HOME
     DEFAULT_ENABLED_ARMS = DUAL_ARM_NAMES
     # 相机布局：{相机名: 分辨率 (width, height)}（SDK 产出 raw RGB；observe 编码 JPEG 原图）
     IMAGES: dict[str, tuple[int, int]] = {

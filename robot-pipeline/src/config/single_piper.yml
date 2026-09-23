@@ -10,7 +10,8 @@ robot:
   name: single_piper_001
   type: single_piper_robot
   step_rad: 0.1 # 每帧最大关节增量（rad），env 控制线程限速接近 target
-  init_qpos: [0, 0, 0, 0, 0, 0, 1] # 6 关节 + 夹爪（Follower 从臂动作维度）
+  init_joint: [0, 0, 0, 0, 0, 0] # 初始关节角（rad，6 关节）：joint 空间
+  init_gripper: [1] # 初始夹爪开合（1 = 张开）：gripper 空间
   ports: # 控制器端口（CAN 接口名；**必填**，缺失 / 空串 → 启动报错）
     leader: can_right # Leader 主臂
     follower: can_left # Follower 从臂

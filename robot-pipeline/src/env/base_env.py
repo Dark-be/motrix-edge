@@ -107,35 +107,48 @@ class BaseEnv:
         self._slow_observe_warn_t = 0.0  # 观测慢帧告警上次输出时刻（限流，秒）
 
     # ---- 控制方法（HTTP 线程调用：只入队，不直接碰 robot / collector；由消费者线程执行）---------
-    def _check_action_dim(self, flat_action):
-        """同步校验动作维度（HTTP 线程即时反馈，不触碰 robot 状态）。"""
-        dim = self.robot.action_dim()
+    def _check_action_dim(self, flat_action, action_space=None):
+        """同步校验动作维度 + 动作空间（HTTP 线程即时反馈，不触碰 robot 状态）。
+
+        两种空间的**扁平维度相同**（每臂 7 维），差别在语义，所以除了维度还要校验空间是否
+        被机器人声明（``ACTION_SPACES``）——未声明 → ``ValueError``（server 映射 422）。
+        """
+        dim = self.robot.action_dim(self.robot.normalize_action_space(action_space))
         if len(flat_action) != dim:
-            raise ValueError(f"action dim {len(flat_action)} != ACTION_DIM {dim}")
+            raise ValueError(
+                f"action dim {len(flat_action)} != {self.robot.normalize_action_space(action_space)} dim {dim}"
+            )
+        if action_space is not None:
+            self.robot.normalize_action_space(action_space)
 
     def robot_reset(self):
         """程序复位到 home（非阻塞）：入队，由控制线程执行。"""
         debug_print(self.robot.name, "HTTP 收到命令: reset（复位到 home）", "INFO")
         self.commands.put(("reset", None))
 
-    def robot_execute(self, flat_action):
-        """直接下发动作指令（raw）：入队，由控制线程执行（同步校验维度）。"""
-        self._check_action_dim(flat_action)
-        debug_print(self.robot.name, f"HTTP 收到命令: execute dim={len(flat_action)}", "INFO")
-        self.commands.put(("execute", flat_action))
+    def robot_execute(self, flat_action, action_space=None):
+        """直接下发动作指令（raw）：入队，由控制线程执行（同步校验维度 / 动作空间）。
 
-    def robot_rollout(self, flat_action):
+        ``action_space=pose`` 时由 robot 在控制线程**解算一次**再运行（失败只影响
+        该条命令：日志 WARNING + 目标不变，见 ``_drain_commands``）。
+        """
+        self._check_action_dim(flat_action, action_space)
+        debug_print(self.robot.name, f"HTTP 收到命令: execute dim={len(flat_action)} space={action_space}", "INFO")
+        self.commands.put(("execute", (flat_action, action_space)))
+
+    def robot_rollout(self, flat_action, action_space=None):
         """推理闭环：入队，由控制线程执行（同步校验维度 + **遥操作中同步拒绝**）。
 
         **遥操作（人工接管，不分模式）进行中** → 抛 ``TakeoverActiveError``（server 映射 HTTP 409）：
         从臂 target 由人工决定，推理下发必须让位；控制线程执行时 ``BaseRobot.rollout()``
         **再判一次**（权威）——两次判定之间遥操作状态可能变化，以控制线程为准。
+        ``action_space`` 语义同 ``robot_execute``。
         """
-        self._check_action_dim(flat_action)
+        self._check_action_dim(flat_action, action_space)
         if self.robot.teleop_enabled:
             raise TakeoverActiveError("teleop (human takeover) active: rollout refused")
-        debug_print(self.robot.name, f"HTTP 收到命令: rollout dim={len(flat_action)}", "INFO")
-        self.commands.put(("rollout", flat_action))
+        debug_print(self.robot.name, f"HTTP 收到命令: rollout dim={len(flat_action)} space={action_space}", "INFO")
+        self.commands.put(("rollout", (flat_action, action_space)))
 
     def robot_safe_stop(self):
         """安全停止（软停：停发指令并保持位姿、不断电；幂等、失败安全）：入队，由控制线程执行。"""
@@ -365,7 +378,12 @@ class BaseEnv:
         )
 
     def _drain_commands(self):
-        """取出本拍所有待执行运动指令并应用到 robot（控制线程内，robot 单写者）。"""
+        """取出本拍所有待执行运动指令并应用到 robot（控制线程内，robot 单写者）。
+
+        两条错误通道**语义分开**：``ValueError``（调用方给的参数 / 目标不可达，如笛卡尔 IK 失败）
+        只影响该条命令——记 WARNING、目标保持不变，**不置 ``last_error``**（否则一个坏目标会把
+        Edge 看到的 health 打成 not ready）；其余异常视为硬件 / 控制器故障，进 ``last_error``。
+        """
         while True:
             try:
                 cmd, payload = self.commands.get_nowait()
@@ -375,9 +393,11 @@ class BaseEnv:
                 if cmd == "reset":
                     self.robot.reset()
                 elif cmd == "execute":
-                    self.robot.execute(payload)
+                    action, action_space = payload
+                    self.robot.execute(action, action_space)
                 elif cmd == "rollout":
-                    if not self.robot.rollout(payload):
+                    action, action_space = payload
+                    if not self.robot.rollout(action, action_space):
                         # 遥操作中：推理让位（预期状态，只记日志，不置 last_error / 不影响 health）
                         debug_print(self.robot.name, "rollout ignored: teleop (human takeover) active.", "WARNING")
                 elif cmd == "safe_stop":
@@ -392,6 +412,9 @@ class BaseEnv:
                         self.robot.enable_teleop()  # 缺省 absolute（兼容只发 enabled 的调用方）
                 else:
                     debug_print(self.robot.name, f"unknown command '{cmd}' ignored", "WARNING")
+            except ValueError as exc:
+                # 命令被拒（动作空间不支持 / 笛卡尔目标不可达）：目标未更新，机械臂保持原动作
+                debug_print(self.robot.name, f"command '{cmd}' rejected: {exc} (target unchanged)", "WARNING")
             except Exception as exc:  # noqa: BLE001 单条命令失败不阻断其余
                 # 存字符串：health 的 detail 是 str 字段，存异常对象会在序列化时丢成 {}
                 self.last_error = f"command '{cmd}' failed: {exc}"

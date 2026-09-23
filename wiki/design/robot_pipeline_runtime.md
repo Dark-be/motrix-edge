@@ -109,22 +109,54 @@ flowchart LR
 无影响；但下游（mcap → ACT / LeRobot 转换）**不要按固定滞后做时间平移校正**，需要严格对齐时
 须知该滞后并非定值。
 
-## 末端位姿观测（`POSE` / `pose_dim`）
+## 观测四键（`observations/qpos` / `gripper` / `pose` / `pose_target`）
 
-笛卡尔原语（LLM agent 会话）与前端预览都要末端位姿，它在 robot 侧由类常量 **`POSE`** 声明：
-0 = 不提供（共享内存保持 v2 布局，下游 `pose_dim = 0`，位姿显示为不可用）；> 0 = 提供，
-`_ShmPublisher` 创建写者时传 `pose_dim`（**布局 v3**，在 action 之后新增一块位姿区），每帧写
-`observations/pose`（与 qpos / action 同一帧，硬件上同拍采样）。
+观测**常驻、与动作空间无关**（下发 `joint` / `pose` / `pose_delta` / `gripper` 都不会改变观测的
+键与语义）：
+
+-   `observations/qpos`：**关节角**（每臂 6 维，扁平顺序 = 臂布局）——数采 / VLA 要的就是它；
+-   `observations/gripper`：**夹爪**（每臂 1 维，归一化 `[0, 1]`）——夹爪是独立的 `gripper` 动作
+    空间，故观测独立成键，不拼进关节角；
+-   `observations/pose`：**实测末端位姿**（每臂 6 维 `xyz + rpy`，米 / 弧度）——由**同一帧关节角**
+    正解；
+-   `observations/pose_target`：**目标位姿** = `FK(关节段目标)`（同一套正解、同一拍）——增量动作
+    （`pose_delta`）的解算结果靠它对上位可见（`settle` 判到位拿它当参考），「目标 − 实测」即当前
+    稳态误差。
+    机器人用类常量 **`POSE`** 声明：0 = 不提供（这两个键都不出现、共享内存不占对应区），> 0 = 提供
+    （`_ShmPublisher` 创建写者时传 `pose_dim` / `pose_target_dim`，区域顺序
+    `qpos | action | gripper | pose | pose_target | images`）。
 
 -   **每臂 6 维** `xyz + rpy`，扁平顺序与 qpos 的臂布局一致（对齐 Edge 侧适配器的
-    `POSE_DIM_PER_ARM = 6`）；
--   **test_robot**（虚拟）无真实运动学：用固定可逆映射从**同一拍 qpos** 派生——「关节动 → EEF
-    跟着动」，预览与笛卡尔闭环都可解释；
--   **真机**（piper 系列）应读法兰位姿（`PiperController.get_position()` / `get_flange_pose()`）
-    并在 `get_observation_pose()` 返回；若还需接受笛卡尔目标，则要补机器人侧 IK（见
-    [边缘原语接口](./motrix_edge_primitives.md) 的未决项）。
--   采集（`ActMcapCollector`）只落 qpos / action / images，**位姿不入 mcap**（数据集格式未定，
-    暂不扩 schema）。
+    `ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}` 与 `_select_arm_segments`）；
+-   **test_robot**（虚拟）无真实运动学：用固定可逆映射 `POSE_MAP`（对角：`x←j1 y←j2 z←j3
+rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——「关节动 → EEF 跟着动」，
+    预览与笛卡尔闭环都可解释；
+-   **dual_piper（真机，已实现）**：`POSE = 12` + `get_observation_pose(qpos=None)` 用**同一拍关节角**经
+    `robot/kinematics` 的正解解算（米 / 弧度，与 edge 契约同量纲同约定）——**与位姿目标的解算共用
+    同一个运动学模型**，所以「读到的位姿」与「下发的位姿目标」同系可直接比对；底层硬件依赖
+    只剩关节读写与 MIT 关节控制。SDK 法兰位姿（`get_flange_pose()`）**不在运行时链路**，只在现场
+    标定时读取对照（见 [位姿动作](./robot_pipeline_cartesian.md)）；
+-   **读取失败 → 写 NaN**（而不是 `None`）：写者的 `pose=None` 语义是「本帧保持旧值」，那会让
+    下游把陈旧位姿当真值；NaN 写进位姿区后 edge 侧的量纲/有限性防护会**丢弃该帧位姿**，
+    下游看到的是「声明了但本拍不可用」而不是「一个错的真值」（同原因只告警一条）；
+-   采集（`ActMcapCollector`）落 `observations/qpos`（关节角）+ `observations/gripper`（夹爪）+
+    `action` + 相机 topic，**位姿不入 mcap**（数据集格式未定，暂不扩 schema）。
+
+## 位姿动作下发：不经 `move_p`
+
+`pose` 是**动作语义**而非控制模式：机器人收到每臂 `xyz + rpy`（夹爪是另一个独立空间，另发一条）后，
+先由 `robot/kinematics` 的求解器解算成关节目标，之后与关节动作**走同一条通路**（`target_action`
+限速插值 → MIT 位置环）。求解器、坐标系约定、失败语义见
+[robot-pipeline 位姿动作](./robot_pipeline_cartesian.md)。
+
+**为什么不用 `move_p`**（SDK 约束，与实现选择无关）：
+
+-   piper SDK 的 `move_mit` / `move_j` / `move_p` 是**互斥的运动模式**，且默认“自动切模式”
+    （`_maybe_set_motion_mode`）——两套指令交替下发会**每帧互切运动模式**，30Hz 的力矩环会把
+    位姿目标冲掉；
+-   引入「单一控制模式」等于给机械臂加第二套控制通路（模式切换 + 切换时锚定状态），复杂度与
+    现场风险都高于「一次 IK + 单一路径」；
+-   故笛卡尔目标**一帧都不进 `move_p`**：解算完成后，控制层看到的始终只有关节目标。
 
 ## 频率与诊断
 

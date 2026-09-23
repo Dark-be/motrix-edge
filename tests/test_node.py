@@ -477,14 +477,16 @@ class _FakeExecAdapter:
 
     def __init__(self):
         self.executed = []
+        self.execute_spaces: list[str | None] = []
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
 
     def reset(self):
         self.reset_calls += 1
 
-    def execute(self, action):
+    def execute(self, action, action_space=None):
         self.executed.append(action)
+        self.execute_spaces.append(None if action_space is None else str(action_space))
 
     def set_teleop(self, enabled: bool, mode: str | None = None):
         self.teleop_calls.append((bool(enabled), mode))
@@ -535,6 +537,51 @@ def test_robot_execute_supports_fullwidth_commas():
     assert replies[0].status == "ok"
 
 
+def test_robot_execute_forwards_action_space():
+    """robot execute：可选动作空间参数透传给 adapter（pose → 机器人侧解算），回执回显。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_EXECUTE,
+            params={"qpos": "0,0,0,0,0,0,0", "action_space": "pose"},
+            reply_to=replies.append,
+        )
+    )
+    assert adapter.executed == [[0.0] * 7]
+    assert adapter.execute_spaces == ["pose"]
+    assert replies[0].status == "ok"
+    assert replies[0].data["action_space"] == "pose"
+
+
+def test_robot_execute_defaults_to_joint_space():
+    """robot execute：不带 action_space → joint（只用 ``<qpos>`` 的旧调用方语义不变）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "0,0,0"}, reply_to=replies.append))
+    assert adapter.execute_spaces == ["joint"]
+    assert replies[0].status == "ok"
+    assert replies[0].data["action_space"] == "joint"
+
+
+def test_robot_execute_rejects_unknown_action_space():
+    """robot execute：动作空间不在词表内 → rejected（不下发动作）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_EXECUTE,
+            params={"qpos": "0,0,0", "action_space": "cartesian"},
+            reply_to=replies.append,
+        )
+    )
+    assert replies[0].status == "rejected"
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
+    assert "invalid action space" in replies[0].error
+    assert adapter.executed == []
+    assert node.state == NodeState.READY
+
+
 def test_robot_execute_rejects_invalid_qpos():
     """READY 下 robot execute：qpos 缺失 / 非法 → rejected（不崩溃，不调用 adapter）。"""
     node, adapter = _ready_node_with_exec_adapter()
@@ -556,7 +603,7 @@ def test_robot_execute_rejected_when_adapter_dim_mismatch():
     """robot execute：adapter.execute 维度校验失败 → 回执 rejected（异常不外泄）。"""
 
     class _DimAdapter(_FakeExecAdapter):
-        def execute(self, action):
+        def execute(self, action, action_space=None):
             if len(action) != 14:
                 raise ValueError(f"execute action dim {len(action)} != action_dim 14")
             self.executed.append(action)

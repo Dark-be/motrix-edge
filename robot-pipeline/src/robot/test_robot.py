@@ -14,23 +14,20 @@
 
 """TestRobot —— 虚拟测试机器人（**无硬件依赖**，离线联调 Edge 侧 TestRobotAdapter）。
 
-参考 DualPiperRobot 的结构：由 **test 控制器 + test 视觉传感器**组装——动作经
-``_apply_action`` 下发到控制器，qpos 从控制器「手搓」读取，图像从传感器读取并解码
-为 raw RGB。
+结构对齐 ``DualPiperRobot``：**只做装配（控制器 + 相机）、取数与下发**——关节目标与位姿目标都只是
+“转发”：运动学（FK / IK / 限速域）在 ``TestArmController``（虚拟：位姿 = ``POSE_MAP @ q`` 线性映射）。
 
-- **控制器**：左/右臂 ``TestArmController``（内部有界随机游走，模拟关节反馈）。
-- **视觉传感器**：3 相机 ``TestVisionSensor``（每帧生成移动 RGB 渐变，JPEG 输出）。
-- **末端位姿**：无真实运动学 → 用**固定可逆映射**（``POSE_MAP``，对角）从同一拍关节派生，
-  保证「关节动 → EEF 跟着动」；供预览显示与笛卡尔策略的位姿观测（共享内存布局 v3）。
-- 身份 / 共享内存名（``type="test_robot"`` / ``SHM="test_robot_obs"``）对齐
-  ``TestRobotAdapter``；换真实 SDK 进程即可无缝替换。
+- **控制器**：左/右臂 ``TestArmController``（内部有界随机游走，模拟关节反馈 + 虚拟运动学）；
+- **视觉传感器**：3 相机 ``TestVisionSensor``（每帧生成移动 RGB 渐变，JPEG 输出）；
+- 身份 / 共享内存名（``type="test_robot"`` / ``SHM="test_robot_obs"``）对齐 ``TestRobotAdapter``；
+  换真实 SDK 进程即可无缝替换。
 """
 
 import cv2
 import numpy as np
 from utils.base.data_handler import debug_print  # noqa: E402
 
-from robot.base_robot import BaseRobot
+from robot.base_robot import BaseRobot, CartesianActionError
 from robot.controller.test_arm_controller import TestArmController  # noqa: E402
 from robot.sensor.test_vision_sensor import TestVisionSensor  # noqa: E402
 
@@ -45,15 +42,24 @@ class TestRobot(BaseRobot):
         "execute": True,
         "streaming": True,
     }
-    # 双臂：左 + 右臂，各 6 关节 + 1 夹爪 = 7，共 14
-    QPOS = 14
+    # 双臂：左 + 右臂，各 6 关节（joint 空间 12）；夹爪独立为 gripper 空间（每臂 1，共 2）
+    QPOS = 12
+    GRIPPER = 2
+    # ---- 臂接线：左/右臂各一个 TestArmController（虚拟执行 + 虚拟运动学）----
+    ARM_NAMES = ("left", "right")
+    ARM_CONTROLLERS = {"left": "left_arm", "right": "right_arm"}
+    JOINTS_PER_ARM = 6  # 每臂关节数（joint 空间每臂维度）
+    POSE_DIM_PER_ARM = 6  # 每臂位姿维数（xyz + rpy）
     # 末端位姿：每臂 6 维（xyz + rpy），双臂共 12（对齐 TestRobotAdapter.POSE_DIM_PER_ARM = 6）
     POSE = 12
-    # 「手搓 FK」：每臂 6 关节 → 6 维末端位姿的**固定可逆**线性映射（对角：x←j1 y←j2 z←j3
-    # rx←j4 ry←j5 rz←j6，平移 0.2 m/rad）。test 机器人没有真实运动学——用它保证位姿与关节
-    # **严格一致**（比独立随机游走有意义：关节动则 EEF 跟着动，预览与笛卡尔闭环都可解释）。
-    # 换真机后应改为读法兰位姿（或真实 IK/FK），本映射仅属虚拟机器人。
-    POSE_MAP = np.diag([0.2, 0.2, 0.2, 1.0, 1.0, 1.0])
+    # 动作空间：关节 + 位姿（绝对 / 增量）+ 夹爪（位姿由控制器的虚拟运动学解算，与 edge 侧
+    # TestRobotAdapter 一致）
+    ACTION_SPACES = (
+        BaseRobot.ACTION_SPACE_JOINT,
+        BaseRobot.ACTION_SPACE_POSE,
+        BaseRobot.ACTION_SPACE_POSE_DELTA,
+        BaseRobot.ACTION_SPACE_GRIPPER,
+    )
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     SHM_NAME = "test_robot_obs"
@@ -71,6 +77,108 @@ class TestRobot(BaseRobot):
             "cam_left_wrist": TestVisionSensor("cam_left_wrist"),
             "cam_right_wrist": TestVisionSensor("cam_right_wrist"),
         }
+        self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条，不刷屏）
+
+    # ---- 取数：关节 qpos / 末端位姿（同一拍关节角正解）----------------------------------
+    def _controller_for_arm(self, arm: str) -> TestArmController:
+        """按 ``ARM_CONTROLLERS`` 取该臂的控制器（装配缺失 → 响亮报错）。"""
+        key = self.ARM_CONTROLLERS.get(arm)
+        if key is None or key not in self.controllers:
+            raise RuntimeError(f"{self.name}: controller {key!r} for arm {arm!r} is not assembled")
+        return self.controllers[key]
+
+    def get_observation_qpos(self) -> np.ndarray:
+        """当前帧**关节角**（扁平 ``QPOS`` 维 = 每臂 6）：“读取”退化为控制器内部状态（虚拟随机游走）。"""
+        return self._read_joints()
+
+    def get_observation_pose(self, qpos: np.ndarray | None = None) -> np.ndarray | None:
+        """末端位姿（扁平 ``POSE`` 维）：每臂由虚拟运动学正解，与位姿目标的解算同一模型。
+
+        关节读数缺失 / 非法 → **NaN 向量**（下游丢弃该帧位姿）；同一原因只告警一条。
+        """
+        try:
+            joints = self._read_joints() if qpos is None else np.asarray(qpos, dtype=np.float64).reshape(-1)
+            if joints.shape[0] < self.QPOS or not np.all(np.isfinite(joints[: self.QPOS])):
+                raise ValueError(f"joint reading invalid (dim={joints.shape[0]})")
+        except Exception as exc:  # noqa: BLE001 读数不可用：本拍不出位姿，下一拍重试
+            reason = str(exc) or exc.__class__.__name__
+            if reason != self._pose_read_error:
+                self._pose_read_error = reason
+                debug_print(self.name, f"pose unavailable ({reason}); publishing NaN pose", "WARNING")
+            return np.full(self.POSE, np.nan)
+        self._pose_read_error = None  # 恢复正常：下次失败重新告警一条
+        return self._pose_of_joints(joints)
+
+    def _pose_of_joints(self, joints: np.ndarray) -> np.ndarray:
+        """逐臂虚拟正解 → 扁平位姿（``POSE`` 维）；关节值非法 → NaN 向量。"""
+        values = np.asarray(joints, dtype=np.float64).reshape(-1)
+        if values.shape[0] < self.QPOS or not np.all(np.isfinite(values[: self.QPOS])):
+            return np.full(self.POSE, np.nan)
+        arms = values[: self.QPOS].reshape(len(self.ARM_NAMES), self.JOINTS_PER_ARM)
+        return np.concatenate([TestArmController.joint_to_pose(arm) for arm in arms])
+
+    def get_target_pose(self) -> np.ndarray | None:
+        """**目标位姿** = ``FK(关节段目标)``（与 ``get_observation_pose()`` 同一套虚拟正解）。"""
+        return self._pose_of_joints(self._target_joints())
+
+    def get_observation_gripper(self) -> np.ndarray:
+        """当前帧夹爪（扁平 ``GRIPPER`` 维：每臂 1）——虚拟控制器直接给当前值。"""
+        values = []
+        for arm in self.ARM_NAMES:
+            gripper = self._controller_for_arm(arm).get_gripper()
+            values.append(np.nan if gripper is None else float(np.asarray(gripper, dtype=np.float64).reshape(-1)[0]))
+        return np.asarray(values, dtype=np.float64)
+
+    def _read_joints(self) -> np.ndarray:
+        """逐臂“读”关节角（扁平 ``QPOS`` 维，顺序对齐 ``ARM_NAMES``）；读不到 → RuntimeError。"""
+        parts: list[np.ndarray] = []
+        for arm in self.ARM_NAMES:
+            joint = self._controller_for_arm(arm).get_joint()
+            if joint is None:
+                raise RuntimeError(f"{self.name}: arm {arm!r} joint read failed (None)")
+            parts.append(np.asarray(joint, dtype=np.float64).reshape(-1)[: self.JOINTS_PER_ARM])
+        return np.concatenate(parts)
+
+    # ---- 下发：关节段（限速跟踪）/ 夹爪段（直接跟随）------------------------------
+    def _apply_action(self, action: np.ndarray):
+        """把底层目标向量 ``[关节段 | 夹爪段]`` 逐臂下发（控制线程每拍；限速已在 ``step()`` 完成）。"""
+        values = np.asarray(action, dtype=np.float64).reshape(-1)
+        for index, arm in enumerate(self.ARM_NAMES):
+            start = index * self.JOINTS_PER_ARM
+            controller = self._controller_for_arm(arm)
+            controller.set_joint(values[start : start + self.JOINTS_PER_ARM].copy())
+            controller.set_gripper(float(values[self.QPOS + index]))
+
+    def _prepare_target(self, qpos: np.ndarray, action_space: str | None) -> np.ndarray:
+        """准备**关节段目标**：``joint`` 直通；``pose`` / ``pose_delta`` 逐臂解算（虚拟线性运动学）。
+
+        ``pose_delta`` 由基类叠加成绝对目标位姿（基准 = 关节段目标的正解位姿）后再解算。
+        """
+        space = self.normalize_action_space(action_space)
+        values = np.asarray(qpos, dtype=np.float64).reshape(-1)
+        if space == self.ACTION_SPACE_JOINT:
+            if values.shape[0] != self.QPOS:
+                raise ValueError(f"{self.name}: joint action dim {values.shape[0]} != QPOS {self.QPOS}")
+            return values
+        target = self._absolute_pose_target(space, values)
+        seed = self._target_joints() if space == self.ACTION_SPACE_POSE_DELTA else self.current_action()
+        return self._solve_pose(target, seed)
+
+    def _solve_pose(self, pose: np.ndarray, seed: np.ndarray) -> np.ndarray:
+        """绝对目标位姿（每臂 ``xyz + rpy``）→ 关节段目标（逐臂虚拟逆解，起点 ``seed``）。"""
+        start_joints = np.asarray(seed, dtype=np.float64).reshape(-1)
+        home = np.asarray(self.init_joint, dtype=np.float64).reshape(-1)
+        joints: list[np.ndarray] = []
+        for index, arm in enumerate(self.ARM_NAMES):
+            start = index * self.POSE_DIM_PER_ARM
+            joint_start = index * self.JOINTS_PER_ARM
+            span = slice(joint_start, joint_start + self.JOINTS_PER_ARM)
+            block = pose[start : start + self.POSE_DIM_PER_ARM]
+            result = TestArmController.pose_to_joint(block, start_joints[span], fallback_seeds=(home[span],))
+            if not result.ok:
+                raise CartesianActionError(f"{self.name}: {arm} arm pose target rejected ({result.describe()})")
+            joints.append(np.asarray(result.q, dtype=np.float64))
+        return np.concatenate(joints)
 
     def connect(self):
         """连接 test 控制器与视觉传感器（虚拟，无硬件）。"""
@@ -92,53 +200,7 @@ class TestRobot(BaseRobot):
             sensor.disconnect()
             debug_print(self.name, f"Disconnect sensor {name} done", "INFO")
 
-    # ---- 控制 / 观测 ----
-    def _apply_action(self, action: np.ndarray):
-        """把目标 action 拆分到左/右臂控制器下发（限速已在 step() 内完成）。
-
-        布局：左 6 关节 + 左夹爪 + 右 6 关节 + 右夹爪（对齐 QPOS=14）。
-        """
-        left = self.controllers["left_arm"]
-        right = self.controllers["right_arm"]
-        left.set_joint(np.asarray(action[:6], dtype=np.float64).copy())
-        left.set_gripper(float(action[6]))
-        right.set_joint(np.asarray(action[7:13], dtype=np.float64).copy())
-        right.set_gripper(float(action[13]))
-
-    def get_observation_qpos(self) -> np.ndarray:
-        """读取当前帧原始观测的 qpos（扁平 QPOS 维）——从控制器「手搓」。
-
-        布局（对齐 QPOS=14）：左 6 关节 + 左夹爪 + 右 6 关节 + 右夹爪。
-        """
-        left_joint = self.controllers["left_arm"].get_joint()
-        left_gripper = self.controllers["left_arm"].get_gripper()
-        right_joint = self.controllers["right_arm"].get_joint()
-        right_gripper = self.controllers["right_arm"].get_gripper()
-        if left_joint is None or left_gripper is None or right_joint is None or right_gripper is None:
-            raise RuntimeError("TestRobot.get_observation_qpos: 控制器读取失败（返回 None）")
-        return np.concatenate(
-            [
-                np.asarray(left_joint).ravel(),
-                np.asarray(left_gripper).ravel(),
-                np.asarray(right_joint).ravel(),
-                np.asarray(right_gripper).ravel(),
-            ]
-        ).astype(np.float32)
-
-    def get_observation_pose(self, qpos=None) -> np.ndarray | None:
-        """末端位姿（扁平 12 维：左 xyz+rpy + 右 xyz+rpy，顺序同 QPOS 的臂布局）。
-
-        由**同一拍 qpos** 经 ``POSE_MAP``（手搓 FK，见类常量）派生：左臂取 ``qpos[0:6]``、
-        右臂取 ``qpos[7:13]``（与 ``_apply_action`` 的切片一致，夹爪不参与位姿）。
-        位姿与关节同源 → 预览里关节动则 EEF 跟着动，笛卡尔策略的观测/执行口径一致。
-        """
-        source = self.get_observation_qpos() if qpos is None else qpos
-        values = np.asarray(source, dtype=np.float64).reshape(-1)
-        if values.shape[0] < self.QPOS:
-            raise RuntimeError(f"TestRobot.get_observation_pose: qpos dim {values.shape[0]} < QPOS {self.QPOS}")
-        left = self.POSE_MAP @ values[0:6]
-        right = self.POSE_MAP @ values[7:13]
-        return np.concatenate([left, right]).astype(np.float64)
+    # ---- 相机（取数的一部分：由 capture_images() 组装为契约键）-------------------------
 
     def get_observation_images(self) -> list:
         """读取各相机 raw RGB 帧（顺序对齐 IMAGE_NAMES）。

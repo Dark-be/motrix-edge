@@ -9,7 +9,8 @@
 
 > 迁移（issue #10）：仓库根顶层 `config/` 目录与 `_GLOBAL_CONFIG.py`（`ROOT_DIR` / `CONFIG_DIR` /
 > `DATA_PATH` / `LOG_PATH` 仓库根推导常量）已删除——顶层 `config/` 与 robot-pipeline 顶层
-> `config` 包同名会干扰 ruff isort 的 first-party 分类；`edge.yml` 移入包内作 package data。
+> `config` 包同名会干扰 ruff isort 的 first-party 分类；`edge.yml` / `capture.yml` 移入包内作
+> package data。
 
 ## 配置路径与加载
 
@@ -35,18 +36,21 @@
 | `get_state_dir()`            | 可写状态目录：`XDG_STATE_HOME/motrix`，缺省 `CWD`                |
 | `CONFIG_DIR` / `LOG_PATH`    | 模块级导出（`LOG_PATH` 供 `debug_print` 与 uvicorn 日志使用）    |
 
+-   `CaptureMetaStore` 写 `capture.yml`：用可写配置路径（外界目录优先，否则状态目录；首次缺省
+    访问时把包内默认播种到可写位置）。
+
 配置段：
 
-| 段           | 说明                                                                                               | 消费方                |
-| ------------ | -------------------------------------------------------------------------------------------------- | --------------------- |
-| `INFO_LEVEL` | 日志级别（DEBUG / INFO / ERROR）                                                                   | 日志                  |
-| `identity`   | 设备身份（edge_id / edge_name / edge_version）                                                     | identity              |
-| `lease`      | 租约 ttl / renew_interval                                                                          | lease                 |
-| `server`     | HTTP 监听 host / port                                                                              | server                |
-| `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）                                                  | node / adapter        |
-| `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                    | node / CaptureSession |
-| `policy`     | 推理节点默认 host / port；策略类型、图像参数和 action_horizon 由客户端默认值或服务端 metadata 决定 | policy                |
-| `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                  | UploadSession         |
+| 段           | 说明                                                                                                                                                                                     | 消费方                       |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `INFO_LEVEL` | 日志级别（DEBUG / INFO / ERROR）                                                                                                                                                         | 日志                         |
+| `identity`   | 设备身份（edge_id / edge_name / edge_version）                                                                                                                                           | identity                     |
+| `lease`      | 租约 ttl / renew_interval                                                                                                                                                                | lease                        |
+| `server`     | HTTP 监听 host / port                                                                                                                                                                    | server                       |
+| `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）；启用臂 / 相机为**运行时配置**（命令 / 前端）                                                                                          | node / adapter               |
+| `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                                                                                                          | node / CaptureSession        |
+| `policy`     | 推理节点默认 host / port；`policy.rtc` 为实时动作块参数（块长上限 H / 前置段 P / 执行段 E / 后缀段 S / 重叠聚合）；策略专属配置项（prompt / 模型路径等）**运行时给定**（`infer config`） | policy / rtc / policy config |
+| `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                                                                                                        | UploadSession                |
 
 ## 命令行接口（CLI）
 

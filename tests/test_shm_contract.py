@@ -14,14 +14,16 @@
 
 """共享内存观测契约测试（真实 /dev/shm）—— 陈旧检测与写者重启后重新 attach。
 
-覆盖：正常读帧、写者停更时**不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach、
-位姿区（pose_dim > 0 时布局 v3 且读到 ``pose``；= 0 时与 v2 兼容且无 ``pose`` 键）。
+覆盖：正常读帧（qpos 关节 + action 关节段目标 + gripper + images）、写者停更时
+**不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach、位姿区（``pose_dim > 0``
+时额外给 ``pose`` 与 ``pose_target``；= 0 时两者都不占区且无对应键）、版本不符拒绝 attach。
 """
 
 import time
 import uuid
 
 import numpy as np
+import pytest
 
 from motrix_edge.adapter.shm_contract import ObsShmReader, ObsShmWriter
 
@@ -29,7 +31,9 @@ _IMAGE_SIZE = (4, 3)  # (width, height)
 _IMAGE_COUNT = 1
 _QPOS_DIM = 2
 _ACTION_DIM = 2
-_POSE_DIM = 6  # 位姿区（v3）；0 = 不启用（v2 兼容）
+_GRIPPER_DIM = 2
+_POSE_DIM = 6  # 位姿区（双臂量级）；0 = 本机不提供位姿
+_EXPECTED_VERSION = 5
 _STALE = 0.05  # 测试用陈旧阈值（秒）
 
 
@@ -38,11 +42,12 @@ def _new_name() -> str:
 
 
 def _write(writer: ObsShmWriter, value: int, action: int | None = None) -> None:
-    """写一帧：qpos / action / 图像都可辨识（action 缺省 = qpos）。"""
+    """写一帧：qpos / action / gripper / 图像都可辨识（action 缺省 = qpos）。"""
     writer.write(
         np.full(_QPOS_DIM, value, dtype="<f8"),
         np.full(_ACTION_DIM, value if action is None else action, dtype="<f8"),
         [np.full((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), value, dtype="<u1")],
+        np.full(_GRIPPER_DIM, value, dtype="<f8"),
     )
 
 
@@ -53,44 +58,71 @@ def _make_writer(name: str, pose_dim: int = 0) -> ObsShmWriter:
         image_size=_IMAGE_SIZE,
         qpos_dim=_QPOS_DIM,
         action_dim=_ACTION_DIM,
+        gripper_dim=_GRIPPER_DIM,
         pose_dim=pose_dim,
+        pose_target_dim=pose_dim,  # 目标位姿随实测位姿同生共死（机器人侧契约）
     )
 
 
 def test_pose_region_roundtrip():
-    """pose_dim > 0：布局升到 v3，读者拿到位姿（与 qpos / action 同一帧）。"""
+    """pose_dim > 0：读者拿到实测位姿与**目标位姿**（与 qpos / action / gripper 同一帧）。"""
     name = _new_name()
     writer = _make_writer(name, pose_dim=_POSE_DIM)
     reader = ObsShmReader(name)
     try:
         assert reader.pose_dim == _POSE_DIM
+        assert reader.pose_target_dim == _POSE_DIM
+        assert reader.gripper_dim == _GRIPPER_DIM
         writer.write(
             np.full(_QPOS_DIM, 1, dtype="<f8"),
             np.full(_ACTION_DIM, 2, dtype="<f8"),
             [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+            np.full(_GRIPPER_DIM, 3, dtype="<f8"),
             pose=np.arange(_POSE_DIM, dtype="<f8"),
+            pose_target=np.arange(_POSE_DIM, dtype="<f8") + 10.0,
         )
         frame = reader.read()
         assert frame is not None
         assert frame["pose"].tolist() == [0, 1, 2, 3, 4, 5]
+        assert frame["pose_target"].tolist() == [10, 11, 12, 13, 14, 15]
+        assert frame["gripper"].tolist() == [3, 3]
     finally:
         reader.close()
         writer.close()
         writer.unlink()
 
 
-def test_pose_dim_zero_keeps_v2_layout():
-    """pose_dim = 0：不占位姿区（版本保持 v2），读数不含 ``pose`` 键（向后兼容）。"""
+def test_pose_dim_zero_keeps_no_pose_region():
+    """pose_dim = 0：不占位姿区，读数不含 ``pose`` / ``pose_target`` 键（本机不提供位姿），
+    但夹爪始终在。"""
     name = _new_name()
     writer = _make_writer(name)
     reader = ObsShmReader(name)
     try:
-        assert reader.pose_dim == 0
+        assert reader.pose_dim == 0 and reader.pose_target_dim == 0
         _write(writer, 5)
         frame = reader.read()
-        assert frame is not None and "pose" not in frame
+        assert frame is not None and "pose" not in frame and "pose_target" not in frame
+        assert frame["gripper"].tolist() == [5, 5]
     finally:
         reader.close()
+        writer.close()
+        writer.unlink()
+
+
+def test_version_mismatch_is_rejected():
+    """版本不符（如还在跑旧版机器人进程）→ 拒绝 attach，报错说明需同步升级。"""
+    name = _new_name()
+    writer = _make_writer(name)
+    try:
+        assert int(writer._header["version"]) == _EXPECTED_VERSION
+        writer._header["version"] = _EXPECTED_VERSION - 1  # 冒充旧版进程写的段
+        with pytest.raises(ValueError, match="version"):
+            ObsShmReader(name)
+        writer._header["version"] = _EXPECTED_VERSION  # 版本回正 → 正常 attach
+        reader = ObsShmReader(name)
+        reader.close()
+    finally:
         writer.close()
         writer.unlink()
 

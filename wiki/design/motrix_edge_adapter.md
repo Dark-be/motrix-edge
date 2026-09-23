@@ -35,32 +35,34 @@ adapter/
 
 机器人**只运行一个进程 / 一个 adapter**（不新增单臂 adapter）：`configure()` 是 **`RobotAdapter`
 基类**的通用能力（`DualPiperAdapter` / `TestRobotAdapter` 声明臂布局后继承）。子类通过类常量声明
-**动作布局**（`ARM_NAMES` / `ARM_QPOS_SLICES` / `ACTION_DIM_PER_ARM` / `HOME_QPOS` /
-`DEFAULT_ENABLED_ARMS` / `IMAGES`），基类提供 `configure` / `_select_qpos` / `_expand_action`：
+**动作布局**（`ARM_NAMES` / `ACTION_DIM_PER_ARM`（**按空间**每臂维度）/ `HOME`（**按空间**全臂 home）/
+`DEFAULT_ENABLED_ARMS` / `IMAGES`），基类提供 `configure` / `_select_arm_segments` / `_expand_action`：
 
--   `enabled_arms`（left / right）：只启用部分臂时 `action_dim = 启用臂数 × ACTION_DIM_PER_ARM`；
-    `execute` / `rollout` 按启用臂数接收动作，**未启用臂动作用 `HOME_QPOS` 填充**（类常量定义，
-    不参与运行时配置）；`observe()` 只返回启用臂 qpos **与 action**（按物理顺序 `ARM_NAMES`
-    拼接，同一裁剪口径）。
+-   `enabled_arms`（right / left）：只启用部分臂时，各空间维度按**该空间的每臂维度 × 启用臂数**算
+    （joint 6 / pose 6 / gripper 1），`execute` 按启用臂数接收动作，**未启用臂动作用同空间的
+    `HOME[space]` 填充**（类常量，不参与运行时配置）；`observe()` 只返回启用臂的值（关节角 /
+    关节段目标 / 夹爪 / 位姿各自裁剪，物理顺序 left → right 拼接）；
 -   `enabled_cameras`：从 `IMAGES` 中挑选要暴露的相机（影响 `observe()` 与 `capabilities`）。
 -   无臂概念（`ARM_NAMES` 为空）的 adapter 忽略 `enabled_arms`；参数**原子校验**：未知臂 / 未知
     相机 / 空臂 → `ValueError`，当前能力不变。不重启、不新建连接；缺省（全臂 / 全相机）与未裁剪
     行为一致。
--   **会话进行中（采集 / 推理）拒绝变更**：`configure()` 立即改变 `action_dim` 与 `observe()`
+-   **会话进行中（采集 / 推理）拒绝变更**：`configure()` 立即改变各空间维度与 `observe()`
     布局，episode 中途变化会让同一 episode 内 qpos / action 维度不一致（mcap 下游按固定维度
     解析），推理侧按旧维度下发的动作也会被维度校验拒绝——`POST /v1/adapters/config` 回 `409`、
     `adapter config set` 回 rejected；先 `session quit` 再改。
 -   查询：`adapter config current` / `GET /v1/adapters/current` 回执 adapter **实际生效**的启用臂 /
-    相机 / 动作维度 / home；**未绑定 → rejected / 404**（能力布局是 adapter 类常量、discover
+    相机 / 各空间维度 / home；**未绑定 → rejected / 404**（能力布局是 adapter 类常量、discover
     不传，未绑定就没有机型信息——不猜、不回退某个 adapter 的默认）。
 
 **运行时配置（不写 edge.yml）**：由命令 `adapter config set <json>` 或前端
 `POST /v1/adapters/config`（受控操作，须租约）设置，存于节点运行时状态 `adapter_config`，在
 adapter discover 绑定时应用（`_probe_adapter` → `apply_adapter_config`）；**未绑定 adapter 时
-也先按类常量**（`ARM_NAMES` / `IMAGES`）**静态校验**（错误停在 set 时刻，而非等绑定失败、节点
-静默停在 IDLE）。非法配置 → 命令 rejected / HTTP 400，**会话进行中 → rejected / HTTP 409**
-（先 `session quit`），两种情况下状态都不更新。查询用 `adapter config` /
-`GET /v1/adapters/config`。
+也先按类常量**（`ARM_NAMES` / `IMAGES`）**静态校验**（`normalize_capability_config()`，错误停在
+set 时刻，而非等绑定失败、节点静默停在 IDLE）。非法配置 → 命令 rejected / HTTP 400，**会话进行
+中 → rejected / HTTP 409**（先 `session quit`），两种情况下状态都不更新。查询用 `adapter config` /
+`GET /v1/adapters/config`。缺省（全臂）行为与未裁剪一致：`action_dims = {joint: 12, pose: 12,
+gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用臂数直通），「哪条臂 / 怎么映射回全臂
+维度」全部由 adapter 承载。
 
 ## RobotAdapter 契约
 
@@ -83,28 +85,60 @@ adapter discover 绑定时应用（`_probe_adapter` → `apply_adapter_config`�
 
 ### 观测键契约（standard_obs 键名）
 
-单点定义于 `base.py`：`KEY_QPOS = "observations/qpos"`、`KEY_ACTION = "action"`、
-`KEY_QPOS = "observations/qpos"`、`KEY_ACTION = "action"`、`KEY_POSE = "observations/pose"`、
-`CAMERA_PREFIX = "observations/images/"`（相机名 `observations/images/<name>`）。
-`capabilities.observation_keys` 与 `observe()` 实际返回**同一套键**（qpos + action + 启用
-相机），随 `configure()` 实时变化；`image_names` 由相机键推导。robot 进程 discover / health 上报
-的 `observation_keys` 同口径（不随 `configure` 变化，固定 qpos + action + 该机型全部相机）。
+单点定义于 `base.py`：`KEY_QPOS = "observations/qpos"`（**关节角**）、`KEY_ACTION = "action"`
+（关节段目标）、`KEY_GRIPPER = "observations/gripper"`（夹爪）、`KEY_POSE = "observations/pose"`
+（**实测**末端位姿）、`KEY_POSE_TARGET = "observations/pose_target"`（**目标**位姿 =
+`FK(关节段目标)`）、`CAMERA_PREFIX = "observations/images/"`（相机名
+`observations/images/<name>`）。
+`capabilities.observation_keys` 与 `observe()` 实际返回**同一套键**（qpos + action + gripper +
+启用相机，机器人提供位姿时另有 pose / pose_target），随 `configure()` 实时变化；`image_names`
+由相机键推理（`image_names_of()` 单点）。robot 进程 discover / health 上报的 `observation_keys`
+同口径。
 
+**观测常驻、与动作空间无关**：`qpos` 始终是关节角（数采 / VLA 要的就是它），`gripper` 是
+独立的夹爪键（每臂 1），`pose` / `pose_target` 是**实测 / 目标**末端位姿（每臂 6 维 xyz + rpy，
+米 / 弧度；机器人提供位姿时才有）——「目标 − 实测」就是底层 MIT 的实时稳态误差。
 其中 `action` 是**进程侧当前目标动作**（SDK 侧正在执行的指令；尚无指令时进程回退为 qpos），
 经共享内存单独传输，**不是 qpos 的副本**——所以 preview 显示的是真实指令。裁剪后
-`qpos` / `action`（以及机器人提供位姿时的 `pose`）共用同一个 `_select_qpos()` 口径，
-观测内臂维度始终自洽。
-`pose` = 末端位姿（每臂 6 维 xyz + rpy，单位米 / 弧度），只在机器人提供时出现（共享内存
-布局 `pose_dim > 0`）；笛卡尔策略靠它知道自己末端在哪（见
+`qpos` / `action` / `gripper`（以及机器人提供位姿时的 `pose` / `pose_target`）共用同一个
+`_select_arm_segments()` 口径，观测内臂维度始终自洽；位姿策略靠 `pose` 知道自己末端在哪（见
 [边缘原语接口（primitives）](./motrix_edge_primitives.md)）。
+
+**位姿约定（读 / 写必须同系）**：
+
+-   **形状 / 单位**：每臂 `xyz(3) + rpy(3)` = 6 维、米 / 弧度（`pose_convention: xyz_rpy`）。
+    SDK 若有 `0.001 mm` / `0.001°` 之类整数标度，由**机器人进程**换算后再写入位姿区。
+-   **坐标系**：`POSE_FRAME`（如 `flange` / `tcp` / `fk`）声明"这是哪个系"。位姿观测与位姿
+    动作**必须同一个系**——`move_delta` 这类「当前位姿 + 增量」差一个常量偏移就会打偏。
+-   **能力以声明为准**：`effective_pose_dim_per_arm()` 取适配器声明的 `pose` 每臂维数（未声明
+    `pose` 空间 → 0）；位姿键也只在声明时才进 `capabilities.observation_keys`，上游（agent / 策略）
+    能提前拒绝而不是拿到空位姿再猜。读侧另有一道**实际长度**校验（见下条）。
+-   **量纲防护**：位姿长度与（臂数 × 每臂维数）不符，或数值超出 `|xyz| ≤ 10 m` /
+    `|rpy| ≤ 7 rad`（`http_shm_adapter.POSE_MAX_ABS_*`）→ 丢弃该拍 `pose` 并记一条 ERROR
+    （同原因不刷屏）。宁可缺，也不把「把 0.001mm 当米」这类值喂进闭环。
 
 ### 动作空间（ActionSpace）
 
-`ActionSpace`（`base.py`）声明 flat 动作向量的**语义**：`joint`（缺省：每臂 6 关节 + 夹爪，
-绝对目标）与 `cartesian_pose`（每臂 xyz + rpy + 夹爪）。声明链路：调用方声明
-（`adapter.rollout(action, action_space=...)`，如原语接口的笛卡尔原语）
-→ 适配器校验（不在 `ACTION_SPACES` 内 → `ValueError`）→ HTTP `/v1/rollout` 的 `action_space`
-字段 → 机器人进程解释（笛卡尔走 IK）。缺省不发该字段时机器人按关节空间解释，**向后兼容**。
+`ActionSpace`（`base.py`）声明 flat 动作向量的**语义**，三个空间**各自只表达一件事**、值都按臂
+等长展开：`joint`（缺省：每臂 6 关节角，绝对目标）/ `pose`（每臂 xyz + rpy，绝对目标）/
+`pose_delta`（每臂 xyz + rpy，**增量**，由机器人叠加在关节段目标上）/ `gripper`（每臂 1
+夹爪，归一化 `[0, 1]`）。声明链路：调用方声明
+（命令 `robot execute <value> [joint|pose|gripper]`；`adapter.rollout(action, action_space=...)`，
+如原语接口的位姿原语）
+→ 适配器校验（不在 `ACTION_SPACES` 内 / 维度不符 → `ValueError`）→ HTTP `/v1/execute` / `/v1/rollout`
+的 `action_space` 字段 → 机器人进程解释（`pose` 走求解器；`gripper` 只写夹爪段）。缺省不发该字段时
+机器人按关节空间解释，**向后兼容**；广告支持的空间与维度 = `GET /v1/adapters` 的
+`capabilities.action_spaces` / `action_dims`。
+
+⚠️ **机器人进程必须真的认 `action_space`**：若它忽略该字段并按关节空间解释，一份位姿
+向量（与关节值同为每臂 6 维）会被当成关节角下发——**静默误解释**。因此机器人侧要：① `ActionRequest` 接受
+`action_space`；② 三个空间分别「只写自己那一段」（`pose` 解算成关节后进同一条关节通路，夹爪另走一条）；
+③ discover 里如实声明动作空间与各空间维度。
+
+> 真机 dual piper 已接入：`pose` 的位姿在机器人侧由求解器解算成关节目标，再经
+> `move_mit` 下发（**不经 `move_p`**，不引入第二套运动模式）——见
+> [robot-pipeline 位姿动作](./robot_pipeline_cartesian.md)。解算失败（超限位 / 不收敛）
+> 时机器人回 422 且不改目标，edge 侧因此不会拿到「被当关节角下发」的错误运动。
 
 设计取舍：
 
@@ -180,7 +214,7 @@ adapter:
 | POST | `/v1/discover`                          | —                         | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`） |
 | GET  | `/v1/health`                            | —                         | `{ok, detail}`                                                                      |
 | POST | `/v1/reset`                             | —                         | `{status}`                                                                          |
-| POST | `/v1/execute`                           | `{action}`                | `{status}`                                                                          |
+| POST | `/v1/execute`                           | `{action, action_space?}` | `{status}`                                                                          |
 | POST | `/v1/rollout`                           | `{action, action_space?}` | `{status}`；**遥操作中 → 409**（推理让位）                                          |
 | POST | `/v1/teleop`                            | `{enabled, mode?}`        | `{status}`（`mode`：`absolute` 缺省 / `delta` 人工接管）                            |
 | POST | `/v1/safe_stop`                         | —                         | `{status}`                                                                          |
@@ -207,13 +241,15 @@ adapter:
 
 -   **HttpShmAdapter**（`http_shm_adapter.py`）：中间件型 adapter 的公共基类——指令经 HTTP
     下发到机器人进程、观测经共享内存读取（硬件与连接由进程自维护），实现 `RobotAdapter`
-    的全部契约方法。子类只声明形态常量：`ADAPTER_TYPE` / `ACTION_DIM` / `IMAGES`
-    （相机名 → 分辨率）/ `CAPABILITIES`，以及连接参数缺省值 `SDK_URL` / `SHM_NAME`。
--   **TestRobotAdapter**（`test_adapter.py`）：测试 / 无硬件联调；`ACTION_DIM` = 14，`IMAGES`
-    = cam_head / cam_left_wrist / cam_right_wrist（640×480），共享内存 `test_robot_obs`。
--   **DualPiperAdapter**（`dual_piper_adapter.py`）：双臂 Piper（左右各 6 关节 + 夹爪 = 14）；
-    相机布局与能力同 TestRobotAdapter，共享内存 `dual_piper_obs`；真实承载端是同仓的
-    [robot-pipeline](../../robot-pipeline/README.md)。
+    的全部契约方法。子类只声明形态常量：`ADAPTER_TYPE` / `ACTION_DIM_PER_ARM`（按空间）/
+    `HOME`（按空间）/ `ACTION_SPACES` / `IMAGES`（相机名 → 分辨率）/ `CAPABILITIES`，以及连接
+    参数缺省值 `SDK_URL` / `SHM_NAME`。
+-   **TestRobotAdapter**（`test_adapter.py`）：测试 / 无硬件联调；三空间维度
+    `{joint: 12, pose: 12, gripper: 2}`，`IMAGES` = cam_head / cam_left_wrist / cam_right_wrist
+    （640×480），共享内存 `test_robot_obs`。
+-   **DualPiperAdapter**（`dual_piper_adapter.py`）：双臂 Piper（每臂 6 关节 + 1 夹爪；joint / pose
+    每臂 6、gripper 每臂 1）；相机布局与能力同 TestRobotAdapter，共享内存 `dual_piper_obs`；
+    真实承载端是同仓的 [robot-pipeline](../../robot-pipeline/README.md)。
 
 ## 接入方式（外部 SDK / 包）
 
