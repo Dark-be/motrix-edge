@@ -4,7 +4,13 @@
 > 或单帧取图端点，本文通篇是**目标态**（分期见文末「分期」，未决项见文末「未决项」）。
 > 它依赖的位姿 / 动作空间契约（`observations/pose` / `observations/pose_target` /
 > `observations/qpos`（**状态向量**：每臂「值 + 夹爪」，夹爪不再单独成键）、`ActionSpace.POSE` /
-> `ActionSpace.POSE_DELTA`、`/v1/preview` 的 `pose` / `pose_target` / `gripper` / `arms`）来自**位姿动作 MR**，master 上同样尚未提供。
+> `ActionSpace.POSE_DELTA`、`/v1/preview` 的 `pose` / `pose_target` / `gripper` / `arms`）来自**位姿动作 MR**，
+> **已合入 `dev`**（edge 侧 `ActionSpace.POSE` / `POSE_DELTA` 与 robot 侧 `kinematics` 齐备）。
+>
+> **已经先行的子集**：RPent 面（`POST /call` 的 `env.*`）按本文语义交付了
+> `move_delta` / `rotate_delta` / `gripper` / `recover`（见 [RPent 对接契约](./motrix_edge_rpent_bridge.md)）；
+> **本文的 `/v1/primitives` 端点、原语执行器、参数钳制（工作空间盒 / 单步上限 / `max_wait`）
+> 与 `goto` / `wait` / `stop` 仍未实现**。
 
 ## 摘要
 
@@ -104,6 +110,10 @@ flowchart LR
     （`move_rel` / `rotate_rel`）用 `action_space=pose_delta`（edge → adapter → robot-pipeline），
     **robot 侧零新增端点**（两个动作空间随位姿动作 MR 引入）。
 -   增量原语的**基准与到位参考都在机器人侧**：edge 不下发绝对目标，也不缓存基准位姿。
+-   **基座来源单点**：所有「保持当前…」的基座（关节段 / 位姿 / 夹爪槽）都取**目标向量**
+    `observations/action`（位姿用它的 `pose_target` 投影），机器人没发布该键才**整体**退实测
+    （`qpos` / `pose`）——**值段与夹爪槽必须同源**，不把两条向量拼成一份基座；实测只用于到位判定
+    （“到了没”看实测），写原语的回执以 `source`（`target` / `measured`）标注实际来源。
 -   **容差分位置 / 姿态两项，且与 facade 同一份取值**：`tol_pos`（米）与 `tol_rot`（弧度）分别比、
     **都**满足才算 `arrived`——与 facade 对 `ActionSpace.POSE` 的 `settle.within()` 同一口径；
     **位姿原语一律如此，含只下发姿态的 `rotate_rel`**。缺省与 facade **同源**：位置 5 cm / 姿态

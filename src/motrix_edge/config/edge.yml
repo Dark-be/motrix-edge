@@ -17,6 +17,51 @@ lease:
 server:
   host: 0.0.0.0
   port: 8000
+  # RPent 兼容的 RPC 面（POST /call；见 wiki/design/motrix_edge_rpent_bridge.md）：
+  # 外部 agent（LLM 当大脑 + 冻 VLA 当小脑，多轮工具调用）经它驱动 edge 执行原语。
+  # RPent 不认 X-Lease-Id 头，故租约 id 由服务自行解析：
+  #   lease_id: null → 用当前活跃租约（Console 签发后即有）；填值 → 固定用该租约。
+  # 写方法与观测方法均须持有活跃租约；healthz / 能力自描述（get_env_meta / get_camera_meta）免租约。
+  rpent:
+    lease_id: null # 固定租约 id（null = 用当前活跃租约）
+    step_hz: null # 动作块逐帧下发频率（null = 机器人上报的实测 control_hz）
+    # 外部动作块布局（null = 要求块的维度与 adapter 的 action_dim 一致）。
+    # rpent/dual_franka = 20 维 [L_xyz(3), L_rot6d(6), L_grip(1), R_xyz(3), R_rot6d(6), R_grip(1)]
+    # → 转成 edge 每臂 [xyz, rpy, gripper] 笛卡尔绝对目标后再下发（rot6d → rpy，夹爪 ±1 → [0,1]）。
+    action_layout: null
+    # true = 只做转换并把结果回给调用方，**不下发**（真机联调先对数值，不动机器人）。
+    dry_run: false
+    # 观测图来源（RPent 会原样落盘 PNG 并内联给模型）：
+    #   native  = 直读 adapter 原图（相机原生分辨率，小物体 / 夹爪间隙看得清；planner 面向）
+    #   preview = 用 FrameManager 降采样缓存（320x240，省带宽）
+    # 动作块的逐帧观测（面向 VLA、不喂 LLM）恒走缓存，不受此项影响。
+    image_source: native
+    # 到位等待（settle）：写原语下发后阻塞到「误差 ≤ 容差 / 超时 / 停滞」，回执带
+    # reached / final_err（+ 分项 final_err_m / final_err_rad）/ elapsed_s / 生效容差等
+    # ——外部 agent 靠它判成败，不等就会读到未动的那一帧。
+    # ⚠️ 容差按 **MIT 实际稳态误差** 标定：底层只有 P/D、无重力 / 力矩前馈（t_ff = 0），
+    #   关节会停在 τ_gravity / kp 附近的平衡点（实测平台值随姿态 / 负载变，可达 0.1–0.25 rad
+    #   量级）→「设定什么关节就是什么关节」并不成立；容差小于稳态误差时 reached 永远不成立，
+    #   每个写原语都会走满 stall_s / timeout_s（agent 侧看到「全是 stalled / timeout」）。
+    #   **当前取值（位置 5cm / 姿态 0.4rad ≈ 23°）是有意放大的**：先把这个静态误差盖住，
+    #   让 agent 判得出「到位」，而不是每次都等到超时；等底层补上重力 / 力矩前馈、或按现场实测
+    #   （下发一个目标等它停稳，看回执 final_err / final_err_m / final_err_rad 的平台值）收敛后
+    #   再把两个值一起收紧（只收紧一个 → 「到位」会总差在另一个上）。
+    settle:
+      enabled: true
+      pos_tol: 0.05 # 位置容差（米）：与姿态**分别**判定，不把米和弧度混进一个阈值
+      rot_tol: 0.4 # 姿态 / 关节容差（弧度）：≈23°，覆盖 MIT 静态误差（见上）
+      timeout_s: 5.0 # 单次原语的等待上限（秒）
+      max_timeout_s: 90.0 # 逐次覆盖 settle.timeout_s 的上限：客户端 HTTP 超时 120s，
+      # 超了会把结构化回执变成客户端异常 → 宁可 edge 提前回 reached=false / timeout=true
+      stall_s: 1.0 # 主误差多久没改善判 stalled（撞到东西 / 力不足；MIT 下也可能只是稳态误差平台）
+      stall_eps: 1e-4 # 「有改善」的最小幅度：小于编码器噪声量级时误差会一直显得在改善 →
+      # 判不出 stalled、一路等到 timeout；现场看到这个现象就把它调到噪声量级以上
+      poll_s: 0.02 # 轮询间隔（秒）
+      target_wait_s: 1.0 # 位姿增量（move_delta / rotate_delta）下发后等「命令落地」的上限（秒）：
+      # 观测里的 observations/pose_target 从下发前快照跃迁即视为落地（下发走命令队列 + 观测按观察
+      # 频率发布，不等就会拿旧目标当参考而误判到位）；一直未跃迁 → reached: null + not_applied
+
 # 上传会话（UploadSession，/v1/uploads/*；见 wiki/design/motrix_edge_upload_session.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。
 # **本版本只做本地文件查看与打包**：临时性的数据查看与筛选由数采人员经前端进行，打包后
