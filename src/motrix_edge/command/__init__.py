@@ -91,6 +91,7 @@ from .naming import (
 from .params import (
     ROLLOUT_MODE_CONTINUOUS,
     ROLLOUT_MODE_SINGLE,
+    parse_action_space,
     parse_bool,
     parse_meta,
     parse_qpos,

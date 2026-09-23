@@ -25,6 +25,8 @@
 -   [Edge 级租约（lease）](./motrix_edge_lease.md)
 -   [Edge Web Console（前端）](./motrix_edge_web_console.md)
 -   [robot-pipeline 运行时（env / robot 双线程）](./robot_pipeline_runtime.md)
+-   [robot-pipeline 位姿动作（求解器）](./robot_pipeline_cartesian.md)
+-   [robot-pipeline 动作空间与观测契约（joint / pose / gripper）](./robot_pipeline_action_spaces.md)
 -   [robot-pipeline 遥操作（绝对映射 / 增量接管）](./robot_pipeline_teleop.md)
 
 <!-- 新增设计文档后在此登记标题链接。 -->

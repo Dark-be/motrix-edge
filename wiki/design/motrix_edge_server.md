@@ -151,12 +151,20 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
     写原语回 `sent: false` + `reached: null` + `reason: dry_run`；`_push_action` 兜底报错），
     真机联调先对数值、机器人不动；是否 dry-run 可从 `settle.dry_run` 看出。
 -   **到位等待**：写原语（`move_delta` / `rotate_delta` / `set_gripper` / `recover_joint_posture`）
-    默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞（`server.rpent.settle.{pos_tol,rot_tol,timeout_s,stall_s}`，
-    默认 **3mm / 0.02rad / 5s**），回执带 `reached` / `final_err` / `elapsed_s`（+ `stalled` / `timeout`）
-    与生效容差 `settle_pos_tol` / `settle_rot_tol`——外部 agent 靠它判成败，不等就会读到未动的那一帧，
-    凭 `final_err` 与容差又能区分「还差一点」与「`stalled` 受阻」。可**逐次覆盖**：`settle=False`
-    不阻塞（`reached: null` + `reason`，仅流式场景用）、`settle={"timeout_s": 60}` 改单项（**上限
-    `max_timeout_s: 90s`**，超了会变成客户端 HTTP 超时异常）、非法类型 → `kind=invalid_params`。
+    默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞（`server.rpent.settle.{pos_tol,rot_tol,timeout_s,stall_s,target_wait_s}`，
+    默认 **1cm / 0.05rad / 5s / 1s**），回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /
+    `final_err_rad` 姿态或关节弧度）/ `elapsed_s`（+ `stalled` / `timeout`）与生效容差
+    `settle_pos_tol` / `settle_rot_tol`——外部 agent 靠它判成败，不等就会读到未动的那一帧，
+    凭 `final_err` 与容差又能区分「还差一点」与「`stalled` 受阻」。**位置与姿态分别比容差**
+    （不把米和弧度混进一个阈值）。**位姿增量（`move_delta` / `rotate_delta`）的到位参考取
+    `observations/pose_target`**（机器人解算出的绝对目标）：下发后先等它从快照跃迁（命令走队列 + 观测
+    按观察频率发布，不等就会拿旧目标当参考而误判到位），一直未跃迁 → `reached: null` +
+    `not_applied`；跃迁后与「快照 + 增量」不符 → `base_changed`（基准被第三方改动）。
+    可**逐次覆盖**：`settle=False` 不阻塞（`reached: null` + `reason`，
+    仅流式场景用）、`settle={"timeout_s": 60}` 改单项（**上限 `max_timeout_s: 90s`**，超了会变成
+    客户端 HTTP 超时异常）、非法类型 → `kind=invalid_params`。⚠️ 底层是 MIT 力矩控制（只有 P/D、
+    `t_ff = 0`）→ **存在稳态误差**，容差必须按现场实测标定，见
+    [RPent 桥接的 MIT 容差标定](./motrix_edge_rpent_bridge.md)。
 -   **观测图分辨率**：`server.rpent.image_source: native`（默认）→ 直读 `adapter.observe()` 原图，
     并与同拍 qpos / pose 一起回（RPent 原样落盘 PNG 并内联给模型，小物体 / 夹爪间隙才看得清）；
     `preview` → 用 `FrameManager` 的 320×240 缓存。动作块逐帧观测面向 VLA，恒走缓存。
@@ -170,19 +178,19 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
 采集为**观测会话**：写端点（`POST` / `DELETE /v1/captures`、`/v1/captures/sync`）经
 `CommandService` 提交命令（与 CLI 同名词），读端点（status / precheck / meta）直读快照或 store：
 
-| 方法   | 路径                      | 租约          | 说明                                                                                                                                          |
-| ------ | ------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                                             |
+| 方法   | 路径                      | 租约          | 说明                                                                                                                                               |
+| ------ | ------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                                                  |
 | GET    | `/v1/captures`            | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id |
-| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                                               |
-| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段，前端选择列表）                                                                             |
-| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                                                   |
-| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                                                     |
-| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                                                |
-| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                                                                        |
-| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加）                                                      |
-| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                                                |
-| GET    | `/v1/preview`             | 必需          | 最新观测预览（qpos / action / pose 末端位姿 + 相机名 / 臂名；**不要求会话**，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)） |
+| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                                                    |
+| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段，前端选择列表）                                                                                  |
+| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                                                        |
+| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                                                          |
+| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                                                     |
+| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                                                                             |
+| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加）                                                           |
+| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                                                     |
+| GET    | `/v1/preview`             | 必需          | 最新观测预览（qpos / action / pose 末端位姿 + 相机名 / 臂名；**不要求会话**，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）     |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 

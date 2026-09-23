@@ -62,10 +62,11 @@ from pydantic import BaseModel, Field
 from utils.data_handler import debug_print, file_log_enabled
 from utils.logging import uvicorn_log_config
 
-from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_POSE, KEY_QPOS
+from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
     FIELD_ACTION_DIM,
+    FIELD_ACTION_DIMS,
     FIELD_CAPABILITIES,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
@@ -115,20 +116,25 @@ def _robot_name(robot) -> str:
     return str(getattr(robot, "name", None) or getattr(robot, "NAME", None) or type(robot).__name__)
 
 
-def _robot_action_dim(robot) -> int:
-    if hasattr(robot, "QPOS"):
-        return int(robot.QPOS)
-    if hasattr(robot, "action_dim"):
-        action_dim = robot.action_dim
-        return int(action_dim() if callable(action_dim) else action_dim)
-    capabilities = getattr(robot, "capabilities", None)
-    if capabilities is not None and hasattr(capabilities, "action_dim"):
-        return int(capabilities.action_dim)
-    raise AttributeError("robot action dimension is not available")
+def _robot_action_dims(robot) -> dict[str, int]:
+    """各**已声明**动作空间的维度（joint / pose / gripper）——机器人自己算（``action_dims()``）。"""
+    action_dims = getattr(robot, "action_dims", None)
+    if callable(action_dims):
+        return {str(key): int(value) for key, value in action_dims().items()}
+    raise AttributeError("robot action dimensions are not available")
+
+
+def _robot_state_dim(robot) -> int:
+    """状态向量（``observations/qpos`` / ``action``）宽度：每臂「值 + 夹爪」× 臂数（双臂 14）。
+
+    值段当前是关节角（``STATE_SPACE = joint``）；机器人整体切位姿时维度不变、语义由
+    ``state_layout()`` 自描述（采集 JSON 的 ``state_space`` / ``state_dims``）。
+    """
+    return int(robot.state_vector_dim())
 
 
 def _robot_pose_dim(robot) -> int:
-    """末端位姿观测维数（扁平：各臂 xyz + rpy）；0 = 机器人不提供位姿 → 共享内存保持 v2 布局。"""
+    """位姿区宽度（每臂 xyz + rpy）；0 = 本机不提供位姿（不占位姿区）。"""
     return int(getattr(robot, "POSE", 0) or 0)
 
 
@@ -158,7 +164,18 @@ _DEFAULT_PORT = 8090  # 对齐 Edge 侧 adapter.SDK_URL
 
 
 class ActionRequest(BaseModel):
-    action: list[float] = Field(..., description="动作 [左6关节, 左夹爪, 右6关节, 右夹爪]")
+    action: list[float] = Field(
+        ...,
+        description=("动作（按臂展开）：joint = 各臂 6 关节角；pose = 各臂 xyz+rpy；gripper = 各臂 1 夹爪"),
+    )
+    action_space: str | None = Field(
+        default=None,
+        description=(
+            "动作空间：joint（缺省，关节角绝对目标）/ pose（末端位姿绝对目标，机器人侧解算）/ "
+            "pose_delta（末端位姿**增量**，叠加在关节段目标的正解位姿上）/ "
+            "gripper（每臂 1 夹爪，只改夹爪目标）"
+        ),
+    )
 
 
 class TeleopRequest(BaseModel):
@@ -186,10 +203,11 @@ class _ShmPublisher:
         self.last_obs: dict = {}  # 最新 standard_obs（/observe 调试用）
 
     def publish(self, obs):
-        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约：observations/qpos + images/<cam>）。
+        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约）。
 
-        机器人提供末端位姿（``observations/pose``，即 ``robot.POSE > 0``）时一并写入位姿区
-        （布局 v3）；不提供 → 不传 ``pose``，共享内存仍是 v2（下游 adapter 的 ``pose_dim`` 为 0）。
+        写入 qpos（**状态向量**：每臂「值 + 夹爪」）+ action（**同维同布局**的目标向量）+
+        pose（实测位姿）+ pose_target（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位
+        可见）+ raw RGB 图像；位姿（与目标位姿）仅在机器人提供（``POSE > 0``）时写入（否则不占该区）。
         """
         if obs is None or obs.get(KEY_QPOS) is None:
             return
@@ -200,7 +218,9 @@ class _ShmPublisher:
             "seq": getattr(self.robot, "seq", 0),
         }
         if obs.get(KEY_POSE) is not None:
-            standard[KEY_POSE] = obs[KEY_POSE]  # 末端位姿（笛卡尔策略 / 预览的观测输入）
+            standard[KEY_POSE] = obs[KEY_POSE]  # 末端位姿（笛卡尔原语 / 预览的输入）
+        if obs.get(KEY_POSE_TARGET) is not None:
+            standard[KEY_POSE_TARGET] = obs[KEY_POSE_TARGET]  # 目标位姿（= FK(关节段目标)）
         for name in image_names:
             standard[f"{CAMERA_PREFIX}{name}"] = obs[f"{CAMERA_PREFIX}{name}"]
         self.last_obs = standard
@@ -210,23 +230,30 @@ class _ShmPublisher:
             qpos=standard[KEY_QPOS],
             action=standard[KEY_ACTION],
             pose=standard.get(KEY_POSE),
+            pose_target=standard.get(KEY_POSE_TARGET),
             images=[standard[f"{CAMERA_PREFIX}{n}"] for n in image_names],
         )
 
     def _create_writer(self) -> ObsShmWriter:
-        """创建共享内存写者（上次进程残留 → attach 后 unlink 重建）。"""
+        """创建共享内存写者（上次进程残留 → attach 后 unlink 重建）。
+
+        区域宽度：qpos / action = **状态向量维数**（每臂「值 + 夹爪」，双臂 14）；
+        pose / pose_target = 每臂 6 × 臂数（不提供位姿 → 0）。
+        """
         # 相机尺寸（假设各相机一致）；无相机机器人（IMAGES 为空）用占位尺寸，image_count=0 无图像数据
         image_size = next(iter(getattr(self.robot, "IMAGES", {}).values()), (640, 480))
         image_names = _robot_image_names(self.robot)
+        qpos_dim = _robot_state_dim(self.robot)
 
         def build() -> ObsShmWriter:
             return ObsShmWriter(
                 name=self.robot.SHM_NAME,
                 image_count=len(image_names),
                 image_size=image_size,
-                qpos_dim=_robot_action_dim(self.robot),
-                action_dim=_robot_action_dim(self.robot),
-                pose_dim=_robot_pose_dim(self.robot),  # > 0 → 布局 v3（多一块位姿区）
+                qpos_dim=qpos_dim,
+                action_dim=qpos_dim,
+                pose_dim=_robot_pose_dim(self.robot),
+                pose_target_dim=_robot_pose_dim(self.robot),  # 目标位姿随实测位姿同生共死
             )
 
         try:
@@ -290,7 +317,8 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     def root():
         return {
             "name": f"{_robot_name(robot)}_process_server",
-            "action_dim": _robot_action_dim(robot),
+            "action_dims": _robot_action_dims(robot),
+            "action_spaces": list(getattr(robot, "ACTION_SPACES", None) or ("joint",)),
             "endpoints": [
                 PATH_DISCOVER,
                 PATH_HEALTH,
@@ -329,10 +357,13 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 FIELD_SUPPORTED_ADAPTERS: [robot.ADAPTER_TYPE],
                 FIELD_ROBOT_MODEL_ID: robot.ROBOT_MODEL_ID,
                 FIELD_ROBOT_MODEL_VERSION: robot.ROBOT_MODEL_VERSION,
-                FIELD_ACTION_DIM: _robot_action_dim(robot),
-                # 观测键 = standard_obs 实际产出的键（qpos + 进程侧目标 action + 相机），
+                FIELD_ACTION_DIM: _robot_action_dims(robot).get("joint", 0),
+                FIELD_ACTION_DIMS: _robot_action_dims(robot),
+                # 观测键 = standard_obs **实际产出**的键（状态向量 qpos + 目标向量 action + 位姿），
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
-                FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION] + [f"{CAMERA_PREFIX}{n}" for n in image_names],
+                FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION]
+                + ([KEY_POSE, KEY_POSE_TARGET] if _robot_pose_dim(robot) > 0 else [])
+                + [f"{CAMERA_PREFIX}{n}" for n in image_names],
                 FIELD_CAPABILITIES: _robot_capabilities(robot),
                 FIELD_ENDPOINT: endpoint,
                 FIELD_SHM_NAME: robot.SHM_NAME,
@@ -367,13 +398,17 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     def _apply_action(req: ActionRequest) -> dict:
         _require_ready()
         try:
-            env.robot_execute(req.action)
+            env.robot_execute(req.action, req.action_space)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_EXECUTE)
     def execute(req: ActionRequest):
+        """直接下发 raw 动作（与 rollout 一样只修改唯一目标，主循环限速跟踪）。
+
+        ``action_space=pose`` 时由机器人侧解算一次（失败 → 422，不改既有目标）。
+        """
         return _apply_action(req)
 
     @app.post(PATH_ROLLOUT)
@@ -382,10 +417,11 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 
         遥操作期间从臂 target 由人工决定，推理下发必须让位（与 execute / reset 的「程控抢回」
         相反：被拒的 rollout 不会结束遥操作）；Edge 侧 adapter 据此跳过本拍，遥操作关闭后自动恢复。
+        ``action_space`` 语义同 ``/v1/execute``。
         """
         _require_ready()
         try:
-            env.robot_rollout(req.action)
+            env.robot_rollout(req.action, req.action_space)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except TakeoverActiveError as e:
@@ -456,13 +492,23 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 调试（非契约）
     @app.get("/observe")
     def observe_debug():
-        """调试用：最新观测 qpos + **末端位姿**（提供时）+ 相机 JPEG(base64)（Edge 侧实际经共享内存读观测）。"""
+        """调试用：最新观测状态向量（每臂「值 + 夹爪」）+ 位姿 + 目标向量 + 相机 JPEG(base64)。
+
+        Edge 侧实际经共享内存读观测（本端点为调试用）；逐维含义见 ``state_layout()``
+        （采集 JSON 的 ``state_space`` / ``state_dims``）。
+        """
         obs = publisher.last_obs
         if not obs:
             return {"ready": False, "data": None}
-        out = {"ready": True, "qpos": obs[KEY_QPOS].tolist(), "seq": obs.get("seq")}
+        out = {
+            "ready": True,
+            "qpos": np.asarray(obs[KEY_QPOS], dtype=np.float64).tolist(),
+            "seq": obs.get("seq"),
+            "state_layout": robot.state_layout(),
+        }
         if obs.get(KEY_POSE) is not None:
             out["pose"] = np.asarray(obs[KEY_POSE], dtype=np.float64).tolist()
+        out["action"] = np.asarray(obs[KEY_ACTION], dtype=np.float64).tolist()
         for name in _robot_image_names(robot):
             rgb = obs.get(f"{CAMERA_PREFIX}{name}")
             if rgb is None:

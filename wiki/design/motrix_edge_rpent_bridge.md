@@ -129,8 +129,9 @@ RPent vla_server（vla.predict）→ RPent primitives → env.chunk_step → edg
 ### `states` 与观测键
 
 RPent 的 `dual_franka` client 要求 `env.get_observation` 返回里带 `states`（agent 侧
-缓存为 `wrapped_state_vector`）。edge 的对应物是**同一帧的 qpos**（`observations/qpos`，
-`FrameManager.latest()` 已有）：facade 把该帧 qpos 同时按 `states` 回一份，维持 RPent
+缓存为 `wrapped_state_vector`）。edge 的对应物是**同一帧的状态向量**（`observations/qpos`，
+每臂「值 + 夹爪」交错——与 RPent 的「每臂 7 维」同构，`FrameManager.latest()` 已有）：facade
+把该帧 qpos 同时按 `states` 回一份，维持 RPent
 原样可用；`pose` 单独作为扩展键回传（RPent 侧不读、不影响其契约）。
 
 ### 动作语义与单位的边界
@@ -432,8 +433,8 @@ edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成
 -   **VLA 由 RPent 侧自跑，edge 不提供 `vla.*` 接口**；edge→robot 进程契约不改名。
 -   **`recover_joint_posture` 的夹爪基座**：定为与 `set_gripper` 同策略——夹爪位**优先取目标**
     （`action` 的夹爪维）、实测只兜底，并在回执里给 `gripper_base`（取值 `target` /
-    `qpos`，与 `env.set_gripper` 回执的 `base` 同风格；当前实现取实测 `observations/gripper`
-    且无该字段，待随本特性 MR 对齐；理由见「同类规则」）。
+    `qpos`，与 `env.set_gripper` 回执的 `base` 同风格；当前实现取实测（状态向量
+    `observations/qpos` 的每臂夹爪槽）且无该字段，待随本特性 MR 对齐；理由见「同类规则」）。
 -   **增量原语的注释同步**：`_move_delta` / `_rotate_delta` 的 docstring 仍写「现算绝对目标下发」，
     与其调用的 `_pose_delta`（`ActionSpace.POSE_DELTA`，**本层不算绝对目标**）相反，待改成「下发
     `pose_delta` 增量（基准归机器人）」——注释与实现相反比没有注释更容易把实现改错。

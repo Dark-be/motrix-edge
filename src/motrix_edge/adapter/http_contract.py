@@ -18,7 +18,7 @@
 **HTTP API 约定**：端点路径 + 请求 / 响应 body 字段，两端**单点定义**，避免硬编码漂移。
 
 - **客户端**：Edge adapter 中间件（``test_adapter.py``）——发起调用。
-- **服务器**：SDK 进程（``robot-pipeline``）——接收调用。
+- **服务器**：SDK 进程（``robot-pipeline/src/server/contract_server.py``）——接收调用。
 
 端点一览（前缀 ``/v1``）：
 
@@ -27,8 +27,8 @@
 | POST | ``/v1/discover``         | —                      | ``{status, robot}``（robot 自描述见下）    |
 | GET  | ``/v1/health``           | —                      | ``{ok, detail, control_hz, measured_hz}``      |
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
-| POST | ``/v1/execute``          | ``{action}``           | ``{status}``                                   |
-| POST | ``/v1/rollout``          | ``{action, action_space?}``  | ``{status}``                                   |
+| POST | ``/v1/execute``          | ``{action, action_space?}`` | ``{status}``                                   |
+| POST | ``/v1/rollout``          | ``{action, action_space?}`` | ``{status}``                                   |
 | POST | ``/v1/teleop``           | ``{enabled, mode?}``   | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
 | GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录）        |
@@ -50,11 +50,17 @@
   位姿为锚点，只把主臂**增量**叠加到从臂 target（从臂不突变）。只发 ``{enabled}`` 的调用方
   行为不变；robot-pipeline 侧语义见
   [robot-pipeline 遥操作](../../../wiki/design/robot_pipeline_teleop.md)。
-- ``/v1/rollout`` 的 ``action_space``（取值 ``joint`` / ``cartesian_pose``，缺省 ``joint``）：
-  声明 ``action`` 的语义——``joint`` 为关节空间绝对目标（每臂 6 关节 + 夹爪），
-  ``cartesian_pose`` 为末端位姿（每臂 xyz + rpy + 夹爪），由机器人侧 IK 转关节后执行。
-  不传该字段的调用方行为不变；笛卡尔动作见
-  [边缘原语接口](../../../wiki/design/motrix_edge_primitives.md)。
+- ``/v1/execute`` 与 ``/v1/rollout`` 的 ``action_space``（取值 ``joint`` / ``pose`` /
+  ``pose_delta`` / ``gripper``，缺省 ``joint``）：声明 ``action`` 的语义——``joint`` 为关节空间绝对
+  目标（每臂 6 关节角），``pose`` 为末端位姿绝对目标（每臂 xyz + rpy），``pose_delta`` 为位姿
+  **增量**（叠加在**关节段目标**的正解位姿上），``gripper`` 为夹爪（每臂 1）。``pose`` /
+  ``pose_delta`` 由机器人侧求解器解算成关节目标（不切运动模式，仍走 MIT 关节通路）后执行。
+  不传该字段的调用方行为不变；解算失败（超限位 / 不收敛）→ 422 且**不改既有目标**；位姿动作见
+  [robot-pipeline 位姿动作](../../../wiki/design/robot_pipeline_cartesian.md)。
+- **位姿增量叠在目标上**：``pose_delta`` 的基准是机器人自己的**关节段目标**（不是实测位姿）：
+  底层 MIT 无重力前馈，实测恒落后目标一个稳态误差，以实测为基准会把误差写进新目标、逐步累积。
+  目标位姿由机器人常驻发布为 ``observations/pose_target``（= ``FK(关节段目标)``），与
+  ``observations/pose`` 同系可比。
 """
 
 from __future__ import annotations
@@ -74,7 +80,7 @@ PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
 
 # ---- 请求 body 字段 ----
 FIELD_ACTION = "action"  # execute / rollout：动作数据
-FIELD_ACTION_SPACE = "action_space"  # rollout：动作语义（joint | cartesian_pose；缺省 joint）
+FIELD_ACTION_SPACE = "action_space"  # rollout / health：动作空间（joint | pose | pose_delta | gripper；缺省 joint）
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
 FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
@@ -92,7 +98,8 @@ FIELD_TYPE = "type"  # robot：adapter 类型（entry point 名，用于实例�
 FIELD_SUPPORTED_ADAPTERS = "supported_adapters"  # robot：声明支持的 adapter 类型
 FIELD_ROBOT_MODEL_ID = "robot_model_id"  # connect / robot：机器人型号
 FIELD_ROBOT_MODEL_VERSION = "robot_model_version"  # robot：机器人型号版本
-FIELD_ACTION_DIM = "action_dim"  # robot：动作维度
+FIELD_ACTION_DIM = "action_dim"  # robot：joint 空间维度（兼容字段）
+FIELD_ACTION_DIMS = "action_dims"  # robot：各动作空间维度（{joint: 12, pose: 12, pose_delta: 12, gripper: 2}）
 FIELD_OBSERVATION_KEYS = "observation_keys"  # robot：观测键布局（含 observations/images/<cam>）
 FIELD_CONTROLLERS = "controllers"  # robot：控制器列表
 FIELD_SENSORS = "sensors"  # robot：传感器列表
@@ -111,15 +118,25 @@ TELEOP_MODES = (VALUE_TELEOP_MODE_ABSOLUTE, VALUE_TELEOP_MODE_DELTA)
 DEFAULT_TELEOP_MODE = VALUE_TELEOP_MODE_ABSOLUTE  # 不传 mode 时保持旧行为
 
 # ---- 动作空间取值（与 adapter/base.py 的 ActionSpace 一一对应；两端引用不硬编码）----
-VALUE_ACTION_SPACE_JOINT = "joint"  # 关节空间（每臂 6 关节 + 夹爪，绝对目标）
-VALUE_ACTION_SPACE_CARTESIAN_POSE = "cartesian_pose"  # 末端位姿（每臂 xyz + rpy + 夹爪）
+VALUE_ACTION_SPACE_JOINT = "joint"  # 关节空间（每臂 6 关节角，绝对目标）
+VALUE_ACTION_SPACE_POSE = "pose"  # 末端位姿（每臂 xyz + rpy，绝对目标）
+VALUE_ACTION_SPACE_POSE_DELTA = "pose_delta"  # 末端位姿**增量**（每臂 xyz + rpy）
+VALUE_ACTION_SPACE_GRIPPER = "gripper"  # 夹爪（每臂 1，归一化 [0, 1]）
+ACTION_SPACES = (
+    VALUE_ACTION_SPACE_JOINT,
+    VALUE_ACTION_SPACE_POSE,
+    VALUE_ACTION_SPACE_POSE_DELTA,
+    VALUE_ACTION_SPACE_GRIPPER,
+)
 DEFAULT_ACTION_SPACE = VALUE_ACTION_SPACE_JOINT  # 不发该字段时机器人按关节空间解释（向后兼容）
 
 __all__ = [
+    "ACTION_SPACES",
     "DEFAULT_ACTION_SPACE",
     "DEFAULT_TELEOP_MODE",
     "FIELD_ACTION",
     "FIELD_ACTION_DIM",
+    "FIELD_ACTION_DIMS",
     "FIELD_ACTION_SPACE",
     "FIELD_CAPABILITIES",
     "FIELD_CONTROL_HZ",
@@ -155,8 +172,10 @@ __all__ = [
     "PATH_SAFE_STOP",
     "PATH_TELEOP",
     "TELEOP_MODES",
-    "VALUE_ACTION_SPACE_CARTESIAN_POSE",
+    "VALUE_ACTION_SPACE_GRIPPER",
     "VALUE_ACTION_SPACE_JOINT",
+    "VALUE_ACTION_SPACE_POSE",
+    "VALUE_ACTION_SPACE_POSE_DELTA",
     "VALUE_STATUS_ACCEPTED",
     "VALUE_TELEOP_MODE_ABSOLUTE",
     "VALUE_TELEOP_MODE_DELTA",
