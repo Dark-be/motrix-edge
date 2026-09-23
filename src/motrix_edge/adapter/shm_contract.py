@@ -16,7 +16,7 @@
 
 观测方向固定：**SDK 进程产出 → adapter 读取**（模拟 / 真实机器人图像 + 关节数据）。
 指令方向（action 下发、采集命令）走 HTTP，契约见
-[`http_contract`](./http_contract.py)（``scripts/test_robot_sdk.py`` 服务器 /
+[`http_contract`](./http_contract.py)（``robot-pipeline`` 服务器 /
 ``test_adapter`` 客户端），不经过共享内存。
 
 布局（单个共享内存块）：
@@ -26,7 +26,8 @@
 - ``action``：``float64[dim]`` **当前目标动作**（SDK 侧 "正在执行的指令"，无指令时回退 qpos）——
   与 qpos 分开传输，edge 侧观测的 ``action`` 才是真指令，而不是实测关节值的副本。
 - ``pose``：``float64[pose_dim]`` **末端位姿**（每臂 6 维 xyz + rpy，物理顺序同臂布局）——
-  笛卡尔原语（见 wiki/design/motrix_edge_primitives.md）的观测输入。``pose_dim = 0``
+  LLM agent 执行层（见 wiki/design/motrix_edge_primitives.md）的观测输入（到位判定 / 原语目标）。
+  ``pose_dim = 0``
   表示机器人不提供位姿：此时**不占用位姿区**，布局与版本保持 v2 不变（向后兼容）。
 - ``images``：``uint8[N][H][W][3]`` **raw RGB**（N 张相机帧连续排布）。
 

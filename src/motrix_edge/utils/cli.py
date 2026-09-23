@@ -15,10 +15,11 @@
 """基于 prompt_toolkit 的交互式 CLI（``motrix-edge run`` 的键盘输入线程）。
 
 本模块只管**终端交互**：行编辑 / 历史 / 补全 / 并发输出保护，以及把一行文本经
-``CommandRegistry`` 解析后提交给共享 ``CommandBus``。命令语义、状态校验与回执由 node /
-session 消费方决定——CLI 是进程内的命令来源之一，与 HTTP 共用同一注册表与命令契约（差异
-只有租约，以及安全命令即发即忘）；见 ``wiki/design/motrix_edge_config.md`` 与
-``wiki/design/motrix_edge_command_bus.md``。入口、子命令与运行装配在 ``__main__.py``。
+``CommandRegistry`` 解析后提交给共享命令通道。命令的注册校验 / push 分流 / 回执语义与
+HTTP **共用** ``CommandDispatcher``（错误也是同一个 ``CommandError``，带 edge 错误码 ``code``）；
+唯一差异是 CLI 在进程内直连总线、**不经 HTTP 入口的租约门**。入口、子命令与运行装配在
+``__main__.py``；见 ``wiki/design/motrix_edge_config.md`` 与
+``wiki/design/motrix_edge_command_bus.md``。
 """
 
 from __future__ import annotations
@@ -32,15 +33,17 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from motrix_edge.utils.commands import (
-    CRITICAL_COMMANDS,
+from motrix_edge.command import (
+    META_SOURCE,
+    SOURCE_CLI,
     CommandBus,
+    CommandDispatcher,
     CommandError,
     CommandRegistry,
     CommandResult,
 )
 
-# 回执超时（秒）：人在终端等结果，比总线缺省（5s）宽松
+# CLI 回执超时（秒）：人在终端等，比派发缺省（5s）宽松
 _CLI_TIMEOUT = 10.0
 
 
@@ -88,26 +91,37 @@ class CliSession:
         return HTML(f"<b>{hint}</b>")
 
     def execute_line(self, line: str, bus: CommandBus) -> str:
-        """解析并执行一行命令，返回可打印的回执文本（解析失败 / 超时也返回文案，不抛）。"""
+        """解析并执行一行命令，返回可打印的回执文本（解析失败 / 超时也返回文案，不抛）。
+
+        派发与 HTTP 共用 ``CommandDispatcher``（同一注册校验 / push 分流 / 回执语义），错误也
+        是同一个 ``CommandError``（带 edge 错误码 ``code``）；唯一差异是 CLI 在进程内直连
+        总线、**不经过 HTTP 入口的租约门**。
+        """
         try:
             cmd = self.registry.parse_argv(shlex.split(line))
-            if cmd.name in CRITICAL_COMMANDS:  # 安全命令：即发即忘，不阻塞输入线程
-                bus.push(cmd)
-                return f"[{cmd.name}] accepted"
-            result = bus.submit(cmd, timeout=_CLI_TIMEOUT)
-        except (ValueError, CommandError) as exc:  # 解析失败 / 未注册命令 / 等不到回执
+        except (ValueError, CommandError) as exc:  # 解析失败 / 未注册命令
             return f"WARNING: {exc}"
+
+        # CLI = 进程内本地通道：直连 CommandBus，**不需要租约**（租约只约束 HTTP / RPent 入口）。
+        # 除租约外与 HTTP 完全同语义：同一注册表、同一消费方、同一状态校验与回执形状。
+        dispatcher = CommandDispatcher(bus, self.registry)
+        try:
+            result = dispatcher.dispatch(cmd.name, cmd.params, meta={META_SOURCE: SOURCE_CLI}, timeout=_CLI_TIMEOUT)
+        except CommandError as exc:  # 与 HTTP 同一错误类型：同一个 edge 错误码
+            return f"WARNING: [{exc.code}] {exc}"
         return self.format_result(cmd.name, result)
 
     @staticmethod
     def format_result(name: str, result: CommandResult) -> str:
-        """格式化回执（只依赖命令名，与命令对象解耦）。"""
+        """格式化回执（只依赖命令名，与命令对象解耦；回执类型与 HTTP 同源）。"""
         line = f"[{name}] {result.status}"
-        if result.status == "ok":
+        if result.status in ("ok", "accepted"):
             if result.data:
                 line += f" {result.data}"
         else:
-            line += f" ({result.status_code}): {result.error or 'no error'}"
+            # 失败：code 是 edge 错误码（缺省 None = 未指定，不显示括号）
+            code = f" ({result.code})" if result.code else ""
+            line += f"{code}: {result.error or 'no error'}"
         return line
 
     def run(self, bus: CommandBus) -> None:

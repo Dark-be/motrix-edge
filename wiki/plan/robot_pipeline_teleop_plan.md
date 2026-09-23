@@ -36,9 +36,9 @@ env / contract server 透传；遥操作期间推理让位（`/v1/rollout` 409�
         → node / session → `adapter.set_teleop(enabled, mode)` → `/v1/teleop {enabled, mode?}`。
 -   [x] Edge 推理让位：`HttpShmAdapter.rollout()` 识 409 → 返回 False（日志限流）；InferSession
         单步回执 rejected(409)、持续推理跳过该拍，遥操作关闭后自动恢复。
--   [x] Console：命令卡片加「人工接管 Takeover（增量）」（`capability=robot_teleop` + `mode=delta`），
+-   [x] Console：命令卡片加「人工接管 Takeover（增量）」（`capability=robot/teleop` + `mode=delta`），
         入口校验非法 mode → 400。
--   [x] mock SDK（`scripts/test_robot_sdk.py`）：`/v1/teleop` 收 mode、遥操作中 `/v1/rollout` → 409。
+-   [x] mock SDK（`robot-pipeline`）：`/v1/teleop` 收 mode、遥操作中 `/v1/rollout` → 409。
 -   [x] 校验：`ruff check`（src / tests / robot-pipeline / scripts）+ `ruff format --check` + `pytest`
         （容器，358 passed）+ `/v1` 冒烟（接管中 rollout 409 且 target 不被改写、execute 抢回后 rollout 恢复、
         非法 mode 422）+ 前端 `tsc --noEmit` / `npm run build`。

@@ -2,7 +2,7 @@
 
 ## 摘要
 
-Edge 的控制入口统一为**命令总线**（`utils/commands.py`）：命令对象（`Command`）+ 注册式解析
+Edge 的控制入口统一为**命令总线**（`command/` 包）：命令对象（`Command`）+ 注册式解析
 （`CommandRegistry`）+ 同步回执（`CommandBus.submit` / `reply`）。HTTP / 本地 CLI / 本地脚本统一
 为命令来源，**本地命令无需租约、不走 HTTP**（进程内总线），HTTP 命令须租约；状态机校验对所有
 来源生效。命令名**空格分隔、不用点**，无短别名。
@@ -12,7 +12,7 @@ Edge 的控制入口统一为**命令总线**（`utils/commands.py`）：命令�
 -   控制单元 = 命令对象：带参数、带回执、带授权元数据；本地与 HTTP 行为一致（同一执行器、同一回执、同一状态校验）。
 -   新增命令 = 注册一个 `CommandSpec`，CLI 与 HTTP 自动获得解析与执行，不改核心循环。
 -   本地命令无需租约、不走 HTTP（进程内 `CommandBus`）；HTTP 命令须持有租约。
--   命令名常量、解析、传输、执行全部收敛到 `utils/commands.py` 单点定义。
+-   命令名常量、解析、传输、执行全部收敛到 `command/` 包（`naming` / `core` / `registry` / `params` / `config_commands`），单点定义。
 
 ## 命令对象
 
@@ -26,11 +26,17 @@ class Command:
 
 @dataclass
 class CommandResult:
-    status: str = "ok"        # ok / rejected / error
+    status: str = "ok"        # ok / rejected / error —— **判成败只看它**
     data: dict = field(default_factory=dict)
     error: str | None = None
-    status_code: int = 200
+    code: str | None = None   # edge 错误码（失败必填），见 errors.ErrorCode
 ```
+
+-   **判成败只看 `status`**（`ok` / `accepted` 为成功）—— HTTP 与 CLI 一致；`code` 不参与判断，
+    它是 **edge 错误码**（`motrix_edge.errors.ErrorCode`）。
+-   `code` 是**业务层自己的词表**（`conflict` / `lease_expired` / `timeout` …）：HTTP 面把它
+    映射成 HTTP 状态码并在响应体回传，CLI 直接展示 —— **状态码是 HTTP 自己的事**，CLI 不遵循
+    「200 = OK」。失败回执必须显式给码，漏给按 `internal` 暴露（服务端问题）。
 
 ## 注册式解析（CommandRegistry）
 
@@ -57,8 +63,9 @@ class CommandResult:
     迟到回执由内部 sink **丢弃**（不阻塞会话线程）。
 -   `__call__()`：非阻塞取下一个命令或 `None`（`command_source` 契约，命令源可替换）。
 
-处理器执行完统一 `reply(cmd.request_id, result)`；`EdgeNode._handle` 统一：查注册表 → 校验
-`auth`（`meta.lease_id` 存在则走租约校验）→ 调 handler → 回执。
+处理器执行完统一 `reply(cmd.request_id, result)`：消费方（`EdgeNode._handle` / 会话循环）按注册表
+分派到 handler，并做**状态机校验**（非法转移一律拒绝，与来源无关）；**租约校验不在消费方**，
+而在 HTTP 入口（`CommandService`）——见下节。
 
 ## 命令清单（build_command_registry）
 
@@ -85,22 +92,47 @@ class CommandResult:
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
 `node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer config`、`capture meta *`
 （配置级，与节点状态机解耦）全局可用——`capture meta` 读写 `capture.yml` 的 `meta` 段，见
-[采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、
+[采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、`infer rollout stop`、
 `infer config set '{"host":"10.0.0.9"}'`、`adapter config set '{"enabled_arms": ["right"]}'`、`lease revoke`。
+
+## 回执通道（push / submit）
+
+命令携带 `reply_to` 即 **submit**（调用方同步等回执），缺省为 **push**（即发即忘）：
+
+-   **走 push**：仅 `robot estop` / `node reset` —— 「不能等 / 不该等」的路径：急停不能等回执
+    （且可能没有消费方），节点 ERROR 恢复路径也不该阻塞在同步等待上。经 HTTP 调用时回执为
+    `accepted`（急停走旁路队列，任务运行期间也即时生效）；
+-   **其余全部命令走 submit** —— 「操作要确认成没成」，回执含结果字段（如 teleop 的
+    `teleop`/`mode`、episode 的 `episode`/`recording`、execute 的 `action`）。
+
+**入口只有两个**：本地 CLI（进程内 `CommandBus`）与 HTTP 控制面（`CommandService`：REST 端点按
+命令词直调、`/v1/commands` 按 capability）。**派发本身单点共用**
+（`command/dispatch.py::CommandDispatcher`：注册校验 → push / submit 分流 → 等回执）；
+`CommandService` 只在其上加 HTTP 入口要的三件事：租约门、capability 映射、回执 → HTTP 响应。
+同一命令在两端**逐条对应** —— 语义、回执、错误类型（`CommandError`）全部相同，差别只在是否
+要求租约。HTTP 侧成功回 `data`，业务拒绝 / 超时按 **edge 错误码**抛 `CommandError`（`app.py`
+的单一处理器把它映射成 HTTP 状态码 + 响应体 `code`）；`/v1/commands` 则把回执状态
+（`ok` / `rejected` / `error`）与 `code` 原样透传为 `CommandResponse.status` / `.code`。
 
 ## 本地 vs HTTP（行为对齐）
 
-| 维度     | 本地（CLI / 脚本）                             | HTTP（Console）                |
-| -------- | ---------------------------------------------- | ------------------------------ |
-| 传输     | 进程内 `CommandBus`（不走 HTTP）               | HTTP → `from_mapping` → submit |
-| 租约     | 无需（本地即信任，`meta` 无 `lease_id`）       | 须持有（`meta.lease_id`）      |
-| 回执     | `submit` 同步（脚本）/ `push`（键盘）          | `submit` 同步                  |
-| 状态校验 | 同一状态机（非法转移同样被拒）                 | 同一状态机                     |
-| 语义     | 同一 `CommandSpec` 语义（node / session 实现） | 同一语义                       |
+| 维度     | 本地（CLI / 脚本）                             | HTTP（Console）                                                             |
+| -------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
+| 传输     | 进程内 `CommandBus`（不走 HTTP）               | HTTP → `CommandService.submit` → `CommandBus`                               |
+| 派发     | `CommandDispatcher.dispatch`（单点共用）       | 同（`CommandService` 内部就调它）                                           |
+| 租约     | 无需（本地即信任，`meta` 无 `lease_id`）       | 须持有（`meta.lease_id`）                                                   |
+| 回执     | `submit` 同步（脚本）/ `push`（键盘）          | `submit` 同步                                                               |
+| 错误     | `CommandError`（edge 错误码 `code`）           | 同（`app.py` 映射成 HTTP 状态码 + 回传 `code`）                             |
+| 状态校验 | 同一状态机（非法转移同样被拒）                 | 同一状态机                                                                  |
+| 语义     | 同一 `CommandSpec` 语义（node / session 实现） | 同一语义                                                                    |
+| 来源标记 | `meta.source = cli`                            | `meta.source = http`（`/call` 为 `rpent`）——**仅日志 / 排障，不作授权依据** |
+
+> 除租约外，两端**不应存在任何其它差异**：新增命令或新增校验一律落在 `CommandSpec` 语义或
+> 消费方（node / session）状态机里，不得只加在 HTTP 路由或只加在 CLI。
 
 ## 相关文档
 
 -   节点命令分发：[节点生命周期（node）](./motrix_edge_node.md)
 -   会话命令消费：[会话（session）](./motrix_edge_session.md)
--   HTTP 化落地（`/v1/commands` capability）随 **feat/3**（HTTP 控制面）落地
--   代码入口：`src/motrix_edge/utils/commands.py` —— 随 **feat/6**（任务运行时核心）落地
+-   HTTP 化落地：[HTTP 控制面（server）](./motrix_edge_server.md)
+-   代码入口：`src/motrix_edge/command/` —— 随 **feat/6**（任务运行时核心）落地

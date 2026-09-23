@@ -18,7 +18,7 @@
 **HTTP API 约定**：端点路径 + 请求 / 响应 body 字段，两端**单点定义**，避免硬编码漂移。
 
 - **客户端**：Edge adapter 中间件（``test_adapter.py``）——发起调用。
-- **服务器**：SDK 进程（``scripts/test_robot_sdk.py``）——接收调用。
+- **服务器**：SDK 进程（``robot-pipeline``）——接收调用。
 
 端点一览（前缀 ``/v1``）：
 

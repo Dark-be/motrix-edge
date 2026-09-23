@@ -17,9 +17,10 @@ import threading
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
+from motrix_edge.command import CommandBus, CommandResult, build_command_registry
+from motrix_edge.errors import ErrorCode
 from motrix_edge.utils import cli as cli_module
 from motrix_edge.utils.cli import CliSession, CommandCompleter
-from motrix_edge.utils.commands import CommandBus, CommandResult, build_command_registry
 
 
 def test_command_completer_uses_registered_commands():
@@ -71,25 +72,6 @@ def test_execute_line_reports_parse_error():
     assert "unknown command" in result
 
 
-def test_execute_line_reports_timeout_as_warning(monkeypatch):
-    """等不到回执（submit 超时）→ 一行 WARNING，不抛异常、不阻塞调用方。"""
-    monkeypatch.setattr(cli_module, "_CLI_TIMEOUT", 0.05)  # 免得测试真等 10s
-    cli = CliSession(build_command_registry())
-
-    result = cli.execute_line("infer config", CommandBus())  # 无人消费 → 超时
-
-    assert result.startswith("WARNING:")
-
-
-def test_format_result_renders_data_and_error():
-    """回执格式化：ok 回显 data；失败带错误码 + 原因（终端排障用）。"""
-    ok = CommandResult(status="ok", data={"node_state": "IDLE"})
-    bad = CommandResult(status="rejected", error="not in this state", status_code=409)
-
-    assert CliSession.format_result("infer config", ok) == "[infer config] ok {'node_state': 'IDLE'}"
-    assert CliSession.format_result("session quit", bad) == "[session quit] rejected (409): not in this state"
-
-
 def test_execute_line_estop_is_fire_and_forget():
     cli = CliSession(build_command_registry())
     bus = CommandBus()
@@ -100,3 +82,38 @@ def test_execute_line_estop_is_fire_and_forget():
     assert result == "[robot estop] accepted"
     assert command is not None
     assert command.name == "robot estop"
+
+
+def test_execute_line_reports_rejection_with_error_code():
+    """命令被拒与 HTTP 同一错误类型 / 同一错误码：CLI 也带 ``code`` 打印。"""
+    cli = CliSession(build_command_registry())
+    bus = CommandBus()
+
+    def reply_worker():
+        command = None
+        while command is None:
+            command = bus()
+        assert command.reply_to is not None
+        command.reply_to(CommandResult(status="rejected", error="not in this state", code=ErrorCode.CONFLICT))
+
+    threading.Thread(target=reply_worker, daemon=True).start()
+    result = cli.execute_line("infer config", bus)
+
+    assert result == "[infer config] rejected (conflict): not in this state"
+
+
+def test_format_result_omits_absent_error_code():
+    """失败回执未带错误码时也能渲染：判成败只看 ``status``，不依赖「200 = OK」。"""
+    line = CliSession.format_result("infer config", CommandResult(status="rejected", error="boom"))
+
+    assert line == "[infer config] rejected: boom"
+
+
+def test_execute_line_reports_timeout_as_warning(monkeypatch):
+    """等不到回执（派发超时）→ 一行 WARNING，不抛异常、不阻塞调用方。"""
+    monkeypatch.setattr(cli_module, "_CLI_TIMEOUT", 0.05)  # 免得测试真等 10s
+    cli = CliSession(build_command_registry())
+
+    result = cli.execute_line("infer config", CommandBus())  # 无人消费 → 超时
+
+    assert result.startswith("WARNING:")
