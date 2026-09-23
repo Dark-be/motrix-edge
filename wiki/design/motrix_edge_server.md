@@ -152,7 +152,7 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
     真机联调先对数值、机器人不动；是否 dry-run 可从 `settle.dry_run` 看出。
 -   **到位等待**：写原语（`move_delta` / `rotate_delta` / `set_gripper` / `recover_joint_posture`）
     默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞（`server.rpent.settle.{pos_tol,rot_tol,timeout_s,stall_s,target_wait_s}`，
-    默认 **1cm / 0.05rad / 5s / 1s**），回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /
+    默认 **5cm / 0.4rad（≈23°）/ 5s / 1s**（容差按 MIT 静态误差有意放宽），回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /
     `final_err_rad` 姿态或关节弧度）/ `elapsed_s`（+ `stalled` / `timeout`）与生效容差
     `settle_pos_tol` / `settle_rot_tol`——外部 agent 靠它判成败，不等就会读到未动的那一帧，
     凭 `final_err` 与容差又能区分「还差一点」与「`stalled` 受阻」。**位置与姿态分别比容差**
