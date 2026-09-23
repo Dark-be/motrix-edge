@@ -18,7 +18,9 @@
   1. 外界配置目录：环境变量 ``MOTRIX_CONFIG_DIR``（可写；同名 yml 覆盖包内默认）；
   2. 包内默认：``src/motrix_edge/config/*.yml``（package data，只读兜底）。
 
-日志 / 可写配置状态遵循 XDG（``XDG_STATE_HOME``），缺省回退 CWD。本模块在 import
+日志 / 可写配置状态遵循 XDG（``XDG_STATE_HOME``）；**未设 XDG 时全部收在 ``<cwd>/motrix-edge/``
+下**（状态文件放根，日志放 ``logs/`` 子目录）——**不再往 CWD 根撒文件**：从任意目录启动
+（CLI / pytest / server）都只脏这一个目录，清理与 gitignore 都只有一处。本模块在 import
 时计算模块级 ``CONFIG_DIR`` / ``LOG_PATH``（环境变量须在进程启动前设置）。
 """
 
@@ -32,6 +34,9 @@ import yaml
 # 通过 ``importlib.resources`` 只读访问，不可写。
 DEFAULT_CONFIG_FILES = ("edge.yml", "capture.yml")
 
+# 无 XDG 时的状态 / 日志根目录名：``<cwd>/motrix-edge``（不往 CWD 根撒文件）
+STATE_DIR_NAME = "motrix-edge"
+
 
 def get_config_dir() -> Path | None:
     """外部配置目录（``MOTRIX_CONFIG_DIR``）；未设置 → None（使用包内默认，只读）。"""
@@ -39,16 +44,25 @@ def get_config_dir() -> Path | None:
     return Path(env).expanduser() if env else None
 
 
+def _fallback_root() -> Path:
+    """无 ``XDG_STATE_HOME`` 时的状态 / 日志根：``<cwd>/motrix-edge``。"""
+    return Path.cwd() / STATE_DIR_NAME
+
+
 def get_log_dir() -> Path:
-    """日志目录：``XDG_STATE_HOME``/motrix，缺省 ``CWD/logs``。"""
+    """日志目录：``$XDG_STATE_HOME/motrix``；未设 → ``<cwd>/motrix-edge/logs``。"""
     xdg = os.getenv("XDG_STATE_HOME")
-    return Path(xdg).expanduser() / "motrix" if xdg else Path.cwd() / "logs"
+    return Path(xdg).expanduser() / "motrix" if xdg else _fallback_root() / "logs"
 
 
 def get_state_dir() -> Path:
-    """可写配置状态目录：``XDG_STATE_HOME``/motrix，缺省 ``CWD``。"""
+    """可写状态目录：``$XDG_STATE_HOME/motrix``；未设 → ``<cwd>/motrix-edge``。
+
+    兜底**不收在 CWD 根**：``capture.yml`` 这类状态文件（``writable_config_path``）与
+    ``logs/`` 都收进这一个目录，跑测试 / 起 server 不会再脏工作目录。
+    """
     xdg = os.getenv("XDG_STATE_HOME")
-    return Path(xdg).expanduser() / "motrix" if xdg else Path.cwd()
+    return Path(xdg).expanduser() / "motrix" if xdg else _fallback_root()
 
 
 def config_path(name: str) -> Path | None:
@@ -81,6 +95,7 @@ LOG_PATH = get_log_dir()
 
 __all__ = [
     "DEFAULT_CONFIG_FILES",
+    "STATE_DIR_NAME",
     "get_config_dir",
     "get_log_dir",
     "get_state_dir",

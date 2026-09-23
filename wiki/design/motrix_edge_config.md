@@ -4,7 +4,8 @@
 
 `src/motrix_edge/config/` 是**配置子包**：外界配置优先（环境变量 `MOTRIX_CONFIG_DIR`），否则用
 包内 **package data** 只读兜底（`edge.yml` / `capture.yml`）；日志 / 可写状态目录遵循 XDG（`XDG_STATE_HOME`，
-缺省回退 CWD）。CLI 分两处：入口与子命令在 `__main__.py`（console script `motrix-edge` 与
+未设时**收在 `<cwd>/motrix-edge/` 下**（状态文件放根、日志放 `logs/`），不往工作目录根撒文件）。
+CLI 分两处：入口与子命令在 `__main__.py`（console script `motrix-edge` 与
 `python -m motrix_edge` 共用同一 `main()`），交互式会话集中在 `utils/cli.py`（`CliSession`）。
 
 > 迁移（issue #10）：仓库根顶层 `config/` 目录与 `_GLOBAL_CONFIG.py`（`ROOT_DIR` / `CONFIG_DIR` /
@@ -27,14 +28,14 @@
 
 路径助手（`config/__init__.py`，模块级 `CONFIG_DIR` / `LOG_PATH` 在 import 时按已设环境变量计算）：
 
-| 函数 / 常量                  | 说明                                                             |
-| ---------------------------- | ---------------------------------------------------------------- |
-| `get_config_dir()`           | 外界配置目录（`MOTRIX_CONFIG_DIR`）；未设置 → `None`（包内默认） |
-| `config_path(name)`          | 配置文件真实路径（外界目录存在时）；无外界目录 → `None`          |
-| `writable_config_path(name)` | 可写配置路径：外界目录优先，否则落到状态目录（包内默认只读）     |
-| `get_log_dir()`              | 日志目录：`XDG_STATE_HOME/motrix`，缺省 `CWD/logs`               |
-| `get_state_dir()`            | 可写状态目录：`XDG_STATE_HOME/motrix`，缺省 `CWD`                |
-| `CONFIG_DIR` / `LOG_PATH`    | 模块级导出（`LOG_PATH` 供 `debug_print` 与 uvicorn 日志使用）    |
+| 函数 / 常量                  | 说明                                                               |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `get_config_dir()`           | 外界配置目录（`MOTRIX_CONFIG_DIR`）；未设置 → `None`（包内默认）   |
+| `config_path(name)`          | 配置文件真实路径（外界目录存在时）；无外界目录 → `None`            |
+| `writable_config_path(name)` | 可写配置路径：外界目录优先，否则落到状态目录（包内默认只读）       |
+| `get_log_dir()`              | 日志目录：`XDG_STATE_HOME/motrix`，未设 → `<cwd>/motrix-edge/logs` |
+| `get_state_dir()`            | 可写状态目录：`XDG_STATE_HOME/motrix`，未设 → `<cwd>/motrix-edge`  |
+| `CONFIG_DIR` / `LOG_PATH`    | 模块级导出（`LOG_PATH` 供 `debug_print` 与 uvicorn 日志使用）      |
 
 -   `CaptureMetaStore` 写 `capture.yml`：用可写配置路径（外界目录优先，否则状态目录；首次缺省
     访问时把包内默认播种到可写位置）。

@@ -18,7 +18,8 @@
   1. 外界配置目录：环境变量 ``MOTRIX_CONFIG_DIR``（可写；同名 yml 覆盖包内默认）；
   2. 包内默认：``src/config/*.yml``（package data，只读兜底，按 robot.type 选择）。
 
-日志目录遵循 ``XDG_STATE_HOME``（缺省 ``CWD/logs``）。本模块在 import 时计算模块级
+日志目录遵循 ``XDG_STATE_HOME``；**未设时收在 ``<cwd>/motrix-edge/logs``**（不往 CWD
+根撒文件，与 motrix_edge config 同一套兜底）。本模块在 import 时计算模块级
 ``CONFIG_DIR`` / ``LOG_PATH``。
 """
 
@@ -36,6 +37,9 @@ DEFAULT_CONFIG_FILES = (
     "single_piper.yml",
 )
 
+# 无 XDG 时的日志根目录名：``<cwd>/motrix-edge``（与 motrix_edge 侧同名，同一目录下共存）
+STATE_DIR_NAME = "motrix-edge"
+
 
 def get_config_dir() -> Path | None:
     """外部配置目录（``MOTRIX_CONFIG_DIR``）；未设置 → None（使用包内默认，只读）。"""
@@ -44,9 +48,9 @@ def get_config_dir() -> Path | None:
 
 
 def get_log_dir() -> Path:
-    """日志目录：``XDG_STATE_HOME``/motrix，缺省 ``CWD/logs``。"""
+    """日志目录：``$XDG_STATE_HOME/motrix``；未设 → ``<cwd>/motrix-edge/logs``。"""
     xdg = os.getenv("XDG_STATE_HOME")
-    return Path(xdg).expanduser() / "motrix" if xdg else Path.cwd() / "logs"
+    return Path(xdg).expanduser() / "motrix" if xdg else Path.cwd() / STATE_DIR_NAME / "logs"
 
 
 def config_path(name: str) -> Path | None:

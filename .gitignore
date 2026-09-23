@@ -16,6 +16,10 @@ node_modules
 # VS Code Copilot 扩展运行期锁文件（可能落在工作区同名子目录下）
 .copilot/
 
+# 状态目录兜底（config.get_state_dir 无 XDG 时 = <cwd>/motrix-edge）：Copilot 扩展运行期产物
+# （skill 调用日志 / IDE 锁文件）与 edge 自己的状态 / 日志都落在这里，不属仓库内容
+motrix-edge/
+
 # Web console（edge-console）是独立维护、频繁更新的 dev 工具，不入 edge 仓库版本控制
 frontend/edge-console/
 
@@ -26,7 +30,7 @@ code-quality-report.json
 py-coverage.xml
 py-report.xml
 
-# 包内默认 capture.yml 播种到 CWD（config.get_state_dir 缺省回退 CWD）——不属仓库内容。
+# 状态目录兜底里的可写副本（包内默认 capture.yml 惰性播种到 <cwd>/motrix-edge）——不属仓库内容
 capture.yml
 
 .vscode/

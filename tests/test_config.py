@@ -59,3 +59,17 @@ def test_writable_config_path_state_dir(monkeypatch, tmp_path):
     assert get_state_dir() == tmp_path / "motrix"
     assert get_log_dir() == tmp_path / "motrix"
     assert writable_config_path("edge.yml") == tmp_path / "motrix" / "edge.yml"
+
+
+def test_state_and_log_dir_fall_back_to_named_subdir(monkeypatch, tmp_path):
+    """XDG 也没设：状态 / 日志收在 ``<cwd>/motrix-edge``，**不往 CWD 根撒文件**。
+
+    否则从任意目录启动（CLI / pytest / server）都会在那一层留下 ``capture.yml`` 与
+    ``logs/``；收进一个目录后清理与 gitignore 都只有一处。
+    """
+    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert get_state_dir() == tmp_path / "motrix-edge"
+    assert get_log_dir() == tmp_path / "motrix-edge" / "logs"
+    assert writable_config_path("capture.yml") == tmp_path / "motrix-edge" / "capture.yml"
