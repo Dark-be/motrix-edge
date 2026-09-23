@@ -56,6 +56,7 @@ from motrix_edge.policy import (
     policy_config_runtime_keys,
     validate_policy_type,
 )
+from motrix_edge.policy.contract import ACTION_LAYOUT_JOINT
 from motrix_edge.rtc import build_rtc
 from motrix_edge.utils.data_handler import debug_print, round_floats
 
@@ -751,7 +752,7 @@ class InferSession(BaseSession):
                 ),
             )
             return
-        if action is not None and self.adapter.rollout(action) is False:
+        if action is not None and self._rollout(action) is False:
             # 遥操作（人工接管）中：推理让位（SDK 409）——本步不下发，回执说明原因
             self._reply(
                 cmd,
@@ -885,8 +886,25 @@ class InferSession(BaseSession):
             if action is not None:
                 # 遥操作（人工接管）中 SDK 拒绝本拍（409，adapter 已限流日志）：继续下一拍，
                 # 遥操作关闭（robot teleop false）后自动恢复下发。
-                self.adapter.rollout(action)
+                self._rollout(action)
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
+
+    def _rollout(self, action) -> bool:
+        """按策略声明的动作布局下发本步动作（返回是否已下发）。
+
+        - ``joint``（缺省）：每臂 6 关节角 → :meth:`RobotAdapter.rollout`（夹爪另经 ``gripper`` 空间，
+          未启用臂补 home）；
+        - ``joint_gripper``：每臂「6 关节角 + 1 夹爪」→ :meth:`RobotAdapter.rollout` 带
+          ``layout="joint+gripper"`` + ``arms`` **一次**下发所选臂（未选臂不补 home，关节与夹爪同一
+          控制拍落地）。
+
+        布局取值与语义见 ``motrix_edge.policy.contract``；返回 ``False`` = 本拍被拒（遥操作中）。
+        """
+        layout = getattr(self.policy, "action_layout", ACTION_LAYOUT_JOINT)
+        if layout == ACTION_LAYOUT_JOINT:
+            return self.adapter.rollout(action)
+        arms = list(getattr(self.adapter, "enabled_arms", []) or []) or None
+        return self.adapter.rollout(action, layout=layout, arms=arms)
 
     @staticmethod
     def _action_repr(action):

@@ -47,9 +47,9 @@ def _cfg(**policy):
 
 
 def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
-    """清单顺序 = 端点项（host / port）+ 公共项（warmup_required）+ 策略自身项。"""
+    """清单顺序 = 端点项（host / port）+ 公共项（warmup_required / action_layout）+ 策略自身项。"""
     keys = [item["key"] for item in policy_config_items(schema_policy)]
-    assert keys == ["host", "port", "warmup_required", "model", "device"]
+    assert keys == ["host", "port", "warmup_required", "action_layout", "model", "device"]
 
 
 def test_endpoint_items_lead_every_policy_schema():

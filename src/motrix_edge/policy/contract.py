@@ -12,13 +12,14 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""通用观测键与图像原语（**各策略客户端共用**）。
+"""通用观测键与动作布局（**各策略客户端共用**）。
 
-只提供两样东西：
+提供三样东西：
 
 - edge 观测键：``observations/qpos`` / ``observations/images/<name>``（与 robot-pipeline /
   adapter 的 ``get_observation()`` 输出一致）；策略客户端直接按这些键读观测；
-- 图像原语：解码 + dtype 归一（``to_rgb_uint8``）、等比补零缩放（``resize_with_pad`` = letterbox）。
+- 图像原语：解码 + dtype 归一（``to_rgb_uint8``）、等比补零缩放（``resize_with_pad`` = letterbox）；
+- 动作布局取值（``action_layout``）：策略**输出**的动作语义 → adapter 下疏通路的契约。
 
 **策略自己的 wire 契约与预处理参数在各策略目录内**（每个策略独立，互不牵连）：
 
@@ -28,11 +29,43 @@
   （wire 见 ``motrix_edge.transport.grpc`` 与 vendored ``lerobot.transport``）。
 """
 
+import re
+
 import cv2
 import numpy as np
 
+from motrix_edge.adapter.http_contract import (
+    VALUE_LAYOUT_JOINT,
+    VALUE_LAYOUT_JOINT_GRIPPER,
+    VALUE_LAYOUT_SEPARATOR,
+)
+
 KEY_OBS_QPOS = "observations/qpos"
 KEY_OBS_IMAGE_PREFIX = "observations/images/"
+
+# ---- 动作布局（策略输出 → adapter 下发通路）----------------------------------------------
+# 策略配置项 ``policy.action_layout`` 的取值 = **下发布局词表**（与 adapter / robot 契约同一套，单点定义
+# 在 ``motrix_edge.adapter.http_contract``）：段名用 ``+`` 连接，**书写顺序即块内顺序**：
+#   joint          每臂 6 关节角（缺省；夹爪另经 ``gripper`` 段下发）；
+#   joint+gripper  每臂「6 关节角 + 1 夹爪」（与 observations/qpos 的每臂块**同构**）→ 一条请求
+#                  同时写关节与夹爪（未选臂由机器人保持；见 wiki/design/robot_pipeline_action_layouts.md）。
+POLICY_KEY_ACTION_LAYOUT = "action_layout"
+ACTION_LAYOUT_JOINT = VALUE_LAYOUT_JOINT
+ACTION_LAYOUT_JOINT_GRIPPER = VALUE_LAYOUT_JOINT_GRIPPER
+#: layout 的**语法**（段名 + 分隔符）：策略层只做语法检查——可用性（机器人是否声明该 layout、
+#: 每臂维数）由适配器 / 机器人在进入会话时校验，策略层不认识具体机型。
+LAYOUT_SEGMENT_PATTERN = re.compile(rf"^[a-z][a-z0-9_]*(\{VALUE_LAYOUT_SEPARATOR}[a-z][a-z0-9_]*)*$")
+
+
+def normalize_action_layout(value) -> str:
+    """规范化策略声明的动作布局（``None`` / 空串 → 缺省 ``joint``）；**语法**非法 → ``ValueError``。
+
+    布局**不按动作长度猜测**：段名与顺序由声明给出，可用性由适配器 / 机器人校验。
+    """
+    layout = ACTION_LAYOUT_JOINT if value in (None, "") else str(value).strip().lower()
+    if not LAYOUT_SEGMENT_PATTERN.match(layout):
+        raise ValueError(f"invalid action_layout {value!r} (expect segments joined by {VALUE_LAYOUT_SEPARATOR!r})")
+    return layout
 
 
 def to_rgb_uint8(image) -> np.ndarray:

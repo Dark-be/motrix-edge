@@ -97,6 +97,9 @@
 
 -   `CaptureMetaStore` 写 `capture.yml`：直接写 `<根>/config/capture.yml`（首次缺省访问时播种示例）。
 
+-   `CaptureMetaStore` 写 `capture.yml`：用可写配置路径（外界目录优先，否则状态目录；首次缺省
+    访问时把包内默认播种到可写位置）。
+
 配置段：
 
 | 段           | 说明                                                                                                                                                                                     | 消费方                       |

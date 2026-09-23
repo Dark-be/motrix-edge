@@ -205,7 +205,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 ## 配置项（POLICY_CONFIG_ITEMS）
 
 公共项（与策略自身项**完全同级**、同一张表单、同一通道）：`host` / `port`（`group=endpoint`
-仅用于前端分组）、`warmup_required`（预热门控，缺省 true）。它们也是**会话级**配置
+仅用于前端分组）、`warmup_required`（预热门控，缺省 true）、`action_layout`（模型动作布局，
+缺省 `joint`）。它们也是**会话级**配置
 （`runtime: False`：进入会话时读取，会话内改需退出重进），**没有专用命令**——同一个键只有一套规则。
 
 | 策略          | 专有配置项                                                                                                                                 |
@@ -230,6 +231,11 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
         `runtime: False`。
     -   公共项 `warmup_required`（预热门控）：同为**会话级**（进入会话时读取，会话内改需退出重进）；
         语义见「端点与预热」。
+    -   公共项 `action_layout`（模型动作布局）：同为**会话级**（下发通路在进入会话时固化）。取值
+        `joint`（缺省）= 每臂 6 关节角，夹爪另经 `gripper` 段（需两次下发）；`joint+gripper` = 每臂「6 关节角 +
+        1 夹爪」→ 一条请求同时写关节与夹爪（未选臂由机器人保持，逐臂块与 `observations/qpos` 同构，
+        见 [robot-pipeline 动作空间](./robot_pipeline_action_spaces.md)）。**布局不按动作长度猜测**
+        （非法取值在进入会话时报错），且与会话的 `enabled_arms` 共同决定动作维度。
 -   运行时写入内存态 `base_cfg["policy"]`（不写回 yaml），按策略 schema 白名单校验（类型不符 /
     `min`–`max` 越界 / 必填为空 → 400；**空值 `null` 或空串 = 清除该项回到缺省**，必填项空值 →
     400；`int` 项只接受整数，`bool` / 带小数的浮点 → 400，不静默截断）；**先全量校验通过才写入**
@@ -243,6 +249,7 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 | --------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
 | `host` / `port`             | 客户端传输层         | 推理节点端点（连接目标）；进入会话时固化（改需退出重进）                                    |
 | `warmup_required`           | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
+| `action_layout`             | 会话（InferSession） | 模型输出的动作语义 → 下发方式（`joint` 缺省 / `joint+gripper` 一条请求写两段）              |
 | `prompt`（openpi）          | 服务端（每帧）       | 语言条件：帧里带就用帧里的，缺了才由 checkpoint 的 `default_prompt` 兜底，随后逐帧 tokenize |
 | `image_size`（openpi）      | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |
 | `image_size`（lerobot-act） | **客户端**           | 同上（端侧 letterbox 压缩），但 lerobot 服务端**只拉伸不兜底** → 必须与训练分辨率一致       |

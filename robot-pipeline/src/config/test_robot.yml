@@ -10,7 +10,8 @@ robot:
   name: test_001
   type: test_robot
   step_rad: 0.01 # 每帧最大关节增量（rad），env 控制线程限速接近 target
-  init_qpos: [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1] # 初始关节位置（rad），env reset 时设置
+  init_joint: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] # 初始关节角（rad，每臂 6），env reset 时设置
+  init_gripper: [1, 1] # 初始夹爪开合（每臂 1，1 = 张开）
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:
