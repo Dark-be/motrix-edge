@@ -212,6 +212,19 @@ def adapter_details() -> list[dict]:
     return result
 
 
+def adapter_classes():
+    """遍历**已注册且可导入**的 adapter 类（不实例化：无副作用、不触 SDK / 共享内存）。
+
+    导入失败（缺失 SDK / 依赖）自动跳过。供**未绑定 adapter 时的能力配置预校验**
+    （类常量 ``ARM_NAMES`` / ``IMAGES``）与按能力列出 adapter 使用（不用于展示默认机型）。
+    """
+    for ep in entry_points(group=ADAPTER_EP_GROUP):
+        try:
+            yield ep.load()  # 只取类：不实例化
+        except Exception:  # noqa: BLE001 缺失 SDK / 导入失败 → 跳过，不中断
+            continue
+
+
 __all__ = [
     "ADAPTER_EP_GROUP",
     "CAMERA_PREFIX",
@@ -224,6 +237,7 @@ __all__ = [
     "HealthStatus",
     "RobotAdapter",
     "RobotCapabilities",
+    "adapter_classes",
     "adapter_details",
     "discover_adapter",
     "get_adapter",

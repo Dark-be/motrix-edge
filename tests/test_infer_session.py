@@ -171,39 +171,84 @@ def _build_session(adapter, policy, signals, warmup_required=True):
     return infer_session.InferSession(cfg, command_source=make_signals(*signals), adapter=adapter)
 
 
-def _warmup_gated_source(holder, *seq, before_index=None):
-    """命令源：按序发命令，在发 ``seq[before_index]``（缺省 = 最后一条）前**等预热线程收尾**。
+# 时序前置条件的有界等待：测试用的 fake policy 是即时返回的，5s 已是数量级余量
+_SETTLE_TIMEOUT = 5.0
 
-    预热是异步的（``infer connect`` 立即回执 + 工作线程）：紧随其后的命令必须等它跑完，
-    否则会撞上「预热中」409 / 或被 session quit 取消（取消时序另有专项用例）。未收尾时
-    返回 ``None``——会话循环空转（0.02s/轮），与真实无命令时一致。
+
+def _warmup_settled(session) -> bool:
+    """缺省时序前置条件：预热线程已收尾（``warming=False``）。"""
+    return not session.warming
+
+
+def _wait_for(check, expect, command):
+    """标记一步：**先等 ``check(session)`` 成立**，成立后才下发 ``command``。
+
+    用于「上一步启动的异步处理会改变某个状态值，改变后才能进行下一步」的严格时序校验——例：
+    ``infer connect`` 启动异步预热后，``warmed_up`` 要从 False 跃迁到 True、``warmup_error``
+    要由 ``None`` 变成失败原因，紧随其后的命令才该下发（否则读到的是中间态）。
+
+    ``expect`` = 该前置状态的人类可读描述（超时失败信息里会带上）。
+    """
+    return (command, check, expect)
+
+
+def _warmup_gated_source(holder, *seq):
+    """命令源：**每一步都在时序前置条件成立后**才下发（对异步命令的严格时序校验）。
+
+    预热是异步的（``infer connect`` 立即回执 + 工作线程），紧随其后的命令若不等它收尾就会读到
+    中间态。历史事故：``test_infer_connect_rewarms_after_connection_loss`` 的探针与第一轮预热
+    赛跑，``warmed_up`` 因「预热未结束」而为 False（**恰好**满足断言，理由却是错的），紧接着
+    ``"connection lost" in None`` 抛 TypeError（复现率约 90%）。
+
+    故每一步都先等前置条件成立：
+
+    - 缺省 = 预热静默（``_warmup_settled``，覆盖「被门控的命令又启动了新预热」的情形）；
+    - 断言依赖更强的状态跃迁时，把该步包成 ``_wait_for(check, expect, command)``（如 ``warmed_up``）。
+
+    等待超过 ``_SETTLE_TIMEOUT`` 仍不成立 → ``AssertionError``（把「时序不成立」变成可读失败，
+    而不是忙等到底、或读到中间态）；未成立时返回 ``None``——会话循环空转（0.02s/轮），与真实
+    无命令时一致。
+
+    要验证**预热进行中**的行为（409 / 取消）**不要**用本源——用 ``make_signals`` / ``_build_session``
+    的即时命令源，并靠 fake policy 阻塞 ``connect`` 制造稳定的「预热中」窗口。
 
     序列里的**可调用项**会被调用（用于注入副作用，如模拟连接丢失），其返回值才是要发的命令。
     """
     cmds = list(seq)
-    gate = len(cmds) - 1 if before_index is None else before_index
-    state = {"i": 0}
+    state: dict = {"i": 0}
 
     def source():
         if state["i"] >= len(cmds):
             return None
         session = holder.get("session")
-        if state["i"] == gate and session is not None and session.warming:
-            return None  # 预热还没完 → 再等一轮
-        cmd = cmds[state["i"]]
+        if session is None:  # 会话尚未构造（本源只在 run() 内被调用，正常不会走到）
+            return None
+        item = cmds[state["i"]]
+        command, check, expect = (
+            item if isinstance(item, tuple) else (item, _warmup_settled, "预热静默（warming=False）")
+        )
+        if not check(session):
+            if "deadline" not in state:
+                state["deadline"] = time.monotonic() + _SETTLE_TIMEOUT
+            elif time.monotonic() > state["deadline"]:
+                raise AssertionError(
+                    f"时序不成立：第 {state['i'] + 1}/{len(cmds)} 条命令的前置条件「{expect}」在 "
+                    f"{_SETTLE_TIMEOUT:g}s 内未成立（warming={session.warming}, "
+                    f"warmed_up={session.warmed_up}, warmup_error={session.warmup_error!r}）"
+                )
+            return None  # 条件未成立 → 再等一轮（预热跑在别的线程里）
+        state.pop("deadline", None)
         state["i"] += 1
-        return _as_command(cmd)
+        return _as_command(command)
 
     return source
 
 
-def _build_gated_session(adapter, policy, *seq, before_index=None, warmup_required=True):
-    """按**预热门控时序**构造会话（见 ``_warmup_gated_source``）。"""
+def _build_gated_session(adapter, policy, *seq, warmup_required=True):
+    """按**严格预热门控时序**构造会话（见 ``_warmup_gated_source``）。"""
     holder: dict = {}
     cfg = {"policy": {"infer_freq": 1000, "warmup_required": warmup_required}}
-    session = infer_session.InferSession(
-        cfg, command_source=_warmup_gated_source(holder, *seq, before_index=before_index), adapter=adapter
-    )
+    session = infer_session.InferSession(cfg, command_source=_warmup_gated_source(holder, *seq), adapter=adapter)
     holder["session"] = session
     return session
 
@@ -223,9 +268,9 @@ def test_infer_loop_runs_observation_to_action(monkeypatch):
         policy,
         "infer prompt 把零件放好",
         "infer connect",
-        "infer rollout",
+        # rollout 受预热门控：等预热状态跃迁（warmed_up=True）完成后再下发
+        _wait_for(lambda s: s.warmed_up, "预热收尾（warmed_up=True）", "infer rollout"),
         "session quit",
-        before_index=2,
     )
     assert session.run() == RunResult.FINISHED
     assert session.warmed_up is True
@@ -756,7 +801,13 @@ def test_infer_connect_warms_up_without_motion(monkeypatch):
     replies = []
     connect = _REGISTRY.parse_argv(["infer", "connect"])
     connect.reply_to = replies.append
-    session = _build_gated_session(adapter, policy, connect, "session quit", before_index=1)
+    session = _build_gated_session(
+        adapter,
+        policy,
+        connect,
+        # 等预热跃迁完成后才退出：提前 quit 会把在飞预热取消（用例断言 warmed_up 为真）
+        _wait_for(lambda s: s.warmed_up, "预热收尾（warmed_up=True）", "session quit"),
+    )
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "ok"
@@ -784,7 +835,14 @@ def test_infer_connect_is_idempotent_and_reports_state(monkeypatch):
     first = _REGISTRY.parse_argv(["infer", "connect"])
     second = _REGISTRY.parse_argv(["infer", "connect"])
     second.reply_to = replies.append
-    session = _build_gated_session(adapter, policy, first, second, "session quit", before_index=1)
+    session = _build_gated_session(
+        adapter,
+        policy,
+        first,
+        # 第二次 connect 的幂等回执要读 warmed_up：等跃迁完成后再下发
+        _wait_for(lambda s: s.warmed_up, "预热收尾（warmed_up=True）", second),
+        "session quit",
+    )
 
     assert session.run() == RunResult.FINISHED
     assert policy.connect_calls == 1  # 第二次没有重新连接（已预热）
@@ -812,11 +870,19 @@ def test_infer_connect_failure_lands_in_warmup_error(monkeypatch):
     connect.reply_to = replies.append
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_gated_session(adapter, policy, connect, rollout, "session quit", before_index=1)
+    session = _build_gated_session(
+        adapter,
+        policy,
+        connect,
+        # rollout 要在**预热失败收尾之后**下发：warmup_error 由 None 变为失败原因
+        _wait_for(lambda s: s.warmup_error is not None, "预热失败收尾（warmup_error 已写入）", rollout),
+        "session quit",
+    )
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "ok"  # 异步：命令本身受理成功
     assert session.warmed_up is False
+    assert session.warmup_error is not None, "预热失败应写入 warmup_error，而不是留 None"
     assert "not reachable" in session.warmup_error
     assert session.connected is False
     assert replies[1].status == "rejected"  # rollout 仍被预热门拦下
@@ -930,13 +996,22 @@ def test_infer_connect_rewarms_after_connection_loss(monkeypatch):
 
     session = infer_session.InferSession(
         {"policy": {"infer_freq": 1000, "warmup_required": True}},
-        command_source=_warmup_gated_source(holder, first, drop_connection_and_probe, "session quit", before_index=2),
+        command_source=_warmup_gated_source(
+            holder,
+            first,
+            # 探针的前提是「第一轮预热已成功」（闩锁 warmed_up=True）：否则读到的 warmed_up=False
+            # 是「预热还没结束」而不是「连接丢失使闩锁失效」，后半段断言全部失去意义
+            _wait_for(lambda s: s.warmed_up, "第一轮预热收尾（warmed_up=True）", drop_connection_and_probe),
+            # 重新预热的状态跃迁完成后再退出（提前 quit 会取消在飞的重新预热）
+            _wait_for(lambda s: s.warmed_up, "重新预热收尾（warmed_up=True）", "session quit"),
+        ),
         adapter=adapter,
     )
     holder["session"] = session
     assert session.run() == RunResult.FINISHED
     # 连接丢失 → 闩锁自动失效（而不是留着 stale True）
     assert observed["warmed_up"] is False
+    assert observed["warmup_error"] is not None, "连接丢失应写入 warmup_error，而不是留 None"
     assert "connection lost" in observed["warmup_error"]
     # 重新 infer connect：**不再**被幂等短路（started=True），且重新预热成功
     assert replies[0].data["started"] is True
@@ -961,7 +1036,14 @@ def test_infer_rollout_blocked_again_after_connection_loss(monkeypatch):
         policy.connected = False  # 预热完成后服务端重启
         return rollout
 
-    session = _build_gated_session(adapter, policy, connect, drop_connection, "session quit", before_index=1)
+    session = _build_gated_session(
+        adapter,
+        policy,
+        connect,
+        # 探针的前提是「预热已成功」（注释即为此意）：等跃迁完成后再模拟服务端重启
+        _wait_for(lambda s: s.warmed_up, "预热收尾（warmed_up=True）", drop_connection),
+        "session quit",
+    )
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 409

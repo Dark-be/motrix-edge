@@ -31,6 +31,38 @@ adapter/
 └── dual_piper_adapter.py  # DualPiperAdapter（双臂 Piper；HttpShmAdapter 瘦子类）
 ```
 
+## 能力裁剪（启用臂 / 相机，RobotAdapter.configure）
+
+机器人**只运行一个进程 / 一个 adapter**（不为单臂任务新增 adapter）：`configure()` 是
+**`RobotAdapter` 基类**的通用能力（`DualPiperAdapter` / `TestRobotAdapter` 声明臂布局后继承）。
+子类通过类常量声明**动作布局**（`ARM_NAMES` / `ARM_QPOS_SLICES` / `ACTION_DIM_PER_ARM` /
+`HOME_QPOS` / `DEFAULT_ENABLED_ARMS` / `IMAGES`），基类提供 `configure()` / `_select_qpos()` /
+`_expand_action()`：
+
+-   `enabled_arms`（left / right）：只启用部分臂时 `action_dim = 启用臂数 × ACTION_DIM_PER_ARM`；
+    `execute` / `rollout` 按启用臂数接收动作，**未启用臂动作用 `HOME_QPOS` 填充**（类常量定义，
+    不参与运行时配置）；`observe()` 只返回启用臂 qpos **与 action**（按物理顺序 `ARM_NAMES`
+    拼接，同一裁剪口径）。
+-   `enabled_cameras`：从 `IMAGES` 中挑选要暴露的相机（影响 `observe()` 与 `capabilities`）。
+-   无臂概念（`ARM_NAMES` 为空）的 adapter 忽略 `enabled_arms`；参数**原子校验**：未知臂 / 未知
+    相机 / 空臂 → `ValueError`，当前能力不变。不重启、不新建连接；缺省（全臂 / 全相机）与未裁剪
+    行为一致。
+-   **会话进行中（采集 / 推理）拒绝变更**：`configure()` 立即改变 `action_dim` 与 `observe()`
+    布局，episode 中途变化会让同一 episode 内 qpos / action 维度不一致（mcap 下游按固定维度
+    解析），推理侧按旧维度下发的动作也会被维度校验拒绝——`POST /v1/adapters/config` 回 `409`、
+    `adapter config set` 回 rejected；先 `session quit` 再改。
+-   查询：`adapter config current` / `GET /v1/adapters/current` 回执 adapter **实际生效**的启用臂 /
+    相机 / 动作维度 / home；**未绑定 → rejected / 404**（能力布局是 adapter 类常量、discover
+    不传，未绑定就没有机型信息——不猜、不回退某个 adapter 的默认）。
+
+**运行时配置（不写 edge.yml）**：由命令 `adapter config set <json>` 或前端
+`POST /v1/adapters/config`（受控操作，须租约）设置，存于节点运行时状态 `adapter_config`，在
+adapter discover 绑定时应用（`_probe_adapter` → `apply_adapter_config`）；**未绑定 adapter 时
+也先按类常量**（`ARM_NAMES` / `IMAGES`）**静态校验**（错误停在 set 时刻，而非等绑定失败、节点
+静默停在 IDLE）。非法配置 → 命令 rejected / HTTP 400，**会话进行中 → rejected / HTTP 409**
+（先 `session quit`），两种情况下状态都不更新。查询用 `adapter config` /
+`GET /v1/adapters/config`。
+
 ## RobotAdapter 契约
 
 职责面与「角色」一一对应：
@@ -54,9 +86,14 @@ adapter/
 
 单点定义于 `base.py`：`KEY_QPOS = "observations/qpos"`、`KEY_ACTION = "action"`、
 `CAMERA_PREFIX = "observations/images/"`（相机名 `observations/images/<name>`）。
+`capabilities.observation_keys` 与 `observe()` 实际返回**同一套键**（qpos + action + 启用
+相机），随 `configure()` 实时变化；`image_names` 由相机键推导。robot 进程 discover / health 上报
+的 `observation_keys` 同口径（不随 `configure` 变化，固定 qpos + action + 该机型全部相机）。
 
 其中 `action` 是**进程侧当前目标动作**（SDK 侧正在执行的指令；尚无指令时进程回退为 qpos），
-经共享内存单独传输，**不是 qpos 的副本**——所以 preview 显示的是真实指令。
+经共享内存单独传输，**不是 qpos 的副本**——所以 preview 显示的是真实指令。裁剪后
+`qpos` / `action`（以及机器人提供位姿时的 `pose`）共用同一个 `_select_qpos()` 口径，
+观测内臂维度始终自洽。
 
 设计取舍：
 
@@ -107,7 +144,9 @@ adapter:
 }
 ```
 
--   `name` / `type`：adapter 身份；`name` 供展示，`type` = adapter 类 entry point 名（用于加载并实例化）。
+-   `name` / `type`：adapter 身份；`name` = 机器人进程的**展示名**（取进程配置 `robot.name`，
+    缺省回退机器人类常量 `NAME`）——同型号多机靠配置区分（如 `dual_piper_pc16`）；`type` =
+    adapter 类 entry point 名（用于加载并实例化）。
 -   `endpoint` / `shm_name`：进程自报的连接参数（HTTP 指令地址 / 观测共享内存名），实例化时
     传入 adapter，**类常量 `SDK_URL` / `SHM_NAME` 退化为缺省值**。`endpoint` 取进程收到的
     请求 `Host`（可连地址），因此「discover 可达」即「指令可达」——换端口不必再同步改类常量。

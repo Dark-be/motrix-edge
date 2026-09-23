@@ -27,7 +27,7 @@ class AliciaController(ArmController):
     def __init__(self, name="alicia_controller"):
         super().__init__(name)
         self.robot = None
-        self.port: str = "/dev/ttyACM0"
+        self.port: str | None = None  # 由 connect() 从配置注入（不内置现场默认值）
 
     def connect(self, port: str):
         self.port = port

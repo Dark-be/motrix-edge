@@ -18,6 +18,11 @@
 Edge；Edge 经 ``LeaseManager.install`` 只保留 + ``require`` 校验，**不生成租约**。
 受控操作（进入 / 控制任务、commands 含 estop）须携带匹配租约（``X-Lease-Id``）。
 
+**过期时间由 Console（web）决定**：Console 在签发 / 续约时计算 ``expires_at`` 并随租约
+**镜像**传入；Edge 只保留 + ``require`` 校验，**不做权威计时**（仅在本机按 ``expires_at``
+判断镜像是否已过期以放行 / 展示）。对外时间字段统一以北京时间（``Asia/Shanghai``，+08:00）
+序列化，供展示 / 倒计时。
+
 Edge 监听（Console → Edge）：
   - ``POST /v1/leases``          签发租约镜像（install）
   - ``POST /v1/leases/{id}:renew``  续约（lease_version 递增，版本回退拒绝）
@@ -30,9 +35,9 @@ Edge 监听（Console → Edge）：
 """
 
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from .base import BEIJING_TZ, Lease, LeaseError, LeaseState
+from .base import BEIJING_TZ, Lease, LeaseError, LeaseState, as_beijing
 
 # 默认租约有效期（秒）：Console 前端「签发租约」表单的缺省持续时间（信息字段）
 DEFAULT_LEASE_TTL = 120.0
@@ -72,34 +77,38 @@ class LeaseManager:
     def install(self, lease: Lease) -> Lease:
         """部署 Console 签发的租约**镜像**（Edge 只保留 + 校验，不生成 lease_id）。
 
+        **过期时间由 Console 决定**：``expires_at`` 由 Console 计算并随镜像传入，Edge
+        信任保存（``Lease`` 构造时已归一化到北京时间），**不按本地时钟重算**。
+        ``renewed_at`` 缺省取当前时刻（签发即视作最近一次续约时间）。
+
         单活跃控制租约：已有 ``Active`` 且未过期租约 → ``LeaseError(409)``；过期 /
-        撤销 / 无租约 → 覆盖为新镜像。``renewed_at`` 缺省取当前时刻（签发即视作最近
-        一次续约时间）。
+        撤销 / 无租约 → 覆盖为新镜像。
         """
         with self._lock:
+            now = self._now()
             cur = self._lease
-            if cur is not None and cur.state == LeaseState.ACTIVE and cur.expires_at > self._now():
+            if cur is not None and cur.state == LeaseState.ACTIVE and cur.expires_at > now:
                 raise LeaseError("lease already active", 409)
             if lease.renewed_at is None:
-                lease.renewed_at = self._now()
+                lease.renewed_at = now
             self._lease = lease
             return self._lease
 
     def renew(self, lease_id: str, lease_version: int, expires_at: datetime) -> Lease:
-        """Console 续约：以更高 ``lease_version`` 原地延长 ``expires_at``。
+        """Console 续约：以更高 ``lease_version`` 原地延长 ``expires_at``（版本回退拒绝）。
 
-        版本回退（``lease_version <= 当前``）→ ``LeaseError(409)``；租约不存在 →
-        ``LeaseError(404)``。续约后若新 ``expires_at`` 在未来 → ``Active``（可控制），
-        否则 → ``Expired``。
+        **新过期时间由 Console 决定并传入**（归一化到北京时间）；Edge 不重算。续约后若
+        新 ``expires_at`` 在未来 → ``Active``（可控制），否则 → ``Expired``。
         """
         with self._lock:
             lease = self._require_mirror(lease_id)
             if lease_version <= lease.lease_version:
                 raise LeaseError("lease version rollback rejected", 409)
+            now = self._now()
             lease.lease_version = lease_version
-            lease.expires_at = expires_at
-            lease.renewed_at = self._now()
-            lease.state = LeaseState.ACTIVE if expires_at > self._now() else LeaseState.EXPIRED
+            lease.expires_at = as_beijing(expires_at)
+            lease.renewed_at = now
+            lease.state = LeaseState.ACTIVE if lease.expires_at > now else LeaseState.EXPIRED
             return lease
 
     def revoke(self, lease_id: str) -> Lease:
@@ -108,9 +117,28 @@ class LeaseManager:
         """
         with self._lock:
             lease = self._require_mirror(lease_id)
-            if lease.state != LeaseState.REVOKED:
-                lease.state = LeaseState.REVOKED
+            self._set_revoked(lease)
             return lease
+
+    def revoke_current(self) -> tuple[Lease | None, bool]:
+        """撤销当前租约（无需 id；管理员清理幽灵租约用）。
+
+        返回 ``(租约, 本次是否实际变更)``：无租约 → ``(None, False)``；已撤销 →
+        ``(租约, False)``（幂等，不谎报「已撤销」）。撤销后 ``status()`` 释放当前槽位
+        （``leasable=True``），新控制端可重新签发。
+        """
+        with self._lock:
+            if self._lease is None:
+                return None, False
+            return self._lease, self._set_revoked(self._lease)
+
+    @staticmethod
+    def _set_revoked(lease: Lease) -> bool:
+        """置 ``Revoked``；返回本次是否实际变更（已撤销 → False）。"""
+        if lease.state == LeaseState.REVOKED:
+            return False
+        lease.state = LeaseState.REVOKED
+        return True
 
     def mirror(self, lease_id: str) -> dict:
         """查询本地租约镜像（``GET /v1/leases/{id}``）：返回状态 dict；不存在 →
@@ -122,7 +150,7 @@ class LeaseManager:
     def status(self) -> dict:
         """当前租约状态汇总（``GET /v1/leases``，供展示 / 轮询）。
 
-        - ``lease_id`` = 当前租约 id（无租约 → ``None`）；**Revoked 直接失效 → 清空
+        - ``lease_id`` = 当前租约 id（无租约 → ``None``）；**Revoked 直接失效 → 清空
           当前槽位（``lease_id=None``，须重新签发）**；Expired / Reserved 保留 id
           （Expired 可续约原地重新激活）。
         - ``state`` 由本地按 ``expires_at`` 兜底计算（过期 → ``expired``）。
@@ -196,8 +224,8 @@ class LeaseManager:
             "holder_subject_id": lease.holder_subject_id,
             "purpose": lease.purpose,
             "state": state,
-            "expires_at": lease.expires_at.isoformat(),
-            "renewed_at": lease.renewed_at.isoformat() if lease.renewed_at is not None else None,
+            "expires_at": as_beijing(lease.expires_at).isoformat(),
+            "renewed_at": as_beijing(lease.renewed_at).isoformat() if lease.renewed_at is not None else None,
             "lease_version": lease.lease_version,
             "ttl": lease.ttl,
         }

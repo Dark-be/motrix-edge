@@ -2,14 +2,14 @@
 # 启动机器人进程服务器（通用入口，按 config 自动匹配机器人）。
 #
 # 用法:
-#   bash scripts/start.sh                                  # 交互菜单选择 src/config/*.yml（非交互回退默认）
-#   bash scripts/start.sh test_robot_server                # 直接指定配置名（.yml 后缀可省略，跳过菜单）
-#   bash scripts/start.sh dual_piper_server.yml --host 0.0.0.0 --port 8090
+#   bash scripts/start.sh                                  # 交互菜单选择 src/config/*.yml（dual_piper 置首；非交互回退默认）
+#   bash scripts/start.sh test_robot                       # 直接指定配置名（.yml 后缀可省略，跳过菜单）
+#   bash scripts/start.sh dual_piper.yml --host 0.0.0.0 --port 8090
 #   bash scripts/start.sh --help                           # 查看 server 参数说明（用默认配置）
 #
 # 说明:
 #   - 配置放 src/config/（包内默认）；首个非“-”开头的参数视为配置名，其余参数透传给 server
-#   - 未指定配置名且 stdin 是交互终端时，弹出数字菜单供选择；否则回退默认 test_robot_server.yml
+#   - 未指定配置名且 stdin 是交互终端时，弹出数字菜单供选择（dual_piper 排首位）；否则回退默认 test_robot.yml
 #   - 等价命令: uv run python src/server/robot_server.py --config <name> [args...]
 
 set -euo pipefail
@@ -20,8 +20,8 @@ cd "$ROOT_DIR"
 
 # 特殊：--help / -h 直接透传（用默认配置让 server 打印参数说明，不弹选择菜单）
 if [ $# -gt 0 ] && { [ "$1" = "--help" ] || [ "$1" = "-h" ]; }; then
-    echo "==> 查看 server 参数说明（默认配置 test_robot_server.yml）"
-    exec uv run python src/server/robot_server.py --config "test_robot_server.yml" "$@"
+    echo "==> 查看 server 参数说明（默认配置 test_robot.yml）"
+    exec uv run python src/server/robot_server.py --config "test_robot.yml" "$@"
 fi
 
 # 首个非选项参数为配置名（若显式指定则跳过菜单）
@@ -31,9 +31,19 @@ if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
     shift
 fi
 
-# 未指定配置名：交互菜单选择 src/config/*.yml
+# 未指定配置名：交互菜单选择 src/config/*.yml（dual_piper 置首位，其余按名称）
 if [ -z "$CONFIG_NAME" ]; then
-    mapfile -t AVAILABLE_CFGS < <(ls "$ROOT_DIR"/src/config/*.yml 2>/dev/null | xargs -n1 basename | sort)
+    mapfile -t AVAILABLE_CFGS < <(
+        for f in "$ROOT_DIR"/src/config/*.yml; do
+            [ -f "$f" ] || continue
+            base="$(basename "$f")"
+            # 排序键：dual_piper = 0（现场最常用，排首位），其余 = 1（按名称排序）
+            case "$base" in
+                dual_piper.yml) printf '0 %s\n' "$base" ;;
+                *) printf '1 %s\n' "$base" ;;
+            esac
+        done | sort -k1,1n -k2,2 | awk '{print $2}'
+    )
     if [ "${#AVAILABLE_CFGS[@]}" -eq 0 ]; then
         echo "错误：src/config/ 下没有可用的 *.yml 配置" >&2
         exit 1
@@ -49,7 +59,7 @@ if [ -z "$CONFIG_NAME" ]; then
         done
     else
         # 非交互环境（管道 / CI / 脚本内调用）无菜单可用，回退默认配置
-        CONFIG_NAME="test_robot_server.yml"
+        CONFIG_NAME="test_robot.yml"
         echo "==> 非交互环境：使用默认配置 $CONFIG_NAME（可用：${AVAILABLE_CFGS[*]}）" >&2
     fi
 fi

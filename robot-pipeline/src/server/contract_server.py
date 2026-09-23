@@ -101,6 +101,15 @@ from motrix_edge.adapter.shm_contract import ObsShmWriter
 FIELD_ID = "id"
 
 
+def _robot_name(robot) -> str:
+    """进程展示名：实例 ``name``（= 配置 ``robot.name`` 覆盖类常量 ``NAME``）。
+
+    discover（``id`` / ``name``）、``/`` 调试端点与启动日志共用，保证「配置即上报」；
+    非 ``BaseRobot`` 的替身按 实例 ``name`` → 类常量 ``NAME`` → 类名 依次回退。
+    """
+    return str(getattr(robot, "name", None) or getattr(robot, "NAME", None) or type(robot).__name__)
+
+
 def _robot_action_dim(robot) -> int:
     if hasattr(robot, "QPOS"):
         return int(robot.QPOS)
@@ -169,7 +178,7 @@ class _ShmPublisher:
         image_names = _robot_image_names(self.robot)
         standard = {
             KEY_QPOS: obs[KEY_QPOS],
-            KEY_ACTION: obs.get("action") if obs.get("action") is not None else obs[KEY_QPOS].copy(),
+            KEY_ACTION: obs.get(KEY_ACTION) if obs.get(KEY_ACTION) is not None else obs[KEY_QPOS].copy(),
             "seq": getattr(self.robot, "seq", 0),
         }
         for name in image_names:
@@ -240,14 +249,14 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     async def lifespan(app: FastAPI):
         env.start()
         if not env.health().get("ready"):
-            debug_print("SERVER", f"{robot.NAME} not ready — check config / SDK.", "WARNING")
-        debug_print("SERVER", f"{robot.NAME} process server started (pid={os.getpid()})", "INFO")
+            debug_print("SERVER", f"{_robot_name(robot)} not ready — check config / SDK.", "WARNING")
+        debug_print("SERVER", f"{_robot_name(robot)} process server started (pid={os.getpid()})", "INFO")
         yield
         debug_print("SERVER", "shutting down ...", "INFO")
         env.stop()
         publisher.close()
 
-    app = FastAPI(title=f"{robot.NAME} robot process server", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title=f"{_robot_name(robot)} robot process server", version="0.1.0", lifespan=lifespan)
     app.state.robot = robot  # 供测试/中间件访问内部机器人
     app.state.env = env
 
@@ -259,7 +268,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     @app.get("/")
     def root():
         return {
-            "name": f"{robot.NAME}_process_server",
+            "name": f"{_robot_name(robot)}_process_server",
             "action_dim": _robot_action_dim(robot),
             "endpoints": [
                 PATH_DISCOVER,
@@ -281,21 +290,28 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 
         ``endpoint`` 上报**可连地址**：取请求头 ``Host``（客户端实际用的地址），避免把绑定
         地址（如 0.0.0.0）当成指令目标；Edge 采用该值后，「discover 可达」即「指令可达」。
+
+        ``id`` / ``name`` 取**进程展示名**（配置 ``robot.name``，缺省回退机器人类常量 ``NAME``）：
+        Edge 侧作为 adapter 展示名（控制台 / 状态接口），故同型号多机靠配置区分（如
+        ``dual_piper_pc16``）。
         """
         image_names = _robot_image_names(robot)
         endpoint = f"http://{request.headers.get('host') or f'{host}:{port}'}"
+        name = _robot_name(robot)
         return {
             FIELD_STATUS: VALUE_STATUS_ACCEPTED,
             FIELD_ROBOT: {
-                FIELD_ID: robot.NAME,
-                FIELD_NAME: robot.NAME,
+                FIELD_ID: name,
+                FIELD_NAME: name,
                 FIELD_TYPE: robot.ADAPTER_TYPE,
                 FIELD_RUNNING: True,
                 FIELD_SUPPORTED_ADAPTERS: [robot.ADAPTER_TYPE],
                 FIELD_ROBOT_MODEL_ID: robot.ROBOT_MODEL_ID,
                 FIELD_ROBOT_MODEL_VERSION: robot.ROBOT_MODEL_VERSION,
                 FIELD_ACTION_DIM: _robot_action_dim(robot),
-                FIELD_OBSERVATION_KEYS: [KEY_QPOS] + [f"{CAMERA_PREFIX}{n}" for n in image_names],
+                # 观测键 = standard_obs 实际产出的键（qpos + 进程侧目标 action + 相机），
+                # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
+                FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION] + [f"{CAMERA_PREFIX}{n}" for n in image_names],
                 FIELD_CAPABILITIES: _robot_capabilities(robot),
                 FIELD_ENDPOINT: endpoint,
                 FIELD_SHM_NAME: robot.SHM_NAME,

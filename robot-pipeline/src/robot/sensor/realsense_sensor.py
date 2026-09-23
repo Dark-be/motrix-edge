@@ -118,7 +118,7 @@ class RealsenseSensor(Sensor):
 
 if __name__ == "__main__":
     cam = RealsenseSensor("test")
-    cam.connect("419522071856")
+    cam.connect("<RealSense 序列号>")  # 现场填写
     cam_list = []
     for i in range(1000):
         print(i)

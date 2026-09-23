@@ -49,15 +49,16 @@ class SinglePiperRobot(BaseRobot):
 
     # 默认复位目标（config 未提供 init_qpos 时使用）：6 关节 0 + 夹爪张开 1
     DEFAULT_INIT_QPOS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports）----
+    PORT_ROLES = ("leader", "follower")  # 主 / 从臂 CAN 接口名
 
     def __init__(self, robot_config: dict | None = None):
         robot_config = dict(robot_config or {})
         robot_config.setdefault("init_qpos", self.DEFAULT_INIT_QPOS)
         super().__init__(robot_config)
         # 控制器：Leader 主臂（只读取，遥操作输入）+ Follower 从臂（执行）
-        # 端口 / 固件版本可经 robot_config 配置（leader_port / follower_port / *_firmware）
-        self.leader_port = str(self.robot_config.get("leader_port", "can_left"))
-        self.follower_port = str(self.robot_config.get("follower_port", "can_right"))
+        # 端口在 robot.ports 里**必填**；固件版本可经 robot_config 配置（*_firmware，缺省 v188）
+        self.ports = self._required_devices("ports", self.PORT_ROLES)
         self.leader_firmware = str(self.robot_config.get("leader_firmware", "v188"))
         self.follower_firmware = str(self.robot_config.get("follower_firmware", "v188"))
         self.controllers: dict = {
@@ -67,8 +68,10 @@ class SinglePiperRobot(BaseRobot):
 
     def connect(self):
         """连接：Leader 主臂（role=leader）+ Follower 从臂（role=follower，执行）。"""
-        self.controllers["leader"].connect(port=self.leader_port, role="leader", firmware=self.leader_firmware)
-        self.controllers["follower"].connect(port=self.follower_port, role="follower", firmware=self.follower_firmware)
+        self.controllers["leader"].connect(port=self.ports["leader"], role="leader", firmware=self.leader_firmware)
+        self.controllers["follower"].connect(
+            port=self.ports["follower"], role="follower", firmware=self.follower_firmware
+        )
         debug_print(self.name, "Setup controllers done", "INFO")
         self.ready = True
 

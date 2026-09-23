@@ -34,7 +34,7 @@ class AliciaTeachController(ArmController):
     def __init__(self, name="alicia_teach_controller"):
         super().__init__(name)
         self.robot = None
-        self.port: str = "/dev/ttyACM0"
+        self.port: str | None = None  # 由 connect() 从配置注入（不内置现场默认值）
 
         self.collect_process = None
         self.stop_event = Event()

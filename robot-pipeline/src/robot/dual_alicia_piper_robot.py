@@ -37,7 +37,7 @@ from robot.sensor.v4l2_sensor import V4l2Sensor  # noqa: E402
 
 
 class DualAliciaPiperRobot(BaseRobot):
-    NAME = "dual_piper"
+    NAME = "dual_alicia_piper"
     ADAPTER_TYPE = "dual_piper"
     ROBOT_MODEL_ID = "dual-piper"
     ROBOT_MODEL_VERSION = "0.0.0"
@@ -51,14 +51,18 @@ class DualAliciaPiperRobot(BaseRobot):
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     SHM_NAME = "dual_piper_obs"
+    # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports / robot.cameras）----
+    PORT_ROLES = ("left_master", "right_master", "left", "right")  # 控制器端口（主手 / 从臂）
 
     def __init__(self, robot_config: dict | None = None):
         super().__init__(robot_config)
+        self.ports = self._required_devices("ports", self.PORT_ROLES)
+        self.camera_devices = self._required_devices("cameras", self.IMAGE_NAMES)
         # ---- 控制器 / 传感器接入位（硬件 SDK 仅在机器人端；接入时实例化）----
         # 参照原 src/robot/alicia_piper_teleop_robot.py：
         #   left/right_master = AliciaTeachController（主手，遥操作输入）
         #   left/right_arm    = PiperController（从手，执行）
-        #   cam_head = RealsenseSensor；cam_left/right_wrist = V4l2Sensor
+        #   cam_head = RealsenseSensor；cam_left/right_wrist = Cv2Sensor
         self.controllers: dict = {
             "left_arm": PiperController("left"),  # slave 从手
             "right_arm": PiperController("right"),  # slave 从手
@@ -74,16 +78,18 @@ class DualAliciaPiperRobot(BaseRobot):
     def connect(self):
         """连接真实双臂 SDK：master 主手（遥操作输入）+ slave 从手（执行） + 相机。
 
-        主手只作输入、不下发指令；slave 从手执行。硬件 SDK 仅在机器人端安装。
+        主手只作输入、不下发指令；slave 从手执行。端口 / 相机设备取自配置
+        （``robot.ports`` / ``robot.cameras``，**必填**，构造时已校验）。硬件 SDK 仅在机器人
+        端安装。
         """
-        self.controllers["left_master"].connect(port="/dev/ttyACM0")
-        self.controllers["right_master"].connect(port="/dev/ttyACM1")
-        self.controllers["left_arm"].connect(port="can_left")
-        self.controllers["right_arm"].connect(port="can_right")
+        self.controllers["left_master"].connect(port=self.ports["left_master"])
+        self.controllers["right_master"].connect(port=self.ports["right_master"])
+        self.controllers["left_arm"].connect(port=self.ports["left"])
+        self.controllers["right_arm"].connect(port=self.ports["right"])
         debug_print(self.name, "Setup controllers done", "INFO")
-        self.sensors["cam_head"].connect(device="261222074970", pixel_format="jpg")  # Realsense D435i
-        self.sensors["cam_left_wrist"].connect(device="/dev/left-camera", pixel_format="jpg")  # V4L2 腕相机
-        self.sensors["cam_right_wrist"].connect(device="/dev/right-camera", pixel_format="jpg")  # V4L2 腕相机
+        self.sensors["cam_head"].connect(device=self.camera_devices["cam_head"], pixel_format="jpg")
+        self.sensors["cam_left_wrist"].connect(device=self.camera_devices["cam_left_wrist"], pixel_format="jpg")
+        self.sensors["cam_right_wrist"].connect(device=self.camera_devices["cam_right_wrist"], pixel_format="jpg")
         debug_print(self.name, "Setup sensors done", "INFO")
         self.ready = True
 

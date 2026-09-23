@@ -185,12 +185,39 @@ def test_observe_builds_edge_observation(monkeypatch):
     assert obs is not None
     assert obs[KEY_QPOS].dtype == np.float32
     assert obs[KEY_ACTION].dtype == np.float32
-    # action 取 SHM 里进程侧的目标动作，而不是 qpos 副本（preview 显示真实指令）
+    # action 取 SHM 里进程侧的目标动作，而不是 qpos 副本（preview 显示真实指令）；
+    # 未裁剪（全臂）→ 完整 14 维
     assert np.array_equal(obs[KEY_ACTION], np.arange(14, dtype=np.float32) + 100)
     for name in ("cam_head", "cam_left_wrist", "cam_right_wrist"):
         encoded = obs[f"{CAMERA_PREFIX}{name}"]
         assert isinstance(encoded, bytes)
         assert cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR) is not None
+
+
+def test_observe_action_follows_enabled_arm(monkeypatch):
+    """裁剪到单臂后，观测里的 action 与 qpos **同一口径**（只含启用臂）。"""
+
+    class _Reader:
+        def __init__(self, name):
+            pass
+
+        def read(self):
+            return {
+                "qpos": np.arange(14, dtype=np.float64),
+                "action": np.arange(14, dtype=np.float64) + 100,
+                "images": [np.zeros((4, 4, 3), dtype=np.uint8)] * 3,
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("motrix_edge.adapter.http_shm_adapter.ObsShmReader", _Reader)
+    adapter = DualPiperAdapter()
+    adapter.configure(enabled_arms=["right"])
+    obs = adapter.observe()
+
+    assert np.array_equal(obs[KEY_QPOS], np.arange(7, 14, dtype=np.float32))  # 右臂 qpos
+    assert np.array_equal(obs[KEY_ACTION], np.arange(7, 14, dtype=np.float32) + 100)
 
 
 def test_observe_rejects_camera_count_mismatch(monkeypatch):

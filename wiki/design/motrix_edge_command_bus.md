@@ -86,7 +86,7 @@ class CommandResult:
 `node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer config`、`capture meta *`
 （配置级，与节点状态机解耦）全局可用——`capture meta` 读写 `capture.yml` 的 `meta` 段，见
 [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。CLI 示例：`session run capture`、`robot execute 0,0,0`、`robot teleop true`、
-`infer config set '{"host":"10.0.0.9"}'`。
+`infer config set '{"host":"10.0.0.9"}'`、`adapter config set '{"enabled_arms": ["right"]}'`、`lease revoke`。
 
 ## 本地 vs HTTP（行为对齐）
 

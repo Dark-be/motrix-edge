@@ -10,6 +10,11 @@
 控制任务、`/v1/commands` 含 estop）——受限操作须携带匹配租约（`X-Lease-Id`），由 Edge
 校验后放行。
 
+> **过期时间由 Console（web）决定**：`expires_at` 由 Console 在签发 / 续约时计算并随租约
+> **镜像**下发；Edge 只保留 + `require` 校验（按本机时钟与 `expires_at` 比较判过期），
+> **不自行计算过期**。对外时间字段（`expires_at` / `renewed_at`）统一以北京时间
+> （`Asia/Shanghai`，+08:00）序列化，供展示 / 倒计时。
+
 > **前端暂代 Console**：Console Backend 尚未接入前，`frontend/edge-console` 的「租约编辑
 > 生成栏」暂代 Console 生成 / 续约 / 撤销租约（见「前端暂代 Console」）。
 
@@ -23,6 +28,13 @@
     `lease_version` 原地延长；Edge 在旧租约到期前收到新镜像即可保持控制。
 -   **单点校验**：访问校验（`require`）由 `LeaseManager` 实现；Service 只调用
     `leases.require()`，不复制逻辑。
+-   **Console 决定过期**：`expires_at` 由 Console（web）在签发 / 续约时计算并下发；Edge 只保留
+    镜像并按本机时钟校验是否过期，不自行计算。
+-   **时间统一北京时间**：所有对外时间字段（`expires_at` / `renewed_at`）统一以
+    `Asia/Shanghai`（+08:00）序列化。
+-   **管理员撤销**：命令 `lease revoke`（无需 id）撤销 Edge **当前**租约镜像（清理幽灵租约）；
+    回执带 `changed`（区分「本次真的撤销」与「本就无租约 / 已撤销」，幂等不谎报）；撤销后
+    当前槽位释放（`leasable=True`），新控制端可重新签发。
 
 ## 数据流（正确模型）
 

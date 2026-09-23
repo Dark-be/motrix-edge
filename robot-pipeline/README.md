@@ -20,11 +20,11 @@
 ```text
 scripts/
   start.sh                # 通用启动入口（交互菜单选配置 / 直接指定配置名）
-  can_muti_activate.sh    # 多路 CAN 激活（USB 端口 → can 名映射）
+  can_muti_activate.sh    # USB 物理口 → CAN 名绑定（用法见「CAN 总线配置」）
 src/                      # robot-pipeline 包（src 布局，包名 config/env/robot/server/...）
   config/                 # robot server 配置 + 加载逻辑
     __init__.py           # load_config / get_config_dir（MOTRIX_CONFIG_DIR 优先，包内默认兜底）
-    *_server.yml          # test_robot / dual_piper / dual_alicia_piper / single_piper
+    *.yml                 # test_robot / dual_piper / dual_alicia_piper / single_piper
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
   server/                 # robot_server.py 入口 + contract_server.py（/v1 契约服务器）
@@ -61,7 +61,7 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 **队列 / 单写者 / 频率与诊断 / 停机语义等设计细节**见
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
-一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos`、
+一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos`、`action`、
 `observations/images/<cam>`）、HTTP 端点、共享内存布局都由 **motrix_edge.adapter** 下的
 契约文件单点定义；robot server 复用这些定义，env 只负责控制 robot，不碰 HTTP / 共享内存。
 
@@ -90,23 +90,28 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 具体机器人实现（`BaseRobot` 子类）在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册
 （类型名 -> 模块 + 类名）；配置 `robot.type` 即按此自动匹配：
 
-| 注册类型                  | 实现                            | 说明                                 |
-| ------------------------- | ------------------------------- | ------------------------------------ |
-| `test_robot`              | `robot.test_robot.TestRobot`    | 虚拟（无硬件，离线联调）             |
-| `dual_piper_robot`        | `robot.dual_piper_robot`        | 真实双臂接入位                       |
-| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot` | 双臂：Alicia 主手 + Piper 从手遥操作 |
-| `single_piper_robot`      | `robot.single_piper_robot`      | 单臂 Leader+Follower 遥操作          |
+| 注册类型                  | 实现                                                 | 说明                                 |
+| ------------------------- | ---------------------------------------------------- | ------------------------------------ |
+| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）             |
+| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                       |
+| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作 |
+| `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂 Leader+Follower 遥操作          |
 
-每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层段为
-`server`（监听 host/port）、`robot`（name / type / step_rad / init_qpos）、`collector`：
+每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
+`INFO_LEVEL`（日志级别 DEBUG / INFO / ERROR，robot server 启动时读）、`server`（监听
+host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras`）、`collector`：
 
--   `test_robot_server.yml` —— `robot.type: test_robot`（默认，虚拟机器人无硬件）
--   `dual_piper_server.yml` —— `robot.type: dual_piper_robot`
--   `dual_alicia_piper_server.yml` —— `robot.type: dual_alicia_piper_robot`
--   `single_piper_server.yml` —— `robot.type: single_piper_robot`
+-   `test_robot.yml` —— `robot.type: test_robot`（默认，虚拟机器人无硬件）
+-   `dual_piper.yml` —— `robot.type: dual_piper_robot`
+-   `dual_alicia_piper.yml` —— `robot.type: dual_alicia_piper_robot`
+-   `single_piper.yml` —— `robot.type: single_piper_robot`
 
 配置加载分层（`src/config/__init__.py`，与 motrix_edge 同机制）：环境变量
 `MOTRIX_CONFIG_DIR` 指向的外界配置目录优先，否则读包内默认 `*.yml`（只读兜底）。
+
+`robot.name` 是**进程展示名**（可选，覆盖机器人类常量 `NAME`），也是 `/v1/discover` 上报给 Edge
+的名字（控制台 / 状态接口显示的就是它）；不写则用机型默认名 `NAME`。同型号多台机器按机器命名
+（如 `dual_piper_pc16`），便于控制台区分与采集元信息（mcap 同名 JSON 里的 `robot_name`）。
 
 ## 接入机器人
 
@@ -116,28 +121,69 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
     -   `IMAGE_NAMES` / `IMAGES`：相机名与分辨率
     -   `SHM_NAME`：观测共享内存名
     -   `CAPABILITIES`：能力声明（capture / execute / streaming）
-    -   身份常量：`NAME` / `ADAPTER_TYPE` / `ROBOT_MODEL_ID` / `ROBOT_MODEL_VERSION`
+    -   身份常量：`NAME`（展示名缺省值，配置 `robot.name` 可覆盖）/ `ADAPTER_TYPE` /
+        `ROBOT_MODEL_ID` / `ROBOT_MODEL_VERSION`
 3.  在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册；在 `src/config/*.yml` 配置
     `robot.type` 即按此自动匹配。
 
-机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_qpos`）。
+机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_qpos`）。**硬件接线参数**
+也在此段描述（现场接线不同时只改这里，无需改代码）：
+
+```yaml
+robot:
+    ports: # 控制器端口：CAN 接口名 / 串口设备节点（键 = 实现里的 PORT_ROLES）
+        left_master: m_left # 左主手（遥操作输入）
+        left: left # 左从臂（执行）
+    cameras: # 相机设备（键 = 实现里的 IMAGE_NAMES）：RealSense 序列号 / V4L2 设备节点
+        cam_head: "" # 头部序列号：现场填写（留空 → 启动即报错，不虚构占位值）
+        cam_left_wrist: "" # 左腕序列号：现场填写（留空 → 启动即报错，不虚构占位值）
+```
+
+两个子段都是**键清单由代码声明、值必填**：缺失 / 未写 / 空串都会在机器人构造时报错——代码与
+示例里都不放**现场值**，也不放**占位值**（假序列号只会把错误推迟到 SDK「找不到设备」）；未知
+键名 → `WARNING`（帮助发现拼写错误）。
+键名分别是实现里的 `PORT_ROLES` 与 `IMAGE_NAMES`（见 `src/robot/dual_piper_robot.py`、
+`dual_alicia_piper_robot.py` 与 `single_piper_robot.py`）。相机值随机型不同：**RealSense 机型
+（`dual_piper_robot`）三路都是 RealSense 序列号**；Alicia 机型（`dual_alicia_piper_robot`）
+的腕相机是 V4L2 设备节点。
+
+## CAN 总线配置
+
+Piper 机械臂经 CAN 控制。`scripts/can_muti_activate.sh` 把**机械臂插的 USB 物理口**绑定到
+**固定 CAN 名**（left / right / m_left / m_right）——换设备、重启、换顺序都不用改配置。
+
+映射表维护在脚本顶部的 `USB_PORTS`：**键** = USB 物理口 `bus-info`（`ethtool -i <canX> |
+grep bus-info` 的值，如 `3-2.2:1.0`；同一物理口稳定、与设备无关），**值** =
+`<目标名>:<波特率>`。换 USB 口 / 换 HUB 时 `bus-info` 会变，用 `--list` 抄一遍即可。
+
+```bash
+sudo modprobe gs_usb                             # 前提：驱动已加载（无 CAN 接口时脚本会提示）
+bash scripts/can_muti_activate.sh --list         # ① 看现状 ↔ 配置对照表（免 root），抄 bus-info
+sudo bash scripts/can_muti_activate.sh --dry-run # ② 预演：只打印将要执行的 ip 命令
+sudo bash scripts/can_muti_activate.sh           # ③ 绑定：down → 设波特率 → 改名 → up
+```
+
+-   参数：`--list`（只读对照表，免 root）/ `--dry-run`（只打印，免 root）/ `--ignore`（跳过
+    「CAN 接口数 == 配置条数」的交互确认，非交互环境用）/ `-h`（用法）；
+-   执行时会**短暂 down 接口并改名**：先确认机械臂已停止、没有正在跑的 CAN 通信；
+-   退出码：`0` = 全部目标核对通过（接口存在 + link up + 波特率一致）；`1` = 有目标未达成或
+    有 `ip` 命令失败；`2` = 参数错误。收尾会打印「目标态 vs 实际态」核对表，**以它为准**。
 
 ## 启动机器人服务
 
 单一入口 `src/server/robot_server.py`，**按配置自动匹配**机器人（无需为每种机器人写
-env/server）。配置名即 `src/config/` 下的文件名（`.yml` 后缀可省，默认
-`test_robot_server.yml`）。
+env/server）。配置名即 `src/config/` 下的文件名（`.yml` 后缀可省，默认 `test_robot.yml`）。
 
 ```bash
-# 方式一：启动脚本（交互菜单选配置；直接指定配置名则跳过菜单）
+# 方式一：启动脚本（交互菜单选配置，dual_piper 排首位；直接指定配置名则跳过菜单）
 bash scripts/start.sh
-bash scripts/start.sh dual_piper_server.yml --host 0.0.0.0 --port 8090
+bash scripts/start.sh dual_piper.yml --host 0.0.0.0 --port 8090
 
 # 方式二：直接运行（--config / --host / --port 均可覆盖）
-uv run python src/server/robot_server.py --config test_robot_server.yml --host 0.0.0.0 --port 8090
+uv run python src/server/robot_server.py --config test_robot.yml --host 0.0.0.0 --port 8090
 
-# 方式三：uvicorn（app 默认按 $ROBOT_SERVER_CFG 或 test_robot_server.yml 构建）
-ROBOT_SERVER_CFG=dual_piper_server.yml uv run uvicorn server.robot_server:app --host 0.0.0.0 --port 8090
+# 方式三：uvicorn（app 默认按 $ROBOT_SERVER_CFG 或 test_robot.yml 构建）
+ROBOT_SERVER_CFG=dual_piper.yml uv run uvicorn server.robot_server:app --host 0.0.0.0 --port 8090
 ```
 
 监听地址默认取配置 `server.host` / `server.port`，命令行参数可覆盖。
@@ -194,7 +240,7 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 ```json
 {
     "relative_path": "383af95f31d744f5b49630125c5f0caf.mcap",
-    "robot_name": "test_robot_my_pc",
+    "robot_name": "test_001",
     "robot_type": "test_robot",
     "operator": "Yu Hongzhen",
     "task_name": "put bowls",
@@ -221,12 +267,3 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
 跟随。遥操作默认关闭（adapter 通讯控制中暂时均为 false）。
-
-## CAN 总线配置
-
-Piper 机械臂经 CAN 控制。`scripts/can_muti_activate.sh` 把 USB 端口映射到 can 名并批量
-激活（映射表在脚本内 `USB_PORTS` 中维护，按实际接线调整）：
-
-```bash
-bash scripts/can_muti_activate.sh   # 按 USB_PORTS 映射激活多路 CAN
-```

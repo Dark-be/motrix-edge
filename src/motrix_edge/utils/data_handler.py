@@ -23,6 +23,16 @@ from motrix_edge.config import LOG_PATH
 _LOG_FILE: str | None = None
 
 
+def file_log_enabled() -> bool:
+    """文件日志开关（环境变量 ``MOTRIX_LOG_FILE``，**缺省关闭**，防长期运行塞满磁盘）。
+
+    单点定义：``debug_print``（``logs/log_*.txt``）与 uvicorn 日志
+    （``utils/logging.uvicorn_log_config``，``logs/uvicorn.log``）共用本函数，
+    避免同一个开关在两处各判一次（口径漂移 / 求值时机不同）。终端打印不受影响。
+    """
+    return os.getenv("MOTRIX_LOG_FILE", "0").strip().lower() not in ("0", "false", "no")
+
+
 def _get_log_file() -> str:
     global _LOG_FILE
     if _LOG_FILE is None:
@@ -57,8 +67,8 @@ def debug_print(name, info, level="INFO", end="\n", flush=True):
     msg = f"[{level}][{name}] {info}"
     print(f"{color}{msg}{endc}", end=end, flush=flush)
 
-    # 写入日志文件 (INFO及以上级别)
-    if msg_level_value >= 20:
+    # 写入日志文件（INFO 及以上；MOTRIX_LOG_FILE=0 关闭文件写入）
+    if msg_level_value >= 20 and file_log_enabled():
         log_file_path = _get_log_file()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         try:

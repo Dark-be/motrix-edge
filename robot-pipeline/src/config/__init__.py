@@ -30,10 +30,10 @@ import yaml
 
 # robot server 配置文件（package data；外界配置目录存在同名文件时优先）
 DEFAULT_CONFIG_FILES = (
-    "test_robot_server.yml",
-    "dual_piper_server.yml",
-    "dual_alicia_piper_server.yml",
-    "single_piper_server.yml",
+    "test_robot.yml",
+    "dual_piper.yml",
+    "dual_alicia_piper.yml",
+    "single_piper.yml",
 )
 
 

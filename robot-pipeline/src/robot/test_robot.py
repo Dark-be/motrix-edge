@@ -34,7 +34,7 @@ from robot.sensor.test_vision_sensor import TestVisionSensor  # noqa: E402
 
 
 class TestRobot(BaseRobot):
-    NAME = "test_robot_my_pc"
+    NAME = "test_robot"
     ADAPTER_TYPE = "test_robot"
     ROBOT_MODEL_ID = "test-robot"
     ROBOT_MODEL_VERSION = "0.0.0"

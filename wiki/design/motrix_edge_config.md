@@ -67,7 +67,12 @@
 -   一次性子命令（`adapters` / `version`）直接打印后退出，无需交互会话。
 
 运行拓扑：`run` = node 主线程持续运行 `EdgeNode`（CLI 键盘线程经注册表解析行命令 → `push` 到
-共享 `CommandBus`）+ web 作为独立线程跑 FastAPI（uvicorn 日志写 `logs/uvicorn.log`）。
+共享 `CommandBus`）+ web 作为独立线程跑 FastAPI。
+
+**文件日志开关**：环境变量 `MOTRIX_LOG_FILE=1` 开启文件日志（**缺省关闭**，防长期运行塞满
+磁盘）——同时控制 `debug_print` 的 `logs/log_*.txt` 与 uvicorn 的 `logs/uvicorn.log`（access
+只写文件）；关闭时只静默 HTTP access（不写文件、不刷终端），uvicorn 启动 / 错误日志仍写终端
+（端口占用 bind 失败、uvicorn 内部异常排障可见），终端 `print` 不受影响。
 
 ## 相关文档
 

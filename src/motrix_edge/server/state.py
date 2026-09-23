@@ -21,8 +21,17 @@
 
 
 def adapter_ref(node) -> dict:
-    """当前节点绑定 adapter 的身份（``name`` / ``type``）。"""
-    adapter = getattr(node, "adapter", None) if node is not None else None
+    """当前节点绑定 adapter 的身份（``name`` / ``type``）。
+
+    委托 ``node.adapter_ref``（节点是身份的单一来源）；无该属性的测试替身回退
+    按 ``adapter_name`` / ``adapter`` 读，保持向后兼容。
+    """
+    if node is None:
+        return {"name": None, "type": None}
+    ref = getattr(node, "adapter_ref", None)
+    if ref is not None:
+        return ref
+    adapter = getattr(node, "adapter", None)
     return {
         "name": getattr(node, "adapter_name", None) or getattr(adapter, "name", None),
         "type": getattr(node, "adapter_type", None) or getattr(adapter, "type", None),

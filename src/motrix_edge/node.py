@@ -41,6 +41,7 @@ from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
     CMD_ADAPTER_CONFIG,
     CMD_ADAPTER_CONFIG_CURRENT,
+    CMD_ADAPTER_CONFIG_SET,
     CMD_CAPTURE_META_ADD,
     CMD_CAPTURE_META_DELETE,
     CMD_CAPTURE_META_DELETE_KEY,
@@ -53,6 +54,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_PROMPT,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
+    CMD_LEASE_REVOKE,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -159,6 +161,7 @@ class EdgeNode:
         capture_status_interval=2.0,
         observe_interval=0.05,
         capture_meta_store=None,
+        lease_manager=None,
     ):
         self.base_cfg = base_cfg
         self.command_source = command_source if command_source is not None else _noop_command_source
@@ -168,6 +171,11 @@ class EdgeNode:
         self.lifecycle = NodeLifecycle(NodeState.INIT)  # 构造后默认 INIT；initialize()/run() 后进入 IDLE
         self.session = None
         self.session_type = None
+        # Edge 级租约管理器（注入，供 lease revoke 命令清理幽灵租约）：由 __main__ 创建传入
+        self.lease_manager = lease_manager
+        # 运行时 adapter 能力配置（enabled_arms / enabled_cameras）：由命令 /
+        # 前端（adapter config）设置，adapter discover 绑定时应用（不读 edge.yml）。
+        self.adapter_config: dict = {}
         # 任务线程（session run 启动后台线程）：启动后置非 None，任务期间主循环不 poll
         # 命令（会话命令由任务线程内的会话循环消费）；_tick 检测线程结束收尾。
         self._task_thread = None
@@ -324,6 +332,18 @@ class EdgeNode:
             self._reply(cmd, handle_capture_meta(cmd, self.capture_meta_store))
             return
 
+        # 运行时 adapter 能力配置（adapter config / adapter config set / adapter config current）：
+        # 配置级命令，任何状态均可用；写入节点运行时状态（adapter_config），adapter discover 绑定时应用。
+        if cmd.name in (CMD_ADAPTER_CONFIG, CMD_ADAPTER_CONFIG_SET, CMD_ADAPTER_CONFIG_CURRENT):
+            self._reply(cmd, self._on_adapter_config(cmd))
+            return
+
+        # 撤销 Edge 当前租约（lease revoke）：配置级命令，任何状态均可用；管理员清理幽灵租约，
+        # 撤销后 Edge 释放租约槽位（leasable=True），新控制端可重新签发。
+        if cmd.name == CMD_LEASE_REVOKE:
+            self._reply(cmd, self._on_lease_revoke(cmd))
+            return
+
         # 状态处理器返回是否已回执；未回执（当前状态不适用）→ 兜底回执，避免 submit 挂起
         if not getattr(self, _STATE_HANDLERS[state])(cmd):
             self._reply(
@@ -336,6 +356,55 @@ class EdgeNode:
         if cmd is not None and cmd.reply_to is not None:
             cmd.reply_to(result)
         return result
+
+    def adapter_config_effective(self) -> dict | None:
+        """当前绑定 adapter **实际生效**的能力配置；**未绑定 → None**。
+
+        与 ``adapter_config``（节点运行时配置状态，可能尚未应用）不同：读 adapter 实例
+        实际生效值（``configure()`` 应用后）——``enabled`` 为**能力启用字典**
+        ``{"arms": {臂: bool}, "cameras": {相机: bool}}``（前端勾选展示 / 同步用）。
+
+        **未绑定 adapter → None**（调用方回 404 / rejected）：能力布局（臂名 / 相机名）是
+        adapter 类常量、**discover 不传**，未绑定就没有任何机型信息——拿某个 adapter 的
+        常量当“默认”会展示错误机型（真机项目不猜）。
+        """
+        adapter = self.adapter
+        if adapter is None:
+            return None
+        home = getattr(adapter, "_home_qpos", None)
+        enabled_map = getattr(adapter, "enabled_map", None)
+        return {
+            "adapter": self.adapter_ref,
+            "enabled": enabled_map() if callable(enabled_map) else {},
+            "action_dim": getattr(adapter, "action_dim", None),
+            "home_qpos": [float(v) for v in home] if home is not None else None,
+        }
+
+    def _adapter_config_current(self):
+        """adapter config current：当前 adapter 能力配置（启用臂 / 相机）。
+
+        已绑定 → 当前 adapter **实际生效**（configure 应用后）；**未绑定 → rejected(409)**
+        （没有机型信息，不猜默认；见 ``adapter_config_effective``）。
+        """
+        cfg = self.adapter_config_effective()
+        if cfg is None:
+            return CommandResult(status="rejected", error="adapter not bound", status_code=409)
+        return ok_result(**cfg)
+
+    def _on_lease_revoke(self, cmd):
+        """lease revoke：撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）。
+
+        无需指定 lease_id（撤销 Edge 当前持有的租约）；无租约 → 回执 no lease。
+        回执带 ``changed``：区分「本次真的撤销」与「本就无租约 / 已撤销」（幂等），
+        便于前端提示。撤销后 ``status()`` 清空槽位（leasable=True），新控制端可重新签发。
+        """
+        lm = self.lease_manager
+        if lm is None:
+            return CommandResult(status="rejected", error="lease manager not available", status_code=501)
+        lease, changed = lm.revoke_current()
+        if lease is None:
+            return ok_result(lease_id=None, changed=False, status="no lease to revoke")
+        return ok_result(lease_id=lease.lease_id, state=lease.state.value, changed=changed)
 
     def _on_infer_rtc(self, cmd):
         """infer rtc / infer rtc set <json>：读写 RTC（实时动作块）参数配置。
@@ -360,7 +429,7 @@ class EdgeNode:
         - ``adapter config current``：回执当前绑定 adapter **实际生效**的能力配置
           （configure 应用后：启用臂 / 相机 / 动作维度 / home）；
         - ``adapter config set <json>``：按 JSON 对象（可部分）设置，并应用到当前已绑定
-          adapter（经 ``_apply_adapter_config``，非法 → rejected，状态不更新）。
+          adapter（经 ``apply_adapter_config``，非法 → rejected，状态不更新）。
         """
         if cmd.name == CMD_ADAPTER_CONFIG_CURRENT:
             return self._adapter_config_current()
@@ -370,7 +439,13 @@ class EdgeNode:
             config = parse_meta(cmd.params.get("json"))
         except ValueError as exc:
             return CommandResult(status="rejected", error=str(exc), status_code=400)
-        if not self._apply_adapter_config(config):
+        if not self.apply_adapter_config(config):
+            if self.session is not None:  # 会话中拒绝变更布局（先 session quit）
+                return CommandResult(
+                    status="rejected",
+                    error="adapter config rejected (session active: quit the session first)",
+                    status_code=409,
+                )
             return CommandResult(
                 status="rejected",
                 error="adapter config rejected (check enabled_arms / enabled_cameras)",
@@ -510,7 +585,7 @@ class EdgeNode:
                 node_state=self.state,
                 session=self.session_type,
                 state=getattr(self.session, "state", None),
-                adapter=self._adapter_ref(),
+                adapter=self.adapter_ref,
                 policy=getattr(self.session, "policy_type", None),
             )
         except Exception as exc:
@@ -668,10 +743,79 @@ class EdgeNode:
         adapter = discover_adapter(host=host, port=port)  # 返回 None 或实例化后的 adapter
         if adapter is None:
             return
+        # 应用运行时 adapter 配置（adapter config 命令 / 前端设置；不读 edge.yml）：
+        # 影响 execute 的动作维度与 observe 布局（见 ``configure()``）。配置非法 → 不绑定，
+        # 释放本次 discover 建立的连接等下轮重试（身份随实例一起清，不留陈旧机型）。
         self.adapter = adapter
+        if not self.apply_adapter_config():
+            self._release_adapter()
+            return
         self.adapter_name = getattr(adapter, "name", None) or getattr(adapter, "type", None)
         self.adapter_type = getattr(adapter, "type", None) or getattr(adapter, "name", None)
         self.lifecycle.transition(NodeState.READY)
+
+    def apply_adapter_config(self, config: dict | None = None) -> bool:
+        """合并并应用运行时 adapter 配置（enabled_arms / enabled_cameras）。
+
+        ``config`` 只更新提供的键（缺省 / ``None`` = 用已存配置重放，供 discover 绑定时应用）。
+        **已绑定** → 对当前 adapter 用 ``configure()`` 原子校验（未知臂 / 相机 → 打印 ERROR、
+        返回 False）；**未绑定** → 按已注册 adapter 的**类常量**静态校验（同类错误同样拒绝）。
+        两种情况下配置状态都不更新。home_qpos 固定由 adapter 类常量 ``HOME_QPOS`` 定义
+        （不参与运行时配置）。adapter 未实现 ``configure()`` 时只存状态（True）。
+
+        **会话进行中（采集 / 推理）一律拒绝**（返回 False）：``configure()`` 立即改变
+        ``action_dim`` 与 ``observe()`` 布局，episode 中途改会让同一 episode 内
+        qpos / action 维度不一致（mcap 下游按固定维度解析），推理侧按旧维度下发的动作
+        也会被 ``_expand_action`` 的维度校验拒绝。调用方据此回 409（HTTP）/ rejected
+        （命令）；先 ``session quit`` 再改。
+
+        HTTP（``POST /v1/adapters/config``）/ 命令（``adapter config set``）/ discover 绑定
+        （``_probe_adapter``）共用本方法（单一入口）。
+        """
+        if self.session is not None:
+            debug_print("EdgeNode", "adapter config rejected: session active (quit the session first)", "ERROR")
+            return False
+        merged = {**self.adapter_config, **{k: v for k, v in (config or {}).items() if v is not None}}
+        adapter = self.adapter
+        if adapter is not None:
+            configure = getattr(adapter, "configure", None)
+            if callable(configure):
+                try:
+                    configure(
+                        enabled_arms=merged.get("enabled_arms"),
+                        enabled_cameras=merged.get("enabled_cameras"),
+                    )
+                except ValueError as exc:
+                    debug_print("EdgeNode", f"adapter config rejected: {exc}", "ERROR")
+                    return False
+        elif not self._validate_adapter_config(merged):
+            return False
+        self.adapter_config = merged
+        return True
+
+    def _validate_adapter_config(self, config: dict) -> bool:
+        """未绑定 adapter 时按**类常量**静态校验能力配置（非法 → 打印 ERROR、返回 False）。
+
+        已注册 adapter 的 ``ARM_NAMES`` / ``IMAGES`` 足以判未知臂 / 相机，无需实例化：
+        **任一** adapter 接受即通过（不依赖「上次绑过哪个」，避免用旧机型的常量误判），
+        全部拒绝才拒。这样错误停在 ``adapter config set`` 时刻，而不是等 ``_probe_adapter``
+        因配置非法绑定失败——否则节点静默停在 IDLE，状态里的非法值看不出原因。
+        无可用 adapter（缺失 SDK / 未注册）→ 无从校验，返回 True（留给绑定时刻）。
+        """
+        from motrix_edge.adapter import adapter_classes
+
+        errors = []
+        for cls in adapter_classes():
+            try:
+                cls.normalize_capability_config(config.get("enabled_arms"), config.get("enabled_cameras"))
+            except ValueError as exc:
+                errors.append(f"{cls.__name__}: {exc}")
+            else:
+                return True
+        if not errors:
+            return True  # 无可用 adapter：留给绑定时刻校验
+        debug_print("EdgeNode", f"adapter config rejected (adapter not bound): {'; '.join(errors)}", "ERROR")
+        return False
 
     def _check_adapter_alive(self) -> None:
         """READY / ACTIVE 下周期检查 adapter 心跳：进程失联 → ERROR。"""
@@ -715,11 +859,19 @@ class EdgeNode:
     # ------------------------------------------------------------------
     # 资源释放
     # ------------------------------------------------------------------
-    def _adapter_ref(self) -> dict:
-        """当前节点绑定的唯一 adapter 身份（单 adapter 包，回执 / 状态用）。"""
+    @property
+    def adapter_ref(self) -> dict:
+        """当前节点绑定的唯一 adapter 身份（``name`` / ``type``）——单一来源。
+
+        单 adapter 包：回执 / 状态（``server.state.adapter_ref``）/ adapter 能力配置
+        均取这里，不再各自逐字段拼。**未绑定 → 两字段均 ``None``**（与
+        ``adapter_config_effective()`` 未绑定 → ``None`` 同构：不猜机型）；身份与实例
+        同生命周期（``_probe_adapter`` / ``_release_adapter`` 一起置位 / 清空）。
+        """
+        adapter = self.adapter
         return {
-            "name": self.adapter_name,
-            "type": self.adapter_type,
+            "name": self.adapter_name or getattr(adapter, "name", None),
+            "type": self.adapter_type or getattr(adapter, "type", None),
         }
 
     def _shutdown_session(self):

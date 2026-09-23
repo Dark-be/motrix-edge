@@ -7,12 +7,13 @@ server:
 
 # 机器人控制配置（单臂双 Piper：Leader 主臂 + Follower 从臂；硬件 SDK 仅在机器人端安装）
 robot:
-  name: single_piper
+  name: single_piper_001
   type: single_piper_robot
   step_rad: 0.1 # 每帧最大关节增量（rad），env 控制线程限速接近 target
   init_qpos: [0, 0, 0, 0, 0, 0, 1] # 6 关节 + 夹爪（Follower 从臂动作维度）
-  leader_port: can_right # Leader 主臂 CAN 端口
-  follower_port: can_left # Follower 从臂 CAN 端口
+  ports: # 控制器端口（CAN 接口名；**必填**，缺失 / 空串 → 启动报错）
+    leader: can_right # Leader 主臂
+    follower: can_left # Follower 从臂
   leader_firmware: v188 # Leader 主臂固件版本（default / v188 / v189；按实际固件调整）
   follower_firmware: v188 # Follower 从臂固件版本
 

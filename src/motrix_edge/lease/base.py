@@ -38,6 +38,17 @@ from zoneinfo import ZoneInfo
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 
+def as_beijing(dt: datetime | None) -> datetime | None:
+    """归一化到北京时间（Asia/Shanghai）：对外时间字段统一序列化为 +08:00。
+
+    单点定义（Console 下发的 ISO 串可能带任意时区 / 不带时区）：``Lease`` 构造即归一，
+    调用方不必各自转换；序列化（``lease/__init__`` 的 ``_lease_info``）复用本函数。
+    """
+    if dt is None:
+        return None
+    return dt.astimezone(BEIJING_TZ) if dt.tzinfo is not None else dt.replace(tzinfo=BEIJING_TZ)
+
+
 class LeaseState(str, Enum):
     """租约生命周期状态（Console 权威；Edge 本地按 expires_at 兜底计算过期）。"""
 
@@ -67,10 +78,16 @@ class Lease:
     holder_subject_id: str
     purpose: str
     state: LeaseState
-    expires_at: datetime  # 到期时间（北京时间）
+    expires_at: datetime  # 到期时间（北京时间；由 Console 签发/续约时决定，Edge 只保留）
     renewed_at: datetime | None = None  # 最近一次续约时间
     lease_version: int = 1  # 租约版本；续约递增
     ttl: float | None = None  # 有效期（秒，信息字段）
+
+    def __post_init__(self) -> None:
+        """构造即归一化对外时间字段（北京时区）：不依赖调用方传对时区。"""
+        if self.expires_at is not None:
+            self.expires_at = as_beijing(self.expires_at)
+        self.renewed_at = as_beijing(self.renewed_at)
 
     def is_expired(self, now: datetime | None = None) -> bool:
         """是否已过期（``expires_at`` 已到）。"""

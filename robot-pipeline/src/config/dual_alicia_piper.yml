@@ -1,0 +1,30 @@
+INFO_LEVEL: INFO # DEBUG, INFO, ERROR
+
+# 服务器监听地址（命令行 --host/--port 可覆盖）
+server:
+  host: 0.0.0.0
+  port: 8090
+
+# 机器人控制配置（双臂：Alicia 主手（master，遥操作输入）+ Piper 从手（slave，执行）+ 3 相机；
+# 硬件 SDK 仅在机器人端安装）
+robot:
+  name: dual_alicia_piper_001
+  type: dual_alicia_piper_robot # ROBOT_REGISTRY 键（get_robot 按此自动匹配）
+  step_rad: 0.1 # 每帧最大关节增量（rad），env 控制线程限速接近 target
+  init_qpos: [0, 0.1, 0, 0, 0, 0, 1, 0, 0.1, 0, 0, 0, 0, 1]
+  # 硬件接线（**值必填**：缺失 / 空串 → 启动即报错；代码不内置现场值，也不放占位值）
+  ports: # 控制器端口（键 = 代码里的角色名）
+    left_master: "" # 左主手（Alicia 示教臂）串口设备节点：**现场填写**（留空 → 启动报错）
+    right_master: "" # 右主手串口设备节点：**现场填写**（留空 → 启动报错）
+    left: can_left # 左从臂（Piper，CAN 接口名）
+    right: can_right # 右从臂
+  cameras: # 相机（键 = IMAGE_NAMES 的相机名）：头部 RealSense 序列号 / 腕部 V4L2 节点
+    cam_head: "" # 头部 RealSense 序列号：**现场填写**（留空 → 启动报错）
+    cam_left_wrist: "" # 左腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
+    cam_right_wrist: "" # 右腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
+
+# 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
+collector:
+  type: act_mcap # 采集器类型：act_mcap（act_hdf5 暂不可用）
+  save_dir: ./data/dual_alicia_piper # 采集数据保存目录
+  image_format: jpeg # 图像编码：jpeg | raw

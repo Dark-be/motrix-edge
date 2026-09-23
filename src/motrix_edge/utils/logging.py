@@ -12,28 +12,43 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""uvicorn 日志配置 —— HTTP access 写文件、启动 / 错误日志终端 + 文件。
+"""uvicorn 日志配置 —— 由 ``MOTRIX_LOG_FILE`` 开关决定是否写文件（缺省关闭）。
 
-与 ``data_handler.debug_print`` 的 ``logs/log_*.txt`` 分开（纯文本无 ANSI 颜色）。
+开启：HTTP access 写 ``logs/uvicorn.log``、启动 / 错误日志终端 + 文件；关闭：只有 HTTP
+access 静默，启动 / 错误日志仍写终端（不写文件）。
+与 ``data_handler.debug_print`` 的 ``logs/log_*.txt`` 共用同一开关（纯文本无 ANSI 颜色）。
 """
 
 import copy
 
 from uvicorn.config import LOGGING_CONFIG
 
+from motrix_edge.utils.data_handler import file_log_enabled
 
-def uvicorn_log_config(log_file: str) -> dict:
+
+def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
     """构建 uvicorn 日志配置（经 ``uvicorn.Config(log_config=...)`` 生效）。
 
-    - HTTP access（每请求一行，如 OPTIONS/POST）→ **只写文件**，不再刷终端；
-    - uvicorn / uvicorn.error（启动 / 关闭 / 错误）→ 终端 + 文件；
-    - 文件为 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5），与
-      ``debug_print`` 的 ``logs/log_*.txt`` 分开，纯文本无 ANSI 颜色。
+    ``file_enabled`` 缺省读 ``MOTRIX_LOG_FILE``（与 ``debug_print`` 同一开关，**缺省关闭**）：
+
+    - 开启：HTTP access → **只写文件**（``logs/uvicorn.log``，RotatingFileHandler 10MB × 5），
+      uvicorn 启动 / 错误 → 终端 + 文件；不刷终端；
+    - 关闭（缺省）：HTTP access **丢弃**（NullHandler）——不写文件、不占终端
+      （防长期运行刷屏 / 塞满磁盘）；uvicorn 启动 / 错误日志仍走默认终端 handler
+      （不写文件）——端口占用 bind 失败、uvicorn 内部异常在终端可见，排障不丢现场。
 
     注意：不能手动 ``logger.addHandler`` —— uvicorn 启动 ``configure_logging()``
     会 ``dictConfig`` 覆盖已有 handler；必须经 ``log_config`` 传入。
     """
+    if file_enabled is None:
+        file_enabled = file_log_enabled()
     cfg = copy.deepcopy(LOGGING_CONFIG)
+    if not file_enabled:
+        # 缺省：只静默 HTTP access（每请求一行，长期运行刷屏 / 塞满磁盘）；
+        # uvicorn（启动 / 错误）保留默认终端 handler，不写文件。
+        cfg["handlers"]["null"] = {"class": "logging.NullHandler"}
+        cfg["loggers"]["uvicorn.access"]["handlers"] = ["null"]
+        return cfg
     # 纯文本文件 formatter（默认 formatter 带 ANSI 颜色，不适合文件）
     cfg["formatters"]["file"] = {
         "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -56,4 +71,4 @@ def uvicorn_log_config(log_file: str) -> dict:
     return cfg
 
 
-__all__ = ["uvicorn_log_config"]
+__all__ = ["file_log_enabled", "uvicorn_log_config"]

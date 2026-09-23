@@ -27,6 +27,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL_SET,
     CMD_INFER_PROMPT,
+    CMD_LEASE_REVOKE,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -814,6 +815,66 @@ def test_infer_config_set_rejects_invalid_endpoint():
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
     assert node.base_cfg["policy"]["host"] == "0.0.0.0"
+
+
+def test_lease_revoke_command_revokes_current():
+    """lease revoke：撤销 Edge 当前租约（清理幽灵租约），回执 lease_id / state。"""
+    from datetime import datetime, timedelta, timezone
+
+    from motrix_edge.lease import Lease, LeaseManager, LeaseState
+
+    leases = LeaseManager()
+    leases.install(
+        Lease(
+            lease_id="ls_ghost",
+            edge_id="edge-test",
+            holder_subject_id="ghost-operator",
+            purpose="capture",
+            state=LeaseState.ACTIVE,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=120),
+            lease_version=1,
+            ttl=120,
+        )
+    )
+    node = EdgeNode({}, command_source=lambda: None, lease_manager=leases)
+    node.initialize()
+    replies = []
+    node._dispatch(Command(CMD_LEASE_REVOKE, reply_to=replies.append))
+    assert replies[0].status == "ok"
+    assert replies[0].data["lease_id"] == "ls_ghost"
+    assert replies[0].data["state"] == "revoked"
+    # 撤销后槽位清空（leasable=True），新控制端可重新签发
+    info = leases.status()
+    assert info["lease_id"] is None
+    assert info["leasable"] is True
+
+
+def test_lease_revoke_without_manager_rejected():
+    """lease revoke：未注入 lease_manager → rejected(501)。"""
+    node = EdgeNode({}, command_source=lambda: None)
+    node.initialize()
+    replies = []
+    node._dispatch(Command(CMD_LEASE_REVOKE, reply_to=replies.append))
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 501
+
+
+def test_adapter_config_set_rejected_during_session():
+    """会话进行中 `adapter config set` → rejected(409)：布局不能在 episode 中途变化。"""
+    from types import SimpleNamespace
+
+    from motrix_edge.utils.commands import CMD_ADAPTER_CONFIG_SET
+
+    node = EdgeNode({}, command_source=lambda: None)
+    node.initialize()
+    node.session = SimpleNamespace()  # 会话进行中（采集 / 推理）
+    replies = []
+    node._dispatch(
+        Command(CMD_ADAPTER_CONFIG_SET, params={"json": '{"enabled_arms": ["right"]}'}, reply_to=replies.append)
+    )
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 409
+    assert node.adapter_config == {}  # 状态未更新
 
 
 def test_infer_config_set_clears_endpoint_on_empty_value():

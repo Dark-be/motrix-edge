@@ -32,6 +32,11 @@ motrix_edge.profile**——每个机器人的 obs/action 形态（动作维度 /
   在打帧时写入（不是控制拍的采样时刻）。
   机械臂读取与相机取帧因此分处两线程，相机卡顿只会让观测丢帧，不会拖慢机械臂步进；
   单线程脚本仍可用 ``get_observation()`` 一次取整帧。
+- **名字**：展示名取配置 ``robot.name``，缺省回退类常量 ``NAME``（机型默认名）——同型号多机在
+  配置里命名区分（如 ``dual_piper_pc16``）。
+- **硬件接线只在配置里**：控制器端口 / 相机设备来自 ``robot.ports`` / ``robot.cameras``（键清单
+  由子类声明）；**值必填**，缺失 / 空串 → 构造即报错。代码不内置现场值，**也不虚构占位值**
+  （写假序列号只会把错误推迟到 SDK「找不到设备」）。详见 ``robot-pipeline/README.md``。
 - **控制**：``reset()`` / ``execute()`` / ``rollout()`` / ``safe_stop()`` 只修改
   ``target_action``，实际运动由 env 控制线程每拍 ``step()`` 限速推进（单一目标模型）。
 - **遥操作**：``teleop_enabled`` 默认 **False**（adapter 通讯控制中暂时均处于 false）；
@@ -46,7 +51,7 @@ from utils.base.data_handler import debug_print
 
 class BaseRobot:
     # ---- 身份 / 能力（对齐 adapter 契约；子类覆盖）----
-    NAME = "base_robot"
+    NAME = "base_robot"  # 展示名缺省值（配置 robot.name 可覆盖）
     ADAPTER_TYPE = "base_robot"  # 本机器人对应的 adapter 类型（entry point 名）
     ROBOT_MODEL_ID = "base-robot"
     ROBOT_MODEL_VERSION = "0.0.0"
@@ -60,12 +65,14 @@ class BaseRobot:
 
     # ---- 观测键（adapter 契约约定，与 Edge 侧 / robot server 保持一致；勿改）----
     KEY_QPOS = "observations/qpos"  # 关节 qpos 键
+    KEY_ACTION = "action"  # 进程侧当前目标动作（非 qpos 副本，共享内存单独一段）
     CAMERA_PREFIX = "observations/images/"  # 相机图像键前缀（<prefix><cam_name>）
     KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打帧时写入，非控制拍采样时刻）
 
     def __init__(self, robot_config: dict | None = None):
         self.robot_config = dict(robot_config or {})
-        self.name = str(self.robot_config.get("name", self.NAME))
+        # 展示名：配置 ``robot.name`` 覆盖，缺省回退类常量 ``NAME``（机型默认名）
+        self.name = str(self.robot_config.get("name") or self.NAME).strip()
         # 每帧最大关节增量（rad）：限速插值步长，可经配置 step_rad 修改
         self.step_rad = float(self.robot_config.get("step_rad", 0.1))
         self.ready = False
@@ -92,6 +99,24 @@ class BaseRobot:
 
         # 机械臂侧状态缓存（控制线程每拍 sample_qpos() 覆盖；观测线程只读）
         self.motion_state: dict | None = None
+
+    # ---- 硬件接线（robot.ports / robot.cameras：**值必填**，代码内不存现场值）----
+    def _required_devices(self, section: str, keys: tuple[str, ...]) -> dict[str, str]:
+        """读取**必填**的硬件接线 ``robot.<section>.<key>``；缺失 / 空串 → ValueError。
+
+        端口（CAN 接口名 / 串口设备节点）与相机设备（RealSense 序列号 / V4L2 节点）都只在
+        配置里给——代码不保存现场值（避免「改了接线忘改代码」），**也不替现场编一个**：没有
+        就报错，让问题停在启动时而不是 SDK 连接时。未知键名打 WARNING（发现拼写错误，
+        不影响启动）。
+        """
+        values = self.robot_config.get(section) or {}
+        unknown = [key for key in values if key not in keys]
+        if unknown:
+            debug_print(self.name, f"robot.{section} 未知键 {unknown}（可用：{list(keys)}），已忽略", "WARNING")
+        missing = [key for key in keys if not str(values.get(key) or "").strip()]
+        if missing:
+            raise ValueError(f"配置缺少 robot.{section}：{missing}（必填，无代码缺省值；请按现场接线填写）")
+        return {key: str(values[key]).strip() for key in keys}
 
     # ---- 布局 / 解析（无 profile；obs/action 形态由类常量固定）------------------
     @classmethod
@@ -188,7 +213,7 @@ class BaseRobot:
         action = self.get_action()
         if action is None:
             action = qpos  # 无指令时以当前 qpos 作为 action（保证观测含有效 action）
-        self.motion_state = {self.KEY_QPOS: qpos, "action": action}
+        self.motion_state = {self.KEY_QPOS: qpos, self.KEY_ACTION: action}
         return self.motion_state
 
     def capture_images(self) -> dict:

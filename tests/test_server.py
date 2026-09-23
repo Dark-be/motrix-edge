@@ -35,6 +35,7 @@ from motrix_edge.server import create_app
 from motrix_edge.server.capture import CaptureService
 from motrix_edge.server.command import CommandError, CommandService
 from motrix_edge.server.infer import InferService
+from motrix_edge.server.preview import PreviewService
 from motrix_edge.session.base import RunResult, SessionState
 from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.commands import (
@@ -159,6 +160,75 @@ def test_adapters_info_returns_capabilities():
         caps = info["capabilities"]
         assert caps["action_dim"] == 14
         assert "image_names" in caps and "capabilities" in caps
+
+
+def test_adapters_config_get_set():
+    """GET/POST /v1/adapters/config：运行时 adapter 能力配置（命令 / 前端设置，受控操作）。"""
+    from motrix_edge.node import EdgeNode
+
+    node = EdgeNode(BASE_CFG)
+    client = TestClient(create_app(BASE_CFG, node=node))
+    # GET 初始为空
+    assert client.get("/v1/adapters/config").json() == {}
+    # POST 未持租约 → 409
+    assert client.post("/v1/adapters/config", json={"enabled_arms": ["right"]}).status_code == 409
+    # 签发租约后设置（无 adapter 绑定：存运行时状态）
+    lease = install_lease(client)
+    r = client.post("/v1/adapters/config", json={"enabled_arms": ["right"]}, headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    assert r.json()["enabled_arms"] == ["right"]
+    # GET 反映
+    assert client.get("/v1/adapters/config").json()["enabled_arms"] == ["right"]
+
+
+def test_adapters_config_rejected_during_session():
+    """会话进行中 POST /v1/adapters/config → 409（布局不能在 episode 中途变化）。"""
+    from types import SimpleNamespace
+
+    from motrix_edge.node import EdgeNode
+
+    node = EdgeNode(BASE_CFG)
+    client = TestClient(create_app(BASE_CFG, node=node))
+    lease = install_lease(client)
+    node.session = SimpleNamespace()  # 会话进行中（采集 / 推理）→ 拒绝
+    r = client.post("/v1/adapters/config", json={"enabled_arms": ["right"]}, headers={"X-Lease-Id": lease})
+    assert r.status_code == 409
+    assert "session active" in r.json()["detail"]
+    assert client.get("/v1/adapters/config").json() == {}  # 状态未更新
+
+
+def test_adapters_current_returns_effective():
+    """GET /v1/adapters/current：未绑定 → 404（不猜机型）；绑定后返回实际生效能力。"""
+    from motrix_edge.node import EdgeNode
+
+    node = EdgeNode(BASE_CFG)
+    client = TestClient(create_app(BASE_CFG, node=node))
+    # 未绑定 adapter → 404：能力布局是 adapter 类常量、discover 不传，未绑定没有机型信息
+    r = client.get("/v1/adapters/current")
+    assert r.status_code == 404
+    assert "not bound" in r.json()["detail"]
+    # 绑定 fake adapter（实际生效能力字典：双臂 + 三相机）
+    node.adapter = SimpleNamespace(
+        action_dim=14,
+        _home_qpos=[0.0] * 14,
+        enabled_map=lambda: {
+            "arms": {"left": True, "right": True},
+            "cameras": {"cam_head": True, "cam_left_wrist": True, "cam_right_wrist": True},
+        },
+    )
+    node.adapter_name = "Test Robot"
+    node.adapter_type = "test_robot"
+    r = client.get("/v1/adapters/current")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["adapter"] == {"name": "Test Robot", "type": "test_robot"}
+    assert body["enabled"] == {
+        "arms": {"left": True, "right": True},
+        "cameras": {"cam_head": True, "cam_left_wrist": True, "cam_right_wrist": True},
+    }
+    assert body["action_dim"] == 14
+    assert body["home_qpos"] == [0.0] * 14
+    assert "default" not in body  # 已绑定 → 无 default 标记
 
 
 def test_health_returns_correlation_header():
@@ -448,13 +518,14 @@ def wait_session_state(node, state, timeout=2.0):
 
 
 def make_captures_client(node):
-    """绑定「正在运行的 fake node」+ 共享 CommandBus + 共享 LeaseManager。"""
+    """绑定「正在运行的 fake node」+ 共享 CommandBus + 共享 LeaseManager + 独立 PreviewService。"""
     bus = CommandBus()
     node.command_source = bus
     leases = LeaseManager()
     service = CaptureService(node, bus, leases=leases)
+    preview_svc = PreviewService(node, leases=leases)
     threading.Thread(target=node.run, name="fake-node", daemon=True).start()
-    return service, TestClient(create_app(BASE_CFG, captures=service, lease_manager=leases))
+    return service, TestClient(create_app(BASE_CFG, captures=service, lease_manager=leases, preview=preview_svc))
 
 
 def test_preview_requires_lease():
@@ -462,6 +533,27 @@ def test_preview_requires_lease():
     node = FakeNode()
     service, client = make_captures_client(node)
     assert client.get("/v1/preview").status_code == 409  # 无活跃租约
+
+
+def test_preview_without_session():
+    """GET /v1/preview：只须持有租约，**不要求会话**（无会话也返回观测缓存，随时可开）。"""
+    node = FakeNode()
+    service, client = make_captures_client(node)
+    lease = install_lease(client)
+    # 注入观测（模拟 observe 缓存）；无会话也应 200
+    node.frame_manager.update(
+        {
+            "observations/qpos": np.array([0.3, 0.4]),
+            "observations/images/cam_head": np.full((8, 8, 3), 64, dtype=np.uint8),
+        }
+    )
+    r = client.get("/v1/preview", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == SessionState.INIT  # 无会话：state=INIT
+    obs = body["observation"]
+    assert obs["qpos"] == [0.3, 0.4]
+    assert obs["images"] == ["cam_head"]
 
 
 def test_preview_returns_latest_observation():
@@ -575,12 +667,13 @@ def test_leases_install_renew_revoke():
     assert snap["state"] == "active"
     assert snap["lease_version"] == 1
     assert snap["leasable"] is False
+    assert snap["expires_at"].endswith("+08:00")  # 统一北京时区序列化
     # 查询镜像：GET /v1/leases/{id} → 200（返回 lease 信息）；不存在 → 404
     info = client.get(f"/v1/leases/{lease}").json()
     assert info["lease_id"] == lease
     assert info["edge_id"] == "edge-test-001"
     assert client.get("/v1/leases/ls_none").status_code == 404
-    # 续约：POST /v1/leases/{id}:renew（lease_version 递增，原地延长）
+    # 续约：POST /v1/leases/{id}:renew（lease_version 递增；Console 传新 expires_at）
     future = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
     r1 = client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 2, "expires_at": future})
     assert r1.status_code == 200
@@ -588,6 +681,7 @@ def test_leases_install_renew_revoke():
     assert body["lease_id"] == lease
     assert body["lease_version"] == 2
     assert body["state"] == "active"
+    assert body["expires_at"].endswith("+08:00")
     # 版本回退 → 409
     assert client.post(f"/v1/leases/{lease}:renew", json={"lease_version": 1, "expires_at": future}).status_code == 409
     # 续约后镜像版本更新
@@ -619,6 +713,33 @@ def test_leases_expired_rejected_410():
     # 过期后可重新签发（覆盖）
     lease2 = install_lease(client, ttl=30)
     assert lease2 != lease
+
+
+def test_leases_trusts_console_expiry():
+    """过期时间由 Console 决定：Edge 信任镜像 expires_at，传「过去」则状态为过期（不重算）。"""
+    client = TestClient(create_app(BASE_CFG))
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    lease = install_lease(client, ttl=60, expires_at=past)
+    snap = client.get("/v1/leases").json()
+    assert snap["lease_id"] == lease
+    assert snap["state"] == "expired"  # 过去的 expires_at 被保留（未按 ttl 重算）
+    exp = datetime.fromisoformat(snap["expires_at"])
+    assert exp < datetime.now(timezone.utc)  # 仍是「过去」时刻
+    assert snap["expires_at"].endswith("+08:00")
+
+
+# ---------------------------------------------------------------------------
+# /v1 控制面防缓存：实时状态一律 Cache-Control: no-store（防浏览器回放旧 410 / 状态）
+# ---------------------------------------------------------------------------
+
+
+def test_v1_responses_are_no_store():
+    """/v1/* 响应统一 no-store：preview / 租约等轮询 GET 不得被浏览器缓存。"""
+    client = TestClient(create_app(BASE_CFG))
+    for path in ("/v1/health", "/v1/leases", "/v1/adapters", "/v1/captures", "/v1/infers", "/v1/preview"):
+        r = client.get(path)
+        assert r.status_code in (200, 501), f"{path} -> {r.status_code}"  # 未注入服务也可能 501
+        assert r.headers.get("cache-control") == "no-store", path
 
 
 # ---------------------------------------------------------------------------

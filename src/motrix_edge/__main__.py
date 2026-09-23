@@ -82,9 +82,10 @@ def _print_version() -> None:
 def _start_web(app, host: str, port: int):
     """后台线程运行 FastAPI 服务，返回 uvicorn.Server（置 should_exit=True 停止）。
 
-    uvicorn 日志（access / error）写入 ``logs/uvicorn.log``（RotatingFileHandler，
-    10MB × 5），与 ``debug_print`` 的 ``logs/log_*.txt`` 分开；HTTP access 只写文件，
-    终端只保留 uvicorn 启动 / 错误日志。
+    uvicorn 日志由 ``MOTRIX_LOG_FILE`` 开关控制（与 ``debug_print`` 同一开关，缺省关闭）：
+    开启时 access / error 写入 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5，与
+    ``logs/log_*.txt`` 分开），HTTP access 只写文件；关闭时只静默 HTTP access（不写文件、
+    不刷终端），uvicorn 启动 / 错误日志仍写终端（端口占用等排障信息不丢）。
     """
     import os
 
@@ -131,6 +132,7 @@ def _run_node(args) -> None:
     from motrix_edge.server.capture import CaptureService
     from motrix_edge.server.command import CommandService
     from motrix_edge.server.infer import InferService
+    from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.utils.data_handler import debug_print
 
@@ -176,6 +178,7 @@ def _run_node(args) -> None:
     infers = InferService(node, bus, leases=leases)
     commands = CommandService(node, bus, leases=leases)
     webrtc = WebRTCService(node, leases=leases)
+    preview = PreviewService(node, leases=leases)  # 观测预览（独立于会话，直接读 frame_manager）
     web = _start_web(
         create_app(
             base_cfg,
@@ -185,6 +188,7 @@ def _run_node(args) -> None:
             commands=commands,
             lease_manager=leases,
             webrtc=webrtc,
+            preview=preview,
         ),
         host,
         port,
