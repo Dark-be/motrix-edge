@@ -33,12 +33,7 @@
 import threading
 import time
 
-from motrix_edge.frame import FrameManager
-from motrix_edge.policy import validate_policy_type
-from motrix_edge.session import get_session
-from motrix_edge.session.base import RunResult
-from motrix_edge.utils.capture_meta import CaptureMetaStore
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_ADAPTER_CONFIG,
     CMD_ADAPTER_CONFIG_CURRENT,
     CMD_ADAPTER_CONFIG_SET,
@@ -62,6 +57,8 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
+    META_SOURCE,
+    SOURCE_INTERNAL,
     CommandResult,
     handle_capture_meta,
     handle_infer_rtc,
@@ -71,7 +68,15 @@ from motrix_edge.utils.commands import (
     parse_meta,
     parse_qpos,
     parse_teleop_mode,
+    policy_config_status,
+    set_policy_config,
 )
+from motrix_edge.errors import ErrorCode
+from motrix_edge.frame import FrameManager
+from motrix_edge.policy import validate_policy_type
+from motrix_edge.session import get_session
+from motrix_edge.session.base import RunResult
+from motrix_edge.utils.capture_meta import CaptureMetaStore
 from motrix_edge.utils.data_handler import debug_print
 
 
@@ -349,7 +354,9 @@ class EdgeNode:
         if not getattr(self, _STATE_HANDLERS[state])(cmd):
             self._reply(
                 cmd,
-                CommandResult(status="rejected", error=f"{cmd.name} not applicable in {state}", status_code=409),
+                CommandResult(
+                    status="rejected", error=f"{cmd.name} not applicable in {state}", code=ErrorCode.CONFLICT
+                ),
             )
 
     def _reply(self, cmd, result):
@@ -389,7 +396,7 @@ class EdgeNode:
         """
         cfg = self.adapter_config_effective()
         if cfg is None:
-            return CommandResult(status="rejected", error="adapter not bound", status_code=409)
+            return CommandResult(status="rejected", error="adapter not bound", code=ErrorCode.CONFLICT)
         return ok_result(**cfg)
 
     def _on_lease_revoke(self, cmd):
@@ -401,7 +408,7 @@ class EdgeNode:
         """
         lm = self.lease_manager
         if lm is None:
-            return CommandResult(status="rejected", error="lease manager not available", status_code=501)
+            return CommandResult(status="rejected", error="lease manager not available", code=ErrorCode.NOT_IMPLEMENTED)
         lease, changed = lm.revoke_current()
         if lease is None:
             return ok_result(lease_id=None, changed=False, status="no lease to revoke")
@@ -410,7 +417,7 @@ class EdgeNode:
     def _on_infer_rtc(self, cmd):
         """infer rtc / infer rtc set <json>：读写 RTC（实时动作块）参数配置。
 
-        委托给 ``utils.commands.handle_infer_rtc``（写内存态 ``base_cfg["policy"]["rtc"]``）；
+        委托给 ``command.config_commands.handle_infer_rtc``（写内存态 ``base_cfg["policy"]["rtc"]``）；
         配置级命令（任何状态可用），下次 ``session run infer`` 生效。
         """
         return handle_infer_rtc(self.base_cfg, cmd)
@@ -418,7 +425,7 @@ class EdgeNode:
     def _on_policy_config(self, cmd):
         """策略配置命令族：infer config / infer config set / infer prompt / infer model(set)。
 
-        委托给 ``utils.commands.handle_policy_config``（写内存态 ``base_cfg["policy"]``，
+        委托给 ``command.config_commands.handle_policy_config``（写内存态 ``base_cfg["policy"]``，
         按**当前策略的配置项 schema** 校验）；配置级命令（任何状态可用）。
         """
         return handle_policy_config(self.base_cfg, cmd)
@@ -439,18 +446,18 @@ class EdgeNode:
         try:
             config = parse_meta(cmd.params.get("json"))
         except ValueError as exc:
-            return CommandResult(status="rejected", error=str(exc), status_code=400)
+            return CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
         if not self.apply_adapter_config(config):
             if self.session is not None:  # 会话中拒绝变更布局（先 session quit）
                 return CommandResult(
                     status="rejected",
                     error="adapter config rejected (session active: quit the session first)",
-                    status_code=409,
+                    code=ErrorCode.CONFLICT,
                 )
             return CommandResult(
                 status="rejected",
                 error="adapter config rejected (check enabled_arms / enabled_cameras)",
-                status_code=400,
+                code=ErrorCode.INVALID_ARGUMENT,
             )
         return ok_result(**self.adapter_config)
 
@@ -463,13 +470,17 @@ class EdgeNode:
             debug_print("EdgeNode", "IDLE: 机器人进程未就绪，等待探测到 adapter 后再启动会话。", "WARNING")
             self._reply(
                 cmd,
-                CommandResult(status="rejected", error="robot process not ready", status_code=409),
+                CommandResult(status="rejected", error="robot process not ready", code=ErrorCode.CONFLICT),
             )
             return True
         return False
 
     def _on_ready(self, cmd):
         """READY：session run <type> 一步完成「选择会话 + 启动任务」→ ACTIVE。
+
+        推理会话可带 ``policy_type``（缺省用配置）与 ``config``（策略配置项，在会话实例化**之前**
+        写入内存态）—— HTTP ``POST /v1/infers`` 与 CLI ``session run infer config=<json>``
+        走的是同一条路径。
 
         返回是否已回执（False 由 _dispatch 兜底回执「not applicable」）。
         """
@@ -478,7 +489,11 @@ class EdgeNode:
             if session_type not in ("capture", "infer"):
                 self._reply(
                     cmd,
-                    CommandResult(status="rejected", error=f"unknown session type: {session_type}", status_code=400),
+                    CommandResult(
+                        status="rejected",
+                        error=f"unknown session type: {session_type}",
+                        code=ErrorCode.INVALID_ARGUMENT,
+                    ),
                 )
                 return True
             policy_type = cmd.params.get("policy_type")
@@ -490,9 +505,25 @@ class EdgeNode:
                 try:
                     policy_type = validate_policy_type(policy_type)
                 except ValueError as exc:
-                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                     return True
+                # 进入会话前的策略配置项（HTTP body / CLI `config=<json>`）：必须在会话实例化
+                # **之前**写入内存态，故在此应用而非会话内消费；校验失败不留部分写入。
+                config = cmd.params.get("config")
+                if config:
+                    try:
+                        set_policy_config(self.base_cfg, policy_type, dict(config))
+                    except ValueError as exc:
+                        self._reply(
+                            cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
+                        )
+                        return True
             # session run <type>：选择 + 启动一步完成（原 capture.start/infer.start + session.run 合并）
+            debug_print(
+                "EdgeNode",
+                f"session run {session_type}（source={cmd.meta.get(META_SOURCE, SOURCE_INTERNAL)}）",
+                "INFO",
+            )
             self._reply(cmd, self._start_session(session_type, policy_type=policy_type))
             return True
         return self._handle_adapter_command(cmd)
@@ -521,7 +552,7 @@ class EdgeNode:
                 qpos = parse_qpos(cmd.params.get("qpos"))
                 self.adapter.execute(qpos)  # 维度校验在 adapter.execute
             except ValueError as exc:
-                self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
             self._reply(cmd, ok_result(node_state=self.state, action=qpos))
             return True
@@ -531,7 +562,7 @@ class EdgeNode:
                 mode = parse_teleop_mode(cmd.params.get("mode"))
                 self.adapter.set_teleop(enabled, mode)
             except ValueError as exc:
-                self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
             self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode))
             return True
@@ -558,7 +589,7 @@ class EdgeNode:
         返回 CommandResult（成功带 session state / adapter 身份；失败 rejected）。
         """
         if self._task_thread is not None and self._task_thread.is_alive():
-            return CommandResult(status="rejected", error="task already running", status_code=409)
+            return CommandResult(status="rejected", error="task already running", code=ErrorCode.CONFLICT)
         try:
             self._shutdown_session()
             self.session = get_session(
@@ -589,12 +620,18 @@ class EdgeNode:
                 state=getattr(self.session, "state", None),
                 adapter=self.adapter_ref,
                 policy=getattr(self.session, "policy_type", None),
+                # 会话启动回执一并带回「当前活跃租约」与策略配置项状态：HTTP 端点
+                # （/v1/infers · /v1/captures）与 CLI 拿到的字段完全一致，服务层无需再拼装回执。
+                lease_id=self.lease_manager.status()["lease_id"] if self.lease_manager is not None else None,
+                policy_config=policy_config_status(self.base_cfg, policy_type) if session_type == "infer" else None,
             )
         except Exception as exc:
             self._shutdown_session()
             debug_print("EdgeNode", f"会话 {session_type} 启动失败: {exc}", "ERROR")
             self._enter_error(str(exc))
-            return CommandResult(status="rejected", error=str(exc), status_code=409, data={"node_state": self.state})
+            return CommandResult(
+                status="rejected", error=str(exc), code=ErrorCode.CONFLICT, data={"node_state": self.state}
+            )
 
     def _task_entry(self):
         """任务线程入口：阻塞跑会话 run()，结果存 _task_result（由 _tick 收尾消费）。"""
@@ -618,7 +655,9 @@ class EdgeNode:
             if exit_cmd is not None:
                 self._reply(
                     exit_cmd,
-                    CommandResult(status="error", error="task error", status_code=500, data={"node_state": self.state}),
+                    CommandResult(
+                        status="error", error="task error", code=ErrorCode.INTERNAL, data={"node_state": self.state}
+                    ),
                 )
         else:
             # FINISHED / INTERRUPTED：释放会话，回到 READY（adapter 保留，可再选任务）

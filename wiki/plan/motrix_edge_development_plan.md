@@ -22,7 +22,7 @@
 -   [ ] 推理主循环测试（InferSession 用 fake policy + fake signal source 覆盖 obs → infer → action 一轮与急停/退出分支；复位非阻塞，无专门等待）
 -   [ ] 设备身份声明（`identity` 子包：`Identity` + `headers()` 预留发送接口 + `load_identity` + correlation_id / idempotency_key 生成器；配置 `identity` 段）
 -   [ ] MotrixEdge HTTP 服务骨架（`server` 子包：FastAPI `GET /v1/health` + `POST /v1/commands`（accepted）+ correlation 中间件；默认运行 node 主线程 + web 独立线程；host/port 走配置 `server` 段）
--   [ ] 数据采集 HTTP 接口（`/v1/captures/*`：precheck / start / stop / interrupt / resume / close / status；web 线程经共享 `SignalBus` 驱动 EdgeNode，`CaptureService(node, bus)` 绑定运行中 node，不持有 node）
+-   [ ] 数据采集 HTTP 接口（`/v1/captures/*`：precheck / start / stop / interrupt / resume / close / status；web 线程经共享 `CommandBus` 驱动 EdgeNode，不持有 node）
 -   [ ] 单元测试（节点状态机 / 两条会话主路径 / policy 契约与 broker / adapter 采集回合生命周期，全部无硬件可跑）
 -   [ ] 硬件抽象收敛（Robot / Sensor / Controller / Collector 统一收敛到 `adapter/`：`RobotAdapter` HAL，具体实现移出核心包）
 

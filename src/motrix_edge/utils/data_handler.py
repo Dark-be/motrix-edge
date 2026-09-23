@@ -15,6 +15,8 @@
 import datetime
 import os
 
+import numpy as np
+
 from motrix_edge.config import LOG_PATH
 
 # 环境变量名（单点定义：与 robot-pipeline 侧同名，读取方 / 写入方共用，避免字面量散落
@@ -28,6 +30,11 @@ ENV_LOG_LEVEL = "MOTRIX_EDGE_LOG_LEVEL"
 DEFAULT_LOG_LEVEL = "INFO"
 LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
 _LOG_LEVEL: str = DEFAULT_LOG_LEVEL
+
+# 展示用数值精度（日志 / HTTP 回执 / 网页）：真机动作、qpos 等浮点一律保留 3 位小数，
+# 避免出现 ``-0.06196591258049011`` 这种无意义的长尾数（人看、日志和前端都变清爽）。
+# **仅用于对外展示**：推理、控制、录制等内部链路仍用全精度。
+DISPLAY_FLOAT_DIGITS = 3
 
 # 进程内缓存日志文件路径：首次 debug_print 时确定（含时间戳），之后固定复用——
 # 避免每次写日志都重新 makedirs + 生成新文件名（旧实现跨秒产生海量日志文件）。
@@ -64,6 +71,27 @@ def _get_log_file() -> str:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         _LOG_FILE = os.path.join(LOG_PATH, f"log_{timestamp}.txt")
     return _LOG_FILE
+
+
+def round_floats(value, ndigits=DISPLAY_FLOAT_DIGITS):
+    """递归把浮点数四舍五入到 ``ndigits`` 位，得到**可 JSON 化**的展示值。
+
+    - ``ndarray`` / ``list`` / ``tuple`` → list（元素递归）；``dict`` → dict（值递归）；
+    - ``int`` / ``bool`` / ``str`` / ``None`` 原样返回（bool 是 int 子类，先判）；
+    - ``-0.0`` 归零，避免日志/回执里出现无意义的负零。
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, (float, np.floating)):
+        rounded = round(float(value), ndigits)
+        return 0.0 if rounded == 0 else rounded
+    if isinstance(value, np.ndarray):
+        return [round_floats(v, ndigits) for v in value.reshape(-1)]
+    if isinstance(value, dict):
+        return {key: round_floats(item, ndigits) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [round_floats(item, ndigits) for item in value]
+    return value
 
 
 def debug_print(name, info, level="INFO", end="\n", flush=True):

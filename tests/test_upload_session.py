@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from motrix_edge.errors import ErrorCode
 from motrix_edge.session import UploadError, UploadSession
 
 
@@ -111,7 +112,7 @@ def test_select_replaces_episode_selection_and_enqueue_requires_endpoint(tmp_pat
     assert session.select(["episode_0"])["selected_episode_ids"] == ["episode_0"]
     with pytest.raises(UploadError, match="endpoint is not configured") as excinfo:
         session.enqueue()
-    assert excinfo.value.status_code == 501
+    assert excinfo.value.code == ErrorCode.NOT_IMPLEMENTED
 
 
 def test_select_rejects_unknown_or_invalid_episode(tmp_path):
@@ -242,7 +243,7 @@ def test_pack_survives_failed_post_pack_rescan(tmp_path, monkeypatch):
     session = _packed_session(tmp_path, 2)
 
     def _boom(folder_path=None):
-        raise UploadError("upload folder not found", status_code=404)
+        raise UploadError("upload folder not found", code=ErrorCode.NOT_FOUND)
 
     monkeypatch.setattr(session, "_scan", _boom)
 
@@ -285,7 +286,7 @@ def test_pack_rejects_existing_folder_name(tmp_path):
 
     with pytest.raises(UploadError, match="already exists") as excinfo:
         session.pack()
-    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == ErrorCode.CONFLICT
     assert list((tmp_path / "pack2").iterdir()) == []  # 未写入任何文件
 
     ok = session.pack("pack2_new")
@@ -300,7 +301,7 @@ def test_pack_rejects_unsafe_name(tmp_path, bad_name):
     session = _packed_session(tmp_path, 1)
     with pytest.raises(UploadError) as excinfo:
         session.pack(bad_name)
-    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == ErrorCode.INVALID_ARGUMENT
     assert (tmp_path / "episode_0.mcap").exists()
 
 
@@ -308,7 +309,7 @@ def test_pack_requires_scan_and_selection(tmp_path):
     """未扫描 → 409；已扫描但未选择 → 409。"""
     with pytest.raises(UploadError, match="scan a folder") as excinfo:
         _session(tmp_path).pack()
-    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == ErrorCode.CONFLICT
 
     _make_episodes(tmp_path, 1)
     session = _session(tmp_path)
@@ -335,7 +336,7 @@ def test_pack_rolls_back_when_move_fails(tmp_path, monkeypatch):
     with pytest.raises(UploadError, match="pack failed") as excinfo:
         session.pack()
 
-    assert excinfo.value.status_code == 500
+    assert excinfo.value.code == ErrorCode.INTERNAL
     assert not (tmp_path / "pack2").exists()  # 空包目录已清理
     for episode_id in ("episode_0", "episode_1"):  # 源文件完好（已移动的那个已回滚）
         assert (tmp_path / f"{episode_id}.mcap").exists()
@@ -365,7 +366,7 @@ def test_pack_keeps_leftovers_when_rollback_also_fails(tmp_path, monkeypatch):
     with pytest.raises(UploadError, match="已保留在") as excinfo:
         session.pack()
 
-    assert excinfo.value.status_code == 500
+    assert excinfo.value.code == ErrorCode.INTERNAL
     kept = tmp_path / "pack1" / "episode_0.mcap"
     assert kept.exists()  # 残留保留在包目录里（不删数据）
     assert str(kept) in str(excinfo.value)  # 错误里给出路径（人工可收拾）
@@ -381,7 +382,7 @@ def test_pack_missing_source_file(tmp_path):
 
     with pytest.raises(UploadError, match="source files missing") as excinfo:
         session.pack()
-    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == ErrorCode.NOT_FOUND
     assert not (tmp_path / "pack1").exists()
 
 
@@ -395,7 +396,7 @@ def test_scan_rejects_folder_outside_allowed_roots(tmp_path):
 
     with pytest.raises(UploadError, match="outside the allowed upload roots") as excinfo:
         session.scan(str(outside))
-    assert excinfo.value.status_code == 400
+    assert excinfo.value.code == ErrorCode.INVALID_ARGUMENT
 
     nested = allowed / "sub"  # 子目录在允许范围内（根自身与子目录均可）
     nested.mkdir()
@@ -407,7 +408,7 @@ def test_scan_rejects_when_no_allowed_root(tmp_path):
     _make_episodes(tmp_path, 1)
     with pytest.raises(UploadError, match="no allowed upload root") as excinfo:
         UploadSession({"upload": {}}).scan(str(tmp_path))  # 既无 upload.data_dir 也无 adapter 目录
-    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == ErrorCode.CONFLICT
 
 
 def test_allowed_roots_list_is_not_mutated(tmp_path):
@@ -443,7 +444,7 @@ def test_scan_is_mutually_exclusive(tmp_path):
     try:
         with pytest.raises(UploadError, match="already in progress") as excinfo:
             session.scan(str(tmp_path))
-        assert excinfo.value.status_code == 409
+        assert excinfo.value.code == ErrorCode.CONFLICT
         with pytest.raises(UploadError, match="already in progress"):
             session.pack()
     finally:

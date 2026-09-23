@@ -32,6 +32,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
 
 from motrix_edge.adapter.base import CAMERA_PREFIX
+from motrix_edge.errors import ErrorCode, ServiceError
 from motrix_edge.lease import LeaseError, LeaseManager
 
 # 协商超时（秒）：offer/answer 需在时限内完成
@@ -93,12 +94,10 @@ class FrameStreamTrack(VideoStreamTrack):
         return np.zeros((height, width, 3), dtype=np.uint8)
 
 
-class WebRTCError(Exception):
-    """WebRTC 操作被拒绝（租约缺失 / 不匹配 / 过期 / 未启用）。携带 HTTP status_code。"""
+class WebRTCError(ServiceError):
+    """WebRTC 操作被拒绝（租约缺失 / 不匹配 / 过期 / 未启用）。"""
 
-    def __init__(self, message: str, status_code: int = 403):
-        super().__init__(message)
-        self.status_code = status_code
+    default_code = ErrorCode.FORBIDDEN
 
 
 class WebRTCService:
@@ -137,17 +136,17 @@ class WebRTCService:
         try:
             self._leases.require(lease_id)
         except LeaseError as exc:
-            raise WebRTCError(str(exc), exc.status_code) from exc
+            raise WebRTCError(str(exc), exc.code) from exc
 
         frame_manager = getattr(self._node, "frame_manager", None)
         if frame_manager is None:
-            raise WebRTCError("frame manager not available", status_code=501)
+            raise WebRTCError("frame manager not available", code=ErrorCode.NOT_IMPLEMENTED)
 
         future = asyncio.run_coroutine_threadsafe(self._negotiate(frame_manager, sdp, sdp_type), self._loop)
         try:
             return future.result(timeout=_NEGOTIATE_TIMEOUT)
         except asyncio.TimeoutError as exc:
-            raise WebRTCError("webrtc negotiation timeout", status_code=504) from exc
+            raise WebRTCError("webrtc negotiation timeout", code=ErrorCode.TIMEOUT) from exc
 
     async def _negotiate(self, frame_manager, sdp: str, sdp_type: str) -> dict:
         """异步协商：关闭旧连接 → 创建 PC + **每相机一路视频轨道** → offer → answer。
