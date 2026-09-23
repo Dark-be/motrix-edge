@@ -12,11 +12,11 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""server 状态助手 —— 各 controller 状态快照的公共只读片段。
+"""server 状态助手 —— 状态快照的公共只读片段。
 
-``/v1/captures``（CaptureService）与 ``/v1/infers``（InferService）的状态快照都含「当前
-节点绑定的 adapter」这一段（身份 + 心跳缓存 + 控制频率 + 遥操作位）与「机器人进程采集状态」
-一段；单点实现在此，避免两处各写一份而漂移（历史上有过两份逐字段重复的实现）。
+``/v1/captures`` 与 ``/v1/infers`` 的状态快照（``server/status.py``）都含「当前节点绑定的
+adapter」这一段（身份 + 心跳缓存 + 控制频率 + 遥操作位）与「机器人进程采集状态」一段；
+单点实现在此，避免两处各写一份而漂移（历史上有过两份逐字段重复的实现）。
 
 全部只读 **node 内存状态**（节点主循环已周期 discover / 心跳并缓存），不触发任何对机器人
 进程的实时请求（前端轮询不穿透到 SDK 进程）。

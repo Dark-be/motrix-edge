@@ -62,7 +62,8 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
 一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos`、`action`、
-`observations/images/<cam>`）、HTTP 端点、共享内存布局都由 **motrix_edge.adapter** 下的
+`observations/images/<cam>`、机器人提供末端位姿时另有 `observations/pose`）、HTTP 端点、
+共享内存布局都由 **motrix_edge.adapter** 下的
 契约文件单点定义；robot server 复用这些定义，env 只负责控制 robot，不碰 HTTP / 共享内存。
 
 ## 依赖与运行前提
@@ -118,6 +119,8 @@ host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras
 1.  在 `src/robot/controller/` 接入机械臂控制器，在 `src/robot/sensor/` 接入传感器；
 2.  在 `src/robot/` 组装机器人（`BaseRobot` 子类），用**类常量**固定 obs/action 形态：
     -   `QPOS`：扁平动作维度（各臂关节 + 夹爪拼接）
+    -   `POSE`：扁平末端位姿维度（各臂 `xyz + rpy`；**0 = 不提供位姿观测**）——实现
+        `get_observation_pose()` 返回它，robot server 据此把位姿写入共享内存（布局 v3）
     -   `IMAGE_NAMES` / `IMAGES`：相机名与分辨率
     -   `SHM_NAME`：观测共享内存名
     -   `CAPABILITIES`：能力声明（capture / execute / streaming）
@@ -207,7 +210,7 @@ robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 | POST | `/v1/capture/sync`   | `{meta: {...}}`   | 同步采集元信息（operator / task_name 等）                                       |
 | GET  | `/v1/capture/status` | —                 | 采集状态（运行位 / 元信息 / 数据目录）                                          |
 
-另有调试端点 `GET /observe`（最新观测 qpos + 相机 JPEG base64）。
+另有调试端点 `GET /observe`（最新观测 qpos + 末端位姿（提供时）+ 相机 JPEG base64）。
 
 ## 数据采集
 

@@ -21,9 +21,9 @@
 
 import threading
 
+from motrix_edge.command import CommandBus, build_command_registry
 from motrix_edge.utils.adapters import print_adapter_details, print_adapters
 from motrix_edge.utils.cli import CliSession
-from motrix_edge.utils.commands import CommandBus, build_command_registry
 from motrix_edge.utils.version import get_package_version
 
 
@@ -86,9 +86,8 @@ def _run_node(args) -> None:
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
     from motrix_edge.server import create_app
-    from motrix_edge.server.capture import CaptureService
     from motrix_edge.server.command import CommandService
-    from motrix_edge.server.infer import InferService
+    from motrix_edge.server.meta import CaptureMetaService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.utils.data_handler import debug_print, file_log_enabled
@@ -134,9 +133,10 @@ def _run_node(args) -> None:
     # 同一实例也交给 node：命令面的 ``lease revoke`` 由 node 执行（不传只回 501）。
     leases = build_lease_manager(base_cfg)
     node = EdgeNode(base_cfg, command_source=bus, lease_manager=leases)
-    captures = CaptureService(node, bus, leases=leases)
-    infers = InferService(node, bus, leases=leases)
-    commands = CommandService(node, bus, leases=leases)
+    # 命令写通道（唯一）：REST 端点与 /v1/commands 共用（见 wiki/design/motrix_edge_server.md）
+    commands = CommandService(bus, leases=leases)
+    # 采集元信息选项（config/capture.yml）：与 CLI / 会话共用节点持有的那一份 store（同一把锁）
+    meta = CaptureMetaService(store=node.capture_meta_store, leases=leases)
     webrtc = WebRTCService(node, leases=leases)
     # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存
     preview_service = PreviewService(node, leases=leases)
@@ -144,13 +144,12 @@ def _run_node(args) -> None:
     web = _start_web(
         create_app(
             base_cfg,
-            node=node,  # /v1/health 读 node 已绑定 adapter，不实时 discover
-            captures=captures,
-            infers=infers,
+            node=node,  # /v1/health 与状态快照读 node 内存状态，不实时 discover
             commands=commands,
             lease_manager=leases,
             webrtc=webrtc,
             preview=preview_service,
+            meta=meta,
         ),
         host,
         port,

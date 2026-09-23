@@ -24,9 +24,7 @@
 
 import time
 
-from motrix_edge.frame import FrameManager
-from motrix_edge.utils.capture_meta import CaptureMetaStore
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
@@ -37,7 +35,10 @@ from motrix_edge.utils.commands import (
     parse_qpos,
     parse_teleop_mode,
 )
-from motrix_edge.utils.data_handler import debug_print
+from motrix_edge.errors import ErrorCode
+from motrix_edge.frame import FrameManager
+from motrix_edge.utils.capture_meta import CaptureMetaStore
+from motrix_edge.utils.data_handler import debug_print, round_floats
 
 
 def _noop_command_source():
@@ -156,7 +157,9 @@ class BaseSession:
                 self.adapter.reset()
                 self._reply(cmd, ok_result(state="ready"))
             elif cmd is not None:  # 未识别命令（等待就绪阶段不适用）统一回执，避免 submit 挂起
-                self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
+                self._reply(
+                    cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
+                )
             time.sleep(1)
         return None
 
@@ -164,7 +167,7 @@ class BaseSession:
         """处理采集元信息选项命令（capture meta list/add/edit/delete/delete-key）。
 
         会话运行期间（ACTIVE）命令由会话循环 poll，本方法让配置命令在任务态也可用——
-        委托 ``utils.commands.handle_capture_meta``（读写 config/capture.yml），与节点
+        委托 ``command.config_commands.handle_capture_meta``（读写 config/capture.yml），与节点
         主循环（非任务态）共用同一逻辑，保证「任何状态可用」。
         """
         return handle_capture_meta(cmd, self.capture_meta_store)
@@ -182,7 +185,7 @@ class BaseSession:
     def _execute_action(self, cmd) -> None:
         """robot execute：解析 qpos 位置参数 → ``adapter.execute(qpos)``（维度校验在 adapter）。
 
-        参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action）。
+        参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action，3 位小数）。
         **下发前自查回执是否已过期**（``deadline_exceeded``）：调用方超时放弃后不再动真机。
         """
         if deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
@@ -191,7 +194,7 @@ class BaseSession:
                 CommandResult(
                     status="rejected",
                     error="reply deadline exceeded: action dropped (robot not executed)",
-                    status_code=504,
+                    code=ErrorCode.TIMEOUT,
                 ),
             )
             return
@@ -199,9 +202,9 @@ class BaseSession:
             qpos = parse_qpos(cmd.params.get("qpos"))
             self.adapter.execute(qpos)
         except ValueError as exc:
-            self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+            self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return
-        self._reply(cmd, ok_result(state="ready", action=qpos))
+        self._reply(cmd, ok_result(state="ready", action=round_floats(qpos)))
 
     def _set_teleop(self, cmd) -> None:
         """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。
@@ -215,7 +218,7 @@ class BaseSession:
             mode = parse_teleop_mode(cmd.params.get("mode"))
             self.adapter.set_teleop(enabled, mode)
         except ValueError as exc:
-            self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+            self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return
         self._reply(cmd, ok_result(state="ready", teleop=enabled, mode=mode))
 

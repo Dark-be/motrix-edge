@@ -15,16 +15,8 @@
 import threading
 import time
 
-import numpy as np
-
 from motrix_edge.adapter import AdapterCapability
-from motrix_edge.policy import (
-    get_policy,
-    policy_config_runtime_keys,
-    validate_policy_type,
-)
-from motrix_edge.rtc import build_rtc
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -58,7 +50,14 @@ from motrix_edge.utils.commands import (
     parse_rollout_mode,
     policy_config_status,
 )
-from motrix_edge.utils.data_handler import debug_print
+from motrix_edge.errors import ErrorCode
+from motrix_edge.policy import (
+    get_policy,
+    policy_config_runtime_keys,
+    validate_policy_type,
+)
+from motrix_edge.rtc import build_rtc
+from motrix_edge.utils.data_handler import debug_print, round_floats
 
 from .base import BaseSession, RunResult, SessionState, _cmd_name
 
@@ -252,7 +251,7 @@ class InferSession(BaseSession):
                 CommandResult(
                     status="rejected",
                     error="prompt required: set via 'infer prompt <text>' before inference / recording",
-                    status_code=400,
+                    code=ErrorCode.INVALID_ARGUMENT,
                 ),
             )
             return False
@@ -433,7 +432,7 @@ class InferSession(BaseSession):
                 CommandResult(
                     status="rejected",
                     error="warmup in progress: wait for warmed_up (status) before rollout",
-                    status_code=409,
+                    code=ErrorCode.CONFLICT,
                 ),
             )
             return False
@@ -444,7 +443,7 @@ class InferSession(BaseSession):
             CommandResult(
                 status="rejected",
                 error="not warmed up: run 'infer connect' first (connect + prepare, no motion)",
-                status_code=409,
+                code=ErrorCode.CONFLICT,
             ),
         )
         return False
@@ -462,7 +461,9 @@ class InferSession(BaseSession):
             return True
         except Exception as exc:  # noqa: BLE001
             debug_print(self.name, f"policy connect failed: {exc}", "WARNING")
-            self._reply(cmd, CommandResult(status="error", error=f"policy connect failed: {exc}", status_code=502))
+            self._reply(
+                cmd, CommandResult(status="error", error=f"policy connect failed: {exc}", code=ErrorCode.UPSTREAM_ERROR)
+            )
             return False
 
     def _apply_prompt(self, prompt) -> None:
@@ -482,10 +483,11 @@ class InferSession(BaseSession):
 
     def _on_policy_config(self, cmd):
         """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
-        ``infer model(set)``（**公共项 host / port + 每个策略自己的配置项**，见 ``policy.POLICY_CONFIG_ITEMS``）。
+        ``infer model(set)``（**端点项 host / port（仅需端点的策略）+ 每个策略自己的配置项**，
+        见 ``policy.POLICY_CONFIG_ITEMS``）。
 
-        **所有配置项一视同仁**——推理端点 host / port 与 prompt / 模型路径 / 动作块长度走同一 schema、
-        同一校验、同一通道，**没有「连接后锁定」这一额外轴**：
+        **所有配置项一视同仁**——推理端点 host / port（openpi / lerobot-act）与 prompt / 模型路径 /
+        动作块长度走同一 schema、同一校验、同一通道，**没有「连接后锁定」这一额外轴**：
 
         - 先经 ``handle_policy_config`` 校验并写入内存态 ``base_cfg["policy"]``（下次会话生效）；
         - 设置类命令再按 **``runtime``** 决定是否即时应用：``runtime=True``（prompt / image_size，
@@ -502,7 +504,7 @@ class InferSession(BaseSession):
         deferred = self._apply_policy_config(written) if written else []
         if cmd.name == CMD_INFER_PROMPT:  # 保持既有回执形状（prompt=...）
             return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
-        extra = {"deferred": deferred} if deferred else {}
+        extra = {"deferred": deferred}  # 恒有该键（可能为空列表）：回执形状稳定，调用方无需防缺键
         return ok_result(state=getattr(self, "state", "ready"), **(result.data or {}), **extra)
 
     def _effective_policy_type(self) -> str:
@@ -547,7 +549,10 @@ class InferSession(BaseSession):
         """
         text = cmd.params.get("prompt")
         if text is None or not str(text).strip():
-            self._reply(cmd, CommandResult(status="rejected", error="infer prompt requires <text>", status_code=400))
+            self._reply(
+                cmd,
+                CommandResult(status="rejected", error="infer prompt requires <text>", code=ErrorCode.INVALID_ARGUMENT),
+            )
             return
         self._reply(cmd, self._on_policy_config(cmd))
 
@@ -610,7 +615,7 @@ class InferSession(BaseSession):
                 try:
                     mode = parse_rollout_mode(cmd.params.get("mode"))
                 except ValueError as exc:
-                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                     continue
                 if not self._require_prompt(cmd):  # 需要 prompt 的策略：为空不能开始推理
                     continue
@@ -660,7 +665,9 @@ class InferSession(BaseSession):
                 self._reply(cmd, self._on_capture_meta(cmd))
             else:  # 未识别命令（当前任务不适用）统一回执，避免 submit 挂起
                 if cmd is not None:
-                    self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
+                    self._reply(
+                        cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
+                    )
                 time.sleep(0.02)  # 无命令时轻量轮询（避免忙等）
 
     def _handle_shared_cmd(self, name, cmd) -> bool:
@@ -723,7 +730,9 @@ class InferSession(BaseSession):
         """
         obs = self.adapter.observe()  # 推理输入（显示观测由节点级写入 frame_manager）
         if obs is None:
-            self._reply(cmd, CommandResult(status="rejected", error="observation not ready", status_code=503))
+            self._reply(
+                cmd, CommandResult(status="rejected", error="observation not ready", code=ErrorCode.UNAVAILABLE)
+            )
             return
         action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 取本步动作
         if action is not None and deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
@@ -738,7 +747,7 @@ class InferSession(BaseSession):
                 CommandResult(
                     status="rejected",
                     error="reply deadline exceeded: action dropped (robot not moved)",
-                    status_code=504,
+                    code=ErrorCode.TIMEOUT,
                 ),
             )
             return
@@ -749,7 +758,7 @@ class InferSession(BaseSession):
                 CommandResult(
                     status="rejected",
                     error="teleop (human takeover) active: rollout refused",
-                    status_code=409,
+                    code=ErrorCode.CONFLICT,
                 ),
             )
             return
@@ -788,7 +797,7 @@ class InferSession(BaseSession):
         try:
             meta = parse_meta(cmd.params.get("meta"))
         except ValueError as exc:
-            self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+            self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return
         self.adapter.sync_capture_meta(meta)
         self._reply(cmd, ok_result(state=getattr(self, "state", "ready"), meta=meta))
@@ -807,7 +816,7 @@ class InferSession(BaseSession):
             try:
                 self.rtc.configure(**result.data["rtc"])
             except ValueError as exc:  # 理论上 handle_infer_rtc 已校验，双保险
-                return CommandResult(status="rejected", error=str(exc), status_code=400)
+                return CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
         return ok_result(state=getattr(self, "state", "ready"), rtc=self.rtc.status())
 
     def rtc_status(self) -> dict | None:
@@ -852,7 +861,9 @@ class InferSession(BaseSession):
             if name == CMD_INFER_ROLLOUT:  # 持续中重复 rollout：拒绝
                 self._reply(
                     cmd,
-                    CommandResult(status="rejected", error="continuous rollout already running", status_code=409),
+                    CommandResult(
+                        status="rejected", error="continuous rollout already running", code=ErrorCode.CONFLICT
+                    ),
                 )
                 continue
             if self._handle_shared_cmd(name, cmd):  # 共用命令：配置 / RTC / 录制 / 同步
@@ -863,7 +874,7 @@ class InferSession(BaseSession):
                     CommandResult(
                         status="rejected",
                         error=f"{name} not applicable during continuous rollout",
-                        status_code=409,
+                        code=ErrorCode.CONFLICT,
                     ),
                 )
             obs = self.adapter.observe()
@@ -879,7 +890,10 @@ class InferSession(BaseSession):
 
     @staticmethod
     def _action_repr(action):
-        """动作 → JSON 可表达（list）；None 保持 None。"""
+        """动作 → JSON 可表达（list，**保留 3 位小数**）；None 保持 None。
+
+        该值同时用于日志与 HTTP 回执 → 日志与网页展示口径一致（内部链路仍用全精度）。
+        """
         if action is None:
             return None
-        return np.asarray(action).reshape(-1).tolist()
+        return round_floats(action)

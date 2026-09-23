@@ -18,7 +18,18 @@ FastAPI 应用工厂 ``create_app(base_cfg)``；默认运行（``motrix-edge``�
 web 作为 node 的独立线程启动。
 """
 
-from .app import CommandRequest, CommandResponse, create_app
-from .command import CommandError, CommandService
+from motrix_edge.command import CommandError
+from motrix_edge.errors import ServiceError
 
-__all__ = ["create_app", "CommandRequest", "CommandResponse", "CommandError", "CommandService"]
+from .app import create_app
+from .command import CommandService
+from .schemas import CommandRequest, CommandResponse
+
+__all__ = [
+    "create_app",
+    "CommandRequest",
+    "CommandResponse",
+    "ServiceError",
+    "CommandError",
+    "CommandService",
+]

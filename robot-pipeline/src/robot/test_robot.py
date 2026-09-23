@@ -20,6 +20,8 @@
 
 - **控制器**：左/右臂 ``TestArmController``（内部有界随机游走，模拟关节反馈）。
 - **视觉传感器**：3 相机 ``TestVisionSensor``（每帧生成移动 RGB 渐变，JPEG 输出）。
+- **末端位姿**：无真实运动学 → 用**固定可逆映射**（``POSE_MAP``，对角）从同一拍关节派生，
+  保证「关节动 → EEF 跟着动」；供预览显示与笛卡尔策略的位姿观测（共享内存布局 v3）。
 - 身份 / 共享内存名（``type="test_robot"`` / ``SHM="test_robot_obs"``）对齐
   ``TestRobotAdapter``；换真实 SDK 进程即可无缝替换。
 """
@@ -45,6 +47,13 @@ class TestRobot(BaseRobot):
     }
     # 双臂：左 + 右臂，各 6 关节 + 1 夹爪 = 7，共 14
     QPOS = 14
+    # 末端位姿：每臂 6 维（xyz + rpy），双臂共 12（对齐 TestRobotAdapter.POSE_DIM_PER_ARM = 6）
+    POSE = 12
+    # 「手搓 FK」：每臂 6 关节 → 6 维末端位姿的**固定可逆**线性映射（对角：x←j1 y←j2 z←j3
+    # rx←j4 ry←j5 rz←j6，平移 0.2 m/rad）。test 机器人没有真实运动学——用它保证位姿与关节
+    # **严格一致**（比独立随机游走有意义：关节动则 EEF 跟着动，预览与笛卡尔闭环都可解释）。
+    # 换真机后应改为读法兰位姿（或真实 IK/FK），本映射仅属虚拟机器人。
+    POSE_MAP = np.diag([0.2, 0.2, 0.2, 1.0, 1.0, 1.0])
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     SHM_NAME = "test_robot_obs"
@@ -115,6 +124,21 @@ class TestRobot(BaseRobot):
                 np.asarray(right_gripper).ravel(),
             ]
         ).astype(np.float32)
+
+    def get_observation_pose(self, qpos=None) -> np.ndarray | None:
+        """末端位姿（扁平 12 维：左 xyz+rpy + 右 xyz+rpy，顺序同 QPOS 的臂布局）。
+
+        由**同一拍 qpos** 经 ``POSE_MAP``（手搓 FK，见类常量）派生：左臂取 ``qpos[0:6]``、
+        右臂取 ``qpos[7:13]``（与 ``_apply_action`` 的切片一致，夹爪不参与位姿）。
+        位姿与关节同源 → 预览里关节动则 EEF 跟着动，笛卡尔策略的观测/执行口径一致。
+        """
+        source = self.get_observation_qpos() if qpos is None else qpos
+        values = np.asarray(source, dtype=np.float64).reshape(-1)
+        if values.shape[0] < self.QPOS:
+            raise RuntimeError(f"TestRobot.get_observation_pose: qpos dim {values.shape[0]} < QPOS {self.QPOS}")
+        left = self.POSE_MAP @ values[0:6]
+        right = self.POSE_MAP @ values[7:13]
+        return np.concatenate([left, right]).astype(np.float64)
 
     def get_observation_images(self) -> list:
         """读取各相机 raw RGB 帧（顺序对齐 IMAGE_NAMES）。

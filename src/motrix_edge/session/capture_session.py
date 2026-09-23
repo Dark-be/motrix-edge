@@ -15,7 +15,7 @@
 import time
 
 from motrix_edge.adapter import AdapterCapability
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -33,6 +33,7 @@ from motrix_edge.utils.commands import (
     ok_result,
     parse_meta,
 )
+from motrix_edge.errors import ErrorCode
 from motrix_edge.utils.data_handler import debug_print
 
 from .base import BaseSession, RunResult, SessionState, _cmd_name
@@ -127,11 +128,13 @@ class CaptureSession(BaseSession):
                 try:
                     meta = parse_meta(cmd.params.get("meta"))
                 except ValueError as exc:
-                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                     continue
                 self.adapter.sync_capture_meta(meta)
                 self._reply(cmd, ok_result(state="ready", meta=meta))
             else:  # 未识别命令（当前任务不适用）统一回执，避免 submit 挂起
                 if cmd is not None:
-                    self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
+                    self._reply(
+                        cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
+                    )
                 time.sleep(0.02)  # 无命令轻量轮询（避免忙等）

@@ -34,6 +34,7 @@ policy/
 │   └── contract.py # openpi 官方 wire 助手（键、观测组装、图像预处理、响应解析）
 ├── lerobot_act/
 │   └── client.py   # LerobotActClient：lerobot AsyncInference gRPC（流式动作块）
+└── （LLM 不走策略路径：它是外部 agent，edge 只提供原语接口，见 motrix_edge_primitives.md）
 
 transport/          # 传输层（与策略解耦，见 motrix_edge/transport/）
 ├── ws.py           # WsTransport：msgpack-over-websocket（openpi）
@@ -214,6 +215,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 
 -   清单由 `policy_config_items(policy_type)` 提供（CLI `infer config`、前端表单、HTTP
     `/v1/infers/config` 同一来源）；`runtime_keys` 由 `runtime` 派生。
+-   长文本项（`prompt` / `system_prompt`）带 `multiline: true`：前端渲染**多行 textarea**
+    （占满整行、可拖拽调高），键名不在前端硬编码。
 -   **`runtime`（会话内改能否立即生效）按「配置何时下发给服务端」划分**，不是按客户端能不能读：
     -   `openpi`（每请求独立，无握手状态）：`prompt` / `image_size` 在每次 `infer_chunk` **现读**
         → 会话内改立即生效（`runtime: True`）；
@@ -222,7 +225,7 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
         下发一次（服务端据此加载 checkpoint、定动作块长），会话内改**不重发、不生效** → 标
         `runtime: False`，**退出会话重进才生效**（前端据 `runtime_keys` 在会话内禁用这些输入框，
         避免「status 显示新值、推理仍用旧值」）；
-    -   公共项 `host` / `port`（推理端点）：**会话级**——进入会话时用配置构造策略客户端与传输层，
+    -   端点项 `host` / `port`（推理端点，**仅需端点的策略**）：**会话级**——进入会话时用配置构造策略客户端与传输层，
         会话内改只写内存态配置、下一会话生效（回执 `deferred` 列出未即时生效的键）→ 同样标
         `runtime: False`。
     -   公共项 `warmup_required`（预热门控）：同为**会话级**（进入会话时读取，会话内改需退出重进）；
@@ -270,8 +273,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 | 设置端点             | `infer config set '{"host":"10.0.0.9","port":9000}'`（HTTP：`POST /v1/infers/config`，会话内；或 `POST /v1/infers` 的 `config`，进入会话时） |
 | 连接 + 预热          | `infer connect`（HTTP：`POST /v1/infers/connect`，须已在推理会话）                                                                           |
 
-`host` / `port` **非必填**（后端不硬性要求，前端按「host 已填 + port 合法」门控）：`openpi` /
-`lerobot-act` 未配置端点会在连接时报错。
+`host` / `port` **非必填**：`openpi` / `lerobot-act`
+未配置端点会在连接时报错，前端据「host 已填 + port 合法」门控「进入推理」按钮。
 
 ### 预热（推理但不上真机）
 

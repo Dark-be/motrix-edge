@@ -104,11 +104,11 @@ capture meta delete-key operator
 -   `CaptureMetaStore`：`utils/capture_meta.py`；缺省可写路径（外界目录 `MOTRIX_CONFIG_DIR` /
     状态目录），包内默认在**首次读 / 写时惰性播种**；可注入临时路径（测试）。
 -   **进程内单实例**：`EdgeNode` 持有一份，并注入给会话（`get_session(capture_meta_store=…)`）
-    与 `CaptureService`（`capture_meta_store or node.capture_meta_store`，最后才自建）——
+    与 HTTP 端点（装配层 `CaptureMetaService(store=node.capture_meta_store, leases=…)`）——
     全进程**一份数据、一把锁**（路径规则仍由 `CaptureMetaStore` 缺省逻辑统一决定）。
     这里是「唯一持有者 + 依赖注入」，不是模块级全局单例：依赖显式、测试可注入临时
     store、节点构造参数即可替身，也不会出现「多处各自 new 一把锁」。
--   `handle_capture_meta(cmd, store=None)`：`utils/commands.py`；`store` 缺省用默认路径。
+-   `handle_capture_meta(cmd, store=None)`：`command/config_commands.py`；`store` 缺省用默认路径。
 -   `EdgeNode._dispatch`：配置级命令，任何状态（INIT/IDLE/READY/ACTIVE/ERROR）先于状态机
     处理器响应（与 `infer config` 同一位置）。
 -   会话循环（CaptureSession / InferSession）：任务态（ACTIVE）同样响应 `capture meta`
@@ -126,4 +126,4 @@ capture meta delete-key operator
 
 -   命令模型与传输：[命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   采集会话 / `capture sync`：[会话（session）](./motrix_edge_session.md)
--   代码入口：`src/motrix_edge/utils/capture_meta.py`、`src/motrix_edge/utils/commands.py`
+-   代码入口：`src/motrix_edge/utils/capture_meta.py`、`src/motrix_edge/command/config_commands.py`

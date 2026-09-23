@@ -23,20 +23,16 @@ motrix_edge.profile**——每个机器人的 obs/action 形态（动作维度 /
 - **扁平动作**：一维数组，维度由 ``QPOS`` 声明（各臂关节 + 夹爪拼接）。
   例：双臂 6 关节 + 1 夹爪 → ``QPOS`` = 14，动作 ``[左6关节, 左夹爪, 右6关节, 右夹爪]``。
 - **原始观测**：``sample_qpos()`` / ``build_observation()``（单线程调试可用 ``get_observation()``）
-  产出 ``{observations/qpos, observations/images/<cam>, action, timestamp}``——键名复用 adapter
-  契约常量（``KEY_QPOS`` / ``CAMERA_PREFIX`` / ``KEY_TIMESTAMP``）；robot server
-  （contract_server）据此组装 standard_obs 并写入共享内存。
+  产出 ``{observations/qpos, observations/images/<cam>, action, timestamp}``（机器人提供末端位姿时
+  额外带 ``observations/pose``）——键名复用 adapter 契约常量（``KEY_QPOS`` / ``KEY_POSE`` /
+  ``CAMERA_PREFIX`` / ``KEY_TIMESTAMP``）；robot server（contract_server）据此组装 standard_obs 并
+  写入共享内存。
 - **控制 / 观测分线程（env 双线程序列）**：控制线程每拍 ``step()`` 限速推进 +
-  ``sample_qpos()`` 采样机械臂状态（qpos / action）缓存进 ``motion_state``；观测线程每拍
-  ``build_observation()``（= 缓存状态 + 本拍相机帧），观测帧的 ``timestamp`` 由**观测线程**
-  在打帧时写入（不是控制拍的采样时刻）。
+  ``sample_qpos()`` 采样机械臂状态（qpos / action / pose）缓存进 ``motion_state``；观测线程每拍
+  ``build_observation()``（= 缓存状态 + 本拍相机帧），观测帧的 ``timestamp`` 由**观测线程**在打帧时
+  写入（不是控制拍的采样时刻）。
   机械臂读取与相机取帧因此分处两线程，相机卡顿只会让观测丢帧，不会拖慢机械臂步进；
   单线程脚本仍可用 ``get_observation()`` 一次取整帧。
-- **名字**：展示名取配置 ``robot.name``，缺省回退类常量 ``NAME``（机型默认名）——同型号多机在
-  配置里命名区分（如 ``dual_piper_pc16``）。
-- **硬件接线只在配置里**：控制器端口 / 相机设备来自 ``robot.ports`` / ``robot.cameras``（键清单
-  由子类声明）；**值必填**，缺失 / 空串 → 构造即报错。代码不内置现场值，**也不虚构占位值**
-  （写假序列号只会把错误推迟到 SDK「找不到设备」）。详见 ``robot-pipeline/README.md``。
 - **控制**：``reset()`` / ``execute()`` / ``rollout()`` / ``safe_stop()`` 只修改
   ``target_action``，实际运动由 env 控制线程每拍 ``step()`` 限速推进（单一目标模型）。
 - **遥操作优先于推理**：``teleop_enabled`` 期间 ``rollout()`` **一律被拒绝**（不分模式：
@@ -60,7 +56,7 @@ from utils.base.data_handler import debug_print
 
 class BaseRobot:
     # ---- 身份 / 能力（对齐 adapter 契约；子类覆盖）----
-    NAME = "base_robot"  # 展示名缺省值（配置 robot.name 可覆盖）
+    NAME = "base_robot"
     ADAPTER_TYPE = "base_robot"  # 本机器人对应的 adapter 类型（entry point 名）
     ROBOT_MODEL_ID = "base-robot"
     ROBOT_MODEL_VERSION = "0.0.0"
@@ -68,6 +64,7 @@ class BaseRobot:
 
     # ---- 布局 / 特性（子类覆盖）----
     QPOS = 14  # 扁平动作维度（各臂关节 + 夹爪拼接）
+    POSE = 0  # 扁平末端位姿维度（各臂 xyz + rpy 拼接）；0 = 本机器人不提供位姿观测
     IMAGE_NAMES: list[str] = []  # 相机名（observations/images/<name>）
     IMAGES: dict[str, tuple[int, int]] = {name: (640, 480) for name in IMAGE_NAMES}  # 相机名 -> (w, h)
     SHM_NAME = "robot_obs"  # 观测共享内存名（server 侧发布）
@@ -75,8 +72,8 @@ class BaseRobot:
     # ---- 观测键（adapter 契约约定，与 Edge 侧 / robot server 保持一致；勿改）----
     KEY_QPOS = "observations/qpos"  # 关节 qpos 键
     KEY_ACTION = "action"  # 进程侧当前目标动作（非 qpos 副本，共享内存单独一段）
+    KEY_POSE = "observations/pose"  # 末端位姿键（POSE > 0 时写入；笛卡尔策略的观测输入）
     CAMERA_PREFIX = "observations/images/"  # 相机图像键前缀（<prefix><cam_name>）
-    KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打帧时写入，非控制拍采样时刻）
 
     # ---- 遥操作模式（取值与 /v1/teleop 的 mode 同名；子类一般不用覆盖）----
     TELEOP_MODE_ABSOLUTE = "absolute"  # 主臂绝对位姿直连从臂 target（示教采集）
@@ -85,8 +82,7 @@ class BaseRobot:
 
     def __init__(self, robot_config: dict | None = None):
         self.robot_config = dict(robot_config or {})
-        # 展示名：配置 ``robot.name`` 覆盖，缺省回退类常量 ``NAME``（机型默认名）
-        self.name = str(self.robot_config.get("name") or self.NAME).strip()
+        self.name = str(self.robot_config.get("name", self.NAME))
         # 每帧最大关节增量（rad）：限速插值步长，可经配置 step_rad 修改
         self.step_rad = float(self.robot_config.get("step_rad", 0.1))
         self.ready = False
@@ -106,8 +102,7 @@ class BaseRobot:
         self.teleop_master_ref: np.ndarray | None = None  # 主臂锚点读数（delta 模式）
         self.teleop_slave_ref: np.ndarray | None = None  # 从臂锚点位姿（delta 模式，接管瞬间）
 
-        # 控制拍计数（env 控制线程每拍 ``sample_qpos()`` 自增；server 组装 standard_obs 时附带）
-        # ——与观测发布频率（``OBS_HZ``）解耦，不是观测帧号
+        # 帧计数（get_observation() 每帧自增；server 组装 standard_obs 时附带）
         self.seq = 0
 
         # 控制器 / 传感器（真实机器人填充；虚拟机器人可为空）
@@ -116,24 +111,6 @@ class BaseRobot:
 
         # 机械臂侧状态缓存（控制线程每拍 sample_qpos() 覆盖；观测线程只读）
         self.motion_state: dict | None = None
-
-    # ---- 硬件接线（robot.ports / robot.cameras：**值必填**，代码内不存现场值）----
-    def _required_devices(self, section: str, keys: tuple[str, ...]) -> dict[str, str]:
-        """读取**必填**的硬件接线 ``robot.<section>.<key>``；缺失 / 空串 → ValueError。
-
-        端口（CAN 接口名 / 串口设备节点）与相机设备（RealSense 序列号 / V4L2 节点）都只在
-        配置里给——代码不保存现场值（避免「改了接线忘改代码」），**也不替现场编一个**：没有
-        就报错，让问题停在启动时而不是 SDK 连接时。未知键名打 WARNING（发现拼写错误，
-        不影响启动）。
-        """
-        values = self.robot_config.get(section) or {}
-        unknown = [key for key in values if key not in keys]
-        if unknown:
-            debug_print(self.name, f"robot.{section} 未知键 {unknown}（可用：{list(keys)}），已忽略", "WARNING")
-        missing = [key for key in keys if not str(values.get(key) or "").strip()]
-        if missing:
-            raise ValueError(f"配置缺少 robot.{section}：{missing}（必填，无代码缺省值；请按现场接线填写）")
-        return {key: str(values[key]).strip() for key in keys}
 
     # ---- 布局 / 解析（无 profile；obs/action 形态由类常量固定）------------------
     @classmethod
@@ -306,14 +283,14 @@ class BaseRobot:
         """把 action 下发 / 应用到硬件（子类实现；虚拟机器人同步到合成状态）。"""
         raise NotImplementedError
 
-    # ---- 每拍状态采样 / 观测组装（键名复用 adapter 契约常量，不依赖 profile；由 robot server 组装 standard_obs）----
+    # ---- 每拍状态采样 / 观测组装（**原始数据，无契约键**；由 robot server 组装 standard_obs）----
     def sample_qpos(self) -> dict:
-        """采样机械臂侧状态（qpos + action）并缓存进 ``motion_state``。
+        """采样机械臂侧状态（qpos + action，提供位姿时含 ``pose``）并缓存进 ``motion_state``。
 
-        **由 env 控制线程每拍调用**（本线程是控制器唯一写者 / 读者）；``seq`` 自增（控制拍
-        计数，与观测发布频率无关），供 server 上报。
+        **由 env 控制线程每拍调用**（本线程是控制器唯一写者 / 读者）；seq 自增，供 server 上报。
         观测组装只读本缓存，故相机 / 磁盘卡顿不会拖慢机械臂读取与步进。
-        子类实现 ``get_observation_qpos()``——直接从控制器「手搓」取数据。
+        子类实现 ``get_observation_qpos()``（关节）与 ``get_observation_pose()``（末端位姿，
+        缺省不提供）——直接从控制器「手搓」取数据；位姿与 qpos **同一拍**（不给下游错拍机会）。
 
         帧时刻不由本方法写入：观测的 ``KEY_TIMESTAMP`` 由观测线程在 ``build_observation()``
         打点（观测拍时刻），故本缓存只有状态、没有时间戳。
@@ -323,7 +300,11 @@ class BaseRobot:
         action = self.get_action()
         if action is None:
             action = qpos  # 无指令时以当前 qpos 作为 action（保证观测含有效 action）
-        self.motion_state = {self.KEY_QPOS: qpos, self.KEY_ACTION: action}
+        state = {self.KEY_QPOS: qpos, self.KEY_ACTION: action}
+        pose = self.get_observation_pose(qpos)
+        if pose is not None:
+            state[self.KEY_POSE] = pose
+        self.motion_state = state
         return self.motion_state
 
     def capture_images(self) -> dict:
@@ -338,9 +319,6 @@ class BaseRobot:
 
     def build_observation(self) -> dict | None:
         """组装完整观测 = 最新缓存机械臂状态 + 本拍相机帧（**观测线程调用**）。
-
-        帧时刻 ``KEY_TIMESTAMP`` 由**本线程**在此打点（= 观测拍时刻，取帧之前）：相机帧即本拍取，
-        机械臂状态（qpos / action）来自上一个控制拍（最多早约 1 个控制周期）。
 
         控制线程尚未采到第一拍（启动瞬间）或机械臂读取持续失败时 ``motion_state`` 为空，
         此时返回 None（本拍不出观测，由 env 观测线程跳过，下一拍重试）。
@@ -357,9 +335,6 @@ class BaseRobot:
         ⚠️ 相机取帧会阻塞，故**勿在控制线程调用**（会拖慢机械臂步进）；env 双线程序列下
         控制线程用 ``sample_qpos()``、观测线程用 ``build_observation()``，
         本方法供单线程脚本 / 调试整体取一帧。
-
-        帧时刻与 ``build_observation()`` **同口径**：采完机械臂状态、**取相机帧之前**打点
-        （取帧阻塞不计入帧时刻）。
         """
         state = self.sample_qpos()
         timestamp = time.time()  # 帧时刻（取帧前打点，与 build_observation 同口径）
@@ -368,6 +343,16 @@ class BaseRobot:
     def get_observation_qpos(self) -> np.ndarray:
         """读取当前帧原始观测的 qpos（扁平 QPOS 维；子类实现）。"""
         raise NotImplementedError
+
+    def get_observation_pose(self, qpos: np.ndarray | None = None) -> np.ndarray | None:
+        """读取当前帧**末端位姿**（扁平 ``POSE`` 维：各臂 ``xyz + rpy``，顺序同 qpos 的臂布局）。
+
+        缺省返回 ``None`` = **本机器人不提供位姿观测**：共享内存布局保持 v2（``pose_dim = 0``），
+        下游（adapter / 预览 / 笛卡尔策略）因此拿不到位姿。子类按硬件能力实现——真机读法兰位姿，
+        模拟机器人用「手搓 FK」从关节派生。``qpos`` 为**同一拍**已采样的关节状态（None → 自行采样），
+        供「位姿由关节派生」的实现保持两者严格一致。
+        """
+        return None
 
     def get_observation_images(self) -> list:
         """读取各相机 raw RGB 帧（list，顺序对齐 IMAGE_NAMES；子类实现）。

@@ -17,7 +17,6 @@ lease:
 server:
   host: 0.0.0.0
   port: 8000
-
 # 上传会话（UploadSession，/v1/uploads/*；见 wiki/design/motrix_edge_upload_session.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。
 # **本版本只做本地文件查看与打包**：临时性的数据查看与筛选由数采人员经前端进行，打包后
@@ -38,6 +37,7 @@ adapter:
 # 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
 # 推理会话时由调用方显式选择；host / port 是**会话级**策略配置项（进入会话时固化，改需退出重进），
 # 与 prompt / 模型路径同一 schema、同一通道：infer config set / POST /v1/infers 的 config。
+# **策略要连 TCP 端点**（openpi → ws、lerobot-act → gRPC）；host / port 排在其配置项清单最前，
 # 单臂任务：策略用通用 lerobot-act（按启用臂数直通）；「哪条臂 / 怎么映射回 14 维」由 adapter 运行时配置承载。
 policy:
   host: 127.0.0.1

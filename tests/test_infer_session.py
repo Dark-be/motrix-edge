@@ -26,9 +26,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from motrix_edge.command import META_REPLY_DEADLINE, build_command_registry
+from motrix_edge.errors import ErrorCode
 from motrix_edge.session import infer_session
 from motrix_edge.session.base import RunResult
-from motrix_edge.utils.commands import META_REPLY_DEADLINE, build_command_registry
 
 _REGISTRY = build_command_registry()
 
@@ -113,9 +114,10 @@ class _FakeAdapter:
         self.ready = ready
         self.safe_stop_calls = 0
         self.executed = []
-        self.rollout_spaces: list = []  # rollout 收到的动作空间（None = 未指定）
         self.reset_calls = 0
+        self.teleop_values: list[bool] = []
         self.teleop_calls: list[tuple[bool, str | None]] = []
+        self.rollout_spaces: list[str | None] = []
         self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
         self.images = list(images) if images is not None else None  # 启用相机（adapter config 决定）
         self.action_dim = action_dim  # 启用臂 qpos 维数
@@ -144,6 +146,7 @@ class _FakeAdapter:
         self.executed.append(action)
 
     def set_teleop(self, enabled, mode=None):
+        self.teleop_values.append(bool(enabled))
         self.teleop_calls.append((bool(enabled), mode))
 
     def rollout(self, action, action_space=None) -> bool:
@@ -319,7 +322,7 @@ def test_infer_rollout_requires_prompt(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "prompt required" in replies[0].error
 
 
@@ -336,7 +339,7 @@ def test_infer_rollout_continuous_requires_prompt(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
 
 
 def test_infer_rollout_rejects_multi_step(monkeypatch):
@@ -352,7 +355,7 @@ def test_infer_rollout_rejects_multi_step(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "multi-step rollout removed" in replies[0].error
 
 
@@ -369,7 +372,7 @@ def test_infer_rollout_rejects_drain(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "drain mode removed" in replies[0].error
 
 
@@ -386,7 +389,7 @@ def test_infer_rollout_rejects_invalid_mode(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
 
 
 def test_infer_prompt_command_sets_policy_prompt(monkeypatch):
@@ -419,7 +422,7 @@ def test_infer_prompt_requires_text(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert policy.prompt is None
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
 
 
 def test_infer_capture_episode_recording_toggles(monkeypatch):
@@ -460,7 +463,7 @@ def test_infer_capture_episode_start_requires_prompt(monkeypatch):
     assert adapter.start_capture_calls == 0
     assert session.recording is False
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "prompt required" in replies[0].error
 
 
@@ -585,7 +588,7 @@ def test_infer_config_set_rejects_unknown_key(monkeypatch):
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "unknown openpi config key" in replies[0].error
     assert replies[1].status == "rejected"
     assert policy.prompt is None  # 空文本不生效
@@ -640,7 +643,7 @@ def test_infer_capture_sync_requires_meta(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert adapter.synced_meta == []
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
 
 
 def test_infer_session_binds_adapter_layout_to_policy(monkeypatch):
@@ -710,31 +713,6 @@ def test_infer_rollout_continuous_replies_started_and_stops(monkeypatch):
     assert adapter.executed  # 有动作下发
 
 
-def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
-    """infer rollout stop：停止持续推理并**回到会话主循环**（会话不退出，仍可单步推理）。"""
-    adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    replies = []
-    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
-    cont.reply_to = replies.append
-    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
-    stop.reply_to = replies.append
-    single = _REGISTRY.parse_argv(["infer", "rollout"])
-    single.reply_to = replies.append
-    # None = 无命令空档：让持续推理推一步后再下发 stop
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"), warmup_required=False
-    )
-
-    assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
-    assert [r.status for r in replies] == ["ok", "ok", "ok"]
-    assert replies[0].data["state"] == "continuous"
-    assert replies[1].data["continuous"] is False  # 停止回执
-    assert session.continuous is False  # 运行位已清
-    assert replies[2].data["count"] == 1  # 停止后单步推理仍可用（会话未退出）
-
-
 def test_infer_continuous_records_episode(monkeypatch):
     """持续推理期间可录制 rollout：capture episode start/end 在持续循环内被消费。"""
     adapter = _FakeAdapter(ready=True)
@@ -770,7 +748,7 @@ def test_infer_rollout_without_frame_is_rejected_not_error(monkeypatch):
     assert policy.infer_calls == 0
     assert adapter.executed == []
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 503
+    assert replies[0].code == ErrorCode.UNAVAILABLE
     assert replies[0].error == "observation not ready"
 
 
@@ -917,7 +895,7 @@ def test_infer_connect_failure_lands_in_warmup_error(monkeypatch):
     assert "not reachable" in session.warmup_error
     assert session.connected is False
     assert replies[1].status == "rejected"  # rollout 仍被预热门拦下
-    assert replies[1].status_code == 409
+    assert replies[1].code == ErrorCode.CONFLICT
     assert "not warmed up" in replies[1].error
     assert policy.infer_calls == 0
     assert adapter.executed == []
@@ -955,7 +933,7 @@ def test_infer_rollout_during_warmup_is_rejected(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert replies[0].data["warming"] is True
     assert replies[1].status == "rejected"
-    assert replies[1].status_code == 409
+    assert replies[1].code == ErrorCode.CONFLICT
     assert "warmup in progress" in replies[1].error
     assert adapter.executed == []  # 既没 rollout 也没预热下发动作
     assert session.warmed_up is False  # quit 已取消预热
@@ -1019,8 +997,11 @@ def test_infer_connect_rewarms_after_connection_loss(monkeypatch):
     observed = {}
 
     def drop_connection_and_probe():
-        policy.connected = False  # 模拟服务端重启 / 链路断开
         session = holder["session"]
+        deadline = time.monotonic() + 2.0
+        while session.warming and time.monotonic() < deadline:
+            time.sleep(0.005)  # 预热是异步的：先等首次预热收尾，再模拟断连
+        policy.connected = False  # 模拟服务端重启 / 链路断开
         observed["warmed_up"] = session.warmed_up  # 读 `warmed_up` 即与连接状态对账
         observed["warmup_error"] = session.warmup_error
         return second
@@ -1077,7 +1058,7 @@ def test_infer_rollout_blocked_again_after_connection_loss(monkeypatch):
     )
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert "not warmed up" in replies[0].error
     assert policy.infer_calls == infer_calls_after_warmup["n"]  # 没发起新的推理
     assert policy.connect_calls == 1  # 也没做惰性重连
@@ -1122,7 +1103,7 @@ def test_infer_rollout_blocked_while_warming_even_if_warmup_not_required(monkeyp
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert "warmup in progress" in replies[0].error
     assert observed["infer_calls"] == 0  # 没有与预热并发发起推理
     assert policy.connect_calls == 1  # 也没走惰性自连
@@ -1147,7 +1128,7 @@ def test_infer_rollout_requires_warmup(monkeypatch):
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert "not warmed up" in replies[0].error
     assert policy.infer_calls == 0  # 未预热：连推理都不发起
     assert policy.connect_calls == 0  # 不做惰性自连（预热是显式一步）
@@ -1176,7 +1157,7 @@ def test_infer_rollout_drops_action_when_reply_deadline_passed(monkeypatch):
     assert adapter.executed == []  # 但动作不下发
     assert session.dropped_actions == 1
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 504
+    assert replies[0].code == ErrorCode.TIMEOUT
     assert "deadline exceeded" in replies[0].error
 
 
@@ -1202,7 +1183,7 @@ def test_infer_rollout_auto_connect_failure_replies_error(monkeypatch):
     assert policy.connect_calls == 1  # 单次尝试，不无限重试
     assert policy.infer_calls == 0
     assert replies[0].status == "error"
-    assert replies[0].status_code == 502
+    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
 
 
 def test_infer_connect_success_replies_metadata(monkeypatch):
@@ -1238,13 +1219,92 @@ def test_infer_stop_returns_error(monkeypatch):
 
 
 def test_robot_teleop_in_infer_loop(monkeypatch):
-    """推理循环中 robot teleop：true/false（+ 可选 mode）作为参数 → adapter.set_teleop。"""
+    """推理循环中 robot teleop：true/false 直接作为参数 → adapter.set_teleop。"""
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
     _patch(monkeypatch, policy)
-    session = _build_session(adapter, policy, ("robot teleop true delta", "robot teleop false", "session quit"))
+    session = _build_session(adapter, policy, ("robot teleop true", "session quit"))
     assert session.run() == RunResult.FINISHED
-    assert adapter.teleop_calls == [(True, "delta"), (False, None)]
+    assert adapter.teleop_values == [True]
+
+
+# ---- 以下为 dev 侧独有（本次 merge 保留） ----
+def test_infer_rollout_action_repr_rounds_to_display_digits(monkeypatch):
+    """日志 / 回执 / 网页的动作数值统一保留 3 位小数（内部链路仍用全精度）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    policy.action = np.array([-0.06196591258049011, 0.4469754695892334, -0.0004])
+    _patch(monkeypatch, policy)
+    replies = []
+    rollout = _REGISTRY.parse_argv(["infer", "rollout"])
+    rollout.reply_to = replies.append
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].data["action"] == [-0.062, 0.447, 0.0]  # 3 位小数（-0.0 → 0.0）
+
+
+def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
+    """infer rollout stop：停止持续推理并**回到会话主循环**（会话不退出，仍可单步推理）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
+    cont.reply_to = replies.append
+    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
+    stop.reply_to = replies.append
+    single = _REGISTRY.parse_argv(["infer", "rollout"])
+    single.reply_to = replies.append
+    # None = 无命令空档：让持续推理推一步后再下发 stop
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
+    assert [r.status for r in replies] == ["ok", "ok", "ok"]
+    assert replies[0].data["state"] == "continuous"
+    assert replies[1].data["continuous"] is False  # 停止回执
+    assert session.continuous is False  # 运行位已清
+    assert replies[2].data["count"] == 1  # 停止后单步推理仍可用（会话未退出）
+
+
+def test_infer_connect_failure_records_warmup_error(monkeypatch):
+    """infer connect：连接失败 → 回执**仍是 ok**（异步预热立即回执，`started=True`），
+    失败原因记在 `warmup_error`，连接保持未连接、可重试。"""
+
+    class _ConnectingPolicy(_FakePolicy):
+        def __init__(self):
+            super().__init__()
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise OSError("inference server not reachable")
+
+    adapter = _FakeAdapter(ready=True)
+    policy = _ConnectingPolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    connect = _REGISTRY.parse_argv(["infer", "connect"])
+    connect.reply_to = replies.append
+    # 预热在工作线程里跑：等它收尾（失败原因写入 warmup_error）再退出会话
+    session = _build_gated_session(
+        adapter,
+        policy,
+        connect,
+        _wait_for(lambda s: s.warmup_error is not None, "预热失败收尾（warmup_error 已写入）", "session quit"),
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.connect_calls == 1  # 单次尝试，不无限重试
+    assert session.connected is False
+    assert replies[0].status == "ok"  # 同步回执只表示「已启动预热」
+    assert replies[0].data["started"] is True
+    assert session.warmed_up is False
+    assert "inference server not reachable" in (session.warmup_error or "")
 
 
 def test_infer_rollout_refused_during_teleop(monkeypatch):
@@ -1264,5 +1324,5 @@ def test_infer_rollout_refused_during_teleop(monkeypatch):
     assert policy.infer_calls == 1  # 推理照常跑（只是不下发）
     assert adapter.executed == []  # 本拍动作未下发
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert "teleop" in replies[0].error

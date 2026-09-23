@@ -60,7 +60,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from utils.base.data_handler import debug_print
 
-from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
+from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_POSE, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
     FIELD_ACTION_DIM,
@@ -125,6 +125,11 @@ def _robot_action_dim(robot) -> int:
     raise AttributeError("robot action dimension is not available")
 
 
+def _robot_pose_dim(robot) -> int:
+    """末端位姿观测维数（扁平：各臂 xyz + rpy）；0 = 机器人不提供位姿 → 共享内存保持 v2 布局。"""
+    return int(getattr(robot, "POSE", 0) or 0)
+
+
 def _robot_image_names(robot) -> list[str]:
     names = list(getattr(robot, "IMAGE_NAMES", []) or [])
     if names:
@@ -179,7 +184,11 @@ class _ShmPublisher:
         self.last_obs: dict = {}  # 最新 standard_obs（/observe 调试用）
 
     def publish(self, obs):
-        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约：observations/qpos + images/<cam>）。"""
+        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约：observations/qpos + images/<cam>）。
+
+        机器人提供末端位姿（``observations/pose``，即 ``robot.POSE > 0``）时一并写入位姿区
+        （布局 v3）；不提供 → 不传 ``pose``，共享内存仍是 v2（下游 adapter 的 ``pose_dim`` 为 0）。
+        """
         if obs is None or obs.get(KEY_QPOS) is None:
             return
         image_names = _robot_image_names(self.robot)
@@ -188,6 +197,8 @@ class _ShmPublisher:
             KEY_ACTION: obs.get(KEY_ACTION) if obs.get(KEY_ACTION) is not None else obs[KEY_QPOS].copy(),
             "seq": getattr(self.robot, "seq", 0),
         }
+        if obs.get(KEY_POSE) is not None:
+            standard[KEY_POSE] = obs[KEY_POSE]  # 末端位姿（笛卡尔策略 / 预览的观测输入）
         for name in image_names:
             standard[f"{CAMERA_PREFIX}{name}"] = obs[f"{CAMERA_PREFIX}{name}"]
         self.last_obs = standard
@@ -196,33 +207,34 @@ class _ShmPublisher:
         self._writer.write(
             qpos=standard[KEY_QPOS],
             action=standard[KEY_ACTION],
+            pose=standard.get(KEY_POSE),
             images=[standard[f"{CAMERA_PREFIX}{n}"] for n in image_names],
         )
 
     def _create_writer(self) -> ObsShmWriter:
+        """创建共享内存写者（上次进程残留 → attach 后 unlink 重建）。"""
         # 相机尺寸（假设各相机一致）；无相机机器人（IMAGES 为空）用占位尺寸，image_count=0 无图像数据
         image_size = next(iter(getattr(self.robot, "IMAGES", {}).values()), (640, 480))
         image_names = _robot_image_names(self.robot)
-        try:
-            writer = ObsShmWriter(
+
+        def build() -> ObsShmWriter:
+            return ObsShmWriter(
                 name=self.robot.SHM_NAME,
                 image_count=len(image_names),
                 image_size=image_size,
                 qpos_dim=_robot_action_dim(self.robot),
                 action_dim=_robot_action_dim(self.robot),
+                pose_dim=_robot_pose_dim(self.robot),  # > 0 → 布局 v3（多一块位姿区）
             )
+
+        try:
+            writer = build()
         except FileExistsError:
             # 上次进程残留：attach 后 unlink 再重建（幂等清理）
             stale = shared_memory.SharedMemory(name=self.robot.SHM_NAME)
             stale.close()
             stale.unlink()
-            writer = ObsShmWriter(
-                name=self.robot.SHM_NAME,
-                image_count=len(image_names),
-                image_size=image_size,
-                qpos_dim=_robot_action_dim(self.robot),
-                action_dim=_robot_action_dim(self.robot),
-            )
+            writer = build()
         writer.set_flags(running=True)
         return writer
 
@@ -442,11 +454,13 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 调试（非契约）
     @app.get("/observe")
     def observe_debug():
-        """调试用：最新观测 qpos + 相机 JPEG(base64)（Edge 侧实际经共享内存读观测）。"""
+        """调试用：最新观测 qpos + **末端位姿**（提供时）+ 相机 JPEG(base64)（Edge 侧实际经共享内存读观测）。"""
         obs = publisher.last_obs
         if not obs:
             return {"ready": False, "data": None}
         out = {"ready": True, "qpos": obs[KEY_QPOS].tolist(), "seq": obs.get("seq")}
+        if obs.get(KEY_POSE) is not None:
+            out["pose"] = np.asarray(obs[KEY_POSE], dtype=np.float64).tolist()
         for name in _robot_image_names(robot):
             rgb = obs.get(f"{CAMERA_PREFIX}{name}")
             if rgb is None:
