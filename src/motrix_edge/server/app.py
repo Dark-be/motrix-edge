@@ -49,6 +49,7 @@ from motrix_edge.server.deps import Services
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.routes import build_routers
+from motrix_edge.server.rpent import RpentService
 from motrix_edge.server.webrtc import WebRTCService
 from motrix_edge.session.upload_session import UploadSession
 from motrix_edge.utils.version import get_package_version
@@ -79,6 +80,7 @@ def create_app(
     uploads: UploadSession | None = None,
     preview: PreviewService | None = None,
     meta: CaptureMetaService | None = None,
+    rpent: RpentService | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
@@ -97,6 +99,9 @@ def create_app(
              观测缓存）；注入后注册 ``/v1/preview`` 观测预览端点，未注入时返回 501。
     meta: 可选 ``CaptureMetaService``（采集元信息选项，直连 ``CaptureMetaStore``）；
           未注入时 ``/v1/captures/meta*`` 返回 501。
+    rpent: 可选 ``RpentService``（RPent 兼容的 RPC 面）；注入后注册 **``POST /call``**
+           （外部 agent 经它驱动 edge，见 wiki/design/motrix_edge_rpent_bridge.md），
+           未注入时该端点回 ``ok=false`` 信封。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
@@ -113,6 +118,7 @@ def create_app(
         meta=meta,
         preview=preview,
         webrtc=webrtc,
+        rpent=rpent,
     )
 
     app = FastAPI(title="MotrixEdge", version=get_package_version())

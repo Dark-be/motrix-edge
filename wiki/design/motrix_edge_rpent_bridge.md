@@ -1,9 +1,10 @@
 # RPent 对接契约（RPC facade 与命名约定）
 
-> **状态**：**实现整体待合入**——本文描述的 `/call` facade（`server/rpent/` 包 + `server/routes/rpent.py`
-> 路由）、`<scope>/<verb>` 命名、动作块布局转换与 `settle` 到位判定**只在开发分支**，
-> master 上不存在（`server/rpent/`、`tests/test_rpent.py` 均无）；它依赖的位姿动作链（`pose` / `pose_delta` / `pose_target`、
-> robot 侧 `kinematics`）同样待合入。因此文中的「已实现」一律指**本特性 MR 内的实现**。
+> **状态**：**已落地（`dev`）**——`/call` facade（`server/rpent/` 包 + `server/routes/rpent.py` 路由）、
+> `<scope>/<verb>` 命名、动作块布局转换与 `settle` 到位判定均在 `dev` 上；它依赖的位姿动作链
+> （`pose` / `pose_delta` / `pose_target`、robot 侧 `kinematics`）同样已合入。故文中的「已实现」
+> 指本仓库现状；仍未做的两条（**写方互斥**：与 capture / infer 会话互斥 + 单飞；**端到端联调**）
+> 见 [实施计划](../plan/motrix_edge_rpent_bridge_plan.md)。
 
 ## 摘要
 
@@ -64,7 +65,7 @@ http://<edge>:8000` 后，agent 的 `move_delta` / `rotate_delta` / `set_gripper
 模型侧另有一套 `vla.predict(obs, options) -> actions`（`BaseVLAFacade` 注册、`BaseVLAClient`
 调用），语义 = 「给定观测出一段动作块」——**不属于本文的对接范围**（见下节）。
 
-## 拓扑（实现随本特性 MR 合入）
+## 拓扑
 
 ```mermaid
 flowchart LR
@@ -91,7 +92,7 @@ flowchart LR
 -   RPent 侧需新增/复用一个机器人包（`robots/<robot>/`）把 `env.*` 指向 edge：`env_client.py`
     薄适配 + `toolkit.py` 工具集 + `prompt_bundle.py` + `robot_spec.py` 的 `--env-endpoint`。
 
-## 方法映射（实现随本特性 MR 合入）
+## 方法映射
 
 | RPent 方法                            | edge 承接                                                                                         | 备注                                                                                                           |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -167,7 +168,7 @@ edge 的下发契约是 `layout` + `arms`（段宽见 [下发契约收敛](./rob
 -   **只做数值映射**、不缩放、不猜语义：布局名是唯一开关，不自动识别「增量 vs 绝对」；
 -   `server.rpent.dry_run: true` → **任何下发都被拦住**：`step` / `chunk_step` 只回转换结果；
     `reset` 与四条写原语回 `dry_run: true` + `sent: false` + `reached: null` + `reason: "dry_run"`
-    （数值仍在 `target` / `action` / `converted` 里可核对）；`_push_action` 再兜一层底——真有路径
+    （数值仍在 `target` / `converted` 里可核对）；`_push_qpos` 再兜一层底——真有路径
     漏了就直接报错，绝不默默把机器人动了。
     ⚠️ `dry_run` 必须覆盖**所有写路径**（含 `reset` 与四条写原语），否则会出现“回执说 dry-run、
     机器人却真的动了”——`tests/test_rpent.py` 钉住这条约束。
@@ -178,17 +179,17 @@ edge 的下发契约是 `layout` + `arms`（段宽见 [下发契约收敛](./rob
 ### 与 RPent 客户端的形态对齐（结论）
 
 以下几处 RPent 客户端 / 工具期望的形态与 edge 的原生返回不同，已按下表结论对齐（改 edge 或
-RPent 侧适配二选一）。右列处置**随本特性 MR 合入**，不是 master 现状：
+RPent 侧适配二选一）。右列处置**均已落地**：
 
-| 项                          | RPent 期望                                                  | edge 现状                              | 结论                                                                                                                                  |
-| --------------------------- | ----------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| 末端位姿编码                | `tcp_pose = [x, y, z, qx, qy, qz, qw]`（过了 `from_quat`）  | 扁平 `pose` 仍是 `xyz + rpy`           | **已解决**：每臂块额外给 quat `tcp_pose`（两种约定共存）                                                                              |
-| 机器人状态结构              | 每臂块 `left_arm` / `right_arm`（关节 / 夹爪 / `tcp_pose`） | 扁平 + 每臂块                          | **已解决**（`env.get_robot_state` 同时给两套）                                                                                        |
-| 观测图分辨率                | 原图（如 640×480）                                          | 默认 `image_source: native` → **原图** | **已解决**（planner 面向给原图；`preview` 可回 320×240；VLA 逐帧观测恒走缓存）                                                        |
-| `recover_joint_posture`     | 关节复位**保持已夹持物**                                    | 关节回 home + **保持夹爪**             | **已解决**（无 `HOME["joint"]` 声明才退回 `adapter.reset()` 并标注 fallback）                                                         |
-| `env.get_env_meta` 严格比对 | `BaseEnvClient` 断言 meta **完全相等**                      | 我方 meta 是超集                       | **已澄清**：自写 client（其 franka 包覆写了 `__init__`，断言不执行）                                                                  |
-| 内联相机来源                | `dump_state` 只读 `get_camera_meta` 的 `agent_observation`  | 两处共用同一 helper                    | **已解决**（缺这项模型只拿到路径、盲跑）                                                                                              |
-| 原语到位判定                | 工具返回前就知道「到没到」                                  | `settle` 阻塞到到位 / 超时 / 停滞      | **已解决**（回执 `reached` / `final_err`（+ 分项 `final_err_m` / `final_err_rad`）/ `elapsed_s` / `stalled` / `timeout`，可逐次覆盖） |
+| 项                          | RPent 期望                                                  | edge 现状                              | 结论                                                                                                                                                                                   |
+| --------------------------- | ----------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 末端位姿编码                | `tcp_pose = [x, y, z, qx, qy, qz, qw]`（过了 `from_quat`）  | 扁平 `pose` 仍是 `xyz + rpy`           | **已解决**：每臂块额外给 quat `tcp_pose`（两种约定共存）                                                                                                                               |
+| 机器人状态结构              | 每臂块 `left_arm` / `right_arm`（关节 / 夹爪 / `tcp_pose`） | 扁平 + 每臂块                          | **已解决**（`env.get_robot_state` 同时给两套）                                                                                                                                         |
+| 观测图分辨率                | 原图（如 640×480）                                          | 默认 `image_source: native` → **原图** | **已解决**（planner 面向给原图；`preview` 可回 320×240；VLA 逐帧观测恒走缓存）                                                                                                         |
+| `recover_joint_posture`     | 关节复位**保持已夹持物**                                    | 关节回 home + **保持夹爪**             | **已解决**：关节回 `HOME["joint"]`（无声明才退回 `adapter.reset()` 并标注 fallback）；夹爪基座与 `set_gripper` 同源（取 `action` 的目标夹爪槽，缺 `action` 整体退实测），回执 `source` |
+| `env.get_env_meta` 严格比对 | `BaseEnvClient` 断言 meta **完全相等**                      | 我方 meta 是超集                       | **已澄清**：自写 client（其 franka 包覆写了 `__init__`，断言不执行）                                                                                                                   |
+| 内联相机来源                | `dump_state` 只读 `get_camera_meta` 的 `agent_observation`  | 两处共用同一 helper                    | **已解决**（缺这项模型只拿到路径、盲跑）                                                                                                                                               |
+| 原语到位判定                | 工具返回前就知道「到没到」                                  | `settle` 阻塞到到位 / 超时 / 停滞      | **已解决**（回执 `reached` / `final_err`（+ 分项 `final_err_m` / `final_err_rad`）/ `elapsed_s` / `stalled` / `timeout`，可逐次覆盖）                                                  |
 
 ## RPent 侧机器人包（`robots/motrix_edge/`）
 
@@ -267,6 +268,10 @@ robots/motrix_edge/
     `observations/qpos`（`set_gripper` 即此规则）；`recover_joint_posture` 的手臂段取 `HOME["joint"]`
     常量、夹爪段保持**目标**开合（基座同 `set_gripper`：目标优先、实测兜底）；动作布局未覆盖的臂回填
     也取目标位姿。一句话：**“发到哪”看目标，“到了没”看实测**。
+-   **值段与夹爪槽必须同源**：一条向量里既有值段也有夹爪槽，两者得从**同一来源**取——基座类读
+    `action`（位姿用它的 `pose_target` 投影），到位判定 / 状态回报读 `qpos`（位姿 `pose`），
+    不把「目标值 + 实测夹爪」（或反之）拼成一份基座；写原语的回执以 `source`
+    （`target` / `measured`）标注实际来源。
 
 **原语写法的三个硬要求**（RPent 工具约定）：
 
@@ -292,9 +297,11 @@ robots/motrix_edge/
 
 -   **标定**：下发一个目标、等它停稳，看回执 `final_err_m` / `final_err_rad`（或 `final_err`）的平台值
     ——这与机器人型号 / 当前姿态 / 负载有关，不要照抄别人的数值；
--   **当前缺省值**（位置 5 cm / 姿态 0.4 rad ≈ 23°）是**有意放大**的：先把 MIT 静态误差盖住，
-    让 `reached` 判得出来（否则每个写原语都走满 `stall_s` / `timeout_s`），等补上重力 / 力矩
-    前馈或按实测收敛后再一起收紧；
+-   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 5 cm / 姿态 0.4 rad ≈ 23°）是
+    **有意放大**的：先把 MIT 静态误差盖住，让 `reached` 判得出来（否则每个写原语都走满
+    `stall_s` / `timeout_s`），等补上重力 / 力矩前馈或按实测收敛后再一起收紧。**其余键不必写进
+    yml**：`enabled`（true）/ `timeout_s`（5s）/ `max_timeout_s`（90s）/ `stall_s`（1s）/
+    `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）缺键即取 `rpent/settle.py` 的兜底；
 -   **位置与姿态分别比容差**（`pos_tol` 比米、`rot_tol` 比弧度），不把两种量纲混进一个阈值；
 -   `stalled` 也**可能是「已到稳态误差平台」而不是受阻**——两者从位置观测上不可区分，planner 应结合
     `final_err` 判断（接近容差 → 可补一小步；远大于容差且不再变化 → 受阻 / 需 restage）；
@@ -431,10 +438,8 @@ edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成
 -   `/call` 由 edge 实现（`server/rpent/` 包；HTTP 路由在 `server/routes/rpent.py`）；`/call` 的租约由服务自行解析
     （`server.rpent.lease_id` 固定 → 否则当前活跃租约；自描述方法免租约）；
 -   **VLA 由 RPent 侧自跑，edge 不提供 `vla.*` 接口**；edge→robot 进程契约不改名。
--   **`recover_joint_posture` 的夹爪基座**：定为与 `set_gripper` 同策略——夹爪位**优先取目标**
-    （`action` 的夹爪维）、实测只兜底，并在回执里给 `gripper_base`（取值 `target` /
-    `qpos`，与 `env.set_gripper` 回执的 `base` 同风格；当前实现取实测（状态向量
-    `observations/qpos` 的每臂夹爪槽）且无该字段，待随本特性 MR 对齐；理由见「同类规则」）。
--   **增量原语的注释同步**：`_move_delta` / `_rotate_delta` 的 docstring 仍写「现算绝对目标下发」，
-    与其调用的 `_pose_delta`（`ActionSpace.POSE_DELTA`，**本层不算绝对目标**）相反，待改成「下发
-    `pose_delta` 增量（基准归机器人）」——注释与实现相反比没有注释更容易把实现改错。
+-   **`recover_joint_posture` 的夹爪基座**：与 `set_gripper` 同策略——夹爪位取**目标**
+    （`observations/action` 的每臂夹爪槽），机器人没发布该键才退实测；回执带 `source`
+    （取值 `target` / `measured`；与 `env.set_gripper` 回执同字段同取值）。**已落地**：`env.*`
+    一律走同一个读取口 `_qpos(space, source=…)`，源 → 观测键的映射单点在 `_VALUE_KEYS`
+    （基座类传 `SOURCE_TARGET`，到位判定 / 状态回报用缺省的 `SOURCE_MEASURED`）。
