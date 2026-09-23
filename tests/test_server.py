@@ -123,12 +123,14 @@ def test_health_returns_identity_and_version():
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
     assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
-    # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 预热门控 warmup_required）
+    # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 预热门控 warmup_required
+    # + 动作布局 action_layout）
     by_type = {p["type"]: p for p in body["adapters"]["policies"]}
     assert [item["key"] for item in by_type["openpi"]["config_items"]] == [
         "host",
         "port",
         "warmup_required",
+        "action_layout",
         "prompt",
         "image_size",
     ]
@@ -136,6 +138,7 @@ def test_health_returns_identity_and_version():
         "host",
         "port",
         "warmup_required",
+        "action_layout",
         "pretrained_name_or_path",
         "device",
         "actions_per_chunk",
@@ -165,7 +168,8 @@ def test_adapters_info_returns_capabilities():
         assert "id" not in info and "name" not in info
         assert info["available"] is True
         caps = info["capabilities"]
-        assert caps["action_dim"] == 14
+        assert caps["action_dim"] == 12  # 兼容字段 = 关节空间维度（双臂 6 × 2）
+        assert caps["action_dims"] == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
         assert "image_names" in caps and "capabilities" in caps
 
 
@@ -214,10 +218,11 @@ def test_adapters_current_returns_effective():
     r = client.get("/v1/adapters/current")
     assert r.status_code == 404
     assert "not bound" in r.json()["detail"]
-    # 绑定 fake adapter（实际生效能力字典：双臂 + 三相机）
+    # 绑定 fake adapter（实际生效能力字典：双臂 + 三相机；各空间维度 / home）
     node.adapter = SimpleNamespace(
-        action_dim=14,
-        _home_qpos=[0.0] * 14,
+        action_dim=12,
+        action_dims={"joint": 12, "pose": 12, "gripper": 2},
+        _home={"joint": [0.0] * 12, "gripper": [0.0] * 2},
         enabled_map=lambda: {
             "arms": {"left": True, "right": True},
             "cameras": {"cam_head": True, "cam_left_wrist": True, "cam_right_wrist": True},
@@ -233,8 +238,9 @@ def test_adapters_current_returns_effective():
         "arms": {"left": True, "right": True},
         "cameras": {"cam_head": True, "cam_left_wrist": True, "cam_right_wrist": True},
     }
-    assert body["action_dim"] == 14
-    assert body["home_qpos"] == [0.0] * 14
+    assert body["action_dim"] == 12
+    assert body["action_dims"] == {"joint": 12, "pose": 12, "gripper": 2}
+    assert body["home"]["joint"] == [0.0] * 12
     assert "default" not in body  # 已绑定 → 无 default 标记
 
 
@@ -633,6 +639,7 @@ def test_preview_returns_latest_observation():
     node.frame_manager.update(
         {
             "observations/qpos": np.array([0.1, 0.2]),  # float64：float 转换精确
+            "observations/pose_target": np.array([0.3, 0.4]),  # 目标位姿（= FK(关节段目标)）
             "observations/images/cam_head": np.full((8, 8, 3), 128, dtype=np.uint8),
         }
     )
@@ -643,6 +650,7 @@ def test_preview_returns_latest_observation():
     assert body["adapter"]["name"] == "Test Robot"
     obs = body["observation"]
     assert obs["qpos"] == [0.1, 0.2]
+    assert obs["pose_target"] == [0.3, 0.4]  # 目标位姿随观测一起回（MIT 稳态误差可见）
     # 图像不内联（HTTP JSON 不承载二进制）：只返回摄像头名列表，图像由 WebRTC 推流
     assert obs["images"] == ["cam_head"]
     # 异租约：preview → 403
@@ -1575,10 +1583,12 @@ def test_infers_status_exposes_policy_config():
         "host",
         "port",
         "warmup_required",
+        "action_layout",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
     assert [item["runtime"] for item in cfg["items"]] == [
+        False,
         False,
         False,
         False,

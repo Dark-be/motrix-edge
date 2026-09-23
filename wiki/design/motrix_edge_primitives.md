@@ -3,8 +3,8 @@
 > **状态**：**设计定稿，代码未实现**——本仓库当前没有 `server/primitives.py`、`/v1/primitives`
 > 或单帧取图端点，本文通篇是**目标态**（分期见文末「分期」，未决项见文末「未决项」）。
 > 它依赖的位姿 / 动作空间契约（`observations/pose` / `observations/pose_target` /
-> `observations/gripper`、`ActionSpace.POSE` / `ActionSpace.POSE_DELTA`、`/v1/preview` 的
-> `pose` / `pose_target` / `gripper` / `arms`）来自**位姿动作 MR**，master 上同样尚未提供。
+> `observations/qpos`（**状态向量**：每臂「值 + 夹爪」，夹爪不再单独成键）、`ActionSpace.POSE` /
+> `ActionSpace.POSE_DELTA`、`/v1/preview` 的 `pose` / `pose_target` / `gripper` / `arms`）来自**位姿动作 MR**，master 上同样尚未提供。
 
 ## 摘要
 
@@ -41,7 +41,8 @@ edge 不提供 `vla.*` 接口**）；本文只定义原语语义。
     edge 不提供内建循环 / 记忆 / SSE 对话流，也不需要新会话类型；
 -   依赖的既有契约（**随位姿动作 MR 引入，尚未在 master**）：观测键 `observations/pose`（实测位姿）、
     `observations/pose_target`（= `FK(关节段目标)`，`target` 与到位判定必需）、
-    `observations/gripper`（夹爪实测）；动作空间 `ActionSpace.POSE`（= `"pose"`，绝对目标）与
+    `observations/qpos`（**状态向量**：每臂「值 + 夹爪」交错，夹爪实测在每臂末位）；动作空间
+    `ActionSpace.POSE`（= `"pose"`，绝对目标）与
     `ActionSpace.POSE_DELTA`（= `"pose_delta"`，增量原语）；`/v1/preview` 的 `pose` /
     `pose_target` / `gripper` / `arms`。（基座用的关节段目标是 **`action`** 键，master 已有。）
 
@@ -88,7 +89,7 @@ flowchart LR
 
 | op           | args（缺省）                                                                               | 语义                                                                                                                                                                                              | 钳制                                      |
 | ------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `goto`       | `pos`[3]（绝对，米）、`rpy?`[3]、`arm?`、`tol_pos?` / `tol_rot?`（缺省见下）、`timeout?`=5 | 笛卡尔点到点：`adapter.rollout(target, action_space=pose)`，机器人侧 IK                                                                                                                           | 目标须在工作空间盒内；`rpy` 需机器人支持  |
+| `goto`       | `pos`[3]（绝对，米）、`rpy?`[3]、`arm?`、`tol_pos?` / `tol_rot?`（缺省见下）、`timeout?`=5 | 笛卡尔点到点：`adapter.rollout(target, layout="pose")`，机器人侧 IK                                                                                                                               | 目标须在工作空间盒内；`rpy` 需机器人支持  |
 | `move_rel`   | `delta`[3]（米）、`arm?`、`tol_pos?` / `tol_rot?`、`timeout?`                              | 相对位移（等价「往前伸一点」）：edge 只下发 `pose_delta` 位移增量，**基准由机器人侧取**（不在上位算绝对目标，理由见 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「增量原语的基准与到位判定」） | 单次位移 ≤ `max_step`（缺省 0.05 m）      |
 | `rotate_rel` | `delta_rpy`[3]（弧度）、`arm?`、`tol_pos?` / `tol_rot?`、`timeout?`                        | 相对姿态：同 `move_rel`——只下发 `pose_delta` 的姿态分量增量，**基准由机器人侧取**                                                                                                                 | 单次姿态增量 ≤ `max_rot`（缺省 0.35 rad） |
 | `gripper`    | `value` 0..1、`arm?`                                                                       | 夹爪开合（只改夹爪位，其余维**保持该臂关节段目标**——基座取 `action`（关节段目标）而非实测 qpos，理由同增量原语）                                                                                  | 值域 `[0, 1]`                             |
@@ -99,8 +100,8 @@ flowchart LR
 -   参数非法 / 越界 → **400 拒绝**（不静默截断：截断会让外部 agent 的"心理模型"与实际执行脱节）；
 -   原语集**按能力协商**：机器人没有夹爪 → 清单里没有 `gripper`；无力控 → 不出现 `press`
     （力控原语留待 Phase C）；
--   下发通道**复用 `/v1/rollout`**：**绝对**目标（`goto`）用 `action_space=pose`、**增量**原语
-    （`move_rel` / `rotate_rel`）用 `action_space=pose_delta`（edge → adapter → robot-pipeline），
+-   下发通道**复用 `/v1/rollout`**：**绝对**目标（`goto`）用 `layout="pose"`、**增量**原语
+    （`move_rel` / `rotate_rel`）用 `layout="pose_delta"`（edge → adapter → robot-pipeline），
     **robot 侧零新增端点**（两个动作空间随位姿动作 MR 引入）。
 -   增量原语的**基准与到位参考都在机器人侧**：edge 不下发绝对目标，也不缓存基准位姿。
 -   **容差分位置 / 姿态两项，且与 facade 同一份取值**：`tol_pos`（米）与 `tol_rot`（弧度）分别比、

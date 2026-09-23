@@ -11,7 +11,8 @@ robot:
   name: dual_alicia_piper_001
   type: dual_alicia_piper_robot # ROBOT_REGISTRY 键（get_robot 按此自动匹配）
   step_rad: 0.1 # 每帧最大关节增量（rad），env 控制线程限速接近 target
-  init_qpos: [0, 0.1, 0, 0, 0, 0, 1, 0, 0.1, 0, 0, 0, 0, 1]
+  init_joint: [0, 0.1, 0, 0, 0, 0, 0, 0.1, 0, 0, 0, 0] # 初始关节角（rad，每臂 6）：joint 空间
+  init_gripper: [1, 1] # 初始夹爪开合（每臂 1，1 = 张开）：gripper 空间
   # 硬件接线（**值必填**：缺失 / 空串 → 启动即报错；代码不内置现场值，也不放占位值）
   ports: # 控制器端口（键 = 代码里的角色名）
     left_master: "" # 左主手（Alicia 示教臂）串口设备节点：**现场填写**（留空 → 启动报错）

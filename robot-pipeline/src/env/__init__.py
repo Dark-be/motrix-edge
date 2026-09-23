@@ -39,7 +39,7 @@ def get_env(base_cfg):
 
         robot:
           type: test_robot        # ROBOT_REGISTRY 键
-          init_qpos: [...]
+          init_joint: [...]
 
         collector:                # 可选
           type: act_mcap          # 当前支持 act_mcap（act_hdf5 暂不可用）
