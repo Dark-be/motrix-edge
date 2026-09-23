@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from motrix_edge.errors import ErrorCode
 from motrix_edge.lease import LeaseError, LeaseManager, LeaseState
 from motrix_edge.lease.base import Lease
 
@@ -88,11 +89,11 @@ def test_install_stores_console_mirror():
     assert mgr.require("ls_console_issued").lease_id == "ls_console_issued"
     with pytest.raises(LeaseError) as exc:
         mgr.require("other")
-    assert exc.value.status_code == 403
+    assert exc.value.code == ErrorCode.FORBIDDEN
     # 已有活跃租约时再 install → 409
     with pytest.raises(LeaseError) as exc2:
         mgr.install(make_lease(lease_id="ls_second"))
-    assert exc2.value.status_code == 409
+    assert exc2.value.code == ErrorCode.CONFLICT
 
 
 def test_install_overwrites_expired_or_revoked():
@@ -124,7 +125,7 @@ def test_install_trusts_console_expiry():
     assert lease.renewed_at == _BASE  # renewed_at 缺省取签发时刻（now）
     with pytest.raises(LeaseError) as ei:
         mgr.require("ls_console_issued")
-    assert ei.value.status_code == 410
+    assert ei.value.code == ErrorCode.LEASE_EXPIRED
     # 对外时间字段统一 +08:00 序列化
     snap = mgr.status()
     assert snap["expires_at"].endswith("+08:00")
@@ -151,14 +152,14 @@ def test_renew_rejects_version_rollback():
     mgr.install(make_lease(ttl=10))
     with pytest.raises(LeaseError) as ei:
         mgr.renew("ls_console_issued", lease_version=1, expires_at=_BASE + timedelta(seconds=30))
-    assert ei.value.status_code == 409
+    assert ei.value.code == ErrorCode.CONFLICT
 
 
 def test_renew_not_found_404():
     mgr, _ = make_manager()
     with pytest.raises(LeaseError) as ei:
         mgr.renew("ls_none", lease_version=2, expires_at=_BASE + timedelta(seconds=30))
-    assert ei.value.status_code == 404
+    assert ei.value.code == ErrorCode.NOT_FOUND
 
 
 def test_renew_reactivates_reserved_or_expired():
@@ -178,7 +179,7 @@ def test_revoke_marks_revoked_and_blocks_control():
     assert mgr.mirror("ls_console_issued")["state"] == LeaseState.REVOKED.value
     with pytest.raises(LeaseError) as ei:
         mgr.require("ls_console_issued")
-    assert ei.value.status_code == 403
+    assert ei.value.code == ErrorCode.FORBIDDEN
     # 幂等：重复撤销仍返回 Revoked
     assert mgr.revoke("ls_console_issued").state == LeaseState.REVOKED
 
@@ -187,7 +188,7 @@ def test_revoke_not_found_404():
     mgr, _ = make_manager()
     with pytest.raises(LeaseError) as ei:
         mgr.revoke("ls_none")
-    assert ei.value.status_code == 404
+    assert ei.value.code == ErrorCode.NOT_FOUND
 
 
 def test_revoke_current_revokes_active_lease():
@@ -220,7 +221,7 @@ def test_mirror_returns_lease_info():
     # 不存在 → 404
     with pytest.raises(LeaseError) as ei:
         mgr.mirror("ls_none")
-    assert ei.value.status_code == 404
+    assert ei.value.code == ErrorCode.NOT_FOUND
 
 
 def test_status_no_lease():
@@ -248,7 +249,7 @@ def test_require_missing_lease_409():
     mgr, _ = make_manager()
     with pytest.raises(LeaseError) as ei:
         mgr.require("ls_x")
-    assert ei.value.status_code == 409
+    assert ei.value.code == ErrorCode.LEASE_REQUIRED
 
 
 def test_require_mismatch_403():
@@ -256,7 +257,7 @@ def test_require_mismatch_403():
     mgr.install(make_lease(ttl=10))
     with pytest.raises(LeaseError) as ei:
         mgr.require("ls_wrong")
-    assert ei.value.status_code == 403
+    assert ei.value.code == ErrorCode.FORBIDDEN
 
 
 def test_require_reserved_403():
@@ -265,7 +266,7 @@ def test_require_reserved_403():
     mgr.install(make_lease(state=LeaseState.RESERVED, ttl=10))
     with pytest.raises(LeaseError) as ei:
         mgr.require("ls_console_issued")
-    assert ei.value.status_code == 403
+    assert ei.value.code == ErrorCode.FORBIDDEN
 
 
 def test_require_expired_410():
@@ -274,4 +275,4 @@ def test_require_expired_410():
     clock.advance(11)
     with pytest.raises(LeaseError) as ei:
         mgr.require("ls_console_issued")
-    assert ei.value.status_code == 410
+    assert ei.value.code == ErrorCode.LEASE_EXPIRED

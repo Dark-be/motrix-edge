@@ -18,9 +18,7 @@ import stat
 
 import pytest
 
-from motrix_edge.node import EdgeNode
-from motrix_edge.utils.capture_meta import CaptureMetaError, CaptureMetaStore
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_CAPTURE_META_ADD,
     CMD_CAPTURE_META_DELETE,
     CMD_CAPTURE_META_DELETE_KEY,
@@ -30,6 +28,9 @@ from motrix_edge.utils.commands import (
     build_command_registry,
     handle_capture_meta,
 )
+from motrix_edge.errors import ErrorCode
+from motrix_edge.node import EdgeNode
+from motrix_edge.utils.capture_meta import CaptureMetaError, CaptureMetaStore
 
 # ---------------------------------------------------------------------------
 # CaptureMetaStore：config/capture.yml（meta 段）读写 —— 无硬件可跑
@@ -125,7 +126,7 @@ def test_store_write_failure_keeps_previous_content_and_leaves_no_temp(tmp_path,
     with pytest.raises(CaptureMetaError) as excinfo:
         store.add("operator", "李四")
 
-    assert excinfo.value.status_code == 500  # 写盘失败 → 明确的 500
+    assert excinfo.value.code == ErrorCode.INTERNAL  # 写盘失败 → 明确的 500
     assert store.list_meta() == {"operator": ["张三"]}  # 旧内容未被破坏
     assert [item.name for item in tmp_path.iterdir()] == ["capture.yml"]  # 无 .tmp 残留
 
@@ -216,7 +217,7 @@ def test_handle_capture_meta_lifecycle(tmp_path):
     # delete-key（分类不存在 → rejected）
     result = run_argv(["capture", "meta", "delete-key", "operator"])
     assert result.status == "rejected"
-    assert result.status_code == 400
+    assert result.code == ErrorCode.INVALID_ARGUMENT
 
 
 def test_handle_capture_meta_invalid_params(tmp_path):
@@ -224,10 +225,10 @@ def test_handle_capture_meta_invalid_params(tmp_path):
     registry = _registry()
     result = handle_capture_meta(registry.parse_argv(["capture", "meta", "add"]), store)
     assert result.status == "rejected"
-    assert result.status_code == 400
+    assert result.code == ErrorCode.INVALID_ARGUMENT
     result = handle_capture_meta(registry.parse_argv(["capture", "meta", "edit", "operator", "a"]), store)
     assert result.status == "rejected"
-    assert result.status_code == 400
+    assert result.code == ErrorCode.INVALID_ARGUMENT
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +262,8 @@ def test_store_is_single_instance_across_node_session_and_service(tmp_path):
     """
     from fake_robot import FakeRobotAdapter
 
-    from motrix_edge.server.capture import CaptureService
+    from motrix_edge.server.meta import CaptureMetaService
     from motrix_edge.session import get_session
-    from motrix_edge.utils.commands import CommandBus
 
     store = CaptureMetaStore(tmp_path / "capture.yml")
     node = EdgeNode({"identity": {}}, capture_meta_store=store)
@@ -274,5 +274,5 @@ def test_store_is_single_instance_across_node_session_and_service(tmp_path):
     )
     assert session.capture_meta_store is store
 
-    # server 层（HTTP 只读端点）复用节点持有的那一份，而不是各建一个
-    assert CaptureService(node, CommandBus())._meta_store is store
+    # server 层（HTTP 端点）由装配层注入节点持有的那一份，而不是各建一个
+    assert CaptureMetaService(store=node.capture_meta_store)._store is store

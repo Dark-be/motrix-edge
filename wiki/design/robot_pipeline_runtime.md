@@ -88,7 +88,9 @@ flowchart LR
 在钩子之上，`BaseRobot` 提供按线程划分的入口：
 
 -   `sample_qpos()`（控制线程）：调 `get_observation_qpos()`，附上 `action`，`seq` 自增，
-    结果**缓存**进 `motion_state`（机械臂侧状态快照，**不含帧时刻**）。
+    结果**缓存**进 `motion_state`（机械臂侧状态快照，**不含帧时刻**）；机器人提供位姿时
+    （`get_observation_pose()` 非 None）同拍把 `observations/pose` 一并放进快照——位姿与
+    qpos **同拍**，下游不会读到错拍的组合。
 -   `capture_images()`（观测线程）：调 `get_observation_images()`，组装为
     `observations/images/<cam_name>`。
 -   `build_observation()`（观测线程）：`motion_state` + 本拍相机帧，并写入帧时刻 `timestamp`
@@ -106,6 +108,23 @@ flowchart LR
 逐帧不同；控制拍超时会让「最近一个控制拍」跳档）。故对 `dt` 与 episode 时长（末帧 − 首帧）
 无影响；但下游（mcap → ACT / LeRobot 转换）**不要按固定滞后做时间平移校正**，需要严格对齐时
 须知该滞后并非定值。
+
+## 末端位姿观测（`POSE` / `pose_dim`）
+
+笛卡尔原语（LLM agent 会话）与前端预览都要末端位姿，它在 robot 侧由类常量 **`POSE`** 声明：
+0 = 不提供（共享内存保持 v2 布局，下游 `pose_dim = 0`，位姿显示为不可用）；> 0 = 提供，
+`_ShmPublisher` 创建写者时传 `pose_dim`（**布局 v3**，在 action 之后新增一块位姿区），每帧写
+`observations/pose`（与 qpos / action 同一帧，硬件上同拍采样）。
+
+-   **每臂 6 维** `xyz + rpy`，扁平顺序与 qpos 的臂布局一致（对齐 Edge 侧适配器的
+    `POSE_DIM_PER_ARM = 6`）；
+-   **test_robot**（虚拟）无真实运动学：用固定可逆映射从**同一拍 qpos** 派生——「关节动 → EEF
+    跟着动」，预览与笛卡尔闭环都可解释；
+-   **真机**（piper 系列）应读法兰位姿（`PiperController.get_position()` / `get_flange_pose()`）
+    并在 `get_observation_pose()` 返回；若还需接受笛卡尔目标，则要补机器人侧 IK（见
+    [边缘原语接口](./motrix_edge_primitives.md) 的未决项）。
+-   采集（`ActMcapCollector`）只落 qpos / action / images，**位姿不入 mcap**（数据集格式未定，
+    暂不扩 schema）。
 
 ## 频率与诊断
 

@@ -34,6 +34,8 @@ from datetime import datetime
 from enum import Enum
 from zoneinfo import ZoneInfo
 
+from motrix_edge.errors import ErrorCode, ServiceError
+
 # 北京时间（UTC+8）：Edge 租约的过期时间 / 时间戳统一使用北京时间
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -99,9 +101,7 @@ class Lease:
         return self.state == LeaseState.ACTIVE and not self.is_expired(now)
 
 
-class LeaseError(Exception):
-    """租约操作被拒绝（缺失 / 不匹配 / 过期 / 撤销 / 已有活跃 / 版本回退）。携带 HTTP status_code。"""
+class LeaseError(ServiceError):
+    """租约操作被拒绝（缺失 / 不匹配 / 过期 / 撤销 / 已有活跃 / 版本回退）：缺省 403。"""
 
-    def __init__(self, message: str, status_code: int = 403):
-        super().__init__(message)
-        self.status_code = status_code
+    default_code = ErrorCode.FORBIDDEN
