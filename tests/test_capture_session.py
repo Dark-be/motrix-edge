@@ -89,17 +89,18 @@ def test_capture_estop_during_observe_safe_stops(tmp_path):
 
 
 def test_capture_robot_execute_during_observe(tmp_path):
-    """观测期间 robot execute：解析 qpos 参数 → adapter.execute（qpos 直接作为参数）。"""
+    """观测期间 robot execute：解析值参数（缺省关节空间）→ adapter.execute。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+    joints = ",".join("0" for _ in range(12))
     session = capture_session.CaptureSession(
         make_config(tmp_path),
-        command_source=make_signals("robot execute 0,0,0,0,0,0,0", "session quit"),
+        command_source=make_signals(f"robot execute {joints}", "session quit"),
         frame_manager=FrameManager(),
         adapter=adapter,
     )
     session.session_start()
     assert session.run() == RunResult.FINISHED
-    assert adapter.executed == [[0.0] * 7]  # qpos 直接作为参数传给 adapter.execute
+    assert adapter.executed == [[0.0] * 12]  # 值直接作为参数传给 adapter.execute
     session.session_finish()
 
 

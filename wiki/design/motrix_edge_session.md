@@ -67,7 +67,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 
 -   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
     **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
--   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
+-   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos> [joint|pose]` 直发动作、
     `robot teleop <bool> [mode]` 遥操作 / 人工接管（`mode=delta` = 增量接管）、`capture episode start/end` 控制一轮采集
     （回执回显 `episode` / `recording`）、
     `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
@@ -94,7 +94,10 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     → **丢弃动作**（真机不动）并回执 504，丢弃步数计入 `dropped_actions`。
 -   `infer rollout [mode]`：推理闭环步进，两种模式（参数缺省 = `single`）：
     -   `single`（缺省）：单步推理 —— `obs = adapter.observe()` → `action = rtc.infer(obs)`
-        → `adapter.rollout(action)`；回执含 `count=1` / `action` / `actions`。
+        → 下发本步动作（按策略声明的动作布局选通路：`joint` → `adapter.rollout(action)`；
+        `joint+gripper` → `adapter.rollout(action, layout="joint+gripper", arms=...)`，见
+        [policy 设计](./motrix_edge_policy.md)）；
+        回执含 `count=1` / `action` / `actions`。
     -   `continuous`（`infer rollout continuous`）：**持续推理** —— 启动即回执 `started`，
         然后持续执行推理闭环，直到 `session quit` / `robot estop` 停止（持续期间每步轮询
         命令响应退出 / 复位 / 急停；重复 `infer rollout` → rejected）。

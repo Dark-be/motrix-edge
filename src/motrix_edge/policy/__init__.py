@@ -82,9 +82,9 @@ POLICY_ENDPOINT_CONFIG_ITEMS: list[dict] = [
     },
 ]
 
-# 公共配置项（**所有策略共有**）：预热门控 warmup_required —— 与策略自身配置项**完全同级**：
-# 同一 schema、同一表单、同一 `infer config set` / POST /v1/infers/config 通道、同一校验；
-# 也是**会话级**配置（runtime=False：进入会话时读取，会话内改需退出重进）。
+# 公共配置项（**所有策略共有**）：预热门控 warmup_required + 模型动作布局 action_layout —— 与策略自
+# 身配置项**完全同级**：同一 schema、同一表单、同一 `infer config set` / POST /v1/infers/config
+# 通道、同一校验；也是**会话级**配置（runtime=False：进入会话时读取，会话内改需退出重进）。
 POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
     {
         "key": "warmup_required",
@@ -95,6 +95,19 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "default": True,
         "help": "true（缺省）= 未预热（`infer connect`：连接 + prepare + 取一块丢弃，**不下发任何动作**）"
         "时拒绝 `infer rollout`（409）；false = 允许 rollout 惰性自连（脚本 / 联调用的后门）",
+    },
+    {
+        "key": "action_layout",
+        "label": "模型动作布局 action_layout",
+        "type": "text",
+        "required": False,
+        "runtime": False,  # 会话级：进入会话时固化（下发通路固定）
+        "default": "joint",
+        "placeholder": "joint | joint+gripper",
+        "help": "策略**输出**的动作语义（布局词表，段名用 + 连接）：joint（缺省）= 每臂 6 关节角"
+        "（夹爪需另经 gripper 段，未启用臂补 home）；joint+gripper = 每臂「6 关节角 + 1 夹爪」，"
+        "**一条请求**同时写关节与夹爪（未选臂由机器人保持、不补 home）。布局**不按动作长度猜测**；"
+        "**会话内改需退出重进**",
     },
 ]
 

@@ -19,14 +19,21 @@
 
 - **HTTP 指令下行**：``execute`` / ``rollout`` / ``safe_stop`` / ``reset`` /
   ``set_teleop`` / 采集回合控制；
-- **共享内存观测上行**：读取 qpos 与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；
+- **共享内存观测上行**：读取状态向量（``observations/qpos``，每臂「值 + 夹爪」）/ 目标向量
+  （``action``，同维同布局）/ 实测位姿 / 目标位姿（``observations/pose`` /
+  ``observations/pose_target``）与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；
 - **状态查询**：``health`` 实时查询进程，``capture_status`` 查询采集状态（运行位 / 元信息 / 数据目录）。
 
 **子类只需声明类常量**（身份 / 能力 / 连接参数 / 臂布局 / 相机布局），本基类提供全部
 通用实现（``__init__`` + 指令 / 观测 / 状态方法）。身份与连接参数由 discover 解析传入
 （``name`` / ``endpoint`` / ``shm_name``，缺省回退类常量）；能力由类级常量定义；运行时可由
 Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 / 相机，未启用臂动作用
-``HOME_QPOS`` 填充。
+``HOME[space]`` 填充（同空间，不会拿关节值当位姿发）。
+
+**位姿（末端）约定**：下发的位姿目标与读到的位姿（``observations/pose`` /
+``observations/pose_target``）**必须同坐标系**（``POSE_FRAME``，如 ``flange`` / ``tcp``）。位姿永远按
+``xyz(3) + rpy(3)`` 每臂 6 维、单位**米 / 弧度**（与 edge 契约一致；SDK 若有 0.001mm / 0.001° 之类的
+整数标度，由机器人进程换算）。数值明显离谱（量纲写错）时记 ERROR，不把可疑数据喂给策略。
 """
 
 import cv2
@@ -37,6 +44,7 @@ from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
     KEY_ACTION,
     KEY_POSE,
+    KEY_POSE_TARGET,
     KEY_QPOS,
     Action,
     ActionSpace,
@@ -47,10 +55,11 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
-    FIELD_ACTION_SPACE,
+    FIELD_ARMS,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
     FIELD_DETAIL,
+    FIELD_LAYOUT,
     FIELD_MEASURED_HZ,
     FIELD_META,
     FIELD_OK,
@@ -70,6 +79,11 @@ from motrix_edge.adapter.http_contract import (
 )
 from motrix_edge.adapter.shm_contract import ObsShmReader
 from motrix_edge.utils.data_handler import debug_print
+
+# 位姿量纲防护阀值：明显超出这些范围的位姿视为「量纲 / 坐标系写错」（如把 0.001mm 整数
+# 直接当米 → 1e5 量级），丢弃该拍位姿并记 ERROR，不喂给策略 / planner。
+POSE_MAX_ABS_XYZ_M = 10.0  # 位置：米（工作站半径远小于此）
+POSE_MAX_ABS_RPY_RAD = 7.0  # 姿态：弧度（约 2π，留余量）
 
 
 def _as_opt_float(value) -> float | None:
@@ -92,13 +106,13 @@ class HttpShmAdapter(RobotAdapter):
           discover，如进程内测试）回退类常量 ``SDK_URL`` / ``SHM_NAME``。
         - ``type`` 由类常量 ``ADAPTER_TYPE`` 确定（entry point 类型，用于实例化）。
         - 能力（动作维度 / 相机布局）由类级常量定义；运行时经 ``configure()`` 应用 Edge
-          配置（只含启用臂 / 相机）；home 固定由类常量 ``HOME_QPOS`` 定义，**不参与运行时
-          配置**。
+          配置（启用臂 / 相机）。
         """
         super().__init__(name=name, endpoint=endpoint, shm_name=shm_name)
         self.name = name or self.NAME
-        # 能力：类级常量（自包含，不随 discover 传输）。基类 __init__ 已初始化裁剪状态
-        # （enabled_arms / enabled_images / _home_qpos）；action_dim 为按启用臂推导的只读属性
+        # 能力：类级常量（自包含，不随 discover 传输）；基类 __init__ 已初始化
+        # enabled_arms / 各空间维度（action_dims）/ _home / _full_image_names
+        self.images = list(self.IMAGES)  # 相机名列表（IMAGES 字典的键；configure 可裁剪）
         self.robot_model_id = self.ROBOT_MODEL_ID
         self.robot_model_version = self.ROBOT_MODEL_VERSION
         self._capabilities = dict(self.CAPABILITIES)
@@ -112,6 +126,7 @@ class HttpShmAdapter(RobotAdapter):
         self._http: httpx.Client | None = None  # SDK HTTP 客户端（指令下行）
         self._shm: ObsShmReader | None = None  # 共享内存观测读者（观测上行）
         self._running = False  # 机器人进程最近一次确认是否运行（health 实时刷新）
+        self._pose_problem_logged: str | None = None  # 位姿不可用原因（同原因只记一条）
 
         # 本地记录（便于调试与无硬件测试）
         self.executed: list[list[float]] = []
@@ -146,28 +161,20 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- capabilities ----------------------------------------------------------
     @property
-    def pose_dim(self) -> int:
-        """位姿观测维度（启用臂 × 每臂位姿维数；不提供位姿的适配器为 0）。"""
-        if not self.POSE_DIM_PER_ARM:
-            return 0
-        if not self.ARM_NAMES:
-            return int(self.POSE_DIM_PER_ARM)
-        return int(self.POSE_DIM_PER_ARM) * len(self.enabled_arms)
-
-    @property
     def capabilities(self) -> RobotCapabilities:
-        # 观测键 = ``observe()`` 实际返回的键（qpos + 进程侧目标 action + 位姿 + 启用相机），
-        # 随 configure 实时变化；顺序与 SHM 布局一致（qpos → action → pose → images），便于比对
+        # 状态键在前（qpos → action → 位姿实测 / 目标，与 SHM 布局顺序一致），相机键在后
         obs_keys = [KEY_QPOS, KEY_ACTION]
-        if self.pose_dim > 0:
-            obs_keys.append(KEY_POSE)  # 提供末端位姿（笛卡尔策略的观测输入）
-        obs_keys += [f"{CAMERA_PREFIX}{img}" for img in self.enabled_images]
+        if self.effective_pose_dim_per_arm() > 0:
+            # 机器人提供位姿才声明（否则观测里确实没有这两个键）
+            obs_keys.append(KEY_POSE)
+            obs_keys.append(KEY_POSE_TARGET)
+        obs_keys += [f"{CAMERA_PREFIX}{img}" for img in self.images]
         return RobotCapabilities(
             robot_model_id=self.robot_model_id,
             robot_model_version=self.robot_model_version,
-            action_dim=self.action_dim,
+            action_dim=self.action_dims.get(ActionSpace.JOINT.value, 0),
+            action_dims=dict(self.action_dims),
             action_spaces=[space.value for space in self.ACTION_SPACES],
-            pose_dim=self.pose_dim,
             observation_keys=obs_keys,
             capabilities=dict(self._capabilities),
         )
@@ -200,16 +207,27 @@ class HttpShmAdapter(RobotAdapter):
         self.reset_calls += 1
         self._client().post(PATH_RESET)
 
-    def execute(self, action: Action) -> None:
+    def execute(
+        self,
+        action: Action,
+        *,
+        layout: str | None = None,
+        arms: list[str] | None = None,
+    ) -> None:
         """直接下发动作指令（raw）：本地记录 + HTTP 转发 SDK 进程。
 
-        经 ``_expand_action`` 校验维度（启用臂数）并把动作展开回完整空间（未启用臂 home
-        填充）再发送。
+        经 ``_expand_layout`` 校验（必要时按 HOME 展开未启用臂）后发送；body 带 ``layout``
+        （每臂块的段序列）与可选 ``arms``（作用域：只写这些臂，未选臂由机器人保持）。笛卡尔段
+        （``pose`` / ``pose_delta``）的解算归机器人进程，失败回 422。
         """
-        target = self._expand_action(action, "execute")
+        name = self.layout_name(self.parse_layout(layout))
+        target, arms_out = self._expand_layout(action, "execute", layout, arms)
         self.executed.append(target.tolist())
-        debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
-        self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
+        body: dict = {FIELD_ACTION: target.tolist(), FIELD_LAYOUT: name}
+        if arms_out is not None:
+            body[FIELD_ARMS] = arms_out
+        debug_print(self.name, f"execute sent: {target.tolist()} layout={name}", "INFO")
+        self._client().post(PATH_EXECUTE, json=body)
 
     def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
         """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
@@ -225,22 +243,32 @@ class HttpShmAdapter(RobotAdapter):
         debug_print(self.name, f"teleop set to {self.teleop_enabled} (mode={self.teleop_mode})", "INFO")
         self._client().post(PATH_TELEOP, json=body)
 
-    def rollout(self, action: Action, action_space: ActionSpace | str | None = None) -> bool:
-        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。
+    def rollout(
+        self,
+        action: Action,
+        *,
+        layout: str | None = None,
+        arms: list[str] | None = None,
+    ) -> bool:
+        """推理闭环：经 ``_expand_layout`` 校验（必要时展开）后 HTTP 转发（见 ``/v1/rollout``）。
 
-        ``action_space`` 声明 ``action`` 的语义（缺省 ``joint``，与仅下发关节动作的调用方
-        等价）；非关节空间时随 body 下发 ``action_space`` 字段，由机器人进程做 IK。
-
-        遥操作（人工接管）中 SDK 返回 **409**：本拍不下发（返回 False）。持续推理（30Hz）会反复
-        命中，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
+        ``layout``（缺省 ``joint``）声明每臂块内的段序列；``arms``（缺省 = 全部臂）声明作用域。
+        遥操作（人工接管）中 SDK 返回 **409**：本拍不下发（返回 False）。
         """
-        space = self.normalize_action_space(action_space)
-        target = self._expand_action(action, "rollout")
+        name = self.layout_name(self.parse_layout(layout))
+        target, arms_out = self._expand_layout(action, "rollout", layout, arms)
         self.rollout_calls += 1
-        body: dict = {FIELD_ACTION: target.tolist()}
-        if space is not ActionSpace.JOINT:
-            body[FIELD_ACTION_SPACE] = space.value
-        resp = self._client().post(PATH_ROLLOUT, json=body)
+        body: dict = {FIELD_ACTION: target.tolist(), FIELD_LAYOUT: name}
+        if arms_out is not None:
+            body[FIELD_ARMS] = arms_out
+        return self._post_rollout(PATH_ROLLOUT, body)
+
+    def _post_rollout(self, path: str, body: dict) -> bool:
+        """下发一条推理动作并解释回执：409（遥操作 / 人工接管中）→ ``False``（推理让位）。
+
+        持续推理（30Hz）会反复命中 409，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
+        """
+        resp = self._client().post(path, json=body)
         if resp.status_code == httpx.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
             self.rollout_refused_calls += 1
             if not self._rollout_refused_logged:
@@ -298,29 +326,48 @@ class HttpShmAdapter(RobotAdapter):
     def observe(self) -> dict | None:
         """读取共享内存最新观测帧（SDK 进程产出），图像编码为 JPEG（Edge 契约）。
 
-        只返回启用臂 qpos / action 与启用相机（configure 裁剪，三者同一口径）；
-        SDK 进程把观测填充到共享内存，observe 只读取、不推进 SDK 运行。尚无首帧时
-        返回 ``None``。
+        只返回启用臂 / 启用相机的观测（configure 裁剪）；SDK 进程把观测填充到共享内存，
+        observe 只读取、不推进 SDK 运行。尚无首帧时返回 ``None``。
+
+        状态**与动作空间无关**：``observations/qpos`` = **状态向量**（每臂「值 + 夹爪」交错）、
+        ``action`` = **同维同布局**的目标向量、``observations/pose`` = **实测**位姿、
+        ``observations/pose_target`` = **目标**位姿（= ``FK(关节段目标)``，随位姿一起提供）；
+        故数采 / 策略拿到的永远是「值 + 夹爪」那一条向量。
         """
         if self._shm is None:
             self._shm = ObsShmReader(self.shm_name)  # 惰性 attach（首次观测时）
         frame = self._shm.read()
         if frame is None:
             return None  # SDK 尚未产出首帧：瞬态无帧，不是空观测
+        # 状态 / 目标向量：每臂「值 + 夹爪」交错，按**启用臂**裁剪（两键同一口径、同维同布局）
+        per_arm = self.state_dim_per_arm()
         obs = {
-            KEY_QPOS: self._select_qpos(np.asarray(frame["qpos"], dtype=np.float32)),
-            # action = 进程侧当前目标动作（BaseRobot.get_action()；无指令时进程回退 qpos）——
-            # 不是 qpos 的副本：SHM 布局单独带 action 区（见 shm_contract），preview 显示的是真实指令；
-            # 与 qpos **同一裁剪口径**（启用臂），保证观测内各臂维度自洽
-            KEY_ACTION: self._select_qpos(np.asarray(frame["action"], dtype=np.float32)),
+            KEY_QPOS: np.asarray(self._select_arm_segments(frame["qpos"], per_arm), dtype=np.float32),
+            # action = 目标向量（机器人的关节目标 + 夹爪目标；无指令时进程回退 qpos）——不是 qpos 副本：
+            # SHM 布局单独带 action 区（见 shm_contract），preview 显示的是真指令
+            KEY_ACTION: np.asarray(self._select_arm_segments(frame["action"], per_arm), dtype=np.float32),
         }
-        # 末端位姿（机器人提供时）：按启用臂挑选，与 qpos / action 同一裁剪口径
-        if frame.get("pose") is not None and self.POSE_DIM_PER_ARM:
-            obs[KEY_POSE] = self._select_arm_segments(frame["pose"], self.POSE_DIM_PER_ARM)
+        # 末端位姿（机器人提供时）：按启用臂挑选，与 qpos 同一裁剪口径
+        per_arm = self.effective_pose_dim_per_arm()
+        pose = frame.get("pose")
+        if pose is not None and per_arm > 0:
+            problem = self._pose_problem(pose, per_arm)
+            if problem is None:
+                obs[KEY_POSE] = self._select_arm_segments(pose, per_arm)
+            else:
+                self._warn_bad_pose(problem)  # 一次一条：不把可疑位姿喂给下游
+        # 目标位姿（= FK(关节段目标)）：与实测位姿同拍同源；量纲防护同一套
+        target = frame.get("pose_target")
+        if target is not None and per_arm > 0:
+            problem = self._pose_problem(target, per_arm)
+            if problem is None:
+                obs[KEY_POSE_TARGET] = self._select_arm_segments(target, per_arm)
+            else:
+                self._warn_bad_pose(problem)
         # strict=True：路数由两侧各自声明（SHM header 的 image_count ↔ 类常量 IMAGES），
         # 不一致时显式报错，避免静默少一路相机；只暴露 configure 启用的相机
-        for image, name in zip(frame["images"], self.IMAGES, strict=True):
-            if name in self.enabled_images:
+        for image, name in zip(frame["images"], self._full_image_names, strict=True):
+            if name in self.images:
                 obs[f"{CAMERA_PREFIX}{name}"] = self._encode_jpeg(image)
         return obs
 
@@ -331,3 +378,36 @@ class HttpShmAdapter(RobotAdapter):
         if not ok:
             raise ValueError("Failed to encode image as JPEG")
         return buf.tobytes()
+
+    def _pose_problem(self, pose, per_arm: int) -> str | None:
+        """位姿可用性检查：形状对不上 / 数值离谱 → 返回原因（None = 可用）。
+
+        位姿一旦被当米/弧度用（或反过来），下游「当前位姿 + 增量」会直接把机器人指到
+        荒谬坐标——宁可不给，也不给可疑值。
+        """
+        values = np.asarray(pose, dtype=np.float64).reshape(-1)
+        expected = (len(self.ARM_NAMES) or 1) * int(per_arm)
+        if values.shape[0] != expected:
+            return f"pose dim {values.shape[0]} != {expected} (arms × {per_arm})"
+        blocks = values.reshape(-1, int(per_arm))
+        if blocks.shape[1] < 6:
+            return f"pose per-arm dim {blocks.shape[1]} < 6 (xyz + rpy)"
+        xyz, rpy = blocks[:, :3], blocks[:, 3:6]
+        if not np.all(np.isfinite(values)):
+            return "pose contains non-finite values"
+        if float(np.max(np.abs(xyz))) > POSE_MAX_ABS_XYZ_M:
+            return f"|xyz| up to {float(np.max(np.abs(xyz))):.3g} m > {POSE_MAX_ABS_XYZ_M} (unit mismatch?)"
+        if float(np.max(np.abs(rpy))) > POSE_MAX_ABS_RPY_RAD:
+            return f"|rpy| up to {float(np.max(np.abs(rpy))):.3g} rad > {POSE_MAX_ABS_RPY_RAD} (unit mismatch?)"
+        return None
+
+    def _warn_bad_pose(self, problem: str) -> None:
+        """位姿不可用：**一次一条** ERROR（同原因不刷屏），本拍不透传 ``pose``。"""
+        if problem == self._pose_problem_logged:
+            return
+        self._pose_problem_logged = problem
+        debug_print(
+            self.name,
+            f"end-effector pose dropped ({problem}); cartesian primitives / settle will be unavailable",
+            "ERROR",
+        )

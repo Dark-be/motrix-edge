@@ -92,9 +92,11 @@ from .params import (
     ROLLOUT_MODE_CONTINUOUS,
     ROLLOUT_MODE_SINGLE,
     parse_bool,
+    parse_layout,
     parse_meta,
     parse_qpos,
     parse_rollout_mode,
     parse_teleop_mode,
+    reject_legacy_action_space,
 )
 from .registry import CommandRegistry, CommandSpec, build_command_registry
