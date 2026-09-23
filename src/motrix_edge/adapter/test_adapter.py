@@ -14,7 +14,7 @@
 
 """TestRobotAdapter —— 测试 / 无硬件联调用适配器（HTTP + 共享内存**薄客户端**）。
 
-机器人硬件初始化和连接由 SDK 进程（``scripts/test_robot_sdk.py``）自行维护；本适配器
+机器人硬件初始化和连接由 SDK 进程（``robot-pipeline``）自行维护；本适配器
 只是 Edge 侧薄客户端，**不实现任何硬件 / 连接逻辑**：
 
 - **指令走 HTTP**：``execute`` / ``rollout`` / ``safe_stop`` / ``reset`` 等经 HTTP POST

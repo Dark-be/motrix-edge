@@ -37,6 +37,8 @@ Edge 监听（Console → Edge）：
 import threading
 from datetime import datetime
 
+from motrix_edge.errors import ErrorCode
+
 from .base import BEIJING_TZ, Lease, LeaseError, LeaseState, as_beijing
 
 # 默认租约有效期（秒）：Console 前端「签发租约」表单的缺省持续时间（信息字段）
@@ -88,7 +90,7 @@ class LeaseManager:
             now = self._now()
             cur = self._lease
             if cur is not None and cur.state == LeaseState.ACTIVE and cur.expires_at > now:
-                raise LeaseError("lease already active", 409)
+                raise LeaseError("lease already active", code=ErrorCode.CONFLICT)
             if lease.renewed_at is None:
                 lease.renewed_at = now
             self._lease = lease
@@ -103,7 +105,7 @@ class LeaseManager:
         with self._lock:
             lease = self._require_mirror(lease_id)
             if lease_version <= lease.lease_version:
-                raise LeaseError("lease version rollback rejected", 409)
+                raise LeaseError("lease version rollback rejected", code=ErrorCode.CONFLICT)
             now = self._now()
             lease.lease_version = lease_version
             lease.expires_at = as_beijing(expires_at)
@@ -191,25 +193,25 @@ class LeaseManager:
     def _require_mirror(self, lease_id: str) -> Lease:
         """按 id 取本地镜像；不存在 → 404。"""
         if self._lease is None or self._lease.lease_id != lease_id:
-            raise LeaseError("lease not found", 404)
+            raise LeaseError("lease not found", code=ErrorCode.NOT_FOUND)
         return self._lease
 
     def _require_active(self, lease_id: str) -> Lease:
         # 无租约：先 install（409）
         if self._lease is None:
-            raise LeaseError("no active lease (install first)", 409)
+            raise LeaseError("no active lease (install first)", code=ErrorCode.LEASE_REQUIRED)
         lease = self._lease
         # 异租约：优先报「过期」（即使 lease_id 不匹配，也明确状态而非异租约）
         if lease.lease_id != lease_id:
             if lease.expires_at <= self._now():
-                raise LeaseError("lease expired", 410)
-            raise LeaseError("lease mismatch: request does not own the active lease", 403)
+                raise LeaseError("lease expired", code=ErrorCode.LEASE_EXPIRED)
+            raise LeaseError("lease mismatch: request does not own the active lease", code=ErrorCode.FORBIDDEN)
         if lease.state == LeaseState.REVOKED:
-            raise LeaseError("lease revoked", 403)
+            raise LeaseError("lease revoked", code=ErrorCode.FORBIDDEN)
         if lease.expires_at <= self._now():
-            raise LeaseError("lease expired", 410)
+            raise LeaseError("lease expired", code=ErrorCode.LEASE_EXPIRED)
         if lease.state != LeaseState.ACTIVE:
-            raise LeaseError(f"lease not active (state={lease.state.value})", 403)
+            raise LeaseError(f"lease not active (state={lease.state.value})", code=ErrorCode.FORBIDDEN)
         return lease
 
     def _lease_info(self, lease: Lease) -> dict:

@@ -11,7 +11,7 @@
 ## 目标与原则
 
 -   **会话 = 任务环境**：`session run <type>` 一步完成「选择 + 启动」→ ACTIVE；`session quit`
-    退出回 READY。租约**独立于任务**（Edge 级，随 feat/3 落地），session 只消费。
+    退出回 READY。租约**独立于任务**（Edge 级，见 [lease](./motrix_edge_lease.md)），session 只消费。
 -   **命令驱动**：会话在 `run()` 循环内消费命令（`session quit` / `robot estop` / `robot execute` 等）。
 -   **adapter 注入**：`get_session(..., adapter=node.adapter)`；会话按能力校验（capture 要求
     CAPTURE，infer 要求 EXECUTE），不支持 → `ValueError`。
@@ -50,6 +50,17 @@ session.safe_stop()      # 安全停止（幂等、失败安全；委托 adapter
 从 `SESSION_REGISTRY` 按 `session_type`（capture / infer，缺省用配置 `session.type`，再缺省
 capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配置 `policy.type`）。
 
+> **原语接口（外层 agent 执行层）不新增会话类型**：它挂在 node 级（像 `/v1/preview` 一样，
+> 持租约即可用），与 capture / infer 互斥——见 [边缘原语接口](./motrix_edge_primitives.md)。
+
+## UploadSession（上传会话，文件会话）
+
+`UploadSession` 扫描本地采集目录，按 episode 文件名配对 `.mcap` 与 `.json`，读取 JSON 元数据并生成文件摘要；它不占用 RobotAdapter，也不改变 EdgeNode 节点状态。详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
+
+## UploadSession（上传会话，文件会话）
+
+`UploadSession` 与 `CaptureSession`、`InferSession` 同属 `session/` 包，但不进入 EdgeNode 的机器人任务状态机。它扫描本地采集目录、配对 `.mcap` / `.json`、读取元数据并生成 episode 文件摘要；详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
+
 ## CaptureSession（采集会话）
 
 基于 `RobotAdapter` 的**采集执行器（无回合流程控制）**：
@@ -57,13 +68,14 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 -   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
     **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos>` 直发动作、
-    `robot teleop <bool> [mode]` 遥操作 / 人工接管（`mode=delta` = 增量接管）、`capture episode start/end` 控制一轮采集、
+    `robot teleop <bool> [mode]` 遥操作 / 人工接管（`mode=delta` = 增量接管）、`capture episode start/end` 控制一轮采集
+    （回执回显 `episode` / `recording`）、
     `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
 -   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 
 ## InferSession（推理会话）
 
-基于 `RobotAdapter` + 推理策略客户端 + `RTCManager` 的**推理执行器（无回合概念，由 rollout 步进驱动）**：
+基于 `RobotAdapter` + 推理策略客户端的**推理执行器（无「多步推理」模式）**：
 
 -   `run()`：`adapter.reset()` + `rtc.reset()` → 等待机器人就绪 → 等待 `infer rollout` 步进闭环。
 -   **预热门控**：`infer connect` = 连接 + **预热**（`prepare` + 取一块丢弃，**不下发动作**）；它在

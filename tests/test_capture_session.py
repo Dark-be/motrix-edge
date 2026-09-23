@@ -22,10 +22,11 @@ capture episode / sync）；**显示观测由节点级写入 frame_manager，会
 
 from fake_robot import FakeRobotAdapter
 
+from motrix_edge.command import build_command_registry
+from motrix_edge.errors import ErrorCode
 from motrix_edge.frame import FrameManager
 from motrix_edge.session import capture_session
 from motrix_edge.session.base import RunResult
-from motrix_edge.utils.commands import build_command_registry
 
 _REGISTRY = build_command_registry()
 
@@ -141,7 +142,7 @@ def test_capture_session_does_not_handle_policy_config(tmp_path):
     session.session_start()
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     session.session_finish()
 
 
@@ -224,6 +225,6 @@ def test_capture_sync_rejects_invalid_meta(tmp_path):
     session.session_start()
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert adapter.capture_meta == {}
     session.session_finish()

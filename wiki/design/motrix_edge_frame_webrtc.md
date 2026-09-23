@@ -26,7 +26,7 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 | 端点              | 说明                                                                                                            |
 | ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| `GET /v1/preview` | 最新观测：状态（有会话取会话状态，无会话 → `init`）/ adapter 身份 / observation（qpos + action + 摄像头名列表） |
+| `GET /v1/preview` | 最新观测：状态（有会话取会话状态，无会话 → `init`）/ adapter 身份 / observation（qpos + action + **pose 末端位姿** + 摄像头名列表 + **arms 臂名**） |
 
 响应：
 
