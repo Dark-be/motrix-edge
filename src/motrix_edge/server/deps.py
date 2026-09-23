@@ -22,7 +22,7 @@ routes/*（HTTP 映射）→ deps.Services（本模块）→ controllers（域�
                                               ↘ CommandBus → node / session（唯一副作用路径）
 ```
 
-controllers（``meta`` / ``preview`` / ``webrtc``）只依赖 node / bus / store，
+controllers（``meta`` / ``preview`` / ``webrtc`` / ``rpent``）只依赖 node / bus / store，
 **不依赖 FastAPI**；**写路径唯一入口是 ``CommandService``**（REST 端点与 ``/v1/commands``
 共用）。FastAPI 只出现在 ``app.py``（装配 + 中间件）与 ``routes/*``（入参 / 出参映射），
 故本模块也不依赖它。
@@ -36,6 +36,7 @@ from motrix_edge.node import EdgeNode
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
+from motrix_edge.server.rpent import RpentService
 from motrix_edge.server.webrtc import WebRTCService
 from motrix_edge.session.upload_session import UploadSession
 
@@ -46,7 +47,8 @@ class Services:
 
     ``identity`` / ``leases`` / ``uploads`` 总是有值（缺省按 base_cfg 自建）；
     其余由调用方（``__main__`` 或测试）注入：``node`` 供只读快照，``commands`` 是
-    **唯一写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` 各自对应一个协议面。
+    **唯一写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` /
+    ``rpent`` 各自对应一个协议面。
     """
 
     identity: Identity
@@ -57,6 +59,7 @@ class Services:
     meta: CaptureMetaService | None = None
     preview: PreviewService | None = None
     webrtc: WebRTCService | None = None
+    rpent: RpentService | None = None
 
 
 __all__ = ["Services"]
