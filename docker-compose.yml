@@ -16,7 +16,10 @@ services:
       - /run/udev:/run/udev:ro
       - /sys/bus/usb:/sys/bus/usb:ro
       - /dev:/dev:rw
-      - /home/pc16/project:/root/workspace:rw
+      # 仓库根挂到容器的 /root/workspace。缺省 = 本文件所在目录的父目录（与旧行为一致）；
+      # 本机路径写进**不入库**的 .env（MOTRIX_EDGE_DIR=/abs/path/to/motrix-edge），
+      # 避免把个人绝对路径写进仓库
+      - ${MOTRIX_EDGE_DIR:-..}:/root/workspace:rw
     stdin_open: true
     tty: true
     command: "/bin/bash"

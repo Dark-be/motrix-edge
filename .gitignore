@@ -34,5 +34,8 @@ capture.yml
 data/
 logs/
 
+# 本机 docker compose 变量（MOTRIX_EDGE_DIR 等）：只在本机生效，不入库
+.env
+
 # vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
 src/lerobot/
