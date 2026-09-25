@@ -9,11 +9,15 @@
 > infer_test）已删除；feat/7 的 upload_session / upload_pack 两份计划亦已落地删除
 > （未实现项见 [上传会话](../design/motrix_edge_upload_session.md)「后续版本」）；推理策略选择
 > （策略类型随会话选择 + 状态上报 + 前端下拉）已随 policy 客户端落地，计划亦已删除。
-> 以下为保留的后续 / 在途计划。
+> 以下为保留的后续 / 在途计划（primitives / RPent 的实施计划随其特性 MR 合入，暂未登记）。
 
 ## 索引
 
 -   [边缘节点开发计划](./motrix_edge_development_plan.md)
 -   [Adapter 身份与选择实施计划](./motrix_edge_adapter_selection_plan.md)
+-   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
+-   [ACT 走 Lerobot gRPC AsyncInference + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
+-   [robot-pipeline 控制 / 观测双线程实施计划](./robot_pipeline_control_thread_plan.md)
+-   [RTC 过渡策略（权重过渡 / 连续过渡）实施计划](./motrix_edge_rtc_transition_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->

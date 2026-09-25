@@ -14,12 +14,15 @@
 -   [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)
 -   [上传会话（UploadSession）](./motrix_edge_upload_session.md)
 -   [推理策略客户端（policy）](./motrix_edge_policy.md)
+-   [边缘原语接口（primitives，面向外部 agent）](./motrix_edge_primitives.md)
+-   [RPent 对接契约（RPC facade 与命名约定）](./motrix_edge_rpent_bridge.md)
 -   [实时动作块（rtc）](./motrix_edge_rtc.md)
 -   [命令总线（CommandBus）](./motrix_edge_command_bus.md)
 -   [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)
 -   [配置与命令行（config / CLI）](./motrix_edge_config.md)
 -   [HTTP 控制面（server）](./motrix_edge_server.md)
 -   [Edge 级租约（lease）](./motrix_edge_lease.md)
+-   [Edge Web Console（前端）](./motrix_edge_web_console.md)
 -   [robot-pipeline 运行时（env / robot 双线程）](./robot_pipeline_runtime.md)
 
 <!-- 新增设计文档后在此登记标题链接。 -->
