@@ -29,6 +29,7 @@ HTTP（``server.CommandService``）与 RPent 面必须先持 Edge 级活跃租�
 """
 
 from .config_commands import (
+    apply_teleop,
     get_rtc_params,
     handle_capture_meta,
     handle_infer_rtc,
@@ -80,10 +81,13 @@ from .naming import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
+    CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     LEGACY_CAPABILITIES,
+    TELEOP_COMMANDS,
     CapabilityRef,
     capability_for,
     resolve_capability,
@@ -98,5 +102,6 @@ from .params import (
     parse_rollout_mode,
     parse_teleop_mode,
     reject_legacy_action_space,
+    teleop_mode_for,
 )
 from .registry import CommandRegistry, CommandSpec, build_command_registry
