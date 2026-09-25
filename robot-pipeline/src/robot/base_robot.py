@@ -148,6 +148,15 @@ class BaseRobot:
         self.teleop_slave_ref: np.ndarray | None = None  # 从臂关节锚点（delta 模式，接管瞬间）
         self.teleop_master_gripper_ref: np.ndarray | None = None  # 主臂夹爪锚点（delta 模式）
         self.teleop_slave_gripper_ref: np.ndarray | None = None  # 从臂夹爪锚点（delta 模式）
+        # 主臂读数不可用（读不到 / 读取异常）：累计计数 + 限流告警。**不置 last_error**——
+        # 接管中读不到主臂是预期状态（人还没接上 / 瞬时抖动），不能让 /v1/health 变不健康；
+        # 但必须可观测，否则操作员只看到「遥操作开着、机械臂不动」（见 _note_teleop_read_failure）
+        self.teleop_read_failures = 0
+        self._teleop_read_error: str | None = None  # 最近一次原因（同一原因只告警一条）
+        # 最近一次**成功**的主臂读数（关节 / 夹爪）：供采集侧「帧头跳过」判断主臂是否已有效
+        # 移动（``teleop_master_sample()``）；开关遥操作时随锚点一起清空（不留旧样本）
+        self.teleop_master_now: np.ndarray | None = None
+        self.teleop_master_gripper_now: np.ndarray | None = None
 
         # 帧计数（get_observation() 每帧自增；server 组装 standard_obs 时附带）
         self.seq = 0
@@ -464,27 +473,42 @@ class BaseRobot:
         debug_print(self.name, "Teleop anchor captured (delta mode).", "INFO")
 
     def _clear_teleop_anchor(self):
-        """清空增量锚点（开启 / 关闭遥操作时调用；锚点在接管期间固定不变）。"""
+        """清空增量锚点与最近主臂读数（开启 / 关闭遥操作时调用；锚点在接管期间固定不变）。"""
         self.teleop_master_ref = None
         self.teleop_slave_ref = None
         self.teleop_master_gripper_ref = None
         self.teleop_slave_gripper_ref = None
+        self.teleop_master_now = None
+        self.teleop_master_gripper_now = None
 
     def _refresh_teleop_target(self):
-        """本拍遥操作 target 刷新（``step()`` 调用；未开启 / 主臂读不到 → 保持原 target）。
+        """本拍遥操作 target 刷新（``step()`` 调用；未开启 / 读不到 / 读取异常 → 保持原 target）。
 
         ``absolute`` 直连主臂读数；``delta`` 走锚点增量——锚点尚未采样时**本拍先采样**
         （增量恒 0，target = 从臂当前值），保证接管瞬间不突变。主臂有两段读数（关节 + 夹爪），
         两段同拍取、同套映射处理。
+
+        主臂**读不到**（``None``）或**读取异常**（SDK / 控制器报错）都只是本拍不刷新：
+        计数 + 限流告警（``teleop_read_failures`` / ``_note_teleop_read_failure``），
+        **不置 ``last_error``**——否则一次 CAN 抖动就会经 ``step()`` 把 health 打成不健康。
         """
         if not self.teleop_enabled:
             return
-        master = self._get_teleop_target()
-        master_gripper = self._get_teleop_gripper()
+        try:
+            master = self._get_teleop_target()
+            master_gripper = self._get_teleop_gripper()
+        except Exception as exc:  # noqa: BLE001 主臂读取异常（SDK / 控制器）：本拍保持原 target，下一拍重试
+            self._note_teleop_read_failure(exc)
+            return
         if master is None or master_gripper is None:
-            return  # 主臂某段读不到（未连接 / 读取失败）：保持原 target，不突变（下一拍重试）
+            self._note_teleop_read_failure("master reading unavailable (None)")
+            return  # 主臂某段读不到（尚未连接 / 读取失败）：保持原 target，不突变（下一拍重试）
+        self._teleop_read_error = None  # 恢复正常：下次失败重新告警一条
         master = np.asarray(master, dtype=np.float64)
         master_gripper = np.asarray(master_gripper, dtype=np.float64)
+        # 记下最近一次成功读数：采集侧「帧头跳过」用它判断主臂是否已有效移动（与 target 同源）
+        self.teleop_master_now = master
+        self.teleop_master_gripper_now = master_gripper
         if self.teleop_mode != self.TELEOP_MODE_DELTA:
             self.set_target_action(master)
             self.set_target_gripper(master_gripper)
@@ -493,6 +517,33 @@ class BaseRobot:
             self._capture_teleop_anchor(master, master_gripper)
         self.set_target_action_delta(master - self.teleop_master_ref)
         self.set_target_gripper_delta(master_gripper - self.teleop_master_gripper_ref)
+
+    def _note_teleop_read_failure(self, reason) -> None:
+        """主臂读数不可用（``None`` / 异常）：计数 + **同一原因只告警一条**（30Hz 不刷屏）。
+
+        接管中读不到主臂是**预期状态**（操作员还没接上 / 瞬时抖动 / 主臂未使能），因此既不置
+        ``last_error``、也不影响 health；但必须可观测，否则操作员只看到「遥操作开着、机械臂不动」。
+        计数在 ``teleop_read_failures``（累计，恢复后不清零；恢复时下一类原因重新告警一条）。
+        """
+        self.teleop_read_failures += 1
+        text = str(reason)
+        if text != self._teleop_read_error:
+            self._teleop_read_error = text
+            debug_print(
+                self.name,
+                f"teleop master read unavailable: {text}（本拍保持原 target，下一拍重试）",
+                "WARNING",
+            )
+
+    def teleop_master_sample(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """最近一次**成功**的主臂读数 ``(关节, 夹爪)``；未开启遥操作 / 还没读到 → ``None``。
+
+        与 ``_get_teleop_target()`` 同源（控制线程每拍刷新），供采集侧「帧头跳过」复用，
+        不需要观测线程额外读一次主臂。返回的数组**只读使用**，调用方不得就地修改。
+        """
+        if not self.teleop_enabled or self.teleop_master_now is None or self.teleop_master_gripper_now is None:
+            return None
+        return self.teleop_master_now, self.teleop_master_gripper_now
 
     def _get_teleop_target(self) -> np.ndarray | None:
         """遥操作**关节段**目标源（主臂 → 从臂；返回主臂关节角读数）；默认 None（无遥操作源）。

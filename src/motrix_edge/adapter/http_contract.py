@@ -84,6 +84,7 @@ FIELD_ACTION_SPACE = "action_space"  # rollout / health：动作空间（joint |
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
 FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
+FIELD_HEAD_SKIP = "head_skip"  # capture status：帧头跳过进度（{"skipped": n}；null = 未在跳过）
 FIELD_META = "meta"  # capture sync：采集元信息（dict，保存数据时附加）
 
 # ---- 响应 body 字段 ----
@@ -142,6 +143,7 @@ __all__ = [
     "FIELD_CONTROL_HZ",
     "FIELD_CONTROLLERS",
     "FIELD_DATA_DIR",
+    "FIELD_HEAD_SKIP",
     "FIELD_DETAIL",
     "FIELD_ENDPOINT",
     "FIELD_MEASURED_HZ",

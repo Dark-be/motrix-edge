@@ -70,6 +70,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_DATA_DIR,
     FIELD_DETAIL,
     FIELD_ENDPOINT,
+    FIELD_HEAD_SKIP,
     FIELD_MEASURED_HZ,
     FIELD_META,
     FIELD_NAME,
@@ -480,15 +481,18 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     def capture_status():
         """采集状态（运行位 / 元信息 / 数据目录）：Edge adapter.capture_status 消费。
 
-        ``{running, meta, data_dir}``——``running`` 是 **env 真实采集位**（capture/start↔end
+        ``{running, meta, data_dir, head_skip}``——``running`` 是 **env 真实采集位**（capture/start↔end
         之间为 True）；元信息为 ``meta`` 全集（采集员 / 任务名等是其键，不另设同义顶层
-        字段）；数据目录随状态一并上报（原 ``/v1/data_status`` 已合入本端点）。
+        字段）；数据目录随状态一并上报（原 ``/v1/data_status`` 已合入本端点）；``head_skip``
+        为帧头跳过进度（``{"skipped": n}``；``null`` = 未在跳过）——供操作员/脚本区分
+        「正在等主臂移动」与「已开始记录」（阈值见 ``collector.skip_until_motion``）。
         """
         cs = env.capture_status()
         return {
             FIELD_RUNNING: bool(cs.get("running")),
             FIELD_META: cs.get("meta") or {},
             FIELD_DATA_DIR: cs.get("data_dir"),
+            FIELD_HEAD_SKIP: cs.get("head_skip"),
         }
 
     # ---------------------------------------------------------------- 调试（非契约）

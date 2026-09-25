@@ -49,6 +49,7 @@ import threading
 import time
 from collections import deque
 
+import numpy as np
 from collector import get_collector
 from utils.base.data_handler import debug_print
 
@@ -64,6 +65,10 @@ class BaseEnv:
     # 连续 step 失败达到该次数 → 上报 loop_error（≈0.33s @30Hz）：单帧偶发失败只计数，
     # 持续失败（硬件 / 控制器已读不出来）必须降级，否则 Edge 看到 ok 会继续下发指令。
     STEP_ERROR_LIMIT = 10
+    # 采集「帧头跳过」（``collector.skip_until_motion``，只对**遥操作录制**生效）：capture 开始后
+    # 主臂读数相对首帧未超阈值 → 本拍不记录（连 episode 都不开），直到出现一次有效移动；
+    # 此后微小位移照常记录，下一轮 episode 重新武装。阈值按现场主臂手感调（rad / 归一化）。
+    HEAD_SKIP_DEFAULTS = {"enabled": True, "joint_eps": 0.05, "gripper_eps": 0.05}
 
     def __init__(self, robot, capture_config: dict | None = None):
         self.robot = robot
@@ -84,6 +89,12 @@ class BaseEnv:
 
         # 采集：capturing=True 时观测拍记录观测；False 时保存为一条 episode
         # collector 类型由 capture_config 里的 `type` 决定（当前支持 act_mcap，默认 mcap）
+        # 帧头跳过（collector.skip_until_motion）：只在「遥操作录制」时武装，阈值按现场调
+        self._head_skip_cfg = {
+            **self.HEAD_SKIP_DEFAULTS,
+            **((capture_config or {}).get("skip_until_motion") or {}),
+        }
+        self._head_skip: dict | None = None  # 帧头跳过状态（None = 未在跳过，正常记录）
         self.capturing = False
         self._collector = get_collector(
             capture_config or {"type": "act_mcap", "save_dir": "./data", "image_format": "jpeg"}
@@ -234,10 +245,12 @@ class BaseEnv:
         return 1.0 / (sum(periods) / len(periods))
 
     def capture_status(self) -> dict:
-        """采集状态：运行位 + 采集元信息 + 数据目录。
+        """采集状态：运行位 + 采集元信息 + 数据目录 + 帧头跳过进度。
 
         元信息为 collector 的 ``meta`` 全集（含 ``capture sync`` 同步的字段，如
         ``operator`` / ``task_name``——**不另设同义顶层字段**，消费方直接读 ``meta``）；
+        ``head_skip`` = 帧头跳过进度（``{"skipped": n}``；``None`` = 未在跳过）——供操作员
+        区分「正在等主臂移动」与「已开始记录」。
         供 server 的 ``GET /v1/capture/status`` 上报，adapter 侧 ``capture_status()``
         消费（**合并**了原 ``data_status``：数据目录随采集状态一并上报）。
         """
@@ -245,6 +258,7 @@ class BaseEnv:
             "running": self.capturing,
             "meta": getattr(self._collector, "meta", {}) or {},
             "data_dir": str(self._collector.save_dir.resolve()),
+            "head_skip": None if self._head_skip is None else {"skipped": self._head_skip["skipped"]},
         }
 
     def observe(self) -> dict:
@@ -430,8 +444,10 @@ class BaseEnv:
             try:
                 if cmd == "capture_start":
                     self.capturing = True
+                    self._arm_head_skip()
                 elif cmd == "capture_end":
                     self.capturing = False
+                    self._finish_head_skip()
                 elif cmd == "capture_sync":
                     self._collector.set_meta(payload)
                 else:
@@ -478,8 +494,15 @@ class BaseEnv:
         流式 collector（实现了 start()，如 ActMcapCollector）在 capture 开始时由观测线程
         调用 start() 打开文件（UUID 命名），之后每拍 collect 直接落盘；缓冲式 collector
         （如缓冲式 collector）无 start，仍按 collect→finish 一次性保存。
+
+          帧头跳过（``collector.skip_until_motion``）：**遥操作录制**时先武装闸门，主臂相对
+          capture 开始那一拍未出现有效移动前**不记录、也不开 episode**（文件在首帧真正要记录时
+          才创建），解锁后微小位移照常记录；整轮都没动 → 不产出文件（与「同拍 start/end」一致）。
         """
         if self.capturing:
+            if not self._head_skip_release():
+                self._head_skip["skipped"] += 1  # 仍在等主臂有效移动（闸门打开时 _head_skip 必存在）
+                return
             if not self._episode_open:
                 self._episode_open = True
                 start = getattr(self._collector, "start", None)
@@ -489,3 +512,70 @@ class BaseEnv:
         elif self._episode_open:
             self._episode_open = False
             self._collector.finish()  # 写 footer + 同名 JSON 元信息（文件列表不经契约上报）
+
+    def _arm_head_skip(self) -> None:
+        """``capture_start``：遥操作录制时武装「帧头跳过」（否则不启用，按原行为直接记录）。
+
+        基准 = **本拍的主臂读数**（``teleop_master_sample()``，与下发 target 同源）；主臂此刻
+        读不到（未开启遥操作 / 主臂还没读到）→ 不武装：宁可按原行为记录，也不静默丢帧。
+        """
+        self._head_skip = None
+        if not self._head_skip_cfg.get("enabled", True):
+            return
+        sample = self.robot.teleop_master_sample()
+        if sample is None:
+            return
+        joints, gripper = sample
+        self._head_skip = {
+            "ref_joints": np.array(joints, dtype=np.float64, copy=True),
+            "ref_gripper": np.array(gripper, dtype=np.float64, copy=True),
+            "skipped": 0,
+        }
+        debug_print(
+            self.robot.name,
+            "capture: 帧头跳过已武装（等主臂有效移动；"
+            f"关节 eps={self._head_skip_cfg['joint_eps']} / 夹爪 eps={self._head_skip_cfg['gripper_eps']}）",
+            "INFO",
+        )
+
+    def _head_skip_release(self) -> bool:
+        """帧头跳过：本拍是否可以开始记录（主臂有效移动 / 遥操作已关闭）→ True（并解锁）。"""
+        state = self._head_skip
+        if state is None:
+            return True
+        sample = self.robot.teleop_master_sample()
+        if sample is None:
+            if not self.robot.teleop_enabled:  # 不再有主臂输入 → 不再等（否则会一直不记录）
+                self._release_head_skip(state, "teleop off")
+                return True
+            return False  # 遥操作中但主臂还没读到：继续等
+        joints, gripper = sample
+        moved_joint = float(np.max(np.abs(np.asarray(joints, dtype=np.float64) - state["ref_joints"])))
+        moved_gripper = float(np.max(np.abs(np.asarray(gripper, dtype=np.float64) - state["ref_gripper"])))
+        if moved_joint <= float(self._head_skip_cfg["joint_eps"]) and moved_gripper <= float(
+            self._head_skip_cfg["gripper_eps"]
+        ):
+            return False
+        self._release_head_skip(state, f"motion joint={moved_joint:.3f} / gripper={moved_gripper:.3f}")
+        return True
+
+    def _release_head_skip(self, state: dict, reason: str) -> None:
+        """解锁闸门并记一条日志（含跳过的帧数，便于与「文件里少了多少帧」对照）。"""
+        self._head_skip = None
+        debug_print(
+            self.robot.name,
+            f"capture: 帧头跳过结束（{reason}），跳过 {state['skipped']} 帧后开始记录",
+            "INFO",
+        )
+
+    def _finish_head_skip(self) -> None:
+        """``capture_end``：整轮都没出现有效移动 → 本轮**不产出文件**（与「同拍 start/end」一致）。"""
+        state = self._head_skip
+        if state is None:
+            return
+        self._head_skip = None
+        debug_print(
+            self.robot.name,
+            f"capture: 本轮未记录（主臂无有效移动，跳过 {state['skipped']} 帧）",
+            "WARNING",
+        )

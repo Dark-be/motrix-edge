@@ -224,7 +224,7 @@ robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 | POST | `/v1/capture/start`  | —                                | 开始一轮采集（episode 开始）                                                    |
 | POST | `/v1/capture/end`    | —                                | 结束一轮采集（episode 结束）                                                    |
 | POST | `/v1/capture/sync`   | `{meta: {...}}`                  | 同步采集元信息（operator / task_name 等）                                       |
-| GET  | `/v1/capture/status` | —                                | 采集状态（运行位 / 元信息 / 数据目录）                                          |
+| GET  | `/v1/capture/status` | —                                | 采集状态（运行位 / 元信息 / 数据目录 / 帧头跳过进度）                           |
 
 另有调试端点 `GET /observe`（最新观测 qpos + 末端位姿（提供时）+ 相机 JPEG base64）。
 
@@ -237,6 +237,12 @@ collector:
     type: act_mcap # 采集器类型：act_mcap（当前唯一；act_hdf5 已移除）
     save_dir: ./data/test_robot # 采集数据保存目录
     image_format: jpeg # 图像编码：jpeg | raw
+    # 帧头跳过（只对**遥操作录制**生效）：capture 开始后主臂相对首帧未超过阈值 → 不记录
+    # （连 episode 都不开），直到出现一次有效移动；此后微小位移照常记录，下一轮重新武装
+    skip_until_motion:
+        enabled: true # false = 关闭（首帧即记录）
+        joint_eps: 0.05 # 关节有效移动阈值（rad，取 max|Δq|）
+        gripper_eps: 0.05 # 夹爪有效移动阈值（归一化 [0,1]，取 max|Δg|）
 ```
 
 -   `act_mcap`：Foxglove MCAP（**ROS2 官方消息格式**，CDR 编码），每条 episode 保存为
@@ -247,6 +253,10 @@ collector:
     `build_observation()` 在取帧前打点），qpos / action 来自上一个控制拍——滞后**有界**（≤ 1/`HZ`
     ≈ 33ms）但**逐帧小幅波动**（两条独立限速循环的调度抖动；控制拍超时会让「最近一个控制拍」
     跳档），**不能按固定滞后做时间平移校正**。**流式写入**：`start` → `collect` 直接落盘 → `finish`。
+    **帧头跳过（只对遥操作录制）**：`robot teach` / `robot takeover` 开着时，capture 开始后主臂相对
+    首帧未超过 `skip_until_motion` 阈值前不记录（也不创建 episode 文件），出现一次有效移动才开始；
+    跳过只作用于本轮帧头，下一轮重新武装。进度见日志与 `GET /v1/capture/status` 的 `head_skip`。
+
 -   采集由 HTTP 控制：`POST /v1/capture/start` 开始，`POST /v1/capture/end` 结束并落盘（在观测线程
     生效，≤ 1/`OBS_HZ`；与运动指令**跨队列顺序不保证**，见
     [运行时设计](../wiki/design/robot_pipeline_runtime.md)「跨队列顺序（有意弱化）」）。
