@@ -28,13 +28,12 @@ from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
+    apply_teleop,
     deadline_exceeded,
     handle_capture_meta,
     ok_result,
     parse_action_space,
-    parse_bool,
     parse_qpos,
-    parse_teleop_mode,
 )
 from motrix_edge.errors import ErrorCode
 from motrix_edge.frame import FrameManager
@@ -211,21 +210,25 @@ class BaseSession:
             return
         self._reply(cmd, ok_result(state="ready", action=round_floats(qpos), action_space=space))
 
-    def _set_teleop(self, cmd) -> None:
-        """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。
+    def _set_teleop(self, cmd) -> tuple[bool, str | None]:
+        """遥操作 / 人工接管的统一入口（``robot teleop`` | ``robot teach`` | ``robot takeover``）。
 
-        ``mode=delta`` = 人工接管（接管瞬间主 / 从位姿为锚点，只叠加主臂增量）；遥操作开启
-        期间轮机侧会拒绝 ``rollout``（推理让位，见 `/v1/rollout` 契约）。
+        模式：``robot teach`` → ``absolute``（示教）、``robot takeover`` → ``delta``（人工接管，
+        接管瞬间主 / 从位姿为锚点、只叠加主臂增量）；``robot teleop`` 用可选 ``mode``（缺省
+        ``absolute``）。遥操作开启期间机器人侧会拒绝 ``rollout``（推理让位，见
+        `wiki/design/robot_pipeline_teleop.md`）。
         参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop 与模式）。
+
+        返回 ``(enabled, mode)`` 供子类复用（如推理会话据此丢弃未执行的动作块）；参数非法时
+        回执 rejected 并返回 ``(False, None)``。
         """
         try:
-            enabled = parse_bool(cmd.params.get("enabled"))
-            mode = parse_teleop_mode(cmd.params.get("mode"))
-            self.adapter.set_teleop(enabled, mode)
+            enabled, mode = apply_teleop(self.adapter, cmd)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
-            return
+            return False, None
         self._reply(cmd, ok_result(state="ready", teleop=enabled, mode=mode))
+        return enabled, mode
 
     def run(self):
         """阻塞式会话执行（节点进入 ACTIVE 时调用），返回 RunResult。"""

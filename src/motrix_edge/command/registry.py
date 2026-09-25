@@ -49,6 +49,8 @@ from .naming import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
+    CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
@@ -165,7 +167,10 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ROBOT_ESTOP),
         # robot execute <qpos> [joint|pose]
         CommandSpec(name=CMD_ROBOT_EXECUTE, positional=("qpos", "action_space")),
-        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),  # robot teleop <true|false> [mode]
+        # robot teleop <true|false> [absolute|delta]：底层命令（模式可选，缺省 absolute）
+        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),
+        CommandSpec(name=CMD_ROBOT_TEACH, positional=("enabled",)),  # robot teach <true|false>：示教（absolute）
+        CommandSpec(name=CMD_ROBOT_TAKEOVER, positional=("enabled",)),  # robot takeover <true|false>：接管（delta）
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>

@@ -76,7 +76,9 @@ class CommandResult:
 | `robot reset`             | —               | 机器人 | 复位机器人（仅 adapter 可用）                                                                                                      | none |
 | `robot estop`             | —               | 全局   | 急停（安全停止 + 转 ERROR）                                                                                                        | none |
 | `robot execute`           | `qpos`          | 机器人 | 直接下发 raw 动作（逗号分隔数字，兼容中英文标点；可选动作空间 `joint` 缺省 / `pose` = 末端位姿（机器人侧解算）/ `gripper` = 夹爪） | none |
-| `robot teleop`            | `enabled`       | 机器人 | 遥操作开关（true/false）                                                                                                           | none |
+| `robot teleop`            | `enabled`       | 机器人 | 遥操作开关（底层命令；可选 `absolute` 缺省 / `delta`）                                                                             | none |
+| `robot teach`             | `enabled`       | 机器人 | 示教遥操作（= `teleop <enabled> absolute`，主臂直连从臂）                                                                          | none |
+| `robot takeover`          | `enabled`       | 机器人 | 人工接管（= `teleop <enabled> delta`，锚点增量不突变）                                                                             | none |
 | `capture episode start`   | —               | 任务级 | 开始一轮采集（adapter.start_capture）                                                                                              | none |
 | `capture episode end`     | —               | 任务级 | 结束一轮采集（adapter.end_capture）                                                                                                | none |
 | `node reset`              | —               | 节点级 | 节点复位 / ERROR 恢复 → IDLE                                                                                                       | none |
@@ -93,7 +95,7 @@ class CommandResult:
 `node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer config`、`capture meta *`
 （配置级，与节点状态机解耦）全局可用——`capture meta` 读写 `capture.yml` 的 `meta` 段，见
 [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。CLI 示例：`session run capture`、`robot execute 0,0,0,0,0,0`、`robot execute 0,0,0,0,0,0,0.2 pose`、
-`robot execute 1,1 gripper`、`robot teleop true`、`infer rollout stop`、
+`robot execute 1,1 gripper`、`robot teleop true`、`robot takeover true`、`infer rollout stop`、
 `infer config set '{"host":"10.0.0.9"}'`、`adapter config set '{"enabled_arms": ["right"]}'`、`lease revoke`。
 
 ## 回执通道（push / submit）
