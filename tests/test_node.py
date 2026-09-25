@@ -30,6 +30,8 @@ from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
+    CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_RUN,
     META_REPLY_DEADLINE,
@@ -678,6 +680,31 @@ def test_robot_teleop_passes_mode():
     assert adapter.teleop_calls == [(True, "delta")]
     assert replies[0].status == "ok"
     assert replies[0].data["mode"] == "delta"
+
+
+def test_robot_teach_and_takeover_aliases_fix_the_mode():
+    """robot teach / robot takeover：模式由**命令名**决定（示教 absolute / 接管 delta），回执回显。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TEACH, params={"enabled": "true"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_TAKEOVER, params={"enabled": "true"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_TAKEOVER, params={"enabled": "false"}, reply_to=replies.append))
+
+    assert adapter.teleop_calls == [(True, "absolute"), (True, "delta"), (False, "delta")]
+    assert [r.data["mode"] for r in replies] == ["absolute", "delta", "delta"]
+    assert all(r.status == "ok" for r in replies)
+
+
+def test_robot_teach_rejects_explicit_mode():
+    """robot teach：别名命令不接受 mode（模式由命令名固定）→ rejected，不静默忽略。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TEACH, params={"enabled": "true", "mode": "delta"}, reply_to=replies.append))
+
+    assert replies[0].status == "rejected"
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
+    assert "mode is fixed by the command name" in replies[0].error
+    assert adapter.teleop_calls == []
 
 
 def test_robot_teleop_rejects_invalid_mode():

@@ -54,21 +54,20 @@ from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
-    CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     META_SOURCE,
     SOURCE_INTERNAL,
+    TELEOP_COMMANDS,
     CommandResult,
+    apply_teleop,
     handle_capture_meta,
     handle_infer_rtc,
     handle_policy_config,
     ok_result,
     parse_action_space,
-    parse_bool,
     parse_meta,
     parse_qpos,
-    parse_teleop_mode,
     policy_config_status,
     set_policy_config,
 )
@@ -560,11 +559,9 @@ class EdgeNode:
                 return True
             self._reply(cmd, ok_result(node_state=self.state, action=qpos, action_space=space))
             return True
-        if cmd.name == CMD_ROBOT_TELEOP:
+        if cmd.name in TELEOP_COMMANDS:  # robot teleop / robot teach / robot takeover
             try:
-                enabled = parse_bool(cmd.params.get("enabled"))
-                mode = parse_teleop_mode(cmd.params.get("mode"))
-                self.adapter.set_teleop(enabled, mode)
+                enabled, mode = apply_teleop(self.adapter, cmd)
             except ValueError as exc:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True

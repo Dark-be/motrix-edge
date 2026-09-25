@@ -1241,6 +1241,58 @@ def test_robot_teleop_in_infer_loop(monkeypatch):
     assert adapter.teleop_values == [True]
 
 
+def test_takeover_start_discards_cached_chunks(monkeypatch):
+    """接管开始（`robot teleop true delta`）即丢弃未执行的动作块。
+
+    否则交回模型后第一块是接管**前**算出的动作，会把机械臂朝原轨迹拉（`infer rollout stop`
+    暂停同理）。
+    """
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("robot teleop true delta", "robot teleop false", "session quit"))
+    resets = []
+    monkeypatch.setattr(session.rtc, "reset", lambda: resets.append("reset"))
+
+    assert session.run() == RunResult.FINISHED
+
+    assert adapter.teleop_values == [True, False]
+    # 会话启动一次 + 接管开始一次；交回（teleop=false）不重复清
+    assert resets == ["reset", "reset"]
+
+
+def test_rollout_stop_discards_cached_chunks(monkeypatch):
+    """暂停（infer rollout stop）即丢弃未执行的动作块：恢复后首块用当时观测现算。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
+    cont.reply_to = replies.append
+    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
+    stop.reply_to = replies.append
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, "session quit"), warmup_required=False
+    )
+    resets = []
+    monkeypatch.setattr(session.rtc, "reset", lambda: resets.append("reset"))
+
+    assert session.run() == RunResult.FINISHED
+
+    # 会话启动一次 + 暂停一次
+    assert resets == ["reset", "reset"]
+
+
+def test_robot_takeover_alias_in_infer_loop(monkeypatch):
+    """推理循环中 robot takeover：等价 robot teleop true delta（人工接管，模式固定 delta）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("robot takeover true", "robot teach false", "session quit"))
+    assert session.run() == RunResult.FINISHED
+    assert adapter.teleop_calls == [(True, "delta"), (False, "absolute")]
+
+
 # ---- 以下为 dev 侧独有（本次 merge 保留） ----
 def test_infer_rollout_action_repr_rounds_to_display_digits(monkeypatch):
     """日志 / 回执 / 网页的动作数值统一保留 3 位小数（内部链路仍用全精度）。"""

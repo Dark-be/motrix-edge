@@ -18,10 +18,26 @@ import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from motrix_edge.command import CommandBus, CommandResult, build_command_registry, parse_action_space
+from motrix_edge.command import CommandBus, CommandError, CommandResult, build_command_registry, parse_action_space
 from motrix_edge.errors import ErrorCode
 from motrix_edge.utils import cli as cli_module
 from motrix_edge.utils.cli import CliSession, CommandCompleter
+
+
+def test_parse_argv_teleop_aliases_take_only_enabled():
+    """robot teach / robot takeover：只接一个位置参数（模式由命令名固定，多给即报错）。"""
+    registry = build_command_registry()
+
+    teach = registry.parse_argv(["robot", "teach", "true"])
+    assert teach.name == "robot teach"
+    assert teach.params["enabled"] == "true"
+
+    takeover = registry.parse_argv(["robot", "takeover", "false"])
+    assert takeover.name == "robot takeover"
+    assert takeover.params["enabled"] == "false"
+
+    with pytest.raises(CommandError):  # 位置参数超员（不接受第二个参数）
+        registry.parse_argv(["robot", "takeover", "true", "delta"])
 
 
 def test_command_completer_uses_registered_commands():

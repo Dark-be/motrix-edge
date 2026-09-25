@@ -21,7 +21,15 @@
 
 import json
 
-from motrix_edge.adapter.http_contract import ACTION_SPACES, DEFAULT_ACTION_SPACE, TELEOP_MODES
+from motrix_edge.adapter.http_contract import (
+    ACTION_SPACES,
+    DEFAULT_ACTION_SPACE,
+    TELEOP_MODES,
+    VALUE_TELEOP_MODE_ABSOLUTE,
+    VALUE_TELEOP_MODE_DELTA,
+)
+
+from .naming import CMD_ROBOT_TAKEOVER, CMD_ROBOT_TEACH
 
 
 def parse_qpos(raw) -> list[float]:
@@ -97,6 +105,25 @@ def parse_teleop_mode(raw) -> str | None:
     if text not in TELEOP_MODES:
         raise ValueError(f"invalid teleop mode: {raw!r} (expect {'|'.join(TELEOP_MODES)})")
     return text
+
+
+# 遥操作命令的语义别名：模式由**命令名**唯一决定（这些命令不接受 ``mode`` 参数）
+TELEOP_COMMAND_MODES: dict[str, str] = {
+    CMD_ROBOT_TEACH: VALUE_TELEOP_MODE_ABSOLUTE,
+    CMD_ROBOT_TAKEOVER: VALUE_TELEOP_MODE_DELTA,
+}
+
+
+def teleop_mode_for(name: str, raw=None) -> str | None:
+    """遥操作命令 → 生效模式：别名命令取固定模式，其余解析可选 ``mode`` 参数。
+
+    - ``robot teach`` → ``absolute``（示教：主臂绝对读数直连从臂）；
+      ``robot takeover`` → ``delta``（人工接管：锚点增量，接管瞬间不突变）；
+    - ``robot teleop`` → ``parse_teleop_mode(raw)``（缺省 ``None`` = 进程侧 ``absolute``，
+      保持旧调用方行为不变）。
+    """
+    fixed = TELEOP_COMMAND_MODES.get(name)
+    return fixed if fixed is not None else parse_teleop_mode(raw)
 
 
 ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）

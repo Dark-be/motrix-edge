@@ -38,9 +38,9 @@ from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
-    CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     ROLLOUT_MODE_CONTINUOUS,
+    TELEOP_COMMANDS,
     CommandResult,
     deadline_exceeded,
     handle_infer_rtc,
@@ -652,7 +652,7 @@ class InferSession(BaseSession):
                 self._reply(cmd, ok_result(state="ready"))
             elif name == CMD_ROBOT_EXECUTE:  # 直接下发 raw 动作（qpos 直接作为参数）
                 self._execute_action(cmd)
-            elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
+            elif name in TELEOP_COMMANDS:  # 遥操作 / 人工接管（robot teleop | teach | takeover）
                 self._set_teleop(cmd)
 
             elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
@@ -669,6 +669,21 @@ class InferSession(BaseSession):
                         cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
                     )
                 time.sleep(0.02)  # 无命令时轻量轮询（避免忙等）
+
+    def _set_teleop(self, cmd) -> None:
+        """遥操作 / 人工接管开关：**接管开始即丢弃未执行的动作块**（RTC 只存在于本会话）。
+
+        接管意味着「接下来由人决定 target」，接管前预取 / 缓存的动作（含在途请求）都不应在交回
+        后被执行——否则交回瞬间机械臂会朝接管**前**的轨迹走。``rtc.reset()`` 同时按世代作废
+        在途结果，交回后的第一块因此用**当时**观测现算（模型动作与人工位姿的差仍由 ``step_rad``
+        限速拉回）。
+
+        判据用**命令语义**（``enabled``）而非适配器状态：后者在“不支持遥操作的适配器”上不会变，
+        而这类适配器本来也没有可丢弃的接管前后语义（实时上也无副作用：队列本来就是空的）。
+        """
+        enabled, _mode = super()._set_teleop(cmd)
+        if enabled:
+            self.rtc.reset()
 
     def _handle_shared_cmd(self, name, cmd) -> bool:
         """单步主循环与持续推理循环**共用**的命令：录制 / 同步 / 策略配置 / RTC。
@@ -840,6 +855,9 @@ class InferSession(BaseSession):
             cmd = self.command_source()
             name = _cmd_name(cmd)
             if name == CMD_INFER_ROLLOUT_STOP:  # 停止持续推理：留在会话（策略连接 / 机器人状态不变）
+                # 暂停即丢弃未执行的动作块：恢复时块可能已经过时（尤其中间插了人工接管——
+                # 机械臂已被带离原轨迹，旧块会把动作往回拉）；下一块用**当时**观测现算。
+                self.rtc.reset()
                 self._reply(cmd, ok_result(state="ready", continuous=False))
                 debug_print(self.name, "Continuous rollout stopped by request (session kept).", "INFO")
                 return None
