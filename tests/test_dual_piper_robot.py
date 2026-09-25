@@ -256,6 +256,51 @@ def test_joint_action_is_forwarded_after_pose_action(dual_piper):
     assert np.allclose(robot.target_action[12:], _GRIPPER)  # 夹爪段仍未被关节命令碰到
 
 
+def test_teleop_master_read_exception_keeps_target_and_counts(dual_piper, monkeypatch):
+    """主臂读取**异常**：``step()`` 不抛（否则控制线程 _step_failed → 连续 10 拍后 health 不健康），
+    target 不变，只计数。"""
+    robot = _robot(dual_piper)
+    robot.set_target_action(np.zeros(12))
+    before = robot.target_action.copy()
+    robot.enable_teleop("delta")
+
+    def _boom():
+        raise RuntimeError("can bus down")
+
+    monkeypatch.setattr(robot.controllers["left_master"], "get_joint", _boom)
+    robot.step()  # 不应抛异常
+
+    assert np.allclose(robot.target_action, before)
+    assert robot.teleop_read_failures == 1
+    robot.step()
+    assert robot.teleop_read_failures == 2
+
+
+def test_teleop_master_read_none_counts_and_recovers(dual_piper):
+    """主臂读数为 ``None``（未使能 / 读不到）：同样只计数；读数恢复后正常刷新 target（delta 锚点 0 起步）。"""
+    robot = _robot(dual_piper)
+    robot.set_target_action(np.zeros(12))
+    robot.enable_teleop("delta")
+    left_master = robot.controllers["left_master"]
+    right_master = robot.controllers["right_master"]
+    assert left_master.joint is None  # `_robot` 缺省：主臂读不到
+
+    robot.step()
+    assert robot.teleop_read_failures == 1
+    assert np.allclose(robot.target_action[:12], np.zeros(12))  # 原 target 保持（不突变）
+
+    left_master.joint = np.array([0.4] * 6)
+    right_master.joint = np.array([0.4] * 6)
+    robot.step()  # 首拍成功读数 → 采锚点，增量恒 0
+    assert robot.teleop_read_failures == 1  # 恢复后不再累加
+    assert np.allclose(robot.target_action[:12], np.zeros(12))
+
+    left_master.joint = np.array([0.6] * 6)  # 主臂推 0.2 rad
+    right_master.joint = np.array([0.6] * 6)
+    robot.step()
+    assert np.allclose(robot.target_action[:12], 0.2)  # 两臂 target = 锚点 + 0.2
+
+
 def test_rollout_refused_during_teleop_for_pose(dual_piper):
     """遥操作（人工接管）期间位姿 rollout 同样被拒，且不改目标。"""
     robot = _robot(dual_piper, left_joint=_TARGET_JOINTS)
