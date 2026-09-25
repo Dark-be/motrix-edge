@@ -147,6 +147,11 @@ rtc.status() -> dict     # 上报：enabled / params / index / remaining / infli
 rtc.close()              # 停止预取工作线程（会话退出调用；幂等）
 ```
 
+-   **重置时机（会话层约定）**：会话**进入**、**暂停**（`infer rollout stop`）与**接管开始**
+    （`robot teleop true`）都调 `rtc.reset()`。后两者丢弃未执行的
+    块并**按世代作废在途请求**，**交回 / 恢复后第一块用当时观测现算**——否则旧块会把机械臂朝接管
+    **前**的轨迹拉。交回（`teleop=false`）不额外重置（那一刻没有要作废的块）；「等模型动作接近
+    当前位姿再交回」的过渡策略见 `robot_pipeline_teleop.md`。
 -   **步号**：`_index` 单调递增（reset 归零）；策略按 `index` 组织观测（lerobot-act 用它做 `TimedObservation.timestep`）。
 -   **前置段跳过**：块返回时从 `max(prefix_len, _index - 块首步)` 之后开始下发；跳过后同步推进 `_index`
     并丢弃队列中已过期步（步号 = 物理时刻）。实测推理耗时（`time.monotonic`）折算成的步数经
