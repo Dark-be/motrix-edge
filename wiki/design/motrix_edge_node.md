@@ -61,8 +61,8 @@ stateDiagram-v2
     但急停必须任何状态立即生效（否则一条分钟级长操作，如推理预热加载模型，会把急停一起挡住）。
 -   IDLE：拒绝 `session run` / `robot reset`（机器人未就绪）。
 -   READY：`session run <type>`（选择 + 启动一步完成 → ACTIVE）、`robot reset`、
-    `robot execute <qpos> [joint|pose]`、`robot teleop <bool> [mode]`。
--   ACTIVE：`session quit`（退出 → READY）、`robot reset`、`robot execute`、`robot teleop`。
+    `robot execute <qpos> [joint|pose]`、`robot teleop <bool> [mode]` / `robot teach <bool>` / `robot takeover <bool>`。
+-   ACTIVE：`session quit`（退出 → READY）、`robot reset`、`robot execute`、`robot teleop` / `robot teach` / `robot takeover`。
 -   ERROR：仅 `node reset` 恢复 → IDLE。
 
 ## 任务线程模型
