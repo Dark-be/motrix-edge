@@ -49,7 +49,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from robot.kinematics import PiperKinematics, log3, solve_ik  # noqa: E402
-from utils.base.data_handler import debug_print  # noqa: E402
+from utils.data_handler import debug_print  # noqa: E402
 
 _POS_TOL_M = 0.005  # 位置误差可接受上限（5mm）
 _ROT_TOL_RAD = 0.02  # 姿态误差可接受上限（约 1.1°）
