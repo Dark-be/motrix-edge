@@ -81,6 +81,8 @@ def _run_node(args) -> None:
         base_cfg = load_config("edge.yml")
         config_source = config_path("edge.yml") or "packaged default (edge.yml)"
 
+    from importlib.util import find_spec
+
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
     from motrix_edge.server import create_app
@@ -88,7 +90,6 @@ def _run_node(args) -> None:
     from motrix_edge.server.meta import CaptureMetaService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.rpent import RpentService
-    from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled, set_log_level
 
     # 日志级别：``edge.yml`` 的 ``INFO_LEVEL`` 是配置来源（环境变量 ``MOTRIX_EDGE_LOG_LEVEL``
@@ -141,7 +142,15 @@ def _run_node(args) -> None:
     commands = CommandService(bus, leases=leases)
     # 采集元信息选项（capture.yml）：与 CLI / 会话共用节点持有的那一份 store（同一把锁）
     meta = CaptureMetaService(store=node.capture_meta_store, leases=leases)
-    webrtc = WebRTCService(node, leases=leases)
+    # WebRTC 预览（可选面 ``--extra webrtc``）：未装 aiortc → 关闭该面
+    # （``/v1/webrtc/offer`` 回 501），不影响控制面 / 采集 / 推理。
+    if find_spec("aiortc") is None:
+        debug_print("EdgeNode", "WebRTC 未启用：缺可选依赖 aiortc（uv sync --extra webrtc）", "WARNING")
+        webrtc = None
+    else:
+        from motrix_edge.server.webrtc import WebRTCService  # noqa: PLC0415
+
+        webrtc = WebRTCService(node, leases=leases)
     # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存
     preview_service = PreviewService(node, leases=leases)
     # RPent 兼容的 RPC 面（POST /call）：外部 agent（LLM + VLA 编排）经它驱动 edge；

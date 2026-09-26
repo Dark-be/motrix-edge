@@ -87,11 +87,34 @@ scripts/             # 联调脚本（虚拟推理端点等）
 ## 快速开始
 
 ```bash
-uv sync           # 安装依赖（含 dev 依赖）
-uv run pytest     # 运行测试
+uv sync           # 安装核心依赖 + dev 依赖
+uv run pytest     # 运行测试（未装可选面时，对应测试文件不收集，见下）
 uv run ruff check .
 npm run format    # ruff format + prettier
 ```
+
+### 可选面（`--extra`）
+
+核心依赖之外，**引入额外第三方依赖**的策略客户端 / 服务拆成可选面（`uv sync --extra <名>`）：
+
+| 可选面    | 内容                                       | 引入的依赖                      |
+| --------- | ------------------------------------------ | ------------------------------- |
+| `openpi`  | openpi 策略客户端（WS + msgpack 一问一答） | `websockets` / `msgpack`        |
+| `lerobot` | lerobot-act 策略客户端（gRPC 流式）        | `grpcio` / `torch`（约 690 MB） |
+| `webrtc`  | WebRTC 观测推流（浏览器实时预览）          | `aiortc`                        |
+| `all`     | 以上全部                                   | —                               |
+
+```bash
+uv sync --extra all      # 实机部署 / 联调通常需要全部
+uv sync --extra webrtc   # 只补 WebRTC 预览
+```
+
+不引入额外依赖的客户端 / 服务**不设选项**（如 RPent 面只用核心依赖里的 `httpx` / `numpy`）。
+对应的测试文件在依赖缺失时**不收集**（pytest 头部会列出被跳过的文件），因此不带可选面跑
+测试只覆盖核心面。
+
+未装 `lerobot` 时 `policy.type: lerobot-act` 不可用（服务端动作载荷是 `torch.Tensor`，反序列化
+需 torch）；未装 `webrtc` 时 `/v1/webrtc/offer` 回 501，其余控制面不受影响。
 
 ### 本机变量（`.env`）
 

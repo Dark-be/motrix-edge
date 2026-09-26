@@ -78,8 +78,10 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 ## 依赖
 
--   `aiortc`（+ `av` / PyAV）：WebRTC 信令 + 媒体编码。
--   `opencv-python`：jpeg 解码 / 缩放。
+-   `aiortc`（+ `av` / PyAV）：WebRTC 信令 + 媒体编码。属**可选面** `webrtc`
+    （`uv sync --extra webrtc`）——edge 本体（控制面 / 采集 / 推理）不依赖它：未装时
+    `__main__` 打一条 WARNING 并关闭该面，`/v1/webrtc/offer` 回 501。
+-   `opencv-python`：jpeg 解码 / 缩放（核心依赖）。
 
 ## 浏览器端查看
 

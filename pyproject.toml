@@ -12,19 +12,29 @@ dependencies = [
     "numpy",          # 数值计算
     "pyyaml",         # 配置文件解析
     "opencv-python-headless",  # 图像处理
-    "websockets>=11.0",  # 推理客户端传输层
-    "msgpack>=1.0.5",    # 推理客户端序列化
     "fastapi>=0.141.1",
     "uvicorn>=0.52.1",
-    "aiortc>=1.15.0,<2.0.0",  # 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），上限约束防升级静默失效
     "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
-    "grpcio>=1.62.0",  # lerobot gRPC AsyncInference 传输（act 策略；vendored lerobot 在 src/lerobot）
     "prompt-toolkit>=3.0.53",  # 交互式 CLI（utils/cli.py）：行编辑 / 历史 / 补全
-    # lerobot-act：服务端动作载荷是 torch.Tensor，pickle 反序列化需 torch（client._to_numpy）。
-    # 必须 `+cpu` 版本（官方 CPU wheel）避免拉入 CUDA / nvidia-* 依赖；官方源在国内很慢，
-    # 已改走阿里云镜像（见文件末 [tool.uv] 的 find-links）。
-    "torch==2.9.1+cpu",
 ]
+
+# 可选面：**按是否引入额外第三方依赖分组** —— 不引入额外依赖的客户端 / 服务不设选项
+# （如 RPent 面只用 httpx + numpy，已在上面 dependencies 里，测试无需跳过）。
+# 装法：``uv sync --extra <名>``（或 ``--extra all`` 一次装齐）；详见 README「安装」。
+[project.optional-dependencies]
+# openpi 策略客户端：WebSocket + msgpack 一问一答（transport/ws.py、policy/openpi/）
+openpi = ["websockets>=11.0", "msgpack>=1.0.5"]
+# lerobot-act 策略客户端：gRPC 流式（transport/grpc.py、policy/lerobot_act/）。
+# 服务端动作载荷是 torch.Tensor，pickle 反序列化需 torch → 必须 `+cpu` 版本（官方 CPU
+# wheel）避免拉入 CUDA / nvidia-* 依赖；官方源在国内很慢，下载源见文件末 [tool.uv] 的
+# find-links（阿里云镜像）。
+lerobot = ["grpcio>=1.62.0", "torch==2.9.1+cpu"]
+# WebRTC 预览推流（server/webrtc.py）：aiortc 视频编码栈，可选面里最重的一个。
+# 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），
+# 上限约束防升级静默失效。
+webrtc = ["aiortc>=1.15.0,<2.0.0"]
+# 一次装齐全部可选面（写法同 robot-pipeline 的 `camera`）
+all = ["motrix-edge[openpi,lerobot,webrtc]"]
 
 [dependency-groups]
 dev = [
