@@ -139,7 +139,7 @@ def _run_node(args) -> None:
     node = EdgeNode(base_cfg, command_source=bus, lease_manager=leases)
     # 命令写通道（唯一）：REST 端点与 /v1/commands 共用（见 wiki/design/motrix_edge_server.md）
     commands = CommandService(bus, leases=leases)
-    # 采集元信息选项（config/capture.yml）：与 CLI / 会话共用节点持有的那一份 store（同一把锁）
+    # 采集元信息选项（capture.yml）：与 CLI / 会话共用节点持有的那一份 store（同一把锁）
     meta = CaptureMetaService(store=node.capture_meta_store, leases=leases)
     webrtc = WebRTCService(node, leases=leases)
     # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存

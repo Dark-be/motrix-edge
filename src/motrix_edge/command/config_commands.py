@@ -232,7 +232,7 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
 def handle_capture_meta(cmd, store=None) -> CommandResult:
     """处理 ``capture meta`` 命令族（list / add / edit / delete / delete-key）。
 
-    读写 ``config/capture.yml`` 的 ``meta`` 段（``CaptureMetaStore``，可拓展任意分类 →
+    读写 ``capture.yml`` 的 ``meta`` 段（``CaptureMetaStore``，可拓展任意分类 →
     选项数组）；配置级命令「任何状态可用」（与 ``infer config`` 一致），节点主循环与会话
     循环共用本函数。``store`` 缺省用默认路径，测试可注入临时 store。
     参数缺失 / 重复 / 不存在 → rejected（不崩溃）。
