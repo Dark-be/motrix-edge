@@ -37,6 +37,10 @@ health / preview / WebRTC 信令。仅中间件（correlation / no-store）用 `
   Console 接入的鉴权（identity 上报核验）落地前，**不要**把 Edge 直接暴露到不受信网络。
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -50,9 +54,11 @@ from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.routes import build_routers
 from motrix_edge.server.rpent import RpentService
-from motrix_edge.server.webrtc import WebRTCService
 from motrix_edge.session.upload_session import UploadSession
 from motrix_edge.utils.version import get_package_version
+
+if TYPE_CHECKING:  # 可选依赖（--extra webrtc）：仅类型标注用，import 时不触碰 aiortc
+    from motrix_edge.server.webrtc import WebRTCService
 
 # edge 错误码 → HTTP 状态码（**HTTP 面自行维护**：业务层只给 code，不认状态码）
 _HTTP_STATUS: dict[str, int] = {
