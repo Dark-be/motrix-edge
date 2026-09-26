@@ -32,7 +32,7 @@ from motrix_edge.utils.commands import (
 )
 
 # ---------------------------------------------------------------------------
-# CaptureMetaStore：config/capture.yml（meta 段）读写 —— 无硬件可跑
+# CaptureMetaStore：capture.yml（meta 段）读写 —— 无硬件可跑
 # ---------------------------------------------------------------------------
 
 
@@ -145,9 +145,9 @@ def test_store_write_keeps_file_mode(tmp_path):
 
 def test_store_seed_creates_readable_file_mode(tmp_path, monkeypatch):
     """首次播种落 0644：配置文件是给人看 / 给人改的，不能因为 mkstemp 变成 0600。"""
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("MOTRIX_EDGE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    store = CaptureMetaStore()  # 缺省路径 → 状态目录（XDG_STATE_HOME/motrix）
+    store = CaptureMetaStore()  # 缺省路径 → 状态目录（$XDG_STATE_HOME/motrix-edge）
 
     meta = store.list_meta()  # 首次读触发惰性播种
 

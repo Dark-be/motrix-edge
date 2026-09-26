@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""config 包测试：选择性加载外界配置（MOTRIX_CONFIG_DIR / XDG）+ 包内默认兜底。"""
+"""config 包测试：选择性加载外界配置（MOTRIX_EDGE_CONFIG_DIR / XDG）+ 包内默认兜底。"""
 
 from motrix_edge.config import (
     DEFAULT_CONFIG_FILES,
@@ -30,8 +30,8 @@ def test_packaged_defaults_are_listed():
 
 
 def test_load_config_falls_back_to_packaged_default(monkeypatch):
-    """未设置 MOTRIX_CONFIG_DIR：load_config 读包内默认 yml（只读兜底）。"""
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+    """未设置 MOTRIX_EDGE_CONFIG_DIR：load_config 读包内默认 yml（只读兜底）。"""
+    monkeypatch.delenv("MOTRIX_EDGE_CONFIG_DIR", raising=False)
     cfg = load_config("edge.yml")
     assert cfg["INFO_LEVEL"] == "INFO"
     assert cfg["adapter"]["host"] == "127.0.0.1"
@@ -39,14 +39,14 @@ def test_load_config_falls_back_to_packaged_default(monkeypatch):
 
 
 def test_load_config_unknown_name_returns_empty(monkeypatch):
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("MOTRIX_EDGE_CONFIG_DIR", raising=False)
     assert load_config("no_such.yml") == {}
 
 
 def test_load_config_prefers_external_dir(monkeypatch, tmp_path):
-    """设置 MOTRIX_CONFIG_DIR：同名 yml 优先（覆盖包内默认）；缺失文件回退包内默认。"""
+    """设置 MOTRIX_EDGE_CONFIG_DIR：同名 yml 优先（覆盖包内默认）；缺失文件回退包内默认。"""
     (tmp_path / "edge.yml").write_text("discover:\n  host: external-host\n", encoding="utf-8")
-    monkeypatch.setenv("MOTRIX_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("MOTRIX_EDGE_CONFIG_DIR", str(tmp_path))
     assert get_config_dir() == tmp_path
     assert config_path("edge.yml") == tmp_path / "edge.yml"
     cfg = load_config("edge.yml")
@@ -54,8 +54,17 @@ def test_load_config_prefers_external_dir(monkeypatch, tmp_path):
 
 
 def test_writable_config_path_state_dir(monkeypatch, tmp_path):
-    """无外界配置目录：writable_config_path 落到状态目录（XDG_STATE_HOME/motrix）。"""
+    """无外界配置目录：writable_config_path 落到状态目录（$XDG_STATE_HOME/motrix-edge）。"""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    assert get_state_dir() == tmp_path / "motrix"
-    assert get_log_dir() == tmp_path / "motrix"
-    assert writable_config_path("edge.yml") == tmp_path / "motrix" / "edge.yml"
+    assert get_state_dir() == tmp_path / "motrix-edge"
+    assert get_log_dir() == tmp_path / "motrix-edge" / "logs"
+    assert writable_config_path("edge.yml") == tmp_path / "motrix-edge" / "edge.yml"
+
+
+def test_state_dir_falls_back_under_cwd(monkeypatch, tmp_path):
+    """未设 XDG_STATE_HOME：状态 / 日志收在 <cwd>/motrix-edge/ 下，不往工作目录根撒文件。"""
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert get_state_dir() == tmp_path / "motrix-edge"
+    assert get_log_dir() == tmp_path / "motrix-edge" / "logs"
+    assert writable_config_path("capture.yml") == tmp_path / "motrix-edge" / "capture.yml"

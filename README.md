@@ -43,7 +43,7 @@ CLI / 控制面 ──CommandBus──▶ EdgeNode（node 生命周期状态机�
 | `identity/` | Edge 设备身份声明与请求元数据                                                                                                                       |
 | `lease/`    | Edge 级租约机制（`LeaseManager`）                                                                                                                   |
 | `utils/`    | 命令总线（CommandBus）/ 采集元信息选项（`capture_meta`）/ data handler 等工具                                                                       |
-| `config/`   | 配置加载：`MOTRIX_CONFIG_DIR` 外界目录覆盖 + 包内默认 `edge.yml` / `capture.yml`（package data，只读兜底）                                          |
+| `config/`   | 配置加载：`MOTRIX_EDGE_CONFIG_DIR` 外界目录覆盖 + 包内默认 `edge.yml` / `capture.yml`（package data，只读兜底）                                     |
 
 > adapter 经 Python **entry point**（`motrix_edge.adapters` 组）注册接入，当前内置
 > `test_robot`（虚拟，离线联调）与 `dual_piper`（双臂 Piper）；外部 SDK / 包亦可按同一
@@ -76,7 +76,7 @@ edge 经 `RobotAdapter` 下发指令（`execute` / `rollout` / `safe_stop` / `re
 ```text
 src/motrix_edge/     # edge 包（任务运行时）：node / adapter / session / policy /
                      #   server / frame / identity / lease / utils / config
-src/motrix_edge/config/edge.yml   # 边缘节点配置（package data；MOTRIX_CONFIG_DIR 同名文件覆盖）
+src/motrix_edge/config/edge.yml   # 边缘节点配置（package data；MOTRIX_EDGE_CONFIG_DIR 同名文件覆盖）
 robot-pipeline/      # 机械臂底层承载（独立 uv 子项目）：src 下 config / env /
                      #   robot / server / collector / utils，启动脚本在 scripts/
 wiki/                # 设计与计划文档
@@ -92,6 +92,22 @@ uv run pytest     # 运行测试
 uv run ruff check .
 npm run format    # ruff format + prettier
 ```
+
+### 本机变量（`.env`）
+
+本机相关变量（如容器挂载路径）写入仓库根**不入库**的 `.env`，样例见 [`.env.example`](.env.example)。
+同一份 `.env` 同时服务三种场景，因此只用朴素的 `KEY=value` 写法（避开 compose 独有的
+引号 / 多行语法，保证三方都能读）：
+
+-   **docker compose**：自动读取项目目录的 `.env` 做 `${}` 插值，并在 `environment:` 段转发
+    需要进入容器的变量；
+-   **裸跑（无 docker）**：`uv run --env-file .env motrix-edge run`；
+-   **shell**：`set -a; . ./.env; set +a`。
+
+这份 `.env` **同时服务 `motrix_edge` 与 `robot-pipeline`**（两个子项目认同一套变量名，日志分别落在
+`<状态目录>/motrix-edge/` 与 `<状态目录>/motrix-robot-pipeline/`）。变量统一 `MOTRIX_EDGE_` 前缀
+（`XDG_STATE_HOME` 属 XDG 规范例外），完整列表见
+[配置与命令行](wiki/design/motrix_edge_config.md#环境变量)。
 
 机器人承载端（robot-pipeline）为独立子项目，需单独 `uv sync`，详见
 [robot-pipeline/README.md](robot-pipeline/README.md)。

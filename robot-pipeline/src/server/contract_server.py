@@ -55,9 +55,11 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 import uvicorn
+from config import get_log_dir
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print, file_log_enabled
+from utils.logging import uvicorn_log_config
 
 from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
@@ -437,5 +439,21 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 def serve(app_obj, host: str | None = None, port: int | None = None) -> None:
     host = host or _DEFAULT_HOST
     port = int(port or _DEFAULT_PORT)
-    debug_print("SERVER", f"uvicorn: http://{host}:{port}", "INFO")
-    uvicorn.run(app_obj, host=host, port=port, log_level="info")
+    # uvicorn 日志与 motrix_edge 侧同构：access 缺省静默（防长期运行刷屏）；开启
+    # MOTRIX_EDGE_LOG_FILE 后只写 <状态目录>/motrix-robot-pipeline/logs/uvicorn.log
+    log_dir = get_log_dir()
+    file_logging = file_log_enabled()
+    if file_logging:  # 关闭时不建目录（不留空 logs/）
+        os.makedirs(log_dir, exist_ok=True)
+    debug_print(
+        "SERVER",
+        f"uvicorn: http://{host}:{port} | file_logging={'ON' if file_logging else 'OFF (MOTRIX_EDGE_LOG_FILE=0)'}",
+        "INFO",
+    )
+    uvicorn.run(
+        app_obj,
+        host=host,
+        port=port,
+        log_level="info",
+        log_config=uvicorn_log_config(str(log_dir / "uvicorn.log"), file_logging),
+    )

@@ -10,11 +10,11 @@
 
 ## 状态
 
-| 项       | 内容                                                                                   |
-| -------- | -------------------------------------------------------------------------------------- |
-| 范围     | `src/motrix_edge/rtc`、`server`（字段描述）、`config/edge.yml`、前端面板               |
-| 契约影响 | 无新增字段；`aggregate_fn` 取值集合新增 `continuous`                                   |
-| 验证     | `tests/test_rtc.py`（连续过渡端到端 + 策略表语义），全仓 ruff / prettier / pytest 全绿 |
+| 项       | 内容                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------- |
+| 范围     | `src/motrix_edge/rtc`、`server`（字段描述）、`src/motrix_edge/config/edge.yml`、前端面板 |
+| 契约影响 | 无新增字段；`aggregate_fn` 取值集合新增 `continuous`                                     |
+| 验证     | `tests/test_rtc.py`（连续过渡端到端 + 策略表语义），全仓 ruff / prettier / pytest 全绿   |
 
 ## TODO
 

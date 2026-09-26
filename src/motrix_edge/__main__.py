@@ -35,7 +35,7 @@ def _print_version() -> None:
 def _start_web(app, host: str, port: int):
     """后台线程运行 FastAPI 服务，返回 uvicorn.Server（置 should_exit=True 停止）。
 
-    uvicorn 日志由 ``MOTRIX_LOG_FILE`` 开关控制（与 ``debug_print`` 同一开关，缺省关闭）：
+    uvicorn 日志由 ``MOTRIX_EDGE_LOG_FILE`` 开关控制（与 ``debug_print`` 同一开关，缺省关闭）：
     开启时 access / error 写入 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5，与
     ``logs/log_*.txt`` 分开），HTTP access 只写文件；关闭时只静默 HTTP access（不写文件、
     不刷终端），uvicorn 启动 / 错误日志仍写终端（端口占用等排障信息不丢）。
@@ -63,12 +63,10 @@ def _run_node(args) -> None:
     """加载配置并启动 EdgeNode（阻塞式主循环，直到 Ctrl-C）。
 
     配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省选择性加载——环境变量
-    ``MOTRIX_CONFIG_DIR`` 指向的外界配置优先，否则包内默认 ``edge.yml``（只读兜底）。
+    ``MOTRIX_EDGE_CONFIG_DIR`` 指向的外界配置优先，否则包内默认 ``edge.yml``（只读兜底）。
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
     node），本地 CLI 按键保留。
     """
-    import os
-
     from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_state_dir, load_config
     from motrix_edge.utils.load_file import load_yaml
 
@@ -81,7 +79,7 @@ def _run_node(args) -> None:
         config_source = explicit
     else:
         base_cfg = load_config("edge.yml")
-        config_source = config_path("edge.yml") or "packaged default (config/edge.yml)"
+        config_source = config_path("edge.yml") or "packaged default (edge.yml)"
 
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
@@ -91,20 +89,25 @@ def _run_node(args) -> None:
     from motrix_edge.server.infer import InferService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
-    from motrix_edge.utils.data_handler import debug_print, file_log_enabled
+    from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled, set_log_level
 
-    # 打印配置来源 + 状态 / 日志目录（区分环境变量 MOTRIX_CONFIG_DIR vs 包内默认；文件日志默认关闭）
+    # 日志级别：``edge.yml`` 的 ``INFO_LEVEL`` 是配置来源（环境变量 ``MOTRIX_EDGE_LOG_LEVEL``
+    # 可临时覆盖），经 ``set_log_level`` 解析进进程内 ``_LOG_LEVEL``——**不写 ``os.environ``**。
+    # 必须先于下面那行横幅：横幅自身也受级别过滤（级别 ≥ WARNING 时启动信息静默）
+    log_level = set_log_level(base_cfg.get("INFO_LEVEL"))
+    # 打印配置来源 + 状态 / 日志目录（区分环境变量 MOTRIX_EDGE_CONFIG_DIR vs 包内默认；文件日志默认关闭）
     config_dir = get_config_dir()
+    file_log_state = "ON" if file_log_enabled() else f"OFF ({ENV_LOG_FILE}=0)"
     debug_print(
         "EdgeNode",
         f"Loaded config: {config_source}"
         f" | config_dir={config_dir or 'packaged default (read-only)'}"
         f" | state_dir={get_state_dir()}"
         f" | log_dir={get_log_dir()}"
-        f" | file_logging={'ON' if file_log_enabled() else 'OFF (MOTRIX_LOG_FILE=0)'}",
+        f" | log_level={log_level}"
+        f" | file_logging={file_log_state}",
         "INFO",
     )
-    os.environ["INFO_LEVEL"] = base_cfg.get("INFO_LEVEL", "DEBUG")
 
     server_cfg = base_cfg.get("server", {})
     host = server_cfg.get("host", "0.0.0.0")
@@ -165,12 +168,12 @@ def main():
     """CLI 入口。
 
     子命令：
-      run [--config <path>]  启动 EdgeNode（--config 指定配置文件路径；缺省 config/edge.yml）
+      run [--config <path>]  启动 EdgeNode（--config 指定配置文件路径；缺省包内默认 edge.yml）
       adapters list          列出所有已注册的机器人 / 策略适配器
       adapters detail        列出所有已注册机器人适配器的能力详情（静态，不探活）
       version                显示 motrix-edge 版本号
 
-    无子命令时等价 ``run``（缺省加载 config/edge.yml）。
+    无子命令时等价 ``run``（缺省加载包内默认 edge.yml）。
     """
     import argparse
 

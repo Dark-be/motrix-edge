@@ -26,13 +26,22 @@ code-quality-report.json
 py-coverage.xml
 py-report.xml
 
-# 包内默认 capture.yml 播种到 CWD（config.get_state_dir 缺省回退 CWD）——不属仓库内容。
+# 包内默认 capture.yml 的可写副本：外界配置目录（MOTRIX_EDGE_CONFIG_DIR）或状态目录，
+# 落点不固定故按文件名收口（状态目录缺省 = $XDG_STATE_HOME/motrix-edge 或 <cwd>/motrix-edge，
+# 已被下方 motrix-edge/ 规则覆盖；本规则针对外界目录指向仓库内的情况）——不属仓库内容。
 capture.yml
 
 .vscode/
 .pytest_cache
 data/
 logs/
+
+# 本机变量（.env；样例见入库的 .env.example）：只在本机生效，不入库
+.env
+
+# 无 XDG 时的状态 / 日志目录（config.get_state_dir 兜底）：edge 与 robot-pipeline 各一个
+motrix-edge/
+motrix-robot-pipeline/
 
 # vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
 src/lerobot/

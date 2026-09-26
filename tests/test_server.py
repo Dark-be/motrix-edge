@@ -908,7 +908,7 @@ def test_captures_501_when_not_enabled():
 
 
 def test_captures_meta_returns_options(tmp_path):
-    """GET /v1/captures/meta：返回 config/capture.yml 的元信息选项（前端选择列表，免租约）。"""
+    """GET /v1/captures/meta：返回 capture.yml 的元信息选项（前端选择列表，免租约）。"""
     from motrix_edge.utils.capture_meta import CaptureMetaStore
 
     store = CaptureMetaStore(tmp_path / "capture.yml")

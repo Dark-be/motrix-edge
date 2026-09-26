@@ -12,21 +12,34 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""日志开关测试：``MOTRIX_LOG_FILE`` 解析 + uvicorn log_config 的 handler 裁剪。"""
+"""日志开关测试：``MOTRIX_EDGE_LOG_FILE`` 解析 + uvicorn log_config 的 handler 裁剪。"""
 
 from uvicorn.config import LOGGING_CONFIG
 
-from motrix_edge.utils.data_handler import file_log_enabled
+from motrix_edge.utils.data_handler import file_log_enabled, set_log_level
 from motrix_edge.utils.logging import uvicorn_log_config
 
 
 def test_file_log_enabled_reads_env(monkeypatch):
-    monkeypatch.delenv("MOTRIX_LOG_FILE", raising=False)
+    monkeypatch.delenv("MOTRIX_EDGE_LOG_FILE", raising=False)
     assert file_log_enabled() is False  # 缺省关闭
-    monkeypatch.setenv("MOTRIX_LOG_FILE", "1")
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "1")
     assert file_log_enabled() is True
-    monkeypatch.setenv("MOTRIX_LOG_FILE", "false")
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "false")
     assert file_log_enabled() is False
+
+
+def test_set_log_level_priority(monkeypatch):
+    """级别解析优先级：环境变量 > 传入值（yml 的 ``INFO_LEVEL``）> INFO；非法值 / 空串回退。"""
+    monkeypatch.delenv("MOTRIX_EDGE_LOG_LEVEL", raising=False)
+    assert set_log_level("DEBUG") == "DEBUG"  # 传入值生效
+    assert set_log_level("nope") == "INFO"  # 非法值 → 缺省
+    assert set_log_level() == "INFO"  # 未传 → 缺省
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_LEVEL", "error")
+    assert set_log_level("DEBUG") == "ERROR"  # 环境变量优先（并归一大小写）
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_LEVEL", "")
+    assert set_log_level("DEBUG") == "DEBUG"  # 空串视为未设
+    set_log_level("INFO")  # 复原模块级状态，避免影响其他用例
 
 
 def test_uvicorn_log_config_default_keeps_error_output():

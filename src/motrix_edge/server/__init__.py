@@ -14,7 +14,7 @@
 
 """server 子包 —— MotrixEdge HTTP API 服务。
 
-FastAPI 应用工厂 ``create_app(base_cfg)``；默认运行（``motrix-edge``，加载 config/edge.yml）中
+FastAPI 应用工厂 ``create_app(base_cfg)``；默认运行（``motrix-edge``，加载包内默认 edge.yml）中
 web 作为 node 的独立线程启动。
 """
 

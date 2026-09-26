@@ -137,7 +137,7 @@ def test_as_action_chunk_fills_missing_start_index():
 
 def test_edge_yml_rtc_section_is_valid(monkeypatch):
     """包内 ``edge.yml`` 下发的 ``policy.rtc`` 必须是合法 RTC 配置（键名 + 交叉约束）。"""
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("MOTRIX_EDGE_CONFIG_DIR", raising=False)
     config = load_config("edge.yml")["policy"]["rtc"]
     assert set(config) <= set(DEFAULT_RTC_CONFIG)  # 键名写错会在构造期 ValueError
     merged = {**DEFAULT_RTC_CONFIG, **validate_params(config)}

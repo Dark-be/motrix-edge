@@ -21,7 +21,8 @@ dependencies = [
     "grpcio>=1.62.0",  # lerobot gRPC AsyncInference 传输（act 策略；vendored lerobot 在 src/lerobot）
     "prompt-toolkit>=3.0.53",  # 交互式 CLI（utils/cli.py）：行编辑 / 历史 / 补全
     # lerobot-act：服务端动作载荷是 torch.Tensor，pickle 反序列化需 torch（client._to_numpy）。
-    # 固定官方 CPU 源（见文件末 [[tool.uv.index]]）+ `+cpu` 后缀版本，避免拉入 CUDA / nvidia-* 依赖。
+    # 必须 `+cpu` 版本（官方 CPU wheel）避免拉入 CUDA / nvidia-* 依赖；官方源在国内很慢，
+    # 已改走阿里云镜像（见文件末 [tool.uv] 的 find-links）。
     "torch==2.9.1+cpu",
 ]
 
@@ -39,6 +40,11 @@ dev = [
 # 并通过 console script `motrix-edge` 提供命令行入口。
 [tool.uv]
 package = true
+# 依赖源：torch 官方源（download-r2.pytorch.org）在国内速度不理想——实测约 0.1 MB/s，
+# wheel 175.9 MB 要下约 28 分钟（CI 上尤其明显）；改用阿里云 pytorch-wheels 镜像加速，
+# 冷启动（空缓存 + 全新环境）实测约 10 秒。该镜像页是 flat 列表（无 PEP 503 子路径
+# /torch/），故只能配 find-links，不能当 [[tool.uv.index]]。
+find-links = ["https://mirrors.aliyun.com/pytorch-wheels/cpu/"]
 
 [project.scripts]
 motrix-edge = "motrix_edge.__main__:main"
@@ -52,13 +58,3 @@ dual_piper = "motrix_edge.adapter.dual_piper_adapter:DualPiperAdapter"
 [[tool.uv.index]]
 name = "motphys"
 url = "http://pypi.mp/simple"
-
-# PyTorch 官方 CPU wheel 源（explicit：只服务下方 tool.uv.sources 显式指派的包，不参与其它包的解析）
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-# torch 只从官方 CPU 源取（版本形如 2.9.1+cpu），保证 edge 侧是纯 CPU 版
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }

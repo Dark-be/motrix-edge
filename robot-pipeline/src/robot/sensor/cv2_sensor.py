@@ -13,7 +13,7 @@
 # in compliance with the license file.
 
 import cv2
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .sensor import Sensor
 

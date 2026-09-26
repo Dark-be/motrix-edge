@@ -93,7 +93,7 @@ class BaseSession:
         self.frame_manager = frame_manager or FrameManager()  # 观测帧缓存（preview / WebRTC 消费）
         # 节点级 active adapter（注入，生命周期归节点）：会话只引用，不持有 / 不释放
         self.adapter = adapter
-        # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令任务态读写；
+        # 采集元信息选项存储（capture.yml）：capture meta 配置命令任务态读写；
         # 进程内单实例——节点注入同一份（与 /v1/captures/meta 共用同一把锁）；
         # 缺省 None 表示会话自行按需创建，测试可注入临时 store。
         self.capture_meta_store = capture_meta_store or CaptureMetaStore()
@@ -163,7 +163,7 @@ class BaseSession:
         """处理采集元信息选项命令（capture meta list/add/edit/delete/delete-key）。
 
         会话运行期间（ACTIVE）命令由会话循环 poll，本方法让配置命令在任务态也可用——
-        委托 ``utils.commands.handle_capture_meta``（读写 config/capture.yml），与节点
+        委托 ``utils.commands.handle_capture_meta``（读写 capture.yml），与节点
         主循环（非任务态）共用同一逻辑，保证「任何状态可用」。
         """
         return handle_capture_meta(cmd, self.capture_meta_store)

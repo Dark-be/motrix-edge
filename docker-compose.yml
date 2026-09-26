@@ -12,11 +12,22 @@ services:
     # environment:
     #   - NVIDIA_VISIBLE_DEVICES=all
     #   - NVIDIA_DRIVER_CAPABILITIES=all
+    environment:
+      # 应用变量：只有在 environment 段显式转发才会进入容器；取值来自不入库的 .env
+      # （缺省空 = 不覆盖，应用回退包内默认 / CWD）。容器内取值必须是容器可见路径。
+      - MOTRIX_EDGE_CONFIG_DIR=${MOTRIX_EDGE_CONFIG_DIR:-}
+      - MOTRIX_EDGE_LOG_FILE=${MOTRIX_EDGE_LOG_FILE:-0}
+      - MOTRIX_EDGE_LOG_LEVEL=${MOTRIX_EDGE_LOG_LEVEL:-INFO}
     volumes:
       - /run/udev:/run/udev:ro
       - /sys/bus/usb:/sys/bus/usb:ro
       - /dev:/dev:rw
-      - /home/pc16/project:/root/workspace:rw
+      # 宿主目录挂到容器的 /root/workspace：缺省 . = 仓库根本身，容器内仓库即
+      # /root/workspace（仓库路径 = /root/workspace/src）。**该布局必须与 .venv 的
+      # editable 路径一致**（site-packages/motrix_edge.pth = <容器内仓库>/src），
+      # 否则容器内 import motrix_edge 会失败——换布局后需重建 .venv（删除后重新 uv sync）。
+      # 本机取值写进**不入库**的 .env（见仓库根 .env.example），避免个人绝对路径入库
+      - ${MOTRIX_EDGE_DIR:-.}:/root/workspace:rw
     stdin_open: true
     tty: true
     command: "/bin/bash"

@@ -23,7 +23,7 @@ scripts/
   can_muti_activate.sh    # USB 物理口 → CAN 名绑定（用法见「CAN 总线配置」）
 src/                      # robot-pipeline 包（src 布局，包名 config/env/robot/server/...）
   config/                 # robot server 配置 + 加载逻辑
-    __init__.py           # load_config / get_config_dir（MOTRIX_CONFIG_DIR 优先，包内默认兜底）
+    __init__.py           # load_config / get_config_dir（MOTRIX_EDGE_CONFIG_DIR 优先，包内默认兜底）
     *.yml                 # test_robot / dual_piper / dual_alicia_piper / single_piper
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
@@ -107,7 +107,21 @@ host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras
 -   `single_piper.yml` —— `robot.type: single_piper_robot`
 
 配置加载分层（`src/config/__init__.py`，与 motrix_edge 同机制）：环境变量
-`MOTRIX_CONFIG_DIR` 指向的外界配置目录优先，否则读包内默认 `*.yml`（只读兜底）。
+`MOTRIX_EDGE_CONFIG_DIR` 指向的外界配置目录优先，否则读包内默认 `*.yml`（只读兜底）。
+
+日志与环境变量（与 motrix_edge **共用同一套变量名**，同一份仓库根 `.env`；实现各自独立）：
+
+-   **日志级别**：优先级 = `MOTRIX_EDGE_LOG_LEVEL`（环境变量）> yml 的 `INFO_LEVEL` > `INFO`；
+    启动时经 `set_log_level()` 解析一次，**不写 `os.environ`**；
+-   **文件日志开关**：`MOTRIX_EDGE_LOG_FILE`（缺省关闭）；开启后写
+    `$XDG_STATE_HOME/motrix-robot-pipeline/logs/`（未设 XDG → `<cwd>/motrix-robot-pipeline/logs/`），
+    与 edge 的 `motrix-edge/` 分开；
+-   **uvicorn 日志**：与 edge 同构（`utils/logging.uvicorn_log_config`）——HTTP access 缺省
+    **静默**（防长期运行刷屏）；开启 `MOTRIX_EDGE_LOG_FILE` 后 access 只写 `<日志目录>/uvicorn.log`
+    （轮转 10MB × 5，纯文本），uvicorn 启动 / 错误日志始终写终端。⚠️ 只有
+    `python src/server/robot_server.py`（走 `serve()`）会应用该配置；用
+    `uvicorn server.robot_server:app` 启动时是 uvicorn 默认行为；
+-   **裸跑（无 docker）** 复用仓库根 `.env`：`uv run --env-file ../.env python src/server/robot_server.py`。
 
 `robot.name` 是**进程展示名**（可选，覆盖机器人类常量 `NAME`），也是 `/v1/discover` 上报给 Edge
 的名字（控制台 / 状态接口显示的就是它）；不写则用机型默认名 `NAME`。同型号多台机器按机器命名

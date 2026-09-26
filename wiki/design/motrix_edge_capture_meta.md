@@ -3,8 +3,8 @@
 ## 摘要
 
 采集元信息（采集人员 / 采集任务等）在 `capture.yml` 中维护为**可拓展的「分类 →
-选项数组」**（包内默认只读；可写副本位于 `MOTRIX_CONFIG_DIR` 外界目录或**状态目录**
-（XDG `XDG_STATE_HOME`，不是采集数据目录）），由
+选项数组」**（包内默认只读；可写副本位于 `MOTRIX_EDGE_CONFIG_DIR` 外界目录或**状态目录**
+`$XDG_STATE_HOME/motrix-edge/`（未设 XDG → `<cwd>/motrix-edge/`，不是采集数据目录）），由
 管理入口有两条、写的是同一份数据：CLI 命令族 `capture meta`（list / add / edit / delete /
 delete-key）与 HTTP `/v1/captures/meta`（GET 读列表，POST / PATCH / DELETE 增改删）。前端（web
 console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类动态渲染，选项的增 / 改 / 删
@@ -101,7 +101,7 @@ capture meta delete-key operator
 
 ## 分发与状态可用性
 
--   `CaptureMetaStore`：`utils/capture_meta.py`；缺省可写路径（外界目录 `MOTRIX_CONFIG_DIR` /
+-   `CaptureMetaStore`：`utils/capture_meta.py`；缺省可写路径（外界目录 `MOTRIX_EDGE_CONFIG_DIR` /
     状态目录），包内默认在**首次读 / 写时惰性播种**；可注入临时路径（测试）。
 -   **进程内单实例**：`EdgeNode` 持有一份，并注入给会话（`get_session(capture_meta_store=…)`）
     与 `CaptureService`（`capture_meta_store or node.capture_meta_store`，最后才自建）——

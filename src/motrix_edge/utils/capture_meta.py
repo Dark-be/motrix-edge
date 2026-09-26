@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""CaptureMetaStore —— 采集元信息选项存储（config/capture.yml）。
+"""CaptureMetaStore —— 采集元信息选项存储（capture.yml）。
 
 元信息选项为**可拓展**的「分类 → 选项数组」结构（如 ``operator``=采集人员、
 ``task_name``=采集任务），由 ``capture meta`` 命令族（list / add / edit / delete /
@@ -51,12 +51,12 @@ class CaptureMetaStore:
     线程安全（RLock）：CLI / HTTP 命令可能并发管理选项，**读与写共用同一把锁**（读侧
     不会再读到半截文件）；写盘为**原子替换**（临时文件 + ``os.replace``）。选项按添加
     顺序保持；写回时保留文件其它顶层键。``path`` 缺省用**可写配置路径**（外部配置目录
-    ``MOTRIX_CONFIG_DIR`` 优先，否则状态目录；首次缺省访问时把包内默认播种到该位置），
+    ``MOTRIX_EDGE_CONFIG_DIR`` 优先，否则状态目录；首次缺省访问时把包内默认播种到该位置），
     测试可注入临时路径。``meta`` 缺失 / 非映射 / 选项非列表 → 视为空（非法键忽略）。
     """
 
     def __init__(self, path: str | Path | None = None):
-        # 可写配置路径：外部配置目录（MOTRIX_CONFIG_DIR）优先，否则状态目录（包内默认只读）
+        # 可写配置路径：外部配置目录（MOTRIX_EDGE_CONFIG_DIR）优先，否则状态目录（包内默认只读）
         if path is None:
             self.path = writable_config_path("capture.yml")
             self._seed_on_access = True  # 惰性播种（构造不做 IO，见 _seed_default_if_missing）
