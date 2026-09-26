@@ -96,7 +96,7 @@ class BaseSession:
         self.frame_manager = frame_manager or FrameManager()  # 观测帧缓存（preview / WebRTC 消费）
         # 节点级 active adapter（注入，生命周期归节点）：会话只引用，不持有 / 不释放
         self.adapter = adapter
-        # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令任务态读写；
+        # 采集元信息选项存储（capture.yml）：capture meta 配置命令任务态读写；
         # 进程内单实例——节点注入同一份（与 /v1/captures/meta 共用同一把锁）；
         # 缺省 None 表示会话自行按需创建，测试可注入临时 store。
         self.capture_meta_store = capture_meta_store or CaptureMetaStore()
