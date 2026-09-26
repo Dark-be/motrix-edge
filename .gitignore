@@ -42,6 +42,3 @@ logs/
 # 从仓库内启动（跑脚本 / 跑测试）时会生成；显式设了环境变量则落在那些目录，不受此影响。
 motrix-edge/
 motrix-robot-pipeline/
-
-# vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
-src/lerobot/

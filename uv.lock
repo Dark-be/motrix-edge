@@ -788,21 +788,37 @@ name = "motrix-edge"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiortc" },
     { name = "fastapi" },
-    { name = "grpcio" },
     { name = "httpx" },
-    { name = "msgpack" },
     { name = "numpy", version = "2.2.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "opencv-python-headless" },
     { name = "prompt-toolkit" },
     { name = "pyyaml" },
-    { name = "torch" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "aiortc" },
+    { name = "grpcio" },
+    { name = "msgpack" },
+    { name = "torch" },
     { name = "websockets", version = "16.1.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
     { name = "websockets", version = "17.0.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version >= '3.11'" },
+]
+lerobot = [
+    { name = "grpcio" },
+    { name = "torch" },
+]
+openpi = [
+    { name = "msgpack" },
+    { name = "websockets", version = "16.1.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "websockets", version = "17.0.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version >= '3.11'" },
+]
+webrtc = [
+    { name = "aiortc" },
 ]
 
 [package.dev-dependencies]
@@ -817,19 +833,21 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiortc", specifier = ">=1.15.0,<2.0.0" },
+    { name = "aiortc", marker = "extra == 'webrtc'", specifier = ">=1.15.0,<2.0.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "grpcio", specifier = ">=1.62.0" },
+    { name = "grpcio", marker = "extra == 'lerobot'", specifier = ">=1.62.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "msgpack", specifier = ">=1.0.5" },
+    { name = "motrix-edge", extras = ["openpi", "lerobot", "webrtc"], marker = "extra == 'all'" },
+    { name = "msgpack", marker = "extra == 'openpi'", specifier = ">=1.0.5" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
     { name = "prompt-toolkit", specifier = ">=3.0.53" },
     { name = "pyyaml" },
-    { name = "torch", specifier = "==2.9.1+cpu" },
+    { name = "torch", marker = "extra == 'lerobot'", specifier = "==2.9.1+cpu" },
     { name = "uvicorn", specifier = ">=0.52.1" },
-    { name = "websockets", specifier = ">=11.0" },
+    { name = "websockets", marker = "extra == 'openpi'", specifier = ">=11.0" },
 ]
+provides-extras = ["openpi", "lerobot", "webrtc", "all"]
 
 [package.metadata.requires-dev]
 dev = [

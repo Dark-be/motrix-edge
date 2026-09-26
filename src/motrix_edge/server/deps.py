@@ -28,7 +28,10 @@ controllers（``meta`` / ``preview`` / ``webrtc`` / ``rpent``）只依赖 node /
 故本模块也不依赖它。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from motrix_edge.identity import Identity
 from motrix_edge.lease import LeaseManager
@@ -37,8 +40,10 @@ from motrix_edge.server.command import CommandService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.rpent import RpentService
-from motrix_edge.server.webrtc import WebRTCService
 from motrix_edge.session.upload_session import UploadSession
+
+if TYPE_CHECKING:  # 可选依赖（--extra webrtc）：仅类型标注用，import 时不触碰 aiortc
+    from motrix_edge.server.webrtc import WebRTCService
 
 
 @dataclass

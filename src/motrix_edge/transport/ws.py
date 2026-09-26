@@ -23,9 +23,6 @@
 上层策略只需约定 payload / response 的格式契约（见 policy/contract.py）。
 """
 
-import websockets.sync.client
-
-from motrix_edge.transport import msgpack_numpy
 from motrix_edge.transport.base import BaseTransport
 
 
@@ -40,6 +37,10 @@ class WsTransport(BaseTransport):
             connect_timeout=connect_timeout,  # 单次连接尝试超时（open + metadata 接收）
             request_timeout=request_timeout,  # 单次 request 等待响应超时（防无限阻塞）
         )
+        # 可选依赖（--extra openpi）：msgpack 适配层只在真正使用 WsTransport 时导入
+        from motrix_edge.transport import msgpack_numpy  # noqa: PLC0415
+
+        self._msgpack = msgpack_numpy
         self._packer = msgpack_numpy.Packer()
         self._ws = None
 
@@ -60,6 +61,8 @@ class WsTransport(BaseTransport):
         连接 / 接收 metadata 超时 → 抛异常并清理半开连接，**不再无限重试**——重试由上层
         session 驱动（推理节点未就绪时任务线程可被打断退出，避免阻塞命令回执）。
         """
+        import websockets.sync.client  # noqa: PLC0415 可选依赖（--extra openpi）：只在连接时导入
+
         api_key = self.config.get("api_key")
         timeout = self.config.get("connect_timeout", 5.0)
         headers = {"Authorization": f"Api-Key {api_key}"} if api_key else None
@@ -71,7 +74,7 @@ class WsTransport(BaseTransport):
                 additional_headers=headers,
                 open_timeout=timeout,
             )
-            self.server_metadata = msgpack_numpy.unpackb(self._ws.recv(timeout=timeout))
+            self.server_metadata = self._msgpack.unpackb(self._ws.recv(timeout=timeout))
         except Exception:
             self.close()  # 释放半开连接（幂等）
             raise
@@ -94,7 +97,7 @@ class WsTransport(BaseTransport):
         if isinstance(response, str):
             self.close()  # 服务端发完错误文本即断开：这里同步状态（重连由上层 session 驱动）
             raise RuntimeError(f"Error in inference server:\n{response}")
-        return msgpack_numpy.unpackb(response)
+        return self._msgpack.unpackb(response)
 
     def close(self):
         """关闭连接（幂等；半开 / 已断连场景不抛异常，状态始终置为未连接）。"""
