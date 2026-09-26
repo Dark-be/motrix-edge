@@ -42,6 +42,3 @@ logs/
 # 无 XDG 时的状态 / 日志目录（config.get_state_dir 兜底）：edge 与 robot-pipeline 各一个
 motrix-edge/
 motrix-robot-pipeline/
-
-# vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
-src/lerobot/
