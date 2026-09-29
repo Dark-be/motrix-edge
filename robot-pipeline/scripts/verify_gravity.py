@@ -29,7 +29,10 @@
 - ① 每位关节的 ``|torque|`` 应远小于 ±16 N·m、标准差小；**单次读取耗时**决定 6 次/拍能否放进 30 Hz；
 - ② ``τ_meas`` 应与 ``k_p·(q_des − q_meas)`` **同号、同量级**（同一个量从两侧算出来），不一致说明
   读数符号 / 单位 / 关节序与下发不一致——**这一步不过就不能上前馈**（方向错等于主动推机器人）；
-- ③ 汇总里的「最大 ``|τ|`` 是否超 ±16 N·m」「每关节行程」「静摩擦幅值」是后续拟合与限幅的依据。
+- ③ 汇总里的「最大 ``|τ|`` 是否超 ±16 N·m」「每关节行程」「静摩擦幅值」是后续拟合与限幅的依据；
+- ④ ``--hold --params <参数文件> --alpha 1.0``：**同一姿态**下对比 ``α=0`` 与 ``α>0`` 的
+  ``k_p·|Δq|``——这就是重力前馈的逐档验收（先 0.2 → 0.5 → 1.0）；`--sweep` 采样期间**必须** α=0
+  （否则采到的是「残差力矩」而不是 τ_g，拟合出来会是一片 0）。
 
 ⚠️ ``--sweep`` **会让机械臂运动**：请在**无人、无负载（或记录当前负载）、急停可达**的前提下使用，
 并确认点位已按当前限位过滤（越界的一个都不发）。``--hold`` 不下发位移，只持续重发当前位形。
@@ -47,12 +50,16 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from config import resolve_config_file  # noqa: E402
 from robot.gravity import (  # noqa: E402
+    DEFAULT_PARAMS_RELATIVE,
     DEFAULT_SETTLE,
     DEFAULT_WINDOW,
     T_FF_LIMIT_NM,
+    GravityCompensator,
     SettleDetector,
     friction_from_passes,
+    load_gravity_params,
     plan_waypoints,
     save_samples,
     summarize_samples,
@@ -63,44 +70,40 @@ from utils.data_handler import debug_print  # noqa: E402
 
 DEFAULT_HZ = 30.0
 SETTLE_TIMEOUT_S = 5.0  # 单个位形的判稳上限（超时 → 丢弃该点）
-READ_FIELDS = ("position", "velocity", "torque")  # get_motor_states().msg 的字段
 
 
 def _read_state(controller) -> dict | None:
     """读一次 6 个关节的 ``q`` / ``vel`` / ``tau``（含本次读取耗时 ms）。
 
-    ``get_motor_states`` 是**按关节**的请求 / 应答（1-based），所以这里循环 6 次——「6 次/拍能否放进
-    30 Hz」正是 ``--read`` 要量的事情之一。任一关节返回 ``None`` → 本次读数作废（返回 ``None``）。
+    读数走 :meth:`PiperController.get_motor_states`（不再自己摸 SDK）：它读的是 SDK 后台读取线程
+    已解析好的**缓存帧**，不是请求 / 应答；耗时照量——现场仍要看「6 关节一拍」能否放进 30 Hz。
+    任一关节返回 ``None`` → 本次读数作废（返回 ``None``）。
     """
     started = time.perf_counter()
-    q = np.zeros(6, dtype=np.float64)
-    vel = np.zeros(6, dtype=np.float64)
-    tau = np.zeros(6, dtype=np.float64)
-    for index in range(6):
-        state = controller.robot.get_motor_states(index + 1)
-        if state is None:
-            return None
-        values = [
-            float(np.asarray(getattr(state.msg, field), dtype=np.float64).reshape(-1)[0]) for field in READ_FIELDS
-        ]
-        q[index], vel[index], tau[index] = values
-    return {"q": q, "vel": vel, "tau": tau, "read_ms": (time.perf_counter() - started) * 1e3}
+    states = controller.get_motor_states()
+    elapsed = (time.perf_counter() - started) * 1e3
+    if states is None:
+        return None
+    return {"q": states.q, "vel": states.vel, "tau": states.tau, "read_ms": elapsed}
 
 
-def _send_and_wait_stable(controller, q_target, detector, *, hz, timeout_s=SETTLE_TIMEOUT_S) -> list[dict]:
+def _send_and_wait_stable(controller, q_target, detector, *, hz, ff=None, timeout_s=SETTLE_TIMEOUT_S) -> list[dict]:
     """以 ``hz`` 持续重发 ``q_target`` 直到判稳 → 再采一窗样本；超时返回空列表。
 
     ``move_mit`` 是**直通、无平滑**模式：不重发就等于不通讯，所以判稳前每一拍都要发。``set_joint``
     会**就地修改**传入数组（既有语义），故每次都传 ``copy()``。
+
+    ``ff`` = 可选的 :class:`GravityCompensator`（标定采样时**必须不传**）：传了就按「先读实测 q →
+    再算前馈 → 下发」的顺序跑，与运行时控制拍一致。
     """
     detector.reset()
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        controller.set_joint(q_target.copy())
         state = _read_state(controller)
         if state is None:
             debug_print("GRAVITY", "读取电机状态失败，本次读数作废", "ERROR")
             return []
+        controller.set_joint(q_target.copy(), torque_ff=None if ff is None else ff.torque(state["q"]))
         if detector.update(state["q"], state["vel"], state["tau"]):
             break
         time.sleep(1.0 / hz)
@@ -109,10 +112,10 @@ def _send_and_wait_stable(controller, q_target, detector, *, hz, timeout_s=SETTL
 
     window: list[dict] = []
     for _ in range(DEFAULT_WINDOW):
-        controller.set_joint(q_target.copy())
         state = _read_state(controller)
         if state is None:
             return []
+        controller.set_joint(q_target.copy(), torque_ff=None if ff is None else ff.torque(state["q"]))
         window.append(state)
         time.sleep(1.0 / hz)
     return window
@@ -152,16 +155,31 @@ def _mode_read(controller, *, seconds, hz) -> int:
     return 0
 
 
-def _mode_hold(controller, kinematics, *, hz) -> int:
-    """符号 / 单位自检：以当前实测位形为目标 → 比对 ``τ_meas`` 与 ``k_p·(q_des − q_meas)``。"""
+def _mode_hold(controller, *, hz, alpha=0.0, params=None) -> int:
+    """符号 / 单位自检 + **前馈验收**：以当前实测位形为目标，对比 ``τ_meas`` 与 ``k_p·Δq``。
+
+    ``alpha > 0``（需 ``--params``）时每拍下发 ``t_ff = α·τ̂_g(q_meas)``：同一姿态下跑 α=0 与
+    α=1 两次，看 ``k_p·|Δq|`` 降多少——这就是设计里的逐档验收。
+    """
     from robot.controller.piper_controller import MIT_CTRL_CFG  # 现场依赖：仅本机可用
+
+    ff = None
+    if alpha > 0:
+        path = resolve_config_file(str(params or DEFAULT_PARAMS_RELATIVE))
+        model = load_gravity_params(path)
+        if model.is_placeholder:
+            print(f"⚠️ {path} 还是占位参数（全 0）：α={alpha:g} 不会有任何效果", file=sys.stderr)
+        ff = GravityCompensator(model, alpha=alpha)
+        print(f"[前馈] {model.describe()}；α={ff.alpha:g}，限幅 ±{ff.limit:g} N·m")
+    elif params:
+        print("提示：给了 --params 但没有 --alpha > 0，仍按 α=0（纯位置环）跑", file=sys.stderr)
 
     state = _read_state(controller)
     if state is None:
         print("读取初始位形失败", file=sys.stderr)
         return 1
     target = state["q"].copy()
-    window = _send_and_wait_stable(controller, target, SettleDetector(), hz=hz)
+    window = _send_and_wait_stable(controller, target, SettleDetector(), hz=hz, ff=ff)
     if not window:
         print("未判稳（超时）——检查是否有人 / 外力干扰，或放宽判稳阈值", file=sys.stderr)
         return 1
@@ -170,7 +188,8 @@ def _mode_hold(controller, kinematics, *, hz) -> int:
     kp = np.array([cfg["kp"] for cfg in MIT_CTRL_CFG], dtype=np.float64)
     sag = target - stats["q"]
     predicted = kp * sag
-    print(f"\n[符号单位自检] 判稳后窗口 {stats['n']} 拍")
+    label = f"α={alpha:g}" if ff is not None else "α=0（纯位置环）"
+    print(f"\n[符号单位自检 / 前馈验收 {label}] 判稳后窗口 {stats['n']} 拍")
     print("  J   q_des−q_meas(rad)   k_p*(Δq)(N·m)   τ_meas(N·m)   τ_std   同号?")
     agree = 0
     for joint in range(6):
@@ -182,7 +201,14 @@ def _mode_hold(controller, kinematics, *, hz) -> int:
             f"  {joint + 1}   {sag[joint]:+.4f}            {predicted[joint]:+.3f}         "
             f"{stats['tau'][joint]:+.3f}      {stats['tau_std'][joint]:.3f}   {'✓' if same_sign else '✗'}"
         )
-    print(f"  同号关节 {agree}/6；|tau|max={np.abs(stats['tau']).max():.3f} N·m；")
+    print(f"  同号关节 {agree}/6；|tau|max={np.abs(stats['tau']).max():.3f} N·m")
+    print(
+        f"  残余 Σ|k_p·Δq| = {np.sum(np.abs(predicted)):.3f} N·m，关节 |Δq|max = "
+        f"{np.max(np.abs(sag)):.4f} rad（摩擦量级是关键参照）"
+    )
+    if ff is not None:
+        print(f"  本拍 t_ff = {None if ff.last_torque is None else np.round(ff.last_torque, 3).tolist()}")
+        print("  ⚠️ 这是**同一姿态**下的对比：请用 α=0 再跑一次本模式，比上面那行「残余 / |Δq|max」")
     if agree < 6:
         print("  ⚠️ 存在不同号关节：读数符号 / 关节序 / 单位需要核对，先不要上重力前馈")
         return 1
@@ -304,6 +330,12 @@ def main() -> int:
         "--payload", default="unknown", help="负载备注（bare / gripper / 工件名）：决定这份样本的适用范围"
     )
     parser.add_argument("--out", default="gravity_samples.json", help="--sweep 样本输出路径（JSON）")
+    parser.add_argument(
+        "--alpha", type=float, default=0.0, help="--hold 时按 t_ff = α·τ̂_g(q_meas) 下发（0 = 纯位置环对照）"
+    )
+    parser.add_argument(
+        "--params", default=None, help=f"--hold --alpha>0 用的参数文件（缺省 {DEFAULT_PARAMS_RELATIVE}）"
+    )
     args = parser.parse_args()
 
     from robot.controller.piper_controller import PiperController  # 现场依赖：仅本机可用
@@ -316,10 +348,14 @@ def main() -> int:
         print("⚠️ leader 模式不可由程序驱动：--hold / --sweep 需要 --role follower", file=sys.stderr)
         controller.disconnect()
         return 2
+    if args.sweep and args.alpha > 0:
+        print("⚠️ 标定采样不能开前馈（会采到残差力矩而不是 τ_g）：请用 α=0", file=sys.stderr)
+        controller.disconnect()
+        return 2
 
     try:
         if args.hold:
-            return _mode_hold(controller, kinematics, hz=args.hz)
+            return _mode_hold(controller, hz=args.hz, alpha=args.alpha, params=args.params)
         if args.sweep:
             return _mode_sweep(controller, kinematics, args)
         return _mode_read(controller, seconds=args.seconds, hz=args.hz)

@@ -20,24 +20,28 @@
 -   [ ] **阶段 0-c** 现场跑数据（**依赖真机**）：`--read` 确认读数可用与开销 → `--hold` 确认符号
         单位 → `--sweep` 出样本；判读「最大 `|τ|` 是否超 ±16 N·m」「每关节行程是否够」「静摩擦
         幅值」
--   [ ] **阶段 1-a** `gravity_regressor(q)`：DH 回归器 `Y(q) ∈ ℝ^{6×n_π}`（每连杆 4 参数）
--   [ ] **阶段 1-b** 单测：点质量解析用例（单连杆 `τ = m·g·l·cos q`）+ 与有限差分对照
--   [ ] **阶段 1-c** `fit_gravity(samples)`：最小二乘（可选岭正则）+ 条件数 / 残差 RMS 报告
--   [ ] **阶段 1-d** `scripts/fit_gravity.py`：样本 JSON → `π̂` + 归档文件（按机型 / 负载命名）
--   [ ] **阶段 2-a** `PiperController.get_motor_states()`：把力矩读数收进控制器（不再由脚本直接
+-   [x] **阶段 1-a** `gravity_regressor(q)`：DH 回归器 `Y(q) ∈ ℝ^{6×24}`（每连杆 4 参数）
+-   [x] **阶段 1-b** 数学校验（**不做自动化测试文件**，改为工具内自检）：`fit_gravity.py --self-test`
+        跑「回归器 = 势能数值偏导」「法兰点质量 = `−J_vᵀ·m·g`（与 `jacobian` 独立对齐）」
+-   [x] **阶段 1-c** `fit_gravity(samples)`：最小二乘（可选岭正则）+ 秩 / 条件数 / 残差 RMS /
+        逐位形残差（坏点定位）
+-   [x] **阶段 1-d** `scripts/fit_gravity.py`：样本 JSON → `π̂` + `--install` 写进控制器读的
+        参数文件（含 DH、负载与拟合报告；每臂一份）
+-   [x] **阶段 2-a** `PiperController.get_motor_states()`：把力矩读数收进控制器（不再由脚本直接
         摸 SDK；数据类含 `q` / `vel` / `tau`）
--   [ ] **阶段 2-b** 配置：机型侧 `robot.gravity`（`enabled` / `alpha` / `t_ff` 上限 / `π̂` 引用）
--   [ ] **阶段 2-c** 控制环注入：`set_joint(q_des, torque_ff = α·τ̂_g(q_meas))`，含
-        **限幅 + 异常降级（本拍 `t_ff=0`）+ 告警**
--   [ ] **阶段 2-d** 可观测：`τ_meas` / `τ̂_g` 进观测或 `/v1/health` 扩展字段（现场验收要能看）
+-   [x] **阶段 2-b** 配置：机型侧 `robot.gravity`（`enabled` / `alpha` / `t_ff_limit` / `params` /
+        `arms.<臂>` 覆盖）；缺省指向**占位参数（全 0）** → `t_ff` 恒为 0，行为与未补偿一致
+-   [x] **阶段 2-c** 控制环注入：`set_joint` 每拍读实测 `q` → `t_ff = α·τ̂_g(q_meas)`，含
+        **限幅（≤ min(16, 配置值)）+ 异常降级（本拍 `t_ff=0`）+ 同原因只告警一条**
+-   [x] **阶段 2-d** 可观测（控制器侧）：`gravity_status()` / `last_torque_ff`
+-   [ ] **阶段 2-d'** 把 `gravity_status()` 接进 `/v1/health` 扩展字段（现场不用起额外进程看）
 -   [ ] **阶段 2-e** 现场验收：`α` 0.2 → 1.0 逐档，看 `k_p·(q_des − q_ss)` 下降曲线
 -   [ ] **阶段 3** 笛卡尔 K/D → `Jᵀ K_c J` 折回关节 `k_p` / `k_d`（含奇异处截断 / 正则化）
 -   [ ] **阶段 4** 位置型导纳：`τ_ext = τ_meas − τ̂_g` → `J⁻ᵀ` 折力 → 滤波 → 导纳积分 → 修正目标
 -   [ ] **阶段 5**（远期）力矩型阻抗：**前置**是可信惯量（厂商 URDF/CAD 或完整辨识），届时才评估
         Pinocchio，并先补「URDF ↔ `PIPER_DH` 一致性」测试
--   [ ] **文档同步**：阶段 2 落地时改 `wiki/design/robot_pipeline_cartesian.md`、
-        `robot_pipeline_action_spaces.md`、`robot-pipeline/README.md` 里「本次位姿控制无力矩前馈」
-        的措辞，并删掉 `wiki/plan/robot_pipeline_cartesian_plan.md` 里的同名说明
+-   [x] **文档同步**：`wiki/design/robot_pipeline_cartesian.md`、`robot_pipeline_action_spaces.md`、
+        `robot-pipeline/README.md` 里「本次位姿控制无力矩前馈」改为「`t_ff` 缺省 0，可选重力前馈」
 
 ## 阶段 0：标定工具（本次）
 
@@ -69,21 +73,28 @@
 （`get_motor_states(i).msg.torque`，1-based）；`Ctrl+C` 与异常都不丢已采样本（`finally` 回原位 +
 落盘）。
 
-## 阶段 1：回归器与拟合
+## 阶段 1：回归器与拟合（已完成）
 
--   `gravity_regressor(q)`：由 `PIPER_DH` 推出（连杆质心位置对关节角的偏导），参数按
-    `π_i = (m_i, m_i·c_i)` 排列 → `Y(q)`；**与 FK / IK / 限幅共用同一份运动学**；
--   单测：单连杆点质量解析式对齐（符号约定由它钉住）+ 与数值偏导对照；
--   `fit_gravity(samples)`：`min‖Y π − τ‖²`（可选岭正则），输出 `π̂` + 条件数 + 残差 RMS；
--   `scripts/fit_gravity.py`：读样本 JSON → 写 `π̂` 归档（含元信息：机型 / 负载 / 时间 / 增益）。
+-   `gravity_regressor(q)`：由 `PIPER_DH` 推出（连杆坐标系 = `prefix_transforms(q)[k+1]`，与
+    `PiperKinematics.jacobian` 同一取轴 / 取原点约定），参数按 `π_k = (m_k, m_k·c_k)` 排列 →
+    `Y(q) ∈ ℝ^{6×24}`；**与 FK / IK / 限幅共用同一份运动学**；
+-   数学校验：**不做自动化测试文件**（约定：robot-pipeline 的用例不进 edge 的 `tests/`），改为
+    `python scripts/fit_gravity.py --self-test`（离线 7 项：势能数值偏导、雅可比对齐、拟合重现、
+    占位 / α / 限幅 / 降级）；
+-   `fit_gravity(samples)`：`min‖Y π − τ‖²`（可选岭正则），输出 `π̂` + 秩 / 条件数 / 残差 RMS /
+    逐位形残差（坏点）——本仓 Piper 上秩实测 **10/24**（结构不可辨识方向），最小范数解在采样域内
+    精确重现力矩；
+-   `scripts/fit_gravity.py`：读样本 JSON → 写 `π̂`（含 DH / 负载 / 拟合报告元信息）；`--install`
+    直接写控制器读的参数文件。
 
-## 阶段 2：接入控制环
+## 阶段 2：接入控制环（已完成，现场验收待做）
 
--   `PiperController` 增 `get_motor_states()`（返回 `q` / `vel` / `tau` 数据类），控制环每拍取一次；
--   `BaseRobot` 子类在 `_apply_action()` 里算 `τ_ff = α · τ̂_g(q_meas)` 并透传 `set_joint(..., torque_ff=)`；
--   **降级规则**：读数 `None` / 超时 / NaN / 参数域外 → 本拍 `t_ff = 0` + 限流告警，不中断控制；
+-   `PiperController.get_motor_states()`（返回 `q` / `vel` / `tau` 数据类）；
+-   注入在**控制器内部**（`set_joint`）：显式 `torque_ff` 优先；否则装载过 `robot.gravity` 时每拍读
+    实测 `q` 算 `α·τ̂_g(q_meas)`——所有机器人类零改动，主臂（只读）不装载；
+-   **降级规则**：读数 `None` / 非有限 / 模型异常 → 本拍 `t_ff = 0` + 同原因只告警一条，不中断控制；
 -   限幅：`|τ_ff| ≤ min(16 N·m, 配置上限)`；
--   观测：把 `τ_meas`、`τ̂_g`（可选 `α`）带进 `/v1/health` 扩展或采集元信息，供现场验收。
+-   可观测：`gravity_status()` / `last_torque_ff`（接 `/v1/health` 待做，见 TODO 2-d'）。
 
 ## 阶段 3 / 4 / 5
 

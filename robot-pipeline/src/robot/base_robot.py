@@ -413,6 +413,26 @@ class BaseRobot:
             "action_dims": dims(self.ACTION_SPACE_JOINT),
         }
 
+    def control_layout(self) -> dict:
+        """各**执行控制器**的控制模式：``{"control_mode": <聚合>, "arms": {<控制器名>: {...}}}``。
+
+        写进采集 JSON（``control_mode`` / ``control``）与 ``/v1/capture/status`` 的 ``meta``——
+        下游据此判断这一段数据是「MIT 纯位置环」（``mit``）「MIT + 重力前馈」（``mit+gravity``）
+        还是「joint 通路」（``joint``，该通路**不下发 t_ff**，故重力前馈不生效）。
+
+        **主手不记录**：只有能提供 ``control_detail`` 且 ``role == "follower"`` 的控制器入表
+        （leader 主手与没有控制通路的 AliciaTeachController / TestArmController 一律跳过）。
+        聚合值：执行臂模式唯一 → 该值；双臂不同 → ``mixed``；没有可记录的执行控制器
+        （如 ``test_robot``）→ ``None`` 且 ``arms`` 为空。
+        """
+        arms: dict = {}
+        for name, ctrl in (getattr(self, "controllers", {}) or {}).items():
+            detail = getattr(ctrl, "control_detail", None)
+            if isinstance(detail, dict) and detail.get("role") == "follower":
+                arms[str(name)] = detail
+        modes = {entry["mode"] for entry in arms.values()}
+        return {"control_mode": next(iter(modes)) if len(modes) == 1 else ("mixed" if modes else None), "arms": arms}
+
     # ---- 控制：HTTP（reset/execute/rollout/safe_stop）只修改两段目标 ----------------
     def reset(self):
         """程序复位到 home（非阻塞）：关节段 = ``init_joint``，夹爪段 = ``init_gripper``。

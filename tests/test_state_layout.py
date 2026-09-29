@@ -20,6 +20,9 @@
   （双臂 7 + 7 = 14、单臂 7）；夹爪**不再单独成观测键**，就是每臂块的末位；
 - 逐维含义由 ``state_layout()`` 自描述（``{index, arm, kind, name}``），写进每轮 mcap 的同名 JSON
   元信息（``state_space`` / ``state_dims`` / ``action_space`` / ``action_dims``）；
+- 控制模式由 ``control_layout()`` 自描述（``mit`` / ``mit+gravity`` / ``joint``，**主手不记录**），
+  写进同一 JSON 的 ``control_mode``（聚合值，双臂不同时 ``mixed``）/ ``control``（逐控制器明细）——
+  下游据此判断这段数据是否带重力前馈（``joint`` 通路不下发 ``t_ff``，前馈不生效）；
 - **整体切位姿只改 ``STATE_SPACE``**：值段每臂仍是 6 维、总维度不变，下游按 ``kind`` 自行解释
   （``joint`` / ``pose`` / ``gripper``），不必改代码。
 
@@ -258,3 +261,153 @@ def test_collector_layout_defaults_to_empty(collector, tmp_path):
     assert instance.meta["state_space"] is None
     assert instance.meta["state_dims"] == []
     assert instance.meta["action_dims"] == []
+
+
+# ---- 控制模式（采集 JSON）-------------------------------------------------------
+
+
+def _control_arm(piper_controller, *, ctrl_mode="mit", role="follower", gravity=None):
+    """假 PiperController：只填控制模式判定所需的三个属性（不连 SDK、不碰运动学）。"""
+    ctrl = piper_controller.PiperController.__new__(piper_controller.PiperController)
+    ctrl.role = role
+    ctrl.ctrl_mode = ctrl_mode
+    ctrl.gravity = gravity
+    return ctrl
+
+
+@pytest.fixture(scope="module")
+def piper_controller():
+    """导入 robot-pipeline 的 PiperController（占位硬件 SDK，不 connect）。"""
+    return _load("robot.controller.piper_controller")
+
+
+@pytest.fixture(scope="module")
+def gravity():
+    """导入 robot-pipeline 的 robot.gravity（重力模型 / 前馈，无硬件依赖）。"""
+    return _load("robot.gravity")
+
+
+def _model(gravity, value=0.1):
+    """非占位重力模型（全 0 = 占位 → 不产生前馈）。"""
+    return gravity.GravityModel(np.full((6, gravity.PI_PER_LINK), value))
+
+
+def test_control_mode_prefers_channel_over_feedforward(piper_controller, gravity):
+    """``joint`` 通路不下发 t_ff → 即使装了模型也只报 ``joint``（不能只看有没有 gravity）。"""
+    model = _model(gravity)
+    ff = gravity.GravityCompensator(model, alpha=1.0)
+
+    assert _control_arm(piper_controller, gravity=ff).control_mode == "mit+gravity"
+    assert _control_arm(piper_controller, ctrl_mode="joint", gravity=ff).control_mode == "joint"
+    assert _control_arm(piper_controller).control_mode == "mit"
+    assert _control_arm(piper_controller, role="leader").control_mode == "read_only"
+    # 占位（全 0）/ α=0 不产生前馈 → 与纯位置环等价
+    assert (
+        _control_arm(piper_controller, gravity=gravity.GravityCompensator(_model(gravity, 0.0))).control_mode == "mit"
+    )
+    assert _control_arm(piper_controller, gravity=gravity.GravityCompensator(model, alpha=0.0)).control_mode == "mit"
+
+
+def test_control_detail_carries_config_facts_only(piper_controller, gravity):
+    """明细报**配置事实**（模式 / 通路 / 角色 / α / 限幅 / 参数来源），不带运行时计数。"""
+    detail = _control_arm(piper_controller, gravity=gravity.GravityCompensator(_model(gravity))).control_detail
+
+    assert detail["mode"] == "mit+gravity" and detail["ctrl_mode"] == "mit" and detail["role"] == "follower"
+    assert detail["gravity"]["active"] is True and detail["gravity"]["alpha"] == 1.0
+    assert detail["gravity"]["limit_nm"] == gravity.T_FF_LIMIT_NM
+    assert detail["gravity"]["placeholder"] is False
+    assert "degrades" not in detail["gravity"] and "clips" not in detail["gravity"]
+    assert _control_arm(piper_controller).control_detail["gravity"] is None
+
+
+def test_control_layout_records_execution_controllers_only(dual_piper, piper_controller):
+    """只记录执行控制器（follower）：主手（leader）与无控制通路的控制器一律不入表。"""
+    robot = _robot(dual_piper)
+    robot.controllers = {
+        "left_arm": _control_arm(piper_controller),
+        "right_arm": _control_arm(piper_controller, ctrl_mode="joint"),
+        "left_master": _control_arm(piper_controller, role="leader"),
+        "right_master": _FakeArm(None),  # 无 control_detail 的控制器
+    }
+    layout = robot.control_layout()
+
+    assert set(layout["arms"]) == {"left_arm", "right_arm"}
+    assert layout["arms"]["right_arm"]["mode"] == "joint" and layout["arms"]["right_arm"]["ctrl_mode"] == "joint"
+    assert layout["control_mode"] == "mixed"  # 双臂模式不同
+
+
+def test_control_layout_aggregate_and_empty(dual_piper, piper_controller):
+    """执行臂唯一 → 聚合值就是它；没有执行控制器（如 test_robot）→ None + 空表。"""
+    robot = _robot(dual_piper)
+    robot.controllers = {
+        "left_arm": _control_arm(piper_controller),
+        "left_master": _control_arm(piper_controller, role="leader"),
+    }
+    assert robot.control_layout()["control_mode"] == "mit"
+
+    robot.controllers = {"left_master": _control_arm(piper_controller, role="leader")}
+    assert robot.control_layout() == {"control_mode": None, "arms": {}}
+
+
+def test_collector_writes_control_into_episode_json(collector, tmp_path):
+    """采集 JSON 元信息带上控制模式（聚合值 + 逐控制器明细）。"""
+    control = {
+        "control_mode": "mixed",
+        "arms": {
+            "right_arm": {
+                "mode": "mit+gravity",
+                "ctrl_mode": "mit",
+                "role": "follower",
+                "gravity": {
+                    "active": True,
+                    "alpha": 1.0,
+                    "limit_nm": 16.0,
+                    "params": "gravity/piper_6dof.json",
+                    "placeholder": False,
+                },
+            }
+        },
+    }
+    instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
+    instance.set_control_layout(control)
+
+    assert instance.meta["control_mode"] == "mixed"  # /v1/capture/status 的 meta 同源
+    episode = tmp_path / "abc.mcap"
+    episode.write_bytes(b"not-a-real-mcap")  # 只验证元信息，不真写 mcap
+    meta = json.loads(instance._write_meta_json(episode).read_text(encoding="utf-8"))
+
+    assert meta["control_mode"] == "mixed"
+    assert meta["control"] == control["arms"]
+
+
+def test_collector_control_defaults_to_empty(collector, tmp_path):
+    """未注入（如旧机器人）→ 键在位但为空，不编造模式。"""
+    instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
+
+    assert instance.meta["control_mode"] is None and instance.meta["control"] == {}
+
+
+def test_env_control_layout_follows_connect_time_gravity(
+    dual_piper, piper_controller, collector, gravity, tmp_path, monkeypatch
+):
+    """重力前馈在 ``robot.connect()`` 里才装载 → env 连上后**再注入一次**，否则落盘漏报。"""
+    env_module = _load("env.base_env")
+    # ``env.base_env`` 可能是被别的模块测试（帧头跳过）打桩 collector 包时导入的 → 它的
+    # ``get_collector`` 绑在桩上（模块级 ``from collector import get_collector``），这里换成真 collector。
+    monkeypatch.setattr(env_module, "get_collector", lambda cfg: collector.ActMcapCollector(cfg))
+    robot = _robot(dual_piper)
+    robot.controllers = {
+        "left_arm": _control_arm(piper_controller),
+        "left_master": _control_arm(piper_controller, role="leader"),
+    }
+    env = env_module.BaseEnv(robot, capture_config={"type": "act_mcap", "save_dir": str(tmp_path)})
+
+    # 构造期（还没 connect）：纯位置环
+    assert env._collector.meta["control_mode"] == "mit"
+
+    # connect() 装载重力前馈（现场由 PiperController.connect(gravity=...) 做）→ 再注入
+    robot.controllers["left_arm"].gravity = gravity.GravityCompensator(_model(gravity))
+    env._inject_control_layout()
+
+    assert env._collector.meta["control_mode"] == "mit+gravity"
+    assert env._collector.meta["control"]["left_arm"]["gravity"]["active"] is True
