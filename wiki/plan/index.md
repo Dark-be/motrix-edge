@@ -22,5 +22,6 @@
 -   [robot-pipeline 位姿动作（求解器）实施计划](./robot_pipeline_cartesian_plan.md)
 -   [RTC 过渡策略（权重过渡 / 连续过渡）实施计划](./motrix_edge_rtc_transition_plan.md)
 -   [robot-pipeline 遥操作（增量接管）实施计划](./robot_pipeline_teleop_plan.md)
+-   [robot-pipeline 重力补偿与阻抗控制实施计划](./robot_pipeline_impedance_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->
