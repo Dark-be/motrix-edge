@@ -121,3 +121,24 @@ def as_action_chunk(chunk, start_index: int = 0) -> ActionChunk | None:
     if isinstance(chunk, ActionChunk):
         return chunk if chunk.start_index is not None else replace(chunk, start_index=int(start_index))
     return ActionChunk(actions=chunk, start_index=start_index)
+
+
+def chunk_step_action(chunk: ActionChunk | None, index: int) -> np.ndarray | None:
+    """取动作块中「绝对步号 ``index``」对应的动作；整块落在过去 → ``None``。
+
+    **过期口径的唯一实现**（F11）：块首步可能早于当前步号——异步预取期间控制环又走了几步，
+    或重连后服务端回一块起点已过的块。此时取块内 ``index - start_index`` 那一步（块首步
+    领先当前步号时取首步）；``index`` 已越过块尾 ⇒ 整块过期，返回 ``None``，**不拿过期动作
+    驱动真机**（调用方跳过本步）。
+
+    两条“每步只取一块首部”的路径共用它：``RTCManager`` 的 ``rtc.enabled=false`` 退化路径、
+    ``DirectStepEngine``（残差 RL 闭环）。策略未声明块首步（``start_index is None``）时按
+    ``index`` 对齐（与 :func:`as_action_chunk` 的补齐语义一致）。
+    """
+    if chunk is None or chunk.height == 0:
+        return None
+    start = int(chunk.start_index) if chunk.start_index is not None else int(index)
+    offset = max(0, int(index) - start)
+    if offset >= chunk.height:
+        return None
+    return np.asarray(chunk.actions[offset], dtype=np.float64)

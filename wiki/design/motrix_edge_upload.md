@@ -1,8 +1,12 @@
-# 上传会话（UploadSession）
+# 上传（upload）
 
 ## 摘要
 
-`UploadSession` 管理 Edge 本地采集目录中的 episode 文件：扫描并配对同名的 `.mcap` 与 `.json`，**schema 驱动解析 JSON 描述文件**为结构化元信息，生成可校验的 episode 汇总，支持按 episode 编号选择、**打包**，并维护上传队列状态。
+`UploadService` 管理 Edge 本地采集目录中的 episode 文件：扫描并配对同名的 `.mcap` 与 `.json`，**schema 驱动解析 JSON 描述文件**为结构化元信息，生成可校验的 episode 汇总，支持按 episode 编号选择、**打包**，并维护上传队列状态。
+
+**不是会话**：不继承 `session.BaseSession`、不在 `SESSION_REGISTRY`、无 `run` / `session_start` /
+`session_finish`；由服务层直接持有（`server.deps.Services.uploads`，`/v1/uploads/*` 点对点调用）。
+故模块放在 `motrix_edge/upload.py`，**不在 `session/` 包内**（与 `session/` / `server/` 平级）。
 
 > **本版本范围**：只做**本地文件的查看 / 筛选 / 打包**。上传 API（`/v1/uploads/upload`、`/v1/uploads/retry`）是**为数据平台预留的**——程序化上传在后续版本加入；本版本里数采人员在前端确认打包结果后，**手动上传**文件到数据平台。
 
@@ -14,7 +18,7 @@
 -   缺少配对文件、JSON 无法解析或 JSON 顶层不是对象时，该 episode 进入 `invalid`，扫描仍继续。
 -   选择按 episode 标识处理，不按目录文件行号处理。
 -   当前阶段只实现本地扫描、汇总、选择、打包与上传队列状态；上传目标（`upload.endpoint`，面向数据平台）未配置时，上传动作返回 `501`，不删除本地源文件。
--   UploadSession 不进入 EdgeNode 的机器人任务状态机，不占用 RobotAdapter；它是 server 层管理的文件会话。
+-   UploadService 不进入 EdgeNode 的机器人任务状态机，不占用 RobotAdapter；它是 node 级服务（见「与会话无关」）。
 
 ## 元信息解析（schema 驱动）
 
@@ -53,10 +57,18 @@
 及其子目录内；越界 → `400`，两个来源都没有（未配 `upload.data_dir` 且未绑定进程）→ `409`
 （没配置就不默认放开任意路径）。
 
+**目录解析单点**：「数据目录」的回退链只在一处实现 —— `upload.resolve_data_dir(capture_status,
+configured)`（adapter 上报的采集目录 → `upload.data_dir` 兜底），`server.state.capture_data_dir(node,
+fallback)` 是它在 node 上的包装；上传路由（白名单 + 缺省扫描目录）与状态快照（磁盘占用）共用，
+避免同一条回退链在多处各写一份而漂移。
+
+**与会话无关**：上传是**节点级服务**（不经命令总线、不占机器人互斥、不占会话槽位）——节点 READY 且
+**没有任何会话**时同样可用，扫描也不会改变节点状态。
+
 **重操作互斥**：`scan` 与 `pack` 同一时刻只允许一个在跑（都要对整目录算 SHA-256 / 搬运文件），
 并发触发 → `409`（`already in progress`），避免把控制面拖住。
 
--   `POST /v1/uploads`：创建或重扫 UploadSession；请求可选 `folder_path`，缺省回退链为 adapter 数据目录 → `upload.data_dir`。
+-   `POST /v1/uploads`：创建或重扫 UploadService；请求可选 `folder_path`，缺省回退链为 adapter 数据目录 → `upload.data_dir`。
 -   `GET /v1/uploads`：获取当前扫描汇总。
 -   `POST /v1/uploads/select`：按 `episode_ids` 替换选择集；可选中状态 = `ready` / `pending` / `failed`
     （`invalid` 与 `uploading` / `succeeded` 不可选）。
@@ -69,7 +81,7 @@
 `GET /v1/uploads` 的汇总额外返回 `suggested_pack_name`（`pack<选中数量>`；未扫描 / 未选择时为空）与
 `endpoint_configured`（是否配了上传目标），供前端预填包名 / 决定上传按钮可用性。
 
-UploadSession 用 `RLock` 保护汇总 / 选择集，另有一把重操作锁让 `scan` / `pack` 互斥；
+UploadService 用 `RLock` 保护汇总 / 选择集，另有一把重操作锁让 `scan` / `pack` 互斥；
 除 `pack` 外不改动源文件（上传成功不自动删除）。
 
 **锁粒度**：`pack` 的重 IO（建目录 + 搬文件）在**锁外**进行——锁只包住「校验 + 快照搬运计划」

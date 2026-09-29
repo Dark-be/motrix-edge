@@ -31,7 +31,6 @@ from motrix_edge.command import (
     CMD_CAPTURE_SYNC,
     CMD_INFER_CONFIG_SET,
     CMD_INFER_CONNECT,
-    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC_SET,
@@ -44,7 +43,6 @@ from motrix_edge.server.routes._common import accepted
 from motrix_edge.server.schemas import (
     InferConfigRequest,
     InferEnterRequest,
-    InferPromptRequest,
     InferRolloutRequest,
     InferRTCRequest,
     InferSyncRequest,
@@ -109,7 +107,8 @@ def build_router(services: Services) -> APIRouter:
         """推理闭环（infer rollout）：单步（缺省）或 continuous 持续。
 
         body：``mode``（single 缺省 / continuous）。
-        需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（会话内 ``infer prompt`` 预置）；lerobot-act 不需要。
+        需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（prompt 是普通策略配置项，经
+        ``POST /v1/infers/config`` 预置）；lerobot-act 不需要。
         须已在推理会话且持有租约；continuous 启动即回执 started，直到 ``infer rollout stop`` /
         session quit / estop。
         """
@@ -130,7 +129,7 @@ def build_router(services: Services) -> APIRouter:
     def infers_episode_start(x_lease_id: str | None = Header(default=None)):
         """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
 
-        需要 prompt 的策略（如 openpi）：prompt 为空 → 400（先 ``infer prompt`` 预置）；lerobot-act 不需要。
+        需要 prompt 的策略（如 openpi）：prompt 为空 → 400（先经 ``POST /v1/infers/config`` 预置）；lerobot-act 不需要。
         录制前由调用方 ``POST /v1/infers/sync`` 显式同步采集元信息（默认 operator=policy、
         task_name=prompt）。受控操作：须持有租约。
         """
@@ -173,18 +172,6 @@ def build_router(services: Services) -> APIRouter:
         未知键 / 类型不符 / 必填为空 → 400。受控操作：须已在推理会话且持有租约。
         """
         return accepted(_commands().submit(CMD_INFER_CONFIG_SET, {"json": dict(req.config)}, lease_id=x_lease_id))
-
-    @router.post("/v1/infers/prompt")
-    def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):
-        """会话内预置/更新推理文本指令（统一 prompt；推理/录制前必须非空）。
-
-        须已在推理会话且持有租约；持续推理中亦可修改（下个请求生效）。仅对声明 prompt
-        配置项的策略（语言条件，如 openpi）有效；等价于 ``POST /v1/infers/config``
-        提交 ``{"prompt": ...}``。
-        """
-        if not req.prompt.strip():  # 纯空白不算指令（pydantic 的 min_length 只拦空串）
-            raise ServiceError("prompt required", code=ErrorCode.INVALID_ARGUMENT)
-        return accepted(_commands().submit(CMD_INFER_PROMPT, {"prompt": req.prompt}, lease_id=x_lease_id))
 
     @router.delete("/v1/infers")
     def infers_exit(lease_id: str | None = None):

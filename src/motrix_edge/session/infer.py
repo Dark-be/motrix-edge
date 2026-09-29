@@ -17,53 +17,30 @@ import time
 
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.command import (
-    CMD_CAPTURE_EPISODE_END,
-    CMD_CAPTURE_EPISODE_START,
-    CMD_CAPTURE_META_ADD,
-    CMD_CAPTURE_META_DELETE,
-    CMD_CAPTURE_META_DELETE_KEY,
-    CMD_CAPTURE_META_EDIT,
-    CMD_CAPTURE_META_LIST,
-    CMD_CAPTURE_SYNC,
-    CMD_INFER_CONFIG,
-    CMD_INFER_CONFIG_SET,
     CMD_INFER_CONNECT,
-    CMD_INFER_MODEL,
-    CMD_INFER_MODEL_SET,
-    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
-    CMD_ROBOT_ESTOP,
-    CMD_ROBOT_EXECUTE,
-    CMD_ROBOT_RESET,
-    CMD_SESSION_QUIT,
     ROLLOUT_MODE_CONTINUOUS,
-    TELEOP_COMMANDS,
     CommandResult,
     deadline_exceeded,
     handle_infer_rtc,
-    handle_policy_config,
     ok_result,
-    parse_meta,
     parse_rollout_mode,
-    policy_config_status,
 )
 from motrix_edge.errors import ErrorCode
-from motrix_edge.policy import (
-    get_policy,
-    policy_config_runtime_keys,
-    validate_policy_type,
-)
+from motrix_edge.policy import get_policy
 from motrix_edge.policy.contract import ACTION_LAYOUT_JOINT
 from motrix_edge.rtc import build_rtc
 from motrix_edge.utils.data_handler import debug_print, round_floats
 
-from .base import BaseSession, RunResult, SessionState, _cmd_name
+from .base import STEP_LOOP_COMMANDS, BaseSession, CommonDispatch, RunResult, SessionState, _cmd_name
+from .engine import RtcEngine
+from .policy_config import PolicyConfigFeature
 
 
-class InferSession(BaseSession):
+class InferSession(PolicyConfigFeature, BaseSession):
     """推理会话 —— 组合 RobotAdapter + 推理策略客户端的推理执行器。
 
     生命周期由 EdgeNode 管理（session_start → run → session_finish）。**无「多步推理」模式**：
@@ -71,11 +48,14 @@ class InferSession(BaseSession):
     时序平滑由 RTCManager 负责**（策略只提供原始动作块：``policy.infer_chunk``）。**推理时
     rollout 录制** = 像采集一样经 ``capture episode start/end`` 控制一轮 episode——robot 不关心
     是推理还是采集（capturing 期间按帧录 mcap，含 action）。**prompt 仅语言条件策略需要**：
-    需要 prompt 的策略（openpi）在推理/录制开始前必须已 ``infer prompt <text>`` 预置非空文本，
-    否则拒绝；非语言条件策略（lerobot-act）不需要 prompt，不参与门控。录制时由调用方显式
+    需要 prompt 的策略（openpi）在推理/录制开始前必须已预置非空文本（策略配置项 prompt，经
+    ``infer config set`` / ``POST /v1/infers/config`` 写入），否则拒绝；非语言条件策略
+    （lerobot-act）不需要 prompt，不参与门控。录制时由调用方显式
     ``capture sync`` 同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。RTC 参数经
     ``infer rtc`` / ``infer rtc set <json>`` 查询与运行期修改（见 wiki/design/motrix_edge_rtc.md）。
     """
+
+    required_capability = AdapterCapability.EXECUTE
 
     def __init__(
         self, base_cfg, command_source=None, frame_manager=None, adapter=None, policy_type=None, capture_meta_store=None
@@ -88,10 +68,6 @@ class InferSession(BaseSession):
             adapter=adapter,
             capture_meta_store=capture_meta_store,
         )
-        if self.adapter is None:
-            raise ValueError("infer session requires an injected adapter (owned by node)")
-        if not self.adapter.capabilities.supports(AdapterCapability.EXECUTE):
-            raise ValueError("injected adapter does not support EXECUTE capability")
         self.policy_config = self.base_cfg.get("policy", {})
         # 推理步进频率（Hz）：会话 观测→推理→下发动作 的节奏。``policy.infer_freq`` 可调
         # （默认 10Hz ≈ 0.1s/步；测试传 1000 让主循环几乎不 sleep）。间隔 = 1 / infer_freq。
@@ -100,7 +76,7 @@ class InferSession(BaseSession):
         # 运行时策略选择：session run infer 携带 policy_type（HTTP / 命令）；由节点校验
         self.policy_type = policy_type
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
-        # 会话创建即应用内存态已预置的配置项：如 prompt（进入会话前经 `infer prompt` /
+        # 会话创建即应用内存态已预置的配置项：如 prompt（进入会话前经策略配置通道 /
         # POST /v1/infers body 的 config 预置）；不声明该项的策略无此入口（no-op）。
         self._apply_prompt(self.policy_config.get("prompt"))
         # 把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端（openpi 据此
@@ -119,12 +95,12 @@ class InferSession(BaseSession):
         except ValueError as exc:  # 兜底：内存态配置非法时退回代码缺省，保证会话可进入
             debug_print(self.name, f"RTC config invalid ({exc}); falling back to defaults", "WARNING")
             self.rtc = build_rtc(self.policy, control_hz=(1.0 / self.step_interval) if self.step_interval > 0 else None)
+        # 步进引擎：本会话的「本步动作从哪来」= RTC（块缓存 / 切分 / 平滑 / 预取）。manager 仍归
+        # 本会话持有（``infer rtc set`` / ``rtc_status`` 直接作用于它），引擎只是一层统一的取步面。
+        self.engine = RtcEngine(self.rtc)
 
-        self.state = SessionState.INIT  # 实时状态（供外部查询）
-        # 录制状态：推理会话内是否开启了一轮 rollout 录制（capture episode start/end）。
-        # 录制本身由机器人进程自维护（capturing=True 按帧录 mcap）；本标记只作会话侧
-        # 上报（server /v1/infers status 的 recording 字段）。
-        self._recording = False
+        # 录制状态归基座 ``self.recorder``（capture / infer / rl 共用一份）：recording 属性直接
+        # 读它；录制本身由机器人进程自维护（capturing=True 按帧录 mcap），会话只上报。
         # 预热状态：``infer connect`` 启动**工作线程**（连接 + prepare + 取一块丢弃，**不下发动作**）；
         # ``warmup_required``（缺省 true）时 ``warmed_up`` 是 ``infer rollout`` 的硬前置。
         # 预热必须异步：它可能持续几分钟（加载 checkpoint），占了会话循环就会把急停 / 退出 / 状态查询
@@ -157,11 +133,6 @@ class InferSession(BaseSession):
         ``infer rollout`` 前惰性自连（见 ``_ensure_connected``）。
         """
         return bool(getattr(self.policy, "connected", False))
-
-    @property
-    def recording(self) -> bool:
-        """推理会话当前是否开启了一轮 rollout 录制（capture episode start 后为 True）。"""
-        return bool(self._recording)
 
     @property
     def warmed_up(self) -> bool:
@@ -198,20 +169,6 @@ class InferSession(BaseSession):
         """持续推理是否正在运行（``infer rollout continuous`` 启动 → ``infer rollout stop`` 结束）。"""
         return bool(self._continuous)
 
-    @property
-    def prompt(self) -> str | None:
-        """当前推理文本指令（策略客户端 prompt；未设置为 None）。
-
-        仅语言条件策略（``requires_prompt=True``，如 openpi）必需；lerobot-act 等非语言条件策略
-        不需要（保持 None，不参与门控、不下发）。
-        """
-        return getattr(getattr(self, "policy", None), "prompt", None)
-
-    @property
-    def prompt_required(self) -> bool:
-        """当前策略是否需要 prompt（委托 ``policy.requires_prompt``）。"""
-        return bool(getattr(getattr(self, "policy", None), "requires_prompt", False))
-
     def _sync_warmup_with_connection(self) -> None:
         """连接丢失 → 预热失效（``warmed_up`` 复位），可重新预热。
 
@@ -234,29 +191,6 @@ class InferSession(BaseSession):
                 self._warmed_up = False
                 self._warmup_error = "connection lost: re-run 'infer connect' to warm up again"
                 debug_print(self.name, "Connection lost → warmup invalidated (re-warm needed).", "WARNING")
-
-    def _require_prompt(self, cmd) -> bool:
-        """推理 / rollout 录制前门控：**仅对需要 prompt 的策略**（``policy.requires_prompt``）。
-
-        语言条件策略（openpi）要求会话内已 ``infer prompt <text>`` 预置非空文本——空 →
-        回执 rejected（400）并返回 False（不执行推理 / 不开录制）；prompt 同时作为录制
-        episode 的 task_name。非语言条件策略（lerobot-act：ACT 不接受文本条件）**不需要 prompt**，
-        不门控、直接放行。
-        """
-        if not self.prompt_required:
-            return True
-        prompt = self.prompt
-        if not prompt or not str(prompt).strip():
-            self._reply(
-                cmd,
-                CommandResult(
-                    status="rejected",
-                    error="prompt required: set via 'infer prompt <text>' before inference / recording",
-                    code=ErrorCode.INVALID_ARGUMENT,
-                ),
-            )
-            return False
-        return True
 
     def session_start(self):
         """进入会话（节点进入 ACTIVE 前调用）：adapter 已由节点 discover 绑定。
@@ -467,123 +401,6 @@ class InferSession(BaseSession):
             )
             return False
 
-    def _apply_prompt(self, prompt) -> None:
-        """应用推理文本指令（语言条件策略的配置项）：写入策略客户端运行时 ``prompt``。
-
-        openpi 每次 infer 请求携带该文本（服务端每帧重新 tokenize，可换）；不声明 prompt
-        配置项的策略（如 lerobot-act）无 ``prompt`` 属性，此处 no-op。prompt 由 ``infer prompt <text>``
-        会话内预置（不随 rollout 命令传）；需要 prompt 的策略在推理 / 录制开始前必须非空。
-        ``prompt`` 非 None 即设置（空文本已在调用方校验）。
-        """
-        if prompt is None:
-            return
-        policy = getattr(self, "policy", None)
-        if policy is not None and hasattr(policy, "prompt"):
-            policy.prompt = str(prompt)
-            debug_print(self.name, f"Policy prompt set: {prompt!r}", "INFO")
-
-    def _on_policy_config(self, cmd):
-        """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
-        ``infer model(set)``（**端点项 host / port（仅需端点的策略）+ 每个策略自己的配置项**，
-        见 ``policy.POLICY_CONFIG_ITEMS``）。
-
-        **所有配置项一视同仁**——推理端点 host / port（openpi / lerobot-act）与 prompt / 模型路径 /
-        动作块长度走同一 schema、同一校验、同一通道，**没有「连接后锁定」这一额外轴**：
-
-        - 先经 ``handle_policy_config`` 校验并写入内存态 ``base_cfg["policy"]``（下次会话生效）；
-        - 设置类命令再按 **``runtime``** 决定是否即时应用：``runtime=True``（prompt / image_size，
-          策略每次请求现读）→ 应用到运行中的客户端，下一请求生效；``runtime=False``（host / port、
-          lerobot-act 的模型路径 / device / 动作块长度——**进入会话时固化的握手级配置**）→ 只写
-          内存态配置，回执里以 ``deferred`` 告知需退出会话重进。
-
-        参数缺失 / 非法键 / 类型不符 / 越界 → rejected（400，不崩溃）。
-        """
-        result = handle_policy_config(self.base_cfg, cmd, policy_type=self.policy_type)
-        if result.status != "ok":
-            return result
-        written = result.data.get("written") or {}
-        deferred = self._apply_policy_config(written) if written else []
-        if cmd.name == CMD_INFER_PROMPT:  # 保持既有回执形状（prompt=...）
-            return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
-        extra = {"deferred": deferred}  # 恒有该键（可能为空列表）：回执形状稳定，调用方无需防缺键
-        return ok_result(state=getattr(self, "state", "ready"), **(result.data or {}), **extra)
-
-    def _effective_policy_type(self) -> str:
-        """本会话实际使用的策略类型（显式选择优先，否则配置 ``policy.type``；非法 → 空串）。"""
-        try:
-            return validate_policy_type(self.policy_type or self.policy_config.get("type", "openpi"))
-        except ValueError:
-            return ""
-
-    def _apply_policy_config(self, written: dict) -> list[str]:
-        """把**会话内可热改**的配置项应用到运行中的策略客户端（下一请求生效）。
-
-        只有 ``runtime=True`` 的键即时生效：``prompt`` → 策略 prompt（语言条件策略每次请求携带）；
-        其余键 → ``policy.policy_config``（策略自读，如 openpi 的 ``image_size`` 每次请求现读）。
-        ``runtime=False`` 的键（host / port、lerobot-act 的模型路径 / device / 动作块长度）在**进入
-        会话时**已固化到策略客户端与传输层，改内存态配置需退出会话重进才生效。
-
-        返回本次写入但**未**即时生效（延后到下次会话）的键，供回执 ``deferred`` 提示。
-        """
-        runtime_keys = policy_config_runtime_keys(self._effective_policy_type())
-        live = {key: value for key, value in written.items() if key in runtime_keys}
-        if live.get("prompt") is not None:
-            self._apply_prompt(live.pop("prompt"))
-        policy_config = getattr(getattr(self, "policy", None), "policy_config", None)
-        if isinstance(policy_config, dict):
-            for key, value in live.items():
-                if value is None:  # 清除项：删键让运行中的客户端回退代码缺省
-                    policy_config.pop(key, None)
-                else:
-                    policy_config[key] = value
-        return sorted(key for key in written if key not in runtime_keys)
-
-    def policy_config_status(self) -> dict:
-        """策略配置项状态（schema + 当前值 + 缺失必填项；server ``/v1/infers`` 上报 / 前端表单）。"""
-        return policy_config_status(self.base_cfg, policy_type=self.policy_type)
-
-    def _set_prompt_cmd(self, cmd) -> None:
-        """``infer prompt <text>``：会话内预置推理文本指令（推理 / 录制前必须非空）。
-
-        主循环（等待命令）与持续推理循环均可处理；缺文本 → rejected（不崩溃）。
-        仅对**声明了 prompt 配置项**的策略（语言条件，如 openpi）可用。
-        """
-        text = cmd.params.get("prompt")
-        if text is None or not str(text).strip():
-            self._reply(
-                cmd,
-                CommandResult(status="rejected", error="infer prompt requires <text>", code=ErrorCode.INVALID_ARGUMENT),
-            )
-            return
-        self._reply(cmd, self._on_policy_config(cmd))
-
-    def _bind_policy_adapter(self):
-        """把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端。
-
-        布局单一事实来源 = adapter 配置（``adapter config set`` 的 enabled_arms /
-        enabled_cameras）：openpi 客户端据此过滤要下发的相机（**不另读 edge.yml 的相机名**）；
-        策略无 ``bind_adapter``（如 lerobot-act / 测试替身）→ no-op。adapter 未提供相机名 /
-        绑定失败不致命（observe 本就只含启用相机，仍按观测透传）。
-        """
-        bind = getattr(getattr(self, "policy", None), "bind_adapter", None)
-        adapter = getattr(self, "adapter", None)
-        if bind is None or adapter is None or not callable(bind):
-            return
-        camera_names = list(getattr(adapter, "images", None) or [])
-        if not camera_names:
-            caps = getattr(adapter, "capabilities", None)
-            camera_names = list(getattr(caps, "image_names", None) or [])
-        action_dim = getattr(adapter, "action_dim", None)
-        try:
-            bind(action_dim=action_dim, camera_names=camera_names or None)
-            debug_print(
-                self.name,
-                f"Policy bound to adapter layout: action_dim={action_dim}, cameras={camera_names}",
-                "INFO",
-            )
-        except Exception as exc:  # noqa: BLE001 布局绑定失败不致命
-            debug_print(self.name, f"policy bind_adapter failed: {exc}", "WARNING")
-
     def run(self):
         """阻塞式推理主循环：等待就绪 → 显式 infer connect → 等待 infer rollout 步进闭环。"""
         # 复位（reset() 非阻塞设 home 目标；RTC 块队列 / 步号归零）
@@ -591,7 +408,7 @@ class InferSession(BaseSession):
         self.policy.reset()
         self.rtc.reset()
         # 等待机器人就绪（期间可 session quit 退出 / robot estop 急停 / robot reset 复位）
-        result = self._wait_ready(CMD_SESSION_QUIT)
+        result = self._wait_ready()
         if result is not None:
             self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
             return result
@@ -608,8 +425,18 @@ class InferSession(BaseSession):
                 return RunResult.ERROR
             cmd = self.command_source()
             name = _cmd_name(cmd)
-            if self._handle_shared_cmd(name, cmd):  # 共用命令：配置 / RTC / 录制 / 同步
+            if self._dispatch_session_cmd(name, cmd):  # 会话特有：策略配置 / RTC
                 continue
+            outcome = self.dispatch_common(cmd)  # 公共命令：退出 / 急停 / 复位 / 录制 / 同步 / 元信息…
+            if outcome == CommonDispatch.HANDLED:
+                continue
+            if outcome == CommonDispatch.QUIT:
+                self.state = SessionState.FINISHED
+                debug_print(self.name, "Inference finished, robot reset to home.", "INFO")
+                return RunResult.FINISHED
+            if outcome == CommonDispatch.ESTOP:
+                self.state = SessionState.ERROR
+                return RunResult.ERROR
             if name == CMD_INFER_CONNECT:  # 显式连接推理节点（单次尝试，可反复触发重连）
                 self._connect_policy(cmd)
             elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步 / continuous 持续（多步 & drain 已取消）
@@ -635,40 +462,8 @@ class InferSession(BaseSession):
                     self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
                     return result
                 self._run_single(cmd)  # 单步推理（缺省）
-            elif name == CMD_SESSION_QUIT:  # 退出推理会话
-                self.cancel_warmup("session quit")  # 预热在跑也要能退出（打断在飞调用）
-                self.adapter.reset()  # 推理结束回到 home
-                self.state = SessionState.FINISHED
-                self._record_exit(cmd)
-                debug_print(self.name, "Inference finished, robot reset to home.", "INFO")
-                return RunResult.FINISHED
-            elif name == CMD_ROBOT_ESTOP:  # 急停：立即安全停止再进 ERROR
-                self.cancel_warmup("estop")  # 预热在跑也立即取消（不等模型加载完）
-                self.safe_stop()
-                self.state = SessionState.ERROR
-                self._reply(cmd, ok_result(node_state="error"))
-                return RunResult.ERROR
-            elif name == CMD_ROBOT_RESET:  # 复位（会话期间）
-                self.adapter.reset()
-                self._reply(cmd, ok_result(state="ready"))
-            elif name == CMD_ROBOT_EXECUTE:  # 直接下发 raw 动作（qpos 直接作为参数）
-                self._execute_action(cmd)
-            elif name in TELEOP_COMMANDS:  # 遥操作 / 人工接管（robot teleop | teach | takeover）
-                self._set_teleop(cmd)
-
-            elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
-                CMD_CAPTURE_META_LIST,
-                CMD_CAPTURE_META_ADD,
-                CMD_CAPTURE_META_EDIT,
-                CMD_CAPTURE_META_DELETE,
-                CMD_CAPTURE_META_DELETE_KEY,
-            ):
-                self._reply(cmd, self._on_capture_meta(cmd))
             else:  # 未识别命令（当前任务不适用）统一回执，避免 submit 挂起
-                if cmd is not None:
-                    self._reply(
-                        cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
-                    )
+                self.reject_not_applicable(cmd)
                 time.sleep(0.02)  # 无命令时轻量轮询（避免忙等）
 
     def _set_teleop(self, cmd) -> None:
@@ -686,52 +481,25 @@ class InferSession(BaseSession):
         if enabled:
             self.rtc.reset()
 
-    def _handle_shared_cmd(self, name, cmd) -> bool:
-        """单步主循环与持续推理循环**共用**的命令：录制 / 同步 / 策略配置 / RTC。
+    def _dispatch_session_cmd(self, name, cmd) -> bool:
+        """**本会话特有**命令：策略配置（``infer config(set)`` / ``infer model(set)``）与 RTC 参数。
 
-        返回 True = 已回执（调用方 ``continue``）；False = 不是共用命令，由各循环自己的分支
-        处理（单步：rollout / connect / quit / estop / reset / execute / teleop；持续：重复
-        rollout 拒绝 / quit / estop / reset + 步进）。
+        公共命令（退出 / 急停 / 复位 / 直发动作 / 遥操作 / 录制边界 / 同步 / 元信息）已由基座
+        :meth:`BaseSession.dispatch_common` 统一处理；返回 True = 已回执。
 
-        抽出一份的理由：同一批命令曾在两个循环里各写一遍，改一处漏一处（加「遥操作期间拒绝
-        rollout」时就要补两遍），拒绝文案也跟着漂移。
-
-        - ``infer prompt`` / ``infer config(set)`` / ``infer model(set)``：策略配置项（每个策略有
-          独立配置项，见 ``policy.POLICY_CONFIG_ITEMS``），会话内可改（下个请求生效）；
-        - ``infer rtc(set)``：RTC 参数查询 / 设置（应用到运行中的 manager，下一块起生效）；
-        - ``capture episode start``：开始一轮 rollout 录制——**录制 task_name = prompt**，故对需要
-          prompt 的策略同样门控（持续循环里 prompt 必然非空，门控自然通过）；
-        - ``capture episode end`` / ``capture sync``：结束录制 / 同步采集元信息。
+        - ``infer config(set)`` / ``infer model(set)``：策略配置项（**功能模块**
+          :class:`~motrix_edge.session.policy_config.PolicyConfigFeature`，与 RL 会话共用），
+          会话内可改（下个请求生效）；
+        - ``infer rtc(set)``：RTC 参数查询 / 设置（应用到运行中的 manager，下一块起生效）。
 
         ``runtime=False`` 的配置项（host / port 等）在**进入会话时**固化：会话内设置只写内存态
         配置（回执 ``deferred``），下次会话生效——不额外拒绝，也不需要单独一条命令。
         """
-        if name in (
-            CMD_INFER_PROMPT,
-            CMD_INFER_CONFIG,
-            CMD_INFER_CONFIG_SET,
-            CMD_INFER_MODEL,
-            CMD_INFER_MODEL_SET,
-        ):
-            if name == CMD_INFER_PROMPT:  # 文本指令：会话内预置（推理 / 录制前必须非空）
-                self._set_prompt_cmd(cmd)
-            else:
-                self._reply(cmd, self._on_policy_config(cmd))
+        if self.dispatch_policy_config(name, cmd):  # 策略配置项（功能模块）
             return True
-        if name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):
+        if name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数（操作运行中的 manager）
             self._reply(cmd, self._on_infer_rtc(cmd))
             return True
-        if name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始（robot 不关心模式）
-            if self._require_prompt(cmd):  # 需要 prompt 的策略：录制 task_name = prompt
-                self._start_recording(cmd)
-            return True
-        if name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
-            self._end_recording(cmd)
-            return True
-        if name == CMD_CAPTURE_SYNC:  # 同步采集元信息（operator / task_name 等）到机器人进程
-            self._sync_capture_meta_cmd(cmd)
-            return True
-
         return False
 
     def _run_single(self, cmd) -> None:
@@ -750,7 +518,7 @@ class InferSession(BaseSession):
                 cmd, CommandResult(status="rejected", error="observation not ready", code=ErrorCode.UNAVAILABLE)
             )
             return
-        action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 取本步动作
+        action = self.engine.step(obs)  # 引擎（RtcEngine）：必要时登记预取（后台线程）→ 取本步动作
         if action is not None and deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
             self._dropped_actions += 1
             debug_print(
@@ -785,38 +553,35 @@ class InferSession(BaseSession):
             ok_result(state="ready", count=1, action=repr_action, actions=[repr_action]),
         )
 
-    def _start_recording(self, cmd) -> None:
-        """capture episode start：开始一轮推理 rollout 录制（robot 不关心推理/采集）。
+    # ---- 基座钩子（会话特有差异；公共命令的骨架在 BaseSession.dispatch_common）----
+    def _on_common_quit(self, cmd) -> None:
+        """退出会话：预热在跑也要能退出（取消 + 打断在飞调用）→ 回 home（回执由基座做）。"""
+        self.cancel_warmup("session quit")
+        self.adapter.reset()
+
+    def _on_common_estop(self, cmd) -> None:
+        """急停：预热在跑也立即取消（不等模型加载完）；``safe_stop`` 由基座调用。"""
+        self.cancel_warmup("estop")
+
+    def _on_episode_start(self, cmd) -> bool:
+        """``capture episode start``：开始一轮 rollout 录制（录制 ``task_name`` = prompt → 同一门控）。
 
         通知机器人进程开启录制（``adapter.start_capture``）；录制期间 robot 按帧录 mcap
         （含 action）。录制元信息（operator=policy、task_name=prompt）由调用方**显式**
-        ``capture sync`` 同步（本会话只负责默认上报）。
+        ``capture sync`` 同步（见 server /v1/infers status 的 ``capture_meta``）。
         """
-        self.adapter.start_capture()
-        self._recording = True
+        if not self._require_prompt(cmd):  # 需要 prompt 的策略：录制 task_name 为空无意义
+            return False
+        self.recorder.start()  # 开录 + 生成 episode_id（基座共用一份）
         debug_print(self.name, "Rollout recording started (capture episode start).", "INFO")
         self._reply(cmd, ok_result(state="recording", episode="start", recording=True))
+        return True
 
-    def _end_recording(self, cmd) -> None:
-        """capture episode end：结束一轮推理 rollout 录制（机器人进程保存 episode）。"""
-        self.adapter.end_capture()
-        self._recording = False
+    def _on_episode_end(self, cmd) -> None:
+        """``capture episode end``：结束一轮 rollout 录制（机器人进程保存 episode）。"""
+        self.recorder.end()
         debug_print(self.name, "Rollout recording ended (capture episode end).", "INFO")
         self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
-
-    def _sync_capture_meta_cmd(self, cmd) -> None:
-        """capture sync --meta <json>：同步采集元信息（operator/task_name 等）到机器人进程。
-
-        推理录制时（rollout episode）由调用方显式同步：operator 暂定 "policy"、task_name =
-        prompt（会话默认上报，见 server /v1/infers status 的 capture_meta）。
-        """
-        try:
-            meta = parse_meta(cmd.params.get("meta"))
-        except ValueError as exc:
-            self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
-            return
-        self.adapter.sync_capture_meta(meta)
-        self._reply(cmd, ok_result(state=getattr(self, "state", "ready"), meta=meta))
 
     def _on_infer_rtc(self, cmd):
         """``infer rtc`` / ``infer rtc set <json>``：查询 / 设置 RTC 参数（应用到运行中 manager）。
@@ -862,21 +627,6 @@ class InferSession(BaseSession):
                 self._reply(cmd, ok_result(state="ready", continuous=False))
                 debug_print(self.name, "Continuous rollout stopped by request (session kept).", "INFO")
                 return None
-            if name == CMD_SESSION_QUIT:  # 停止持续推理并退出会话
-                self.cancel_warmup("session quit")  # 预热在跑也要能退出（打断在飞调用）
-                self.adapter.reset()  # 推理结束回到 home
-                self._record_exit(cmd)
-                debug_print(self.name, "Continuous rollout stopped, inference finished.", "INFO")
-                return RunResult.FINISHED
-            if name == CMD_ROBOT_ESTOP:  # 急停
-                self.cancel_warmup("estop")  # 预热在跑也立即取消（不等模型加载完）
-                self.safe_stop()
-                self._reply(cmd, ok_result(node_state="error"))
-                return RunResult.ERROR
-            if name == CMD_ROBOT_RESET:  # 持续中复位（回执 ok，继续推理）
-                self.adapter.reset()
-                self._reply(cmd, ok_result(state="continuous"))
-                continue
             if name == CMD_INFER_ROLLOUT:  # 持续中重复 rollout：拒绝
                 self._reply(
                     cmd,
@@ -885,22 +635,24 @@ class InferSession(BaseSession):
                     ),
                 )
                 continue
-            if self._handle_shared_cmd(name, cmd):  # 共用命令：配置 / RTC / 录制 / 同步
+            if self._dispatch_session_cmd(name, cmd):  # 会话特有：策略配置 / RTC
                 continue
-            if cmd is not None:  # 持续中其它命令：拒绝（避免 submit 挂起）
-                self._reply(
-                    cmd,
-                    CommandResult(
-                        status="rejected",
-                        error=f"{name} not applicable during continuous rollout",
-                        code=ErrorCode.CONFLICT,
-                    ),
-                )
+            # 步进循环内只允许「安全 + 本轮边界」类公共命令（见 STEP_LOOP_COMMANDS）：
+            # 退出 / 急停 / 复位 / 录制边界 / 同步走基座钩子，其余（如 robot execute）一律拒绝
+            outcome = self.dispatch_common(cmd, reset_state="continuous", only=STEP_LOOP_COMMANDS)
+            if outcome == CommonDispatch.HANDLED:
+                continue
+            if outcome == CommonDispatch.QUIT:
+                debug_print(self.name, "Continuous rollout stopped, inference finished.", "INFO")
+                return RunResult.FINISHED
+            if outcome == CommonDispatch.ESTOP:
+                return RunResult.ERROR
+            self.reject_not_applicable(cmd, "during continuous rollout")
             obs = self.adapter.observe()
             if obs is None:  # 观测未就绪：按步进间隔轮询
                 time.sleep(self.step_interval)
                 continue
-            action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 本步动作
+            action = self.engine.step(obs)  # 引擎（RtcEngine）：必要时登记预取（后台线程）→ 取本步动作
             if action is not None:
                 # 遥操作（人工接管）中 SDK 拒绝本拍（409，adapter 已限流日志）：继续下一拍，
                 # 遥操作关闭（robot teleop false）后自动恢复下发。
@@ -908,19 +660,20 @@ class InferSession(BaseSession):
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
 
     def _rollout(self, action) -> bool:
-        """按策略声明的动作布局下发本步动作（返回是否已下发）。
+        """本步动作下发：按策略声明的**动作布局**选通路（两条通路的下发语义见
+        wiki/design/robot_pipeline_action_spaces.md）。
 
         - ``joint``（缺省）：每臂 6 关节角 → :meth:`RobotAdapter.rollout`（夹爪另经 ``gripper`` 空间，
           未启用臂补 home）；
-        - ``joint_gripper``：每臂「6 关节角 + 1 夹爪」→ :meth:`RobotAdapter.rollout` 带
+        - ``joint+gripper``：每臂「6 关节角 + 1 夹爪」→ :meth:`RobotAdapter.rollout` 带
           ``layout="joint+gripper"`` + ``arms`` **一次**下发所选臂（未选臂不补 home，关节与夹爪同一
           控制拍落地）。
 
-        布局取值与语义见 ``motrix_edge.policy.contract``；返回 ``False`` = 本拍被拒（遥操作中）。
+        返回 ``False`` = 本拍被拒（遥操作 / 人工接管中）；两条通路的返回语义一致。
         """
         layout = getattr(self.policy, "action_layout", ACTION_LAYOUT_JOINT)
         if layout == ACTION_LAYOUT_JOINT:
-            return self.adapter.rollout(action)
+            return self.adapter.rollout(action)  # 缺省：启用臂 + HOME 展开（旧行为，逐字不变）
         arms = list(getattr(self.adapter, "enabled_arms", []) or []) or None
         return self.adapter.rollout(action, layout=layout, arms=arms)
 

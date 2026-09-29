@@ -15,23 +15,24 @@
 """session 包 —— 会话（任务执行器）注册式工厂 + EdgeNode 节点生命周期。
 
 通过 SESSION_REGISTRY 注册会话类，由 get_session() 依据上层命令（Command.name，
-见 utils/commands.py）或配置 session.type 选择性实例化。
+见 command/ 包）或配置 session.type 选择性实例化。会话按「**基座 + 功能 + 引擎**」三层
+装配（见 wiki/design/motrix_edge_session.md）：只有 ``infer`` / ``rl`` 跑步进循环，
+``capture`` 是基座装配（跑基座命令循环，不 observe）。
 
 EdgeNode（node.py）在自身生命周期中，根据上层下发的命令（session run <type>）
 选择并实例化会话（选择 + 启动合并为一个流程）；会话只是被节点启停的任务执行器。
+
+**本包只有任务会话**：上传（``UploadService``）不是会话（无 ``run`` 生命周期、不经命令
+总线、不占机器人互斥），由服务层直接持有，单独放在 ``motrix_edge/upload.py``。
 """
 
-from .base import BaseSession, RunResult
-from .capture_session import CaptureSession
-from .infer_session import InferSession
-from .upload_session import UploadError, UploadSession
+from .base import BaseSession, CaptureSession, RunResult
+from .infer import InferSession
 
 # 注册表：会话类型名 -> 会话类
 SESSION_REGISTRY = {
     "capture": CaptureSession,
-    "capture_session": CaptureSession,
     "infer": InferSession,
-    "infer_session": InferSession,
 }
 
 
@@ -58,9 +59,6 @@ def get_session(
       capture_meta_store: 采集元信息选项存储（``CaptureMetaStore``）；节点注入同一实例，
                      使「会话内 CLI 命令」与节点命令共用一份数据与一把锁（缺省 None = 会话
                      自行按需创建；不注入时不传该实参，兼容自定义会话）。
-
-    ``UploadSession`` 与 CaptureSession / InferSession 同包，但属于文件管理会话，不进入
-    EdgeNode 的 RobotAdapter 任务状态机，通过 ``UploadSession`` 直接实例化。
     """
     if session_type is None:
         session_type = base_cfg.get("session", {}).get("type", "capture")
@@ -88,8 +86,6 @@ __all__ = [
     "RunResult",
     "CaptureSession",
     "InferSession",
-    "UploadError",
-    "UploadSession",
     "SESSION_REGISTRY",
     "get_session",
 ]

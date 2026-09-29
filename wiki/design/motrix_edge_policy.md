@@ -314,7 +314,7 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
     `infer rollout` rejected 409（不惰性自连）；置 false = 允许 rollout 惰性自连（脚本 / 联调）。
     **预热进行中一律 409**（与 `warmup_required` 无关）：策略客户端的契约是「可跨线程调用，同一时刻
     至多一个请求」（`rtc/manager.py`）——预热线程与 rollout 并发会破坏 ws 的一问一答 / lerobot-act
-    的单飞取块，并并发 `adapter.observe()`。预热期间允许的其它命令（`infer prompt` / `infer config` /
+    的单飞取块，并并发 `adapter.observe()`。预热期间允许的其它命令（`infer config` /
     `infer rtc` / 录制 / status）都**不发起策略请求**，因此不在此限。
 -   **异步**：预热可能持续几十秒～几分钟（加载 checkpoint / 首帧推理），占住会话循环就会把急停、
     退出、状态查询一起挡住（node 主循环在任务运行期间不 poll 普通命令）。故 `infer connect` 把它
@@ -323,7 +323,7 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
     `GET /v1/infers` 的同名字段供轮询。
 -   **可中断**：`robot estop`（走命令总线旁路，任何状态即时生效）或 `session quit` → 置取消标志 +
     **关传输**（gRPC channel / ws 关闭会打断在飞调用）→ 工作线程以 `cancelled` 收尾，`warmed_up`
-    保持 false（可重新预热）。预热期间 `infer prompt` / `infer config` / `capture meta` 等普通命令
+    保持 false（可重新预热）。预热期间 `infer config` / `capture meta` 等普通命令
     照旧响应。
 -   **闩锁绑定在连接上**：`warmed_up` 是「本**连接**已预热」——连接一断（推理服务端重启 / 链路断开），
     服务端会话与已加载模型都不再可信（lerobot-act 重连后会重发策略指令、**重新加载 checkpoint**），

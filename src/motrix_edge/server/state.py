@@ -24,6 +24,8 @@ adapter」这一段（身份 + 心跳缓存 + 控制频率 + 遥操作位）与�
 
 from __future__ import annotations
 
+from motrix_edge.upload import resolve_data_dir
+
 
 def adapter_ref(node) -> dict:
     """当前节点 active adapter 身份（``name`` / ``type``）；未绑定 → 空值。
@@ -70,6 +72,15 @@ def adapter_state(node) -> dict:
 def capture_raw(node):
     """node 缓存的采集状态对象（``CaptureStatus``；读取 ``data_dir`` 等字段用）；未缓存 → None。"""
     return getattr(node, "capture_status", None) if node is not None else None
+
+
+def capture_data_dir(node, fallback: str | None = None) -> str | None:
+    """机器人数据目录（**唯一解析点**，见 ``upload.resolve_data_dir``）。
+
+    = adapter 上报的采集目录（``node.capture_status.data_dir``，与 ``/v1/captures`` 同源）
+    → ``fallback``（上传服务传 ``upload.data_dir``）；都没上报 / 配置 → None。
+    """
+    return resolve_data_dir(capture_raw(node), fallback)
 
 
 def capture_status(node) -> dict | None:

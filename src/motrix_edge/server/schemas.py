@@ -117,18 +117,12 @@ class InferRolloutRequest(BaseModel):
     """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续）。
 
     多步（count）与 drain（缓存推理）模式已取消（多余字段被忽略）；prompt 不随 rollout 传，
-    由会话内 ``infer prompt`` 预置（为空不能开始推理 / 录制）。
+    由策略配置项 ``prompt`` 预置（经 ``POST /v1/infers/config``；为空不能开始推理 / 录制）。
     """
 
     mode: Literal["single", "continuous"] | None = Field(
         default=None, description="推理模式：single（缺省）/ continuous"
     )
-
-
-class InferPromptRequest(BaseModel):
-    """POST /v1/infers/prompt 请求体：文本指令（仅需要 prompt 的策略，如 openpi）。"""
-
-    prompt: str = Field(..., min_length=1, description="文本指令（需要 prompt 的策略推理前必须设置）")
 
 
 class InferSyncRequest(BaseModel):
@@ -169,7 +163,6 @@ class InferConfigRequest(BaseModel):
     内存态 ``policy`` 段：``runtime: True`` 的键立即应用到运行中的策略客户端（下一请求生效），
     ``runtime: False`` 的键（host / port、模型路径…）要退出会话重进才生效，回执 ``deferred``
     列出这些键。未知键 / 类型不符 / 必填为空 → 400；空值（``null`` / 空串）表示清除该项。
-    仅需 prompt 的策略也可用 ``POST /v1/infers/prompt`` 快捷入口。
     """
 
     config: dict = Field(default_factory=dict, description="策略配置项（按当前策略 schema 校验）")
@@ -204,7 +197,7 @@ class UploadPackRequest(BaseModel):
     """POST /v1/uploads/pack 请求体：打包（移动）选中 episode 的包名。
 
     包目录建在当前扫描目录下（``<folder_path>/<name>/``）；缺省 ``pack<选中数量>``；
-    目录同名已存在 → 409（需改名）；见 wiki/design/motrix_edge_upload_session.md。
+    目录同名已存在 → 409（需改名）；见 wiki/design/motrix_edge_upload.md。
     """
 
     name: str | None = Field(default=None, description="包名（单个目录名）；缺省 pack<选中数量>")
@@ -234,7 +227,6 @@ __all__ = [
     "CommandResponse",
     "InferConfigRequest",
     "InferEnterRequest",
-    "InferPromptRequest",
     "InferRTCRequest",
     "InferRolloutRequest",
     "InferSyncRequest",
