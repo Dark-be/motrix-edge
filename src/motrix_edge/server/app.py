@@ -16,7 +16,7 @@
 
 端点按域拆在 ``server/routes/*``（每个模块只做 HTTP 映射：入参 → controller → dict）；
 controller 在 ``server/*.py``（域语义，不依赖 FastAPI；分层见 ``server/deps.py``）。
-本模块只做四件事：缺省构造 identity / 租约 / 上传会话、挂中间件、注册统一错误处理器、
+本模块只做四件事：缺省构造 identity / 租约 / 上传服务、挂中间件、注册统一错误处理器、
 挂载各域 router。端点清单见 wiki/design/motrix_edge_server.md。
 
 **路由总则**：所有 HTTP handler 一律同步 ``def``（FastAPI 交给线程池）——它们内部都是
@@ -25,7 +25,7 @@ adapter 的同步 HTTP 查询）。写成 ``async def`` 会占住 uvicorn 事件
 health / preview / WebRTC 信令。仅中间件（correlation / no-store）用 ``async def``）。
 
 **错误处理**：各层只抛 ``ServiceError`` 子类（``motrix_edge.errors``）且只讲 **edge 错误码**
-（``ErrorCode``）——命令层 ``CommandError``、租约层 ``LeaseError``、会话层 ``UploadError``、
+（``ErrorCode``）——命令层 ``CommandError``、租约层 ``LeaseError``、上传服务 ``UploadError``、
 服务层各 ``*Error``；**HTTP 状态码由本层维护**（``_HTTP_STATUS`` 映射），响应体回传 code：
 ``{"detail": ..., "code": ...}``。
 
@@ -54,7 +54,7 @@ from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.routes import build_routers
 from motrix_edge.server.rpent import RpentService
-from motrix_edge.session.upload_session import UploadSession
+from motrix_edge.upload import UploadService
 from motrix_edge.utils.version import get_package_version
 
 if TYPE_CHECKING:  # 可选依赖（--extra webrtc）：仅类型标注用，import 时不触碰 aiortc
@@ -83,7 +83,7 @@ def create_app(
     commands: CommandService | None = None,
     lease_manager: LeaseManager | None = None,
     webrtc: WebRTCService | None = None,
-    uploads: UploadSession | None = None,
+    uploads: UploadService | None = None,
     preview: PreviewService | None = None,
     meta: CaptureMetaService | None = None,
     rpent: RpentService | None = None,
@@ -100,7 +100,7 @@ def create_app(
                    ``/v1/leases/*`` 总可用。
     webrtc: 可选 ``WebRTCService``（aiortc 推流，视频轨道从 FrameManager 取帧）；
             未注入时 ``/v1/webrtc/offer`` 返回 501。
-    uploads: 可选 ``UploadSession``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
+    uploads: 可选 ``UploadService``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
     preview: 可选 ``PreviewService``（**独立于采集 / 推理会话**，直接读 node.frame_manager
              观测缓存）；注入后注册 ``/v1/preview`` 观测预览端点，未注入时返回 501。
     meta: 可选 ``CaptureMetaService``（采集元信息选项，直连 ``CaptureMetaStore``）；
@@ -112,8 +112,8 @@ def create_app(
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
     lease_manager = lease_manager or build_lease_manager(base_cfg)
-    # 上传会话（``upload`` 段）：本地 episode 扫描 / 选择 / 打包与上传队列状态
-    uploads = uploads or UploadSession(base_cfg)
+    # 上传服务（``upload`` 段）：本地 episode 扫描 / 选择 / 打包与上传队列状态
+    uploads = uploads or UploadService(base_cfg)
 
     services = Services(
         identity=identity,
@@ -164,7 +164,7 @@ def create_app(
     # ---- 统一错误处理 ----------------------------------------------------------
     #
     # 各层只抛自己的错误类型（``motrix_edge.errors.ServiceError`` 子类：命令层 ``CommandError``、
-    # 租约层 ``LeaseError``、会话层 ``UploadError``、服务层各 ``*Error``）且只讲 **edge 错误码**；
+    # 租约层 ``LeaseError``、上传服务 ``UploadError``、服务层各 ``*Error``）且只讲 **edge 错误码**；
     # **HTTP 状态码由本层维护**（:data:`_HTTP_STATUS`）—— 此处注册**一个**处理器，把 code 与
     # 人读原因一起渲染成 ``{"detail": ..., "code": ...}``。故路由层只需直接调 service。
     def _service_error_handler(request: Request, exc: Exception):

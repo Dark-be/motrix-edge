@@ -25,8 +25,8 @@ from fake_robot import FakeRobotAdapter
 from motrix_edge.command import build_command_registry
 from motrix_edge.errors import ErrorCode
 from motrix_edge.frame import FrameManager
-from motrix_edge.session import capture_session
-from motrix_edge.session.base import RunResult
+from motrix_edge.session import CaptureSession
+from motrix_edge.session.base import RunResult, SessionState
 
 _REGISTRY = build_command_registry()
 
@@ -62,7 +62,7 @@ def make_config(tmp_path):
 def test_capture_consumes_commands_until_exit(tmp_path):
     """采集会话：消费命令直到 session quit 退出；**不写 frame_manager**（显示观测归节点级）。"""
     fm = FrameManager()
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals("session quit"),
         frame_manager=fm,
@@ -77,14 +77,14 @@ def test_capture_consumes_commands_until_exit(tmp_path):
 
 def test_capture_estop_during_observe_safe_stops(tmp_path):
     """观测期间急停：safe_stop 后回 ERROR。"""
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals("robot estop"),
         adapter=FakeRobotAdapter(config={"data_dir": str(tmp_path)}),
     )
     session.session_start()
     assert session.run() == RunResult.ERROR
-    assert session.state == capture_session.SessionState.ERROR
+    assert session.state == SessionState.ERROR
     session.session_finish()
 
 
@@ -92,7 +92,7 @@ def test_capture_robot_execute_during_observe(tmp_path):
     """观测期间 robot execute：解析值参数（缺省关节空间）→ adapter.execute。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
     joints = ",".join("0" for _ in range(12))
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals(f"robot execute {joints}", "session quit"),
         frame_manager=FrameManager(),
@@ -110,7 +110,7 @@ def test_capture_robot_reset_during_observe(tmp_path):
     replies = []
     reset = _REGISTRY.parse_argv(["robot", "reset"])
     reset.reply_to = replies.append
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals(reset, "session quit"),
         frame_manager=FrameManager(),
@@ -124,7 +124,7 @@ def test_capture_robot_reset_during_observe(tmp_path):
 
 
 def test_capture_session_does_not_handle_policy_config(tmp_path):
-    """数采会话不处理策略配置命令（infer config / infer model / infer prompt）→ 409。
+    """数采会话不处理策略配置命令（infer config / infer model）→ 409。
 
     端点（host / port）就是普通 policy config 项，**不再有**会话内可用的专用命令；数采期间
     改策略配置请在空闲态（无会话）或用 CLI / HTTP 配置通道完成。
@@ -134,7 +134,7 @@ def test_capture_session_does_not_handle_policy_config(tmp_path):
     config_set = _REGISTRY.parse_argv(["infer", "config", "set", '{"port": 9000}'])
     config_set.reply_to = replies.append
     cfg = make_config(tmp_path)
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         cfg,
         command_source=make_signals(config_set, "session quit"),
         frame_manager=FrameManager(),
@@ -149,7 +149,7 @@ def test_capture_session_does_not_handle_policy_config(tmp_path):
 
 def test_capture_stop_returns_error(tmp_path):
     """外部请求停止（stop）：会话主循环立即返回 ERROR（node 失联 ERROR 时终止任务线程）。"""
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=lambda: None,
         frame_manager=FrameManager(),
@@ -158,14 +158,14 @@ def test_capture_stop_returns_error(tmp_path):
     session.session_start()
     session.stop()
     assert session.run() == RunResult.ERROR
-    assert session.state == capture_session.SessionState.ERROR
+    assert session.state == SessionState.ERROR
     session.session_finish()
 
 
 def test_capture_robot_teleop_during_observe(tmp_path):
     """观测期间 robot teleop：解析 true/false 参数 → adapter.set_teleop（遥操作开关）。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals("robot teleop true", "robot teleop false delta", "session quit"),
         frame_manager=FrameManager(),
@@ -181,7 +181,7 @@ def test_capture_robot_teleop_during_observe(tmp_path):
 def test_capture_episode_start_end_during_observe(tmp_path):
     """观测期间 capture episode start / end：adapter.start_capture / end_capture。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals("capture episode start", "capture episode end", "session quit"),
         frame_manager=FrameManager(),
@@ -196,7 +196,7 @@ def test_capture_episode_start_end_during_observe(tmp_path):
 def test_capture_sync_meta_during_observe(tmp_path):
     """观测期间 capture sync --meta <json>：解析 JSON → adapter.sync_capture_meta。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals(
             'capture sync --meta \'{"operator": "张三", "task_name": "巡检"}\'',
@@ -217,7 +217,7 @@ def test_capture_sync_rejects_invalid_meta(tmp_path):
     replies = []
     cmd = _REGISTRY.parse_argv(["capture", "sync", "--meta", "not-json"])
     cmd.reply_to = replies.append
-    session = capture_session.CaptureSession(
+    session = CaptureSession(
         make_config(tmp_path),
         command_source=make_signals(cmd, "session quit"),
         frame_manager=FrameManager(),

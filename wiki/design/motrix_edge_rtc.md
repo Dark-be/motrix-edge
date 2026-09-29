@@ -8,6 +8,16 @@
 下一块，控制环不阻塞）与**绝对步号推进**。
 会话（InferSession）只调用 `rtc.infer(observation)` 取「本步应下发的动作」。
 
+两个会话共用它，但**用面不同**：
+
+-   **推理会话（`InferSession`）**：`rtc.infer(...)` 的完整面（块缓存 + 三元切分 + **重叠过渡** + 预取），
+    引擎层是 `RtcEngine`（薄转发）；
+-   **残差 RL 会话（`RLSession`）**：只用「块缓存 + 预取」，**恒 `suffix_len = 0`**（不做重叠过渡）
+    ——执行序列要逐位等于策略输出，因为 `base_action` 会进 learner 的 `state`（见
+    [残差 RL 会话](./motrix_edge_rl.md) 整体原则 6）；引擎层是 `RtcResidualEngine`（多一层残差合成）。
+    它另多用一个 `drop_pending()`：丢掉未执行的块但**保留步号**（`reset()` 会把步号归零，而 RL 的步号
+    是 `TimedObservation.timestep`，中途归零会让服务端重复应答同一时刻）。
+
 > **落地范围**：本提交只交付 `rtc/` 包、`policy.rtc` 配置段与测试；**运行期接线**（策略客户端
 > `infer_chunk` 契约、会话调用 `rtc.infer`、`infer rtc` 命令、`/v1/infers/rtc` 与 `/v1/infers` 的
 > `rtc` 字段）随 **#8（MR !7）** 落地——下面「运行时命令」「HTTP 暴露」两节描述的是**接线后**的形态。

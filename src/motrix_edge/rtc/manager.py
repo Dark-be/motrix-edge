@@ -54,7 +54,7 @@ import time
 
 import numpy as np
 
-from motrix_edge.rtc.base import DEFAULT_AGGREGATE_FN, as_action_chunk, get_aggregate_fn, split_lens
+from motrix_edge.rtc.base import DEFAULT_AGGREGATE_FN, as_action_chunk, chunk_step_action, get_aggregate_fn, split_lens
 
 # 代码缺省参数（edge.yml ``policy.rtc`` 段可覆盖；运行期可经 ``configure`` 改，命令入口见 #8）。
 DEFAULT_RTC_CONFIG = {
@@ -553,13 +553,16 @@ class RTCManager:
             if self._drop_stale_locked(chunk):
                 return None
             age = self._age(chunk)  # 当前步在块内的下标（= 已过期步数）
+            action = chunk_step_action(chunk, self._index)  # 共享的过期口径（F11，与 RL 闭环同一份）
+            if action is None:  # 整块落在过去：计过期，不推进步号
+                self._stale_chunks += 1
+                return None
             self._last_chunk = {
                 "start_index": chunk.start_index,
                 "height": chunk.height,
                 "lens": split_lens(chunk.height, age, 1, 0),
                 "overlap_steps": 0,
             }
-            action = chunk.actions[age]
             self._index += 1
             return action
 
