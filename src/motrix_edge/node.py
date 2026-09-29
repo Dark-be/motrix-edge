@@ -46,7 +46,6 @@ from motrix_edge.command import (
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
-    CMD_INFER_PROMPT,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
     CMD_LEASE_REVOKE,
@@ -313,14 +312,13 @@ class EdgeNode:
             self._reply(cmd, self._on_infer_rtc(cmd))
             return
 
-        # 策略配置命令族（infer config / infer config set <json> / infer prompt <text> /
-        # infer model(set)）：**每个策略有自己的独立配置项**（prompt / 模型路径 / 设备…）；
+        # 策略配置命令族（infer config / infer config set <json> / infer model(set)）：
+        # **每个策略有自己的独立配置项**（prompt / 模型路径 / 设备…）；
         # 配置级命令，任何状态可用（写内存态 base_cfg["policy"]，不写回 yaml），下次
         # session run infer 生效；会话内由 InferSession 额外写入运行中的策略客户端。
         if cmd.name in (
             CMD_INFER_CONFIG,
             CMD_INFER_CONFIG_SET,
-            CMD_INFER_PROMPT,
             CMD_INFER_MODEL,
             CMD_INFER_MODEL_SET,
         ):
@@ -426,7 +424,7 @@ class EdgeNode:
         return handle_infer_rtc(self.base_cfg, cmd)
 
     def _on_policy_config(self, cmd):
-        """策略配置命令族：infer config / infer config set / infer prompt / infer model(set)。
+        """策略配置命令族：infer config / infer config set / infer model(set)。
 
         委托给 ``command.config_commands.handle_policy_config``（写内存态 ``base_cfg["policy"]``，
         按**当前策略的配置项 schema** 校验）；配置级命令（任何状态可用）。

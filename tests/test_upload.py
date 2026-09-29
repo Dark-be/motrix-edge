@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""UploadSession 单元测试：目录扫描、episode 配对、选择、边界与打包。"""
+"""UploadService 单元测试：目录扫描、episode 配对、选择、边界与打包。"""
 
 import json
 import threading
@@ -21,12 +21,12 @@ from pathlib import Path
 import pytest
 
 from motrix_edge.errors import ErrorCode
-from motrix_edge.session import UploadError, UploadSession
+from motrix_edge.upload import UploadError, UploadService
 
 
-def _session(tmp_path, **upload) -> UploadSession:
-    """构造带白名单的会话：允许扫描的根 = tmp_path（等价于 upload.data_dir 指向它）。"""
-    return UploadSession({"upload": {"data_dir": str(tmp_path), **upload}})
+def _session(tmp_path, **upload) -> UploadService:
+    """构造带白名单的服务：允许扫描的根 = tmp_path（等价于 upload.data_dir 指向它）。"""
+    return UploadService({"upload": {"data_dir": str(tmp_path), **upload}})
 
 
 def test_scan_pairs_episode_files_and_reads_metadata(tmp_path):
@@ -321,7 +321,7 @@ def test_pack_requires_scan_and_selection(tmp_path):
 def test_pack_rolls_back_when_move_fails(tmp_path, monkeypatch):
     """移动失败 → 回滚（已移动的移回原处 + 删掉空包目录）→ 500；源数据不丢。"""
     session = _packed_session(tmp_path, 2)
-    import motrix_edge.session.upload_session as module
+    import motrix_edge.upload as module
 
     real_move = module.shutil.move
     calls = {"count": 0}
@@ -351,7 +351,7 @@ def test_pack_keeps_leftovers_when_rollback_also_fails(tmp_path, monkeypatch):
     因此宁可留下残留让人来收拾，也不静默删除。
     """
     session = _packed_session(tmp_path, 1)  # 选中 episode_0（.mcap + .json）
-    import motrix_edge.session.upload_session as module
+    import motrix_edge.upload as module
 
     real_move = module.shutil.move
     calls = {"count": 0}
@@ -392,7 +392,7 @@ def test_scan_rejects_folder_outside_allowed_roots(tmp_path):
     outside = tmp_path / "outside"
     allowed.mkdir()
     outside.mkdir()
-    session = UploadSession({"upload": {"data_dir": str(allowed)}})
+    session = UploadService({"upload": {"data_dir": str(allowed)}})
 
     with pytest.raises(UploadError, match="outside the allowed upload roots") as excinfo:
         session.scan(str(outside))
@@ -407,7 +407,7 @@ def test_scan_rejects_when_no_allowed_root(tmp_path):
     """未配置任何允许根（无 upload.data_dir 且无 adapter 数据目录）→ 409，不扫任意路径。"""
     _make_episodes(tmp_path, 1)
     with pytest.raises(UploadError, match="no allowed upload root") as excinfo:
-        UploadSession({"upload": {}}).scan(str(tmp_path))  # 既无 upload.data_dir 也无 adapter 目录
+        UploadService({"upload": {}}).scan(str(tmp_path))  # 既无 upload.data_dir 也无 adapter 目录
     assert excinfo.value.code == ErrorCode.CONFLICT
 
 
@@ -417,7 +417,7 @@ def test_allowed_roots_list_is_not_mutated(tmp_path):
     否则每次解析都会在别人的 list 里多插一份 upload.data_dir（无界增长）。
     """
     shared = [str(tmp_path / "allowed")]
-    session = UploadSession({"upload": {"data_dir": str(tmp_path / "cfg")}}, allowed_roots=shared)
+    session = UploadService({"upload": {"data_dir": str(tmp_path / "cfg")}}, allowed_roots=shared)
 
     for _ in range(2):
         session._roots()

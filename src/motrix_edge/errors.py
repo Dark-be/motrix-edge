@@ -15,7 +15,7 @@
 """Edge 统一业务错误 —— **edge 自己的错误码**（词表唯一来源，与传输无关）。
 
 各层只抛自己的错误类型（命令层 ``command.CommandError``、租约层 ``lease.LeaseError``、
-会话层 ``session.UploadError``、服务层 ``server.PreviewError`` / ``WebRTCError`` …），且只讲
+上传服务 ``upload.UploadError``、服务层 ``server.PreviewError`` / ``WebRTCError`` …），且只讲
 **edge 错误码**（:class:`ErrorCode`）：
 
 - HTTP 面（``server/app.py``）**自行维护** ``code → HTTP 状态码`` 映射，并把 code 与人读原因
@@ -23,7 +23,7 @@
 - 本地 CLI 直接展示 code（``[infer config] rejected (conflict): ...``）。
 
 即：**HTTP 状态码是 HTTP 自己的事，业务层只认自己的 code**。放在顶层（而不是 ``server/``）
-是为了让命令层 / 租约层 / 会话层都能继承而不产生反向依赖（``server`` 是最上层）。
+是为了让命令层 / 租约层 / 会话层 / 域服务层都能继承而不产生反向依赖（``server`` 是最上层）。
 """
 
 from __future__ import annotations

@@ -12,7 +12,13 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""UploadSession —— 本地采集 episode 扫描、汇总、选择与打包（上传队列状态）。
+"""UploadService —— 本地采集 episode 扫描、汇总、选择与打包（上传队列状态）。
+
+**不是会话**：不继承 ``session.BaseSession``、不在 ``SESSION_REGISTRY``、无 ``run`` /
+``session_start`` / ``session_finish``；由服务层直接持有（``server.deps.Services.uploads``，
+经 ``/v1/uploads/*`` 点对点调用），**不经命令总线、不占机器人互斥、不占会话槽位**——
+节点 READY 且没有任何会话时同样可用。故本模块**不在 ``session/`` 包内**，与 ``session/`` /
+``server/`` 平级；设计见 [上传（upload）](../../wiki/design/motrix_edge_upload.md)。
 
 **范围**：本版本只做**本地文件查看 / 筛选 / 打包**——数据由数采人员在前端确认后打包，
 再**手动上传**到数据平台。程序化上传（消费者为数据平台的上传 API，地址即 ``upload.endpoint``）
@@ -32,12 +38,28 @@ from motrix_edge.errors import ErrorCode, ServiceError
 
 
 class UploadError(ServiceError):
-    """上传会话操作失败（缺省 400）。"""
+    """上传服务操作失败（缺省 400）。"""
 
     default_code = ErrorCode.INVALID_ARGUMENT
 
 
-class UploadSession:
+def resolve_data_dir(capture_status=None, configured: str | None = None) -> str | None:
+    """机器人数据目录的**唯一解析点**：adapter 上报的采集目录 → ``upload.data_dir`` 兜底。
+
+    “数据目录” = 机器人进程自维护的采集目录（``capture_status.data_dir``，与
+    ``GET /v1/captures`` 同源）；进程尚未上报（未绑定 / 未运行时）→ 回退配置项
+    ``upload.data_dir``；两者都无 → None。
+
+    上传服务（扫描白名单 + 缺省扫描目录）与状态快照（磁盘占用）共用本函数，避免同一条回退链
+    在多处各写一份而漂移；``server.state.capture_data_dir`` 是它在 node 上的包装。
+    """
+    data_dir = getattr(capture_status, "data_dir", None) if capture_status is not None else None
+    if data_dir:
+        return str(data_dir)
+    return str(configured) if configured else None
+
+
+class UploadService:
     """扫描本地目录并按同名 stem 配对 ``.mcap`` / ``.json`` episode。
 
     JSON 描述文件按 ``METADATA_SCHEMA`` **schema 驱动**提取为结构化 ``meta`` 字段；
@@ -225,7 +247,7 @@ class UploadSession:
     def pack(self, name: str | None = None) -> dict:
         """把**选择集**打包到 ``<扫描目录>/<包名>/``（`.mcap` + `.json`，**移动**）。
 
-        设计见 wiki/design/motrix_edge_upload_session.md：
+        设计见 wiki/design/motrix_edge_upload.md：
 
           - 包名缺省 ``pack<选中数量>``；**目录已存在则拒绝（409）**（不覆盖 / 不合并）——
             重名时由调用方改名重试；非法包名（不是单个安全路径段）→ 400；

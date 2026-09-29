@@ -40,7 +40,7 @@ from motrix_edge.server.command import CommandService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.rpent import RpentService
-from motrix_edge.session.upload_session import UploadSession
+from motrix_edge.upload import UploadService
 
 if TYPE_CHECKING:  # 可选依赖（--extra webrtc）：仅类型标注用，import 时不触碰 aiortc
     from motrix_edge.server.webrtc import WebRTCService
@@ -58,7 +58,7 @@ class Services:
 
     identity: Identity
     leases: LeaseManager
-    uploads: UploadSession
+    uploads: UploadService
     node: EdgeNode | None = None
     commands: CommandService | None = None
     meta: CaptureMetaService | None = None

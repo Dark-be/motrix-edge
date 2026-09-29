@@ -36,7 +36,8 @@ CLI / 控制面 ──CommandBus──▶ EdgeNode（node 生命周期状态机�
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `node.py`   | `EdgeNode` 生命周期状态机、命令分发、周期任务                                                                                                             |
 | `adapter/`  | RobotAdapter HAL：`HttpShmAdapter` 共享基类（HTTP 指令下行 + 共享内存观测上行）+ `DualPiperAdapter` / `TestRobotAdapter`，以及 `/v1` / 共享内存契约       |
-| `session/`  | 任务会话：`CaptureSession`（数采）/ `InferSession`（推理）；文件会话：`UploadSession`（本地 episode 扫描 / 选择 / 打包）                                  |
+| `session/`  | 任务会话：`BaseSession`（基座）+ `CaptureSession` / `InferSession`，`get_session` 工厂；按「基座 + 功能 + 引擎」装配                                      |
+| `upload.py` | `UploadService`：本地 episode 扫描 / 选择 / 打包与上传队列状态（**不是会话**，服务层直接持有）                                                            |
 | `policy/`   | 推理策略客户端（openpi 等）；`InferSession` 内经 ws 请求推理节点                                                                                          |
 | `server/`   | HTTP 控制面（`/v1/*`）+ WebRTC 观测推流                                                                                                                   |
 | `frame/`    | `FrameManager` 观测帧缓冲（preview / WebRTC 消费）                                                                                                        |

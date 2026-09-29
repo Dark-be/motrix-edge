@@ -60,7 +60,6 @@ CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous
 CMD_INFER_ROLLOUT_STOP = "infer rollout stop"  # 停止持续推理（回到会话 READY，不退会话也不断策略连接）
 CMD_INFER_CONNECT = "infer connect"  # 连接 + 启动异步预热（推理会话内消费；立即回执，重复调用幂等）
 
-CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；会话内运行时可改）
 CMD_INFER_RTC = "infer rtc"  # 查询 RTC 参数与运行状态（内存态 policy.rtc）
 CMD_INFER_RTC_SET = "infer rtc set"  # 设置 RTC 参数（位置参数 json，JSON 对象；内存态 policy.rtc）
 CMD_INFER_MODEL = "infer model"  # 查询 lerobot 类策略的模型路径（内存态 policy.pretrained_name_or_path）

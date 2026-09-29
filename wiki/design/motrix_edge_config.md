@@ -111,7 +111,7 @@
 | `adapter`    | 机器人进程发现 host / port（缺省 127.0.0.1:8090）；启用臂 / 相机为**运行时配置**（命令 / 前端）                                                                                          | node / adapter               |
 | `capture`    | 采集会话配置（观测由节点级持续写入，`obs_freq` 不再被会话消费）                                                                                                                          | node / CaptureSession        |
 | `policy`     | 推理节点默认 host / port；`policy.rtc` 为实时动作块参数（块长上限 H / 前置段 P / 执行段 E / 后缀段 S / 重叠聚合）；策略专属配置项（prompt / 模型路径等）**运行时给定**（`infer config`） | policy / rtc / policy config |
-| `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                                                                                                        | UploadSession                |
+| `upload`     | 本地采集目录与远端上传目标（data_dir / endpoint）                                                                                                                                        | UploadService                |
 
 ## 命令行接口（CLI）
 

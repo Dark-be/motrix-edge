@@ -32,7 +32,7 @@ server:
       pos_tol: 0.05 # 位置容差（米）：与姿态**分别**判定，不把米和弧度混进一个阈值
       rot_tol: 0.4 # 姿态 / 关节容差（弧度）：≈23°，盖住 MIT 静态误差
 
-# 上传会话（UploadSession，/v1/uploads/*；见 wiki/design/motrix_edge_upload_session.md）：
+# 上传服务（UploadService，/v1/uploads/*；见 wiki/design/motrix_edge_upload.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。
 # **本版本只做本地文件查看与打包**：临时性的数据查看与筛选由数采人员经前端进行，打包后
 # 的文件由数采人员**手动上传**到数据平台；程序化上传（消费者为数据平台的上传 API）留待
@@ -62,7 +62,7 @@ policy:
   # 声明见 policy.POLICY_CONFIG_ITEMS；查询 `infer config`，设置 `infer config set <json>`
   # 或 POST /v1/infers/config（会话内）/ POST /v1/infers body `config`（进入会话前）。
   # **运行时给定，不在此维护**：模型路径（lerobot-act 的 pretrained_name_or_path，`infer model set`）
-  # 与文本指令（openpi 的 prompt，`infer prompt`）由调用方 / 前端按所选策略动态填写。
+  # 与文本指令（openpi 的 prompt，`infer config set`）由调用方 / 前端按所选策略动态填写。
   device: cuda # lerobot-act：下发给服务端的推理设备（GPU 部署填 cuda / cuda:0）
   actions_per_chunk: 50 # lerobot-act：动作块长 K（须匹配模型 chunk）
   # --- RTC（实时动作块管理：异步预取 + 三元切分 + 过渡策略；见 wiki/design/motrix_edge_rtc.md）---

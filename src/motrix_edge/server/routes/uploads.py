@@ -26,10 +26,11 @@ from fastapi import APIRouter, Header
 
 from motrix_edge.server.deps import Services
 from motrix_edge.server.schemas import UploadPackRequest, UploadScanRequest, UploadSelectRequest
+from motrix_edge.server.state import capture_data_dir
 
 
 def build_router(services: Services) -> APIRouter:
-    """构建上传 / 扫描路由，并向 UploadSession 注册扫描目录白名单回调。"""
+    """构建上传 / 扫描路由，并向 UploadService 注册扫描目录白名单回调。"""
     router = APIRouter()
     node = services.node
     uploads = services.uploads
@@ -42,33 +43,25 @@ def build_router(services: Services) -> APIRouter:
         """
         leases.require(lease_id)
 
+    def _upload_data_dir() -> str | None:
+        """机器人数据目录（**唯一解析点**）：adapter 上报的采集目录 → ``upload.data_dir`` 兜底。
+
+        同时作为扫描白名单来源与缺省扫描目录（回退链：请求 ``folder_path`` → 本值）；
+        adapter 数据目录来自节点缓存的采集状态，与前端「获取数据目录」按钮（``GET /v1/captures``）
+        **同源**。上传是节点级服务：**无需会话**（节点 READY / 无会话时同样可用）。
+        """
+        return capture_data_dir(node, uploads.default_folder)
+
     def _upload_allowed_roots() -> list[str]:
-        """允许扫描的目录白名单：adapter 上报的数据目录 + ``upload.data_dir``。"""
-        roots: list[str] = []
-        if node is not None:
-            capture = getattr(node, "capture_status", None)
-            data_dir = getattr(capture, "data_dir", None) if capture is not None else None
-            if data_dir:
-                roots.append(str(data_dir))
-        if uploads.default_folder:
-            roots.append(str(uploads.default_folder))
-        return roots
+        """允许扫描的目录白名单 = 数据目录（唯一解析点；解析不出 → 空 → 扫描一律 409）。
+
+        ``UploadService._roots`` 会自行把配置项 ``upload.data_dir`` 并入白名单，故这里只需
+        给出数据目录本身。（回调必须返回 list：``_roots`` 会先拷贝再 append。）
+        """
+        data_dir = _upload_data_dir()
+        return [data_dir] if data_dir else []
 
     uploads.set_allowed_roots(_upload_allowed_roots)
-
-    def _upload_default_folder() -> str | None:
-        """缺省扫描目录回退链：请求 ``folder_path`` → **adapter 数据目录** → ``upload.data_dir``。
-
-        adapter 数据目录来自节点缓存的采集状态（``node.capture_status.data_dir``），与前端
-        「获取数据目录」按钮（``GET /v1/captures``）**同源**；未绑定 / 无数据目录时回退配置
-        目录。
-        """
-        if node is not None:
-            capture = getattr(node, "capture_status", None)
-            data_dir = getattr(capture, "data_dir", None) if capture is not None else None
-            if data_dir:
-                return str(data_dir)
-        return uploads.default_folder
 
     @router.get("/v1/uploads")
     def uploads_status(x_lease_id: str | None = Header(default=None)):
@@ -84,7 +77,7 @@ def build_router(services: Services) -> APIRouter:
         """
         _ensure_upload_lease(x_lease_id)
         folder_path = req.folder_path if req is not None else None
-        return uploads.scan(folder_path or _upload_default_folder())
+        return uploads.scan(folder_path or _upload_data_dir())
 
     @router.post("/v1/uploads/select")
     def uploads_select(req: UploadSelectRequest, x_lease_id: str | None = Header(default=None)):

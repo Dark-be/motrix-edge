@@ -14,7 +14,7 @@
 
 """配置级命令的实现（无状态纯函数，node 主循环与会话循环共用）。
 
-``infer rtc(set)`` / ``infer config(set)`` / ``infer prompt`` / ``infer model(set)`` /
+``infer rtc(set)`` / ``infer config(set)`` / ``infer model(set)`` /
 ``capture meta *`` 都是**配置级**命令：任何状态可用、写内存态配置（不写回 yaml）、
 与状态机解耦。参数非法 → 回执 ``rejected``（400）。
 """
@@ -40,7 +40,6 @@ from .naming import (
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
-    CMD_INFER_PROMPT,
     CMD_INFER_RTC_SET,
 )
 from .params import TELEOP_COMMAND_MODES, parse_bool, parse_meta, teleop_mode_for
@@ -182,15 +181,15 @@ def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:
 
 
 def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
-    """策略配置命令族：``infer config`` / ``infer config set <json>`` / ``infer prompt`` /
+    """策略配置命令族：``infer config`` / ``infer config set <json>`` /
     ``infer model`` / ``infer model set <path>``。
 
     每个策略有自己的独立配置项（prompt / 模型路径 / 设备 / 块长…）+ **端点项**（推理端点
     host / port，`group="endpoint"`、会话级；**仅需端点的策略**有：openpi / lerobot-act），见
     ``policy.POLICY_CONFIG_ITEMS``：
     ``infer config`` 返回清单 + 当前值 + 缺失必填项；``infer config set <json>`` 按当前策略 schema
-    校验并写入（可部分）；``infer prompt`` / ``infer model(set)`` 是 ``prompt`` /
-    ``pretrained_name_or_path`` 两个内置项的**快捷命令**（同一校验与写入路径）。
+    校验并写入（可部分）；``infer model(set)`` 是 ``pretrained_name_or_path`` 这个内置项的
+    **快捷命令**（同一校验与写入路径）。
 
     配置写入内存态 ``base_cfg["policy"]``（**不写回 yaml**），下次 ``session run infer`` 生效；
     会话内由 InferSession 额外写入运行中的策略客户端（下一请求生效）。节点主循环（非任务态）
@@ -210,8 +209,6 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
             params = parse_meta(cmd.params.get("json"), what="infer config set")
         except ValueError as exc:
             return CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
-    elif cmd.name == CMD_INFER_PROMPT:  # 快捷：文本指令（语言条件策略）
-        params = {"prompt": cmd.params.get("prompt")}
     elif cmd.name == CMD_INFER_MODEL_SET:  # 快捷：模型路径（lerobot 类策略）
         params = {"pretrained_name_or_path": cmd.params.get("path")}
     else:
