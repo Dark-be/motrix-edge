@@ -17,6 +17,14 @@ robot:
     follower: can_left # Follower 从臂
   leader_firmware: v188 # Leader 主臂固件版本（default / v188 / v189；按实际固件调整）
   follower_firmware: v188 # Follower 从臂固件版本
+  # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
+  # 参数未标定前指向占位文件（全 0）→ t_ff 恒为 0，行为与未补偿**完全一致**；
+  # 标定完用 scripts/fit_gravity.py --install 覆盖该文件即自动生效（不用改这里）。
+  gravity:
+    enabled: true # 只装在执行臂（Follower）；主臂只读，不装载
+    alpha: 1.0 # 前馈比例（0 = 不补偿）；首跑建议用 verify_gravity.py --hold --alpha 0.2 → 1.0 逐档验收
+    t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，这里只能收紧
+    params: gravity/piper_6dof.json # 参数文件（相对配置目录）；每臂一份用 arms.<臂名>.params
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:

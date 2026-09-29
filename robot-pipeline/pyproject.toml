@@ -48,6 +48,10 @@ include-package-data = true
 # 使用标准 src/ 布局：让 `import robot` / `import task_env` 指向 src 下的同名目录
 package-dir = { "" = "src" }
 
+[tool.setuptools.package-data]
+# 配置随包分发：yml 是各机型的默认配置，gravity/*.json 是重力参数（占位 / 标定产物）
+config = ["*.yml", "gravity/*.json"]
+
 [tool.setuptools.packages.find]
 # 仅在 src/ 下发现包
 where = ["src"]

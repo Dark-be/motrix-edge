@@ -14,11 +14,21 @@
 
 import functools
 import time
+from typing import NamedTuple
 
 import numpy as np
+from config import resolve_config_file
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 from utils.data_handler import debug_print, set_log_level
 
+from robot.gravity import (
+    DEFAULT_ALPHA,
+    DEFAULT_PARAMS_RELATIVE,
+    T_FF_LIMIT_NM,
+    GravityCompensator,
+    load_gravity_params,
+    resolve_arm_config,
+)
 from robot.kinematics import IkResult, PiperKinematics, solve_ik
 
 from .arm_controller import ArmController
@@ -28,10 +38,14 @@ from .arm_controller import ArmController
 # 纯 numpy、无硬件、**无实例状态**——robot 层直接调下面两个静态函数即可。
 _KINEMATICS = PiperKinematics()
 
-# MIT 位置环缺省参数：**只有 P/D**（``kp`` / ``kd``），``t_ref = 0`` = **无力矩前馈**、
+# MIT 位置环缺省参数：**只有 P/D**（``kp`` / ``kd``），``t_ref = 0`` = 缺省无力矩前馈、
 # ``vel_ref = 0`` ——即不补重力 / 科氏 / 摩擦，也不做力控；所以关节会停在
 # ``τ_gravity / kp`` 附近的平衡点（“设定什么关节就是什么关节”并不成立）。上位任何
 # 「到位」判定（edge 的 ``settle`` / RPent 的 ``reached``）都得按**实测稳态误差**设容差。
+#
+# 重力前馈（可选，见 ``robot.gravity`` 与 wiki/design/robot_pipeline_impedance.md）：装载后
+# ``t_ref`` 改为每拍的 ``α·τ̂_g(q_meas)``（仍受固件 ±16 N·m 限幅），上面那条平衡点描述因此
+# 只在**未装载 / 占位参数 / 降级**时成立。
 MIT_CTRL_CFG = [
     {"vel_ref": 0.0, "kp": 6.0, "kd": 0.8, "t_ref": 0.0},
     {"vel_ref": 0.0, "kp": 4.0, "kd": 1.0, "t_ref": 0.0},
@@ -40,6 +54,19 @@ MIT_CTRL_CFG = [
     {"vel_ref": 0.0, "kp": 3.0, "kd": 0.5, "t_ref": 0.0},
     {"vel_ref": 0.0, "kp": 2.0, "kd": 0.4, "t_ref": 0.0},
 ]
+
+
+def _scalar(value) -> float:
+    """取标量（SDK 个别字段是长度 1 的序列；统一成 ``float``）。"""
+    return float(np.asarray(value, dtype=np.float64).reshape(-1)[0])
+
+
+class MotorState(NamedTuple):
+    """一拍电机状态（6 关节，实测）：位置 rad / 速度 rad·s⁻¹ / 力矩 N·m。"""
+
+    q: np.ndarray
+    vel: np.ndarray
+    tau: np.ndarray
 
 
 def _require_robot(method):
@@ -76,9 +103,11 @@ class PiperController(ArmController):
     位姿时直接调 ``self.robot.get_flange_pose()``（``scripts/verify_cartesian.py``），
     ``move_p`` 在本层因此无路可达（与 MIT 互斥）。
 
-    **无力矩前馈**：``MIT_CTRL_CFG`` 只有 P/D（``t_ref = 0``、``vel_ref = 0``），不补重力 /
-    科氏 / 摩擦，也不做力控——位姿 / 关节目标都会停在 ``τ_gravity / kp`` 附近的平衡点，
-    上位「到位」判定（edge 的 ``settle`` / RPent 的 ``reached``）必须按实测稳态误差设容差。
+    **重力前馈（可选）**：``MIT_CTRL_CFG`` 本身只有 P/D（``t_ref = 0``、``vel_ref = 0``），不补
+    重力 / 科氏 / 摩擦；装载 ``robot.gravity`` 后每拍的 ``t_ff`` 改为 ``α·τ̂_g(q_meas)``（仍受固件
+    ±16 N·m 限幅与异常降级）。参数未标定（占位全 0）时 ``t_ff`` 恒为 0，行为与未装载一致；因此
+    ``τ_gravity / kp`` 那条平衡点描述只在**未装载 / 占位 / 降级**时成立。标定与设计见
+    ``wiki/design/robot_pipeline_impedance.md``。
     """
 
     def __init__(self, name="piper_controller"):
@@ -89,8 +118,19 @@ class PiperController(ArmController):
         self.ctrl_mode: str = "mit"  # 下发通路：``mit``（缺省，力矩环）或 ``joint``（SDK 位置速度模式）
         self.role: str = "follower"  # 角色，支持 "leader" 或 "follower"
         self._limit_warned: tuple[int, ...] | None = None  # 限位告警去重（同一组超限关节只打一条）
+        # 重力前馈（可选，缺省 None = 纯位置环）：装载见 enable_gravity_compensation()
+        self.gravity: GravityCompensator | None = None
+        self.last_torque_ff: np.ndarray | None = None  # 最近一拍的 t_ff（可观测 / 现场验收）
+        self._gravity_warned: str | None = None  # 前馈降级 / 限幅告警去重（同一原因只打一条）
 
-    def connect(self, port: str = "can0", ctrl_mode: str = "mit", role: str = "follower", firmware: str = PiperFW.V188):
+    def connect(
+        self,
+        port: str = "can0",
+        ctrl_mode: str = "mit",
+        role: str = "follower",
+        firmware: str = PiperFW.V188,
+        gravity: dict | None = None,
+    ):
         self.port = port
         self.ctrl_mode = ctrl_mode
 
@@ -113,6 +153,10 @@ class PiperController(ArmController):
             debug_print(self.name, f"Connected to Piper on port {port} as FOLLOWER", "INFO")
         else:
             debug_print(self.name, f"Connected to Piper on port {port}, ctrl_mode={ctrl_mode}", "INFO")
+
+        # 重力前馈：只对**执行**臂有意义（主臂只读，不会被 set_joint 下发）；配置缺省不装载。
+        if gravity:
+            self.enable_gravity_compensation(gravity)
 
     @_require_robot
     def set_leader_mode(self):
@@ -175,6 +219,27 @@ class PiperController(ArmController):
             return None
         return np.array(joint_angles.msg)
 
+    @_require_robot
+    def get_motor_states(self) -> MotorState | None:
+        """读**一拍**电机状态（6 关节的实测 ``q`` / ``vel`` / ``tau``）；任一关节拿不到 → None。
+
+        读的是 SDK 后台读取线程已解析好的**缓存帧**（``connect(start_read_thread=True)``），
+        不是请求 / 应答——所以可以在控制拍里每拍取（``get_motor_states(i).msg.torque``，i 从 1 起）。
+        ``tau`` 是重力标定的唯一依据（``simulate`` 需要「实测 q + 实测 τ」同拍配对）；
+        标定脚本 ``scripts/verify_gravity.py`` 也走这里，不再自己摸 SDK。
+        """
+        q = np.zeros(6, dtype=np.float64)
+        vel = np.zeros(6, dtype=np.float64)
+        tau = np.zeros(6, dtype=np.float64)
+        for index in range(6):
+            state = self.robot.get_motor_states(index + 1)
+            if state is None:
+                return None
+            q[index] = _scalar(state.msg.position)
+            vel[index] = _scalar(state.msg.velocity)
+            tau[index] = _scalar(state.msg.torque)
+        return MotorState(q=q, vel=vel, tau=tau)
+
     # ---- 运动学转换（**静态纯函数**，无实例状态；robot 层调用）------------------------
     @staticmethod
     def joint_to_pose(q: np.ndarray) -> np.ndarray:
@@ -220,8 +285,8 @@ class PiperController(ArmController):
     def set_joint(self, joint: np.ndarray, torque_ff: np.ndarray | None = None):
         """下发关节命令（MIT：``p_des`` + 固定 ``kp`` / ``kd``）。
 
-        ``torque_ff`` = 可选的**前馈力矩**（6 维，Nm）：不传则用 MIT 配置的 ``t_ref``（当前为 0）——
-        本控制器不自己算力矩（位置环的 ``kp`` / ``kd`` 抵抗外部作用）。
+        ``torque_ff`` = 可选的**前馈力矩**（6 维，Nm）：显式传入优先；不传则用**重力前馈**
+        （已装载时每拍取实测 ``q`` 算 ``α·τ̂_g(q)``），两者都没有则用 MIT 配置的 ``t_ref``（= 0）。
         与 ``move_p`` 无关：底层始终只有 MIT 这一条关节通路（``move_mit`` 与 ``move_j`` / ``move_p``
         是 SDK 的互斥运动模式，不交替下发）。
 
@@ -238,6 +303,9 @@ class PiperController(ArmController):
             if torque_ff.shape[0] != 6:
                 debug_print(self.name, "set_joint() torque_ff size should be 6", "ERROR")
                 return
+        elif self.gravity is not None:
+            # 重力前馈：占位 / 停用时不取读数（零开销），异常时返回全 0 + 告警一条
+            torque_ff = self._gravity_torque_ff()
         # 显式限位判断（越界值一帧都不下发给 SDK）
         limits = _KINEMATICS.joint_limits
         clipped = np.clip(joint, limits[:, 0], limits[:, 1])
@@ -261,6 +329,7 @@ class PiperController(ArmController):
         elif self.ctrl_mode == "joint":
             self.robot.move_j(joint.tolist())
 
+        self.last_torque_ff = None if torque_ff is None else np.asarray(torque_ff, dtype=np.float64).copy()
         debug_print(self.name, f"set joint to {joint}", "DEBUG")
 
     def _warn_joint_limits(self, requested: np.ndarray, clipped: np.ndarray) -> None:
@@ -280,6 +349,78 @@ class PiperController(ArmController):
             f"{np.round(np.asarray(clipped, dtype=np.float64), 4).tolist()}",
             "WARNING",
         )
+
+    # ---- 重力前馈（可选：t_ff = α·τ̂_g(q_meas)，见 wiki/design/robot_pipeline_impedance.md）----
+    def enable_gravity_compensation(self, section: dict | None, *, params: str | None = None) -> bool:
+        """按 ``robot.gravity`` 配置装载重力前馈；**任何失败都降级为「无前馈」**并告警一条。
+
+        配置形状（``robot.gravity``；**每个臂一份参数**，双臂不能共用）：
+
+        - ``enabled``（缺省 true）、``alpha``（缺省 1.0）、``t_ff_limit``（缺省 16 N·m，只能收紧）；
+        - ``params``：参数文件路径（相对配置目录）；可写成字符串（各臂共用）或
+          ``{<臂名>: 路径, default: 路径}``（每臂一份）；缺省 ``gravity/piper_6dof.json``；
+        - ``arms.<控制器名>``：该臂的覆盖（如 ``arms.left.params``）。
+
+        返回是否装载了模型（**占位参数也返回 True**，但 ``GravityCompensator.active`` 为 False）。
+        标定前默认指向占位文件（全 0）→ ``t_ff`` 恒为 0，行为与未补偿完全一致。
+        """
+        self.gravity = None
+        resolved = resolve_arm_config(section or {}, self.name)
+        if not resolved.get("enabled", True):
+            debug_print(self.name, "重力前馈未启用（robot.gravity.enabled = false）：t_ff 恒为 0", "INFO")
+            return False
+        path = resolve_config_file(str(params or resolved.get("params") or DEFAULT_PARAMS_RELATIVE))
+        limit = float(resolved.get("t_ff_limit", T_FF_LIMIT_NM))
+        if limit > T_FF_LIMIT_NM:
+            debug_print(
+                self.name,
+                f"重力前馈上限配置 {limit:g} N·m > 固件限幅 {T_FF_LIMIT_NM:g} N·m，已收紧到固件限幅",
+                "WARNING",
+            )
+        try:
+            model = load_gravity_params(path)
+        except Exception as exc:  # noqa: BLE001 参数不可用不是致命错误：不装前馈也要能跑
+            debug_print(self.name, f"重力前馈未启用（参数装载失败：{exc}）：t_ff 恒为 0", "WARNING")
+            return False
+        self.gravity = GravityCompensator(
+            model, alpha=float(resolved.get("alpha", DEFAULT_ALPHA)), limit=limit, enabled=True
+        )
+        debug_print(
+            self.name,
+            f"重力前馈已装载：{model.describe()}；α={self.gravity.alpha:g}，限幅 ±{self.gravity.limit:g} N·m",
+            "WARNING" if model.is_placeholder else "INFO",
+        )
+        return True
+
+    def gravity_status(self) -> dict | None:
+        """重力前馈可观测状态（健康检查 / 现场验收）：未装载 → None。"""
+        if self.gravity is None:
+            return None
+        return {"controller": self.name, **self.gravity.status()}
+
+    def _gravity_torque_ff(self) -> np.ndarray:
+        """取本拍重力前馈（6 维，N·m）。
+
+        占位 / 停用 / ``α=0``：**不取电机状态**，直接返回全 0（零开销）；读数不可用或模型异常：
+        返回全 0 本拍退回纯位置环，并告警一条（同一原因只打一条）。
+        """
+        assert self.gravity is not None
+        if not self.gravity.active:
+            return self.gravity.torque(np.zeros(6, dtype=np.float64))
+        states = self.get_motor_states() if self.robot is not None else None
+        tau = self.gravity.note_failure("电机状态不可用") if states is None else self.gravity.torque(states.q)
+        self._warn_gravity_note()
+        return tau
+
+    def _warn_gravity_note(self) -> None:
+        """前馈降级 / 限幅时告警一条（**只在原因变化时**打印，30 Hz 不刷屏）。"""
+        assert self.gravity is not None
+        note = self.gravity.last_note
+        if note == self._gravity_warned:
+            return
+        self._gravity_warned = note
+        if note is not None:
+            debug_print(self.name, f"重力前馈：{note}", "WARNING")
 
     @_require_robot
     def set_gripper(self, gripper: float):

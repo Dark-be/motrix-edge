@@ -78,6 +78,18 @@ def config_path(name: str) -> Path | None:
     return ext / name if ext is not None else None
 
 
+def resolve_config_file(name: str) -> Path:
+    """配置文件 / 数据文件的真实路径：外部配置目录**存在同名文件**则优先，否则用包内默认。
+
+    与 :func:`load_config` 同一套优先级（包内路径**不判断是否存在**，缺文件由调用方决定怎么处理）。
+    用于非 yml 的数据文件（如 ``gravity/piper_6dof.json`` 重力参数）。
+    """
+    external = config_path(name)
+    if external is not None and external.exists():
+        return external
+    return Path(str(resources.files(__package__).joinpath(name)))
+
+
 def load_config(name: str) -> dict:
     """加载 robot server 配置：外部配置目录优先，否则读包内默认 yml（只读兜底）；缺失 → {}。"""
     path = config_path(name)
@@ -103,6 +115,7 @@ __all__ = [
     "get_state_dir",
     "get_log_dir",
     "config_path",
+    "resolve_config_file",
     "load_config",
     "CONFIG_DIR",
     "LOG_PATH",

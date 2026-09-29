@@ -23,6 +23,13 @@ robot:
     cam_head: "" # 头部 RealSense 序列号：**现场填写**（留空 → 启动报错）
     cam_left_wrist: "" # 左腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
     cam_right_wrist: "" # 右腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
+  # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
+  # 只装在执行臂（Piper 从手 left / right）；Alicia 主手只读，不装载。
+  gravity:
+    enabled: true
+    alpha: 1.0 # 前馈比例（0 = 不补偿）；首跑建议逐档验收
+    t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，这里只能收紧
+    params: gravity/piper_6dof.json # 缺省参数（标定前 = 占位全 0）
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:

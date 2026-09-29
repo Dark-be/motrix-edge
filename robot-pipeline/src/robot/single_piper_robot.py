@@ -71,10 +71,16 @@ class SinglePiperRobot(BaseRobot):
         }
 
     def connect(self):
-        """连接：Leader 主臂（role=leader）+ Follower 从臂（role=follower，执行）。"""
+        """连接：Leader 主臂（role=leader）+ Follower 从臂（role=follower，执行）。
+
+        重力前馈（``robot.gravity``）只装在**执行**臂上：主臂只读，不会被 ``set_joint`` 下发。
+        """
         self.controllers["leader"].connect(port=self.ports["leader"], role="leader", firmware=self.leader_firmware)
         self.controllers["follower"].connect(
-            port=self.ports["follower"], role="follower", firmware=self.follower_firmware
+            port=self.ports["follower"],
+            role="follower",
+            firmware=self.follower_firmware,
+            gravity=self.robot_config.get("gravity"),
         )
         debug_print(self.name, "Setup controllers done", "INFO")
         self.ready = True

@@ -326,8 +326,8 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 -   **限位只有一份**：解算用的限位与 `set_joint` **下发前**的裁切共用 `PIPER_JOINT_LIMITS`
     （同一份，**不经配置覆盖**）——越界值一帧都不交给 SDK（否则 SDK 会报错并打印），裁到时打一条
     WARNING（同一组超限关节只打一条）。
--   **只下关节角**：`set_joint` 只给 MIT 的 `p_des`，`kp` / `kd` / `t_ff` 全用缺省值
-    （**本次位姿（阻抗）控制无力矩前馈**：`t_ff = 0` / `v_des = 0`，不补重力 / 摩擦、不做力控）。
+-   **只下关节角**：`set_joint` 只给 MIT 的 `p_des`，`kp` / `kd` 用缺省值；`t_ff` 缺省为 0，
+    也可由**重力前馈**给出（见下节「重力补偿」）——**不做力控**，也不补科氏 / 摩擦。
 
 配置（`robot` 段，全部可选）：
 
@@ -343,6 +343,33 @@ robot:
 ```bash
 python scripts/verify_cartesian.py --port left           # 只读对照 + IK 往返（推荐先跑）
 python scripts/verify_cartesian.py --port left --cycles 3 --role follower
+```
+
+## 重力补偿（可选，默认占位 = 行为不变）
+
+MIT 的 `t_ff` 缺省是 0（不补重力），所以关节会停在 `τ_g / k_p` 的平衡点：低刚度或带负载时
+「设定什么角度就是什么角度」并不成立。重载 / 想做柔顺时，可离线标定出 `τ̂_g(q)` 并前馈：
+
+1. **采样**（真机，`--sweep` 会运动）：`python scripts/verify_gravity.py --port can_left --sweep --out gravity_samples.json`
+   ——先 `--read` 确认读数可用（含单拍耗时）、`--hold` 确认 **τ_meas 与下发的符号 / 单位一致**；
+2. **拟合**（任意机器，离线）：`python scripts/fit_gravity.py --samples gravity_samples.json --install`
+   ——写进控制器读的参数文件（`config/gravity/*.json`）；报告里的**秩 / 条件数 / 残差 RMS** 决定这次标定能不能用；
+3. **验收**：`python scripts/verify_gravity.py --port can_left --hold --alpha 1.0` 与 `--alpha 0`
+   在**同一姿态**下对比 `k_p·|Δq|`（首跑建议 0.2 → 0.5 → 1.0 逐档）。
+
+运行时每拍 `t_ff = clip(α · τ̂_g(实测 q), ±t_ff_limit)`；**任何异常（读数读不到 / NaN / 超限幅）
+当拍退回 `t_ff = 0`**（退回纯位置环）并告警一条，控制不中断。参数按**臂**归档（双臂不能共用），
+**换负载（工件 / 夹爪）必须重标**。设计与取舍见
+[`wiki/design/robot_pipeline_impedance.md`](../wiki/design/robot_pipeline_impedance.md)。
+
+```yaml
+robot:
+    gravity:
+        enabled: true # 缺省 true + 占位参数（全 0）→ t_ff 恒为 0，行为与未补偿完全一致
+        alpha: 1.0 # 前馈比例（0 = 不补偿）
+        t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，只能收紧
+        params: gravity/piper_6dof.json # 参数文件（相对配置目录）
+        # 每臂一份：params 写成 {left: ..., right: ...}，或用 arms.<控制器名>.params 覆盖
 ```
 
 坐标系约定（米 / 弧度、`R = Rz(yaw)Ry(pitch)Rx(roll)`、法兰系）、求解器与失败语义见

@@ -247,8 +247,10 @@ class DualPiperRobot(BaseRobot):
         """
         self.controllers["left_master"].connect(port=self.ports["left_master"], role="leader")
         self.controllers["right_master"].connect(port=self.ports["right_master"], role="leader")
-        self.controllers["left_arm"].connect(port=self.ports["left"])
-        self.controllers["right_arm"].connect(port=self.ports["right"])
+        # 重力前馈只装在**执行**臂（左/右）：主手只读，不会被 set_joint 下发
+        gravity = self.robot_config.get("gravity")
+        self.controllers["left_arm"].connect(port=self.ports["left"], gravity=gravity)
+        self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
         debug_print(self.name, "Setup controllers done", "INFO")
         for name in self.IMAGE_NAMES:
             self.sensors[name].connect(device=self.camera_devices[name], pixel_format="jpg")

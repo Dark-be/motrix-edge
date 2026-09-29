@@ -22,6 +22,19 @@ robot:
     cam_head: "" # 头部 RealSense 序列号：**现场填写**（留空 → 启动报错）
     cam_left_wrist: "" # 左腕 RealSense 序列号：**现场填写**（留空 → 启动报错）
     cam_right_wrist: "" # 右腕 RealSense 序列号：**现场填写**（留空 → 启动报错）
+  # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
+  # 只装在执行臂（left / right）；参数未标定前是占位文件（全 0）→ t_ff 恒为 0。
+  # **双臂不能共用一套参数**（装配与现场误差不同）：左臂标定完写进 arms.left.params。
+  gravity:
+    enabled: true
+    alpha: 1.0 # 前馈比例（0 = 不补偿）；首跑建议逐档验收
+    t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，这里只能收紧
+    params: gravity/piper_6dof.json # 缺省参数（标定前 = 占位全 0）
+    arms: # 每臂覆盖（键 = 控制器名 left / right）
+      left:
+        params: gravity/piper_6dof.json # 左臂参数：标定后换成 gravity/piper_left.json
+      right:
+        params: gravity/piper_6dof.json # 右臂参数：标定后换成 gravity/piper_right.json
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:
