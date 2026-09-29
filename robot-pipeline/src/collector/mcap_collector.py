@@ -51,7 +51,8 @@
     c.finish()                # -> 已写入的 .mcap 文件 Path（并写同名 .json 元信息）
 
 结束一轮时写与 mcap 同名的 JSON 元信息文件（``{uuid}.json``），描述该 mcap（见
-``_write_meta_json``）。
+``_write_meta_json``）：含**控制模式**（``control_mode`` / ``control``——``mit`` /
+``mit+gravity`` / ``joint``，主手不记录），下游据此判断这段数据是否带重力前馈。
 """
 
 from __future__ import annotations
@@ -130,6 +131,7 @@ class ActMcapCollector:
         self._identity: dict = {}  # 机器人身份（robot_name / robot_type），set_robot_meta() 设置
         self._pending: dict = {}  # 同步字段（operator / task_name / description ...），set_meta() 设置
         self._state_layout: dict = {}  # 状态 / 目标向量的逐维含义，set_state_layout() 设置
+        self._control_layout: dict = {}  # 各执行控制器的控制模式，set_control_layout() 设置
         # 当前 episode 的元信息基线（created_at + identity/pending 快照）
         self._meta: dict = {}
         self._start_wall: float | None = None  # 本轮采集开始墙钟时间（duration 兜底）
@@ -166,6 +168,16 @@ class ActMcapCollector:
         gripper）解释每个下标——机器人整体切位姿时只需改 ``state_space``，下游代码不用改。
         """
         self._state_layout = dict(layout or {})
+
+    def set_control_layout(self, layout: dict | None) -> None:
+        """设置各执行控制器的**控制模式**（机器人侧 ``control_layout()``，env 注入）。
+
+        写进每轮 mcap 的同名 JSON 元信息（``control_mode`` = 各执行臂的聚合值（双臂不同时
+        ``mixed``）；``control`` = 逐控制器明细 ``{mode, ctrl_mode, role, gravity}``）——下游据此
+        判断这段数据是否带重力前馈（``mit+gravity``）或走的是 ``joint`` 通路（不下发 ``t_ff``）。
+        主手（leader）不记录，故明细里只有执行控制器。
+        """
+        self._control_layout = dict(layout or {})
 
     def _image_to_jpeg(self, val) -> bytes:
         """把单帧图像统一成 JPEG bytes（CompressedImage format='jpeg'）。
@@ -306,6 +318,8 @@ class ActMcapCollector:
             "state_dims": self._state_layout.get("state_dims") or [],
             "action_space": self._state_layout.get("action_space"),
             "action_dims": self._state_layout.get("action_dims") or [],
+            "control_mode": self._control_layout.get("control_mode"),
+            "control": self._control_layout.get("arms") or {},
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
             "frames": self._step_count,
@@ -335,6 +349,8 @@ class ActMcapCollector:
           （文件哈希）/ ``created_at``（采集开始时间 ISO）；
         - 状态 / 目标向量布局：``state_space`` / ``state_dims`` / ``action_space`` / ``action_dims``
           （逐维 ``{index, arm, kind, name}``，见 ``set_state_layout()``）；
+        - 控制模式：``control_mode``（各执行臂的聚合值，双臂不同时 ``mixed``）/ ``control``
+          （逐控制器明细，见 ``set_control_layout()``；主手不记录）；
         - 同步字段：``operator`` / ``task_name`` 未同步以 null 占位（等待 capture sync）；
           其余同步字段（``description`` 等）附加在末尾。
         """
@@ -347,6 +363,8 @@ class ActMcapCollector:
             "state_dims": self._state_layout.get("state_dims") or [],
             "action_space": self._state_layout.get("action_space"),
             "action_dims": self._state_layout.get("action_dims") or [],
+            "control_mode": self._control_layout.get("control_mode"),
+            "control": self._control_layout.get("arms") or {},
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
             "frames": self._step_count,

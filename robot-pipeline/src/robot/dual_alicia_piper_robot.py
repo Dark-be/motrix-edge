@@ -85,8 +85,10 @@ class DualAliciaPiperRobot(BaseRobot):
         """
         self.controllers["left_master"].connect(port=self.ports["left_master"])
         self.controllers["right_master"].connect(port=self.ports["right_master"])
-        self.controllers["left_arm"].connect(port=self.ports["left"])
-        self.controllers["right_arm"].connect(port=self.ports["right"])
+        # 重力前馈只装在**执行**臂（Alicia 从手）：主手只读，不会被 set_joint 下发
+        gravity = self.robot_config.get("gravity")
+        self.controllers["left_arm"].connect(port=self.ports["left"], gravity=gravity)
+        self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
         debug_print(self.name, "Setup controllers done", "INFO")
         self.sensors["cam_head"].connect(device=self.camera_devices["cam_head"], pixel_format="jpg")
         self.sensors["cam_left_wrist"].connect(device=self.camera_devices["cam_left_wrist"], pixel_format="jpg")
