@@ -36,7 +36,6 @@ from motrix_edge.command import (
     CMD_INFER_CONNECT,
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
-    CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
@@ -415,18 +414,18 @@ class FakeInferSession:
             ):
                 result = handle_policy_config(BASE_CFG, cmd, policy_type=self.policy_config_type)
                 if result.status == "ok" and name == CMD_INFER_CONFIG_SET:
-                    # 镜像真实会话的 runtime 轴：runtime=False 的键只写内存态 → 回执 deferred
+                    # 镜像真实会话的 runtime 轴：runtime=True 的键即刻应用到运行中的客户端
                     runtime = policy_config_runtime_keys(self.policy_config_type)
-                    deferred = sorted(k for k in (result.data.get("written") or {}) if k not in runtime)
+                    written = result.data.get("written") or {}
+                    for key in written:
+                        if key in runtime:
+                            setattr(self.policy, key, written[key])
+                    if "prompt" in written:
+                        self.prompt = written["prompt"]
+                    # runtime=False 的键只写内存态 → 回执 deferred
+                    deferred = sorted(k for k in written if k not in runtime)
                     # 恒有该键（可能为空列表）：镜像产线回执形状
                     result = ok_result(**{**result.data, "deferred": deferred})
-                self._reply(cmd, result)
-            elif name == CMD_INFER_PROMPT:  # 会话内预置文本指令（prompt；经策略配置校验 + 写入内存态）
-                result = handle_policy_config(BASE_CFG, cmd, policy_type=self.policy_config_type)
-                if result.status == "ok":
-                    self.prompt = (cmd.params or {}).get("prompt")
-                    self.policy.prompt = self.prompt
-                    result = ok_result(state="ready", prompt=self.prompt)
                 self._reply(cmd, result)
             elif name == CMD_CAPTURE_EPISODE_START:  # 推理时 rollout 录制开始
                 self.recording = True
@@ -1399,6 +1398,27 @@ def test_upload_scan_defaults_to_adapter_data_dir(tmp_path):
     assert body["episode_count"] == 1
 
 
+def test_upload_works_without_any_session(tmp_path):
+    """无会话（节点 READY、无任何会话）也能上传：upload 是节点级服务。
+
+    “数据目录”只依赖 adapter 上报的采集目录（此处未上报 → 回退 ``upload.data_dir``），
+    不占机器人互斥、也不要求会话槽位；扫描不改变节点状态。
+    """
+    _make_episodes(tmp_path, 1)
+    node = FakeNode()
+    assert node.session is None and node.state == NodeState.READY  # 前置：无会话
+    client, lease = _upload_client(tmp_path, node=node)
+    headers = {"X-Lease-Id": lease}
+
+    body = client.post("/v1/uploads", headers=headers).json()  # 无 folder_path：走回退链
+    assert body["folder_path"] == str(tmp_path.resolve())
+    assert body["episode_count"] == 1
+    assert client.get("/v1/uploads", headers=headers).json()["episode_count"] == 1
+    # 上传不占用会话 / 不改节点状态
+    assert node.session is None
+    assert node.state == NodeState.READY
+
+
 def test_upload_scan_outside_allowed_roots_is_rejected(tmp_path):
     """越界目录 → 400：只允许扫描数据目录（adapter 数据目录 / upload.data_dir）及其子目录。"""
     allowed = tmp_path / "allowed"
@@ -1529,9 +1549,11 @@ def test_infers_status_exposes_prompt_and_recording_defaults():
     assert snap["prompt"] is None
     assert snap["recording"] is False
     assert snap["continuous"] is False  # 持续推理未运行（前端据此门控「持续 / 停止」）
-    # 会话内设置 prompt → status.prompt 同步
+    # 会话内经策略配置通道设置 prompt → status.prompt 同步
     assert (
-        client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
+        client.post(
+            "/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "把零件放好"}}
+        ).status_code
         == 200
     )
     snap = client.get("/v1/infers").json()
@@ -1592,9 +1614,11 @@ def test_infers_status_exposes_policy_config():
     ]  # 公共项会话级（进入会话时固化）
     assert cfg["runtime_keys"] == ["image_size", "prompt"]  # 会话内即时生效的键
     assert next(item for item in cfg["items"] if item["key"] == "prompt")["type"] == "text"
-    # 会话内设置 prompt（走 infer prompt 快捷命令）→ 写入内存态 → 缺失清空
+    # 会话内设置 prompt（走 infer config set 写路径）→ 写入内存态 → 缺失清空
     assert (
-        client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"}).status_code
+        client.post(
+            "/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "把零件放好"}}
+        ).status_code
         == 200
     )
     assert client.get("/v1/infers").json()["policy_config"]["missing"] == []
@@ -1856,24 +1880,32 @@ def test_infers_command_timeout_maps_to_504(monkeypatch):
     assert "timed out" in r.json()["detail"]
 
 
-def test_infers_prompt_updates_runtime_prompt():
-    """运行时改文本指令：POST /v1/infers/prompt → 会话内 infer prompt 命令 → 回执。"""
+def test_infers_config_updates_runtime_prompt():
+    """运行时改文本指令：POST /v1/infers/config（infer config set）→ 会话内命令 → 回执。
+
+    prompt 就是普通策略配置项（runtime=True），走同一写路径（`infer prompt` 快捷命令已删除）。
+    """
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
-    # 未进入推理会话：prompt → 409
-    assert client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "x"}).status_code == 409
+    # 未进入推理会话：改配置 → 409
+    assert (
+        client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}}).status_code
+        == 409
+    )
     assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
-    # 运行时设置 prompt：会话内命令被执行，回执回显
-    r = client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={"prompt": "把零件放好"})
+    # 运行时设置 prompt：会话内命令被执行，回执回显写入项
+    r = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "把零件放好"}})
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "accepted"
-    assert body["prompt"] == "把零件放好"
-    assert CMD_INFER_PROMPT in [getattr(c, "name", None) for c in node.session.pulled]
+    assert body["written"] == {"prompt": "把零件放好"}
+    assert CMD_INFER_CONFIG_SET in [getattr(c, "name", None) for c in node.session.pulled]
     assert node.session.policy.prompt == "把零件放好"
-    # 缺 prompt → pydantic 422
-    assert client.post("/v1/infers/prompt", headers={"X-Lease-Id": lease}, json={}).status_code == 422
+    # 空 config = 空 patch（no-op）：合法，回执 written 为空（不再有必填 prompt 的 422 门）
+    empty = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={})
+    assert empty.status_code == 200
+    assert empty.json()["written"] == {}
     # 清理退出
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)

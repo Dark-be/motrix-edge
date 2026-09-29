@@ -28,8 +28,9 @@ from motrix_edge.utils.data_handler import debug_print
 class OpenPIClient(BasePolicyClient):
     """openpi 策略客户端：**官方 openpi WebSocket 契约** + msgpack-over-ws 传输。
 
-    语言条件策略（``requires_prompt = True``）：推理前必须已 ``infer prompt <text>`` 预置
-    非空文本指令，openpi 每次请求动态携带（服务端每帧重新 tokenize）。
+    语言条件策略（``requires_prompt = True``）：推理前必须已预置非空文本指令（策略配置项
+    ``prompt``，经 ``infer config set`` / ``POST /v1/infers/config`` 写入），openpi 每次请求
+    动态携带（服务端每帧重新 tokenize）。
 
     与官方 ``WebsocketPolicyServer``（openpi 仓 ``serve_policy.py``）互通，服务端零改动：
       connect(): websocket 连接，读取服务端首条 metadata（相机清单以它为准；块长不依赖它）
@@ -41,7 +42,7 @@ class OpenPIClient(BasePolicyClient):
     ``motrix_edge.rtc``（RTCManager）统一负责（见 wiki/design/motrix_edge_rtc.md）。
     """
 
-    requires_prompt = True  # 语言条件策略：推理前必须已 infer prompt 预置非空文本
+    requires_prompt = True  # 语言条件策略：推理前必须已预置非空文本（策略配置项 prompt）
 
     def __init__(self, policy_config: dict):
         super().__init__(policy_config=policy_config)
@@ -54,7 +55,7 @@ class OpenPIClient(BasePolicyClient):
         # 再由它映射到模型键 base_left_0_rgb 等），与 edge 侧名一致 → 一般留空。
         self._rename_cameras = dict(self.policy_config.get("rename_cameras") or {})
         # 文本指令（prompt）：openpi 官方「运行时动态传入」，每次 infer 请求可换。
-        # 配置值作缺省；推理会话可运行时更新（infer prompt <text> / POST /v1/infers/prompt）。
+        # 配置值作缺省；推理会话可运行时更新（infer config set / POST /v1/infers/config）。
         # None = 不发（服务端用 default_prompt 兜底）。
         self.prompt = self.policy_config.get("prompt")
         self._transport = WsTransport(

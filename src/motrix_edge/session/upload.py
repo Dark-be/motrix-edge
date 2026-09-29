@@ -37,6 +37,22 @@ class UploadError(ServiceError):
     default_code = ErrorCode.INVALID_ARGUMENT
 
 
+def resolve_data_dir(capture_status=None, configured: str | None = None) -> str | None:
+    """机器人数据目录的**唯一解析点**：adapter 上报的采集目录 → ``upload.data_dir`` 兜底。
+
+    “数据目录” = 机器人进程自维护的采集目录（``capture_status.data_dir``，与
+    ``GET /v1/captures`` 同源）；进程尚未上报（未绑定 / 未运行时）→ 回退配置项
+    ``upload.data_dir``；两者都无 → None。
+
+    上传服务（扫描白名单 + 缺省扫描目录）与状态快照（磁盘占用）共用本函数，避免同一条回退链
+    在多处各写一份而漂移；``server.state.capture_data_dir`` 是它在 node 上的包装。
+    """
+    data_dir = getattr(capture_status, "data_dir", None) if capture_status is not None else None
+    if data_dir:
+        return str(data_dir)
+    return str(configured) if configured else None
+
+
 class UploadSession:
     """扫描本地目录并按同名 stem 配对 ``.mcap`` / ``.json`` episode。
 

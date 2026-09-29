@@ -104,7 +104,6 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 | `POST /v1/infers/episode/end`                          | `capture episode end`      |
 | `POST /v1/infers/sync`                                 | `capture sync`             |
 | `POST /v1/infers/config`                               | `infer config set <json>`  |
-| `POST /v1/infers/prompt`                               | `infer prompt <text>`      |
 | `POST /v1/infers/rtc`                                  | `infer rtc set <json>`     |
 | `DELETE /v1/infers?lease_id=`                          | `session quit`             |
 | `POST /v1/commands`（`capability=robot/estop`）        | `robot estop`              |
@@ -119,7 +118,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
 -   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集，推理状态同构，分类可拓展，前端按 key 逐行展示）；adapter 段带**遥操作位**（`teleop` / `teleop_mode`）；推理状态额外返回连接成功后的 `metadata`、`prompt` / `recording` / **`continuous`**（持续推理运行位）。
 -   采集元信息选项：`GET /v1/captures/meta` 读列表（免租约）与写回执同构 `{meta: {分类: [选项]}}`；前端按返回的分类动态渲染选择框与管理的下拉（不硬编码分类，新分类无需改前端）。
--   推理面板提供 Prompt 输入（`POST /v1/infers/prompt` 预置，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
+-   推理面板提供 Prompt 输入（经 `POST /v1/infers/config` 写入策略配置项 `prompt`，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
 -   **RTC 卡片**：展示 `GET /v1/infers` 的 `rtc`（enabled / 块长 H / 执行段 E / 后缀 S / 聚合函数 /
     步号与剩余 / 最近一块的 prefix·execution·suffix 切分），并可经 `POST /v1/infers/rtc` 运行期改参数。
 -   WebRTC：`RTCPeerConnection` recvonly 视频轨 → `createOffer` → `setLocalDescription` →

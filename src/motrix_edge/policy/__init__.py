@@ -109,7 +109,7 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
             "multiline": True,
             "default": None,
             "placeholder": "如：把零件放好",
-            "help": "语言条件策略：推理 / 录制前必须非空（可经 infer prompt 运行时改）",
+            "help": "语言条件策略：推理 / 录制前必须非空（可经 infer config set 运行时改）",
         },
         {
             "key": "image_size",

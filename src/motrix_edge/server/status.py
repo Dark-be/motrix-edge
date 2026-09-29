@@ -27,6 +27,7 @@ from motrix_edge.command import policy_config_status
 from motrix_edge.node import NodeState
 from motrix_edge.server.state import (
     adapter_state,
+    capture_data_dir,
     capture_raw,
 )
 from motrix_edge.server.state import (
@@ -62,7 +63,7 @@ def capture_snapshot(node, leases) -> dict:
     """
     session = _session(node)
     raw = capture_raw(node)
-    data_dir = getattr(raw, "data_dir", None) if raw is not None else None
+    data_dir = capture_data_dir(node)  # 数据目录（唯一解析点；未上报 → None）
     return {
         "node_state": getattr(node, "state", None) if node is not None else None,
         "session_type": getattr(node, "session_type", None) if node is not None else None,
@@ -101,8 +102,7 @@ def capture_precheck(node, leases) -> dict:
         except Exception as exc:  # noqa: BLE001 adapter 探活异常不致命，记进 errors
             errors.append(f"robot not ready: {exc}")
 
-    raw = capture_raw(node)
-    data_dir = getattr(raw, "data_dir", None) if raw is not None else None
+    data_dir = capture_data_dir(node)  # 数据目录（唯一解析点）：磁盘占用按它算；未上报 → 不报
     disk: dict = {}
     if data_dir is not None:
         try:

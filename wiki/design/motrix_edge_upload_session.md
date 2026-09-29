@@ -53,6 +53,14 @@
 及其子目录内；越界 → `400`，两个来源都没有（未配 `upload.data_dir` 且未绑定进程）→ `409`
 （没配置就不默认放开任意路径）。
 
+**目录解析单点**：「数据目录」的回退链只在一处实现 —— `session.upload.resolve_data_dir(capture_status,
+configured)`（adapter 上报的采集目录 → `upload.data_dir` 兜底），`server.state.capture_data_dir(node,
+fallback)` 是它在 node 上的包装；上传路由（白名单 + 缺省扫描目录）与状态快照（磁盘占用）共用，
+避免同一条回退链在多处各写一份而漂移。
+
+**与会话无关**：上传是**节点级服务**（不经命令总线、不占机器人互斥、不占会话槽位）——节点 READY 且
+**没有任何会话**时同样可用，扫描也不会改变节点状态。
+
 **重操作互斥**：`scan` 与 `pack` 同一时刻只允许一个在跑（都要对整目录算 SHA-256 / 搬运文件），
 并发触发 → `409`（`already in progress`），避免把控制面拖住。
 

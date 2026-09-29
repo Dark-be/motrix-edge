@@ -21,10 +21,9 @@ EdgeNode（node.py）在自身生命周期中，根据上层下发的命令（se
 选择并实例化会话（选择 + 启动合并为一个流程）；会话只是被节点启停的任务执行器。
 """
 
-from .base import BaseSession, RunResult
-from .capture_session import CaptureSession
-from .infer_session import InferSession
-from .upload_session import UploadError, UploadSession
+from .base import BaseSession, CaptureSession, RunResult
+from .infer import InferSession
+from .upload import UploadError, UploadSession
 
 # 注册表：会话类型名 -> 会话类
 SESSION_REGISTRY = {

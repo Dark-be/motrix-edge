@@ -20,7 +20,7 @@ class BasePolicyClient:
     生命周期由 InferSession（会话）驱动：session_start 时 connect，session_finish 时 disconnect。
 
     ``requires_prompt``：该策略是否**需要文本指令（prompt）**——语言条件策略（openpi）为
-    ``True``，推理前必须已 ``infer prompt <text>`` 预置非空文本（会话据此门控）；
+    ``True``，推理前必须已预置非空文本（策略配置项 ``prompt``；会话据此门控）；
     非语言条件策略（lerobot-act：ACT 不接受文本条件）为 ``False``，不参与 prompt 门控。
     """
 
@@ -32,7 +32,7 @@ class BasePolicyClient:
         # 文本指令（prompt）：**仅语言条件策略（``requires_prompt=True``，如 openpi）使用**——
         # 推理前必须非空（InferSession 门控），录制 rollout 时作 episode 的 task_name。
         # 非语言条件策略（lerobot-act）不使用 prompt：保持 None，不参与门控、不下发。
-        # 运行时经 ``infer prompt <text>`` 更新。
+        # 运行时经 ``infer config set``（POST /v1/infers/config）更新。
         self.prompt = None
         # **实测块长**（策略返回的动作块步数；None = 尚未观测到）：服务端不一定声明块长（openpi
         # 官方 metadata 无 action_horizon；lerobot-act 的 actions_per_chunk 只是请求值），故块长

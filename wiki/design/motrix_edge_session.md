@@ -5,8 +5,11 @@
 `session/` 是**被节点启停的任务执行器**：不实现节点生命周期，只实现任务流程。`BaseSession`
 定义最小接口（`session_start` / `run` / `session_finish` / `safe_stop`），`CaptureSession`、`InferSession` 和 `UploadSession` 位于同一 `session/` 包。
 其中 `CaptureSession` 与 `InferSession` 是由 `get_session()` 工厂选择的机器人任务会话，
-复用节点注入的 adapter；`UploadSession` 是独立的本地文件管理会话，不进入 EdgeNode
-任务状态机，通过 `UploadSession` 直接实例化。
+复用节点注入的 adapter；`UploadSession` **不是会话**（不在 `SESSION_REGISTRY`、无 `run` 生命周期），
+而是由服务层（`Services.uploads`）直接持有并调用（点对点）的文件管理服务。
+
+会话按「**基座 + 功能 + 引擎**」三层装配（见下文「会话分层」一节）：
+只有 `InferSession` / `RLSession` 跑固定步进循环，其余会话的差别只是挂了哪些功能。
 
 ## 目标与原则
 
@@ -53,13 +56,47 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 > **原语接口（外层 agent 执行层）不新增会话类型**：它挂在 node 级（像 `/v1/preview` 一样，
 > 持租约即可用），与 capture / infer 互斥——见 [边缘原语接口](./motrix_edge_primitives.md)。
 
+## 会话分层（基座 / 功能 / 引擎）
+
+> **状态：已实现**。
+> 下面是各层的职责边界与已经冻结的取舍。
+
+会话不再靠「每加一种任务就再写一个会话类」扩展，而是**一个基座循环 + 若干可装配功能 + 可选的步进引擎**：
+
+| 层                                   | 职责                                                                                                                                                                                                                                                                           | 不做什么                                                             |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| **基座**（`BaseSession` + 命令骨架） | 生命周期（`session_start` / `run` / `session_finish`）、**命令循环**（取命令 → 分发 → 回执 → 未识别兜底）、能力校验（`required_capability`）、**无引擎的默认 `run`**（`capture` 直接使用）、急停 / 退出 / 复位 / 直发动作 / 遥操作                                             | 不产生动作（不 `observe`）、不训练、不管理 learner 通道              |
+| **功能**（feature）                  | 录制（`capture episode start/end` + mcap + `episode_id`，`session/recording.py`）、采集元信息（`capture meta *`）、采集同步（`capture sync`）、策略配置（`infer config/model`，`session/policy_config.py`；infer / rl 共用）、RTC 参数（`infer rtc`）、上传（`/v1/uploads/*`） | 不决定“每步做什么”，不持步进节拍                                     |
+| **引擎**（engine）                   | “**本步动作从哪来**”：`step(observation)` + `reset()`（`session/engine.py`）；`RtcEngine`（包 `RTCManager`：块缓存 / 三元切分 / 预取，返回动作）与 `RtcResidualEngine`（同样是 `RTCManager` 取 base，但额外叠加本地残差、返回 `StepResult`）                                   | 不处理命令、不管生命周期、不管录制与上行（上行归会话自己的数据回路） |
+
+装配结果：
+
+| 会话      | 基座                   | 功能                                | 引擎                                                        |
+| --------- | ---------------------- | ----------------------------------- | ----------------------------------------------------------- |
+| `capture` | ✓                      | 录制 + 元信息 + 同步 + 遥操作       | —（不 observe）                                             |
+| `infer`   | ✓                      | 录制 + 元信息 + 同步 + **策略配置** | `RtcEngine`（含 `rtc.enabled=false` 的 direct 退化）        |
+| `rl`      | ✓                      | 录制 + 元信息 + 同步 + **策略配置** | `RtcResidualEngine`（块缓存 + 本地残差，`rl.rtc` 恒不混合） |
+| `upload`  | 不适用（**不是会话**） | 上传（服务层直接持有）              | —                                                           |
+
+### 冻结的取舍
+
+-   **单线程，不做步进线程**：命令处理与步进在**同一线程**（即 `run()` 循环内）。理由：状态一致性由单线程天然保证（无锁、无竞态，也不出现「已受理、待生效」这类模糊回执）。
+    **接受的代价**：步路径上会有 tens-of-ms 级停顿（回合边界的权重反序列化、`rl reward` 的整轮载荷序列化），加上换块时同步等一次 base 推理（`rl.rtc.prefix_len = 0` 时每 `H` 步一次；`prefix_len > 0` 时由后台预取线程藏住）。
+    若将来要提高步频，**优先在单线程内瘦身**（如把序列化改成流式 / 分块），不加线程。
+-   **只有 `infer` / `rl` 跑步进循环**：只有这两个会话需要「持续取观测 → 出动作」；`capture` 不 observe（显示观测由**节点级**持续写入 `frame_manager`）。
+-   **取步只有两个引擎面，过期口径只有一份**：会话只依赖「`step` + `reset`」；纯 base 引擎（`RtcEngine`）返回动作，残差引擎（`RtcResidualEngine`）返回 `StepResult`（多带合成前的 base，供过渡记录）。「块内取当前绝对步、整块过期则不给动作」由 `rtc.base.chunk_step_action` **单点实现**——推理的 `rtc.enabled=false` 退化路径与 RL 闭环共用（此前两处各写一份，F11）。
+-   **`capture` 退化为基座装配**：`session run capture` / `POST /v1/captures` 不变，但它不再有自身实现（录音 / 元信息 / 遥操作全来自基座与功能）。
+-   **`upload` 保持节点级服务**：它只依赖机器人的「数据目录」这一条信息，**不占用**机器人、也不该被会话互斥挡住（现在无会话时也能上传）。目录解析**单点化**：`adapter.capture_status().data_dir` + `upload.data_dir` 白名单只解析一处，会话 / 服务 / CLI 共用。
+-   **命令面 = capability 面**，租约语义不变（HTTP 与 CLI 的唯一差异仍是租约）。
+
 ## UploadSession（上传会话，文件会话）
 
-`UploadSession` 扫描本地采集目录，按 episode 文件名配对 `.mcap` 与 `.json`，读取 JSON 元数据并生成文件摘要；它不占用 RobotAdapter，也不改变 EdgeNode 节点状态。详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
+`UploadSession` **不是会话**：不在 `SESSION_REGISTRY`、不继承 `BaseSession`、没有 `run` / `session_start` /
+`session_finish`，`node.py` 也不引用它；它由服务层（`Services.uploads`）直接持有，上传端点直调其
+`scan / select / pack / enqueue / retry / status`（每端点仍校验租约，但不经命令总线）。
 
-## UploadSession（上传会话，文件会话）
-
-`UploadSession` 与 `CaptureSession`、`InferSession` 同属 `session/` 包，但不进入 EdgeNode 的机器人任务状态机。它扫描本地采集目录、配对 `.mcap` / `.json`、读取元数据并生成 episode 文件摘要；详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
+它扫描本地采集目录、按 episode 文件名配对 `.mcap` / `.json`、读元数据并生成摘要；**不占用 RobotAdapter**、
+不改变节点状态。它依赖机器人的只有「数据目录」：白名单 = `adapter` 上报的采集目录（经节点缓存读出）与配置项 `upload.data_dir`。详细接口见 [上传会话设计](./motrix_edge_upload_session.md)。
 
 ## CaptureSession（采集会话）
 
@@ -72,6 +109,9 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     （回执回显 `episode` / `recording`）、
     `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
 -   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
+-   **已实现**：上述命令全部来自**基座 + 功能**（见「会话分层」）——`CaptureSession` 本体只剩
+    「要求 `CAPTURE` 能力 + 生命周期状态」，命令面与主循环（无引擎）都在 `BaseSession`；
+    原 `session/capture.py` 已删除，类定义在 `session/base.py`。
 
 ## InferSession（推理会话）
 
@@ -100,12 +140,14 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
         命令响应退出 / 复位 / 急停；重复 `infer rollout` → rejected）。
     -   多步（`count`）与 `drain` 模式**已取消**：动作块只作策略内部缓存、由 rtc 统一管理；
         录制 rollout 走 `capture episode start/end`（多余的 `count` 字段被忽略）。
--   命令：`infer connect`、`infer rollout [mode]`、`infer prompt` / `infer config` / `infer model`、
+-   命令：`infer connect`、`infer rollout [mode]`、`infer config` / `infer model`、
     `infer rtc`、`capture episode start` / `end`（rollout 录制）、`capture sync`、`session quit`
     （退出回 home）、`robot estop`、`robot reset`、`robot execute`、`robot teleop` / `robot teach` / `robot takeover`；
     `capture meta list/add/edit/delete/delete-key`（配置级命令，任务态同样可用）。
 -   单步主循环与持续推理循环**共用**一批命令（策略配置 / RTC / 录制 / 同步），
     实现在 `InferSession._handle_shared_cmd`（一处维护，避免两个循环各写一遍导致漂移）。
+-   **目标形态**：这批共用命令中的「策略配置 / 录制 / 同步」上提到基座功能（`dispatch_common`），
+    会话内只留「步进 + RTC」；策略配置项 `prompt` 因此同时成为 RL 会话可用的 prompt 入口（见 [残差 RL 会话](./motrix_edge_rl.md)）。
 
 ## 相关文档
 
@@ -113,4 +155,5 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 -   推理策略客户端：[推理策略客户端（policy）](./motrix_edge_policy.md)
 -   观测帧缓存：[FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)
 -   命令定义：[命令总线（CommandBus）](./motrix_edge_command_bus.md)
+-   残差 RL 会话（actor 侧，含 learner 通道）：[残差 RL 会话（rl session）](./motrix_edge_rl.md)
 -   代码入口：`src/motrix_edge/session/` —— 随 **feat/6**（任务运行时核心）落地

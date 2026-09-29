@@ -92,7 +92,7 @@ policy:
   # 声明见 policy.POLICY_CONFIG_ITEMS；查询 `infer config`，设置 `infer config set <json>`
   # 或 POST /v1/infers/config（会话内）/ POST /v1/infers body `config`（进入会话前）。
   # **运行时给定，不在此维护**：模型路径（lerobot-act 的 pretrained_name_or_path，`infer model set`）
-  # 与文本指令（openpi 的 prompt，`infer prompt`）由调用方 / 前端按所选策略动态填写。
+  # 与文本指令（openpi 的 prompt，`infer config set`）由调用方 / 前端按所选策略动态填写。
   device: cuda # lerobot-act：下发给服务端的推理设备（GPU 部署填 cuda / cuda:0）
   actions_per_chunk: 50 # lerobot-act：动作块长 K（须匹配模型 chunk）
   # --- RTC（实时动作块管理：异步预取 + 三元切分 + 过渡策略；见 wiki/design/motrix_edge_rtc.md）---

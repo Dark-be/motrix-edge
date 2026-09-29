@@ -24,7 +24,6 @@ from motrix_edge.command import (
     CMD_INFER_CONFIG,
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL_SET,
-    CMD_INFER_PROMPT,
     CMD_LEASE_REVOKE,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
@@ -990,15 +989,15 @@ def test_infer_config_set_clears_endpoint_on_empty_value():
     assert replies[0].data["policy_config"]["values"]["host"] is None  # 回缺省，前端按「host 非空」门控
 
 
-def test_infer_prompt_without_text_is_rejected():
-    """缺文本的 ``infer prompt`` → 400（不得把必填项写成字面量字符串 "None"）。
+def test_infer_config_set_rejects_empty_required_prompt():
+    """必填项（prompt）空值 → 400（不得把缺失写成字面量字符串 "None" 的脏值）。
 
-    节点侧（非会话）直通 ``handle_policy_config``：若把缺失当成文本值，prompt 会变成 "None"
+    节点侧（非会话）直通 ``handle_policy_config``：若把空值当成文本值，prompt 会变成 "None"
     （非空 → ``missing`` 清空、推理门控放行），属会静默污染配置的脏值。
     """
     node = _endpoint_node()
     replies = []
-    node._dispatch(Command(CMD_INFER_PROMPT, reply_to=replies.append))
+    node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": '{"prompt": null}'}, reply_to=replies.append))
     assert replies[0].status == "rejected"
     assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "prompt" not in node.base_cfg["policy"]

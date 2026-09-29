@@ -28,10 +28,14 @@ import numpy as np
 
 from motrix_edge.command import META_REPLY_DEADLINE, build_command_registry
 from motrix_edge.errors import ErrorCode
-from motrix_edge.session import infer_session
+from motrix_edge.session import infer as infer_session
 from motrix_edge.session.base import RunResult
 
 _REGISTRY = build_command_registry()
+
+# 预置 prompt 的真实命令：`infer prompt` 快捷命令已删除，统一走策略配置写路径（与 `infer config
+# set` 同一条 set_policy_config）。JSON 本体含引号，故整体用单引号包裹，由 _as_command 的 shlex 还原。
+PROMPT_CMD = 'infer config set \'{"prompt": "把零件放好"}\''
 
 
 def _as_command(item):
@@ -63,7 +67,7 @@ class _FakePolicy:
         self.disconnect_calls = 0
         self.prepare_calls = 0
         self.connect_calls = 0
-        self.prompt = None  # 语言条件策略的配置项（会话内 infer prompt 预置；推理/录制前必须非空）
+        self.prompt = None  # 语言条件策略的配置项（会话内 infer config set 预置；推理/录制前必须非空）
         self.bind_calls = 0  # bind_adapter（adapter 布局传入）
         self.bound_cameras = None
         self.bound_action_dim = None
@@ -273,11 +277,11 @@ def test_infer_loop_runs_observation_to_action(monkeypatch):
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
     _patch(monkeypatch, policy)
-    # 缺省 warmup_required=true：infer prompt → **infer connect 预热** → （预热完成后）单步推理 → 退出
+    # 缺省 warmup_required=true：先设 prompt → **infer connect 预热** → （预热完成后）单步推理 → 退出
     session = _build_gated_session(
         adapter,
         policy,
-        "infer prompt 把零件放好",
+        PROMPT_CMD,
         "infer connect",
         # rollout 受预热门控：等预热状态跃迁（warmed_up=True）完成后再下发
         _wait_for(lambda s: s.warmed_up, "预热收尾（warmed_up=True）", "infer rollout"),
@@ -298,9 +302,7 @@ def test_infer_rollout_single_step_replies_action(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 1
@@ -352,7 +354,7 @@ def test_infer_rollout_rejects_multi_step(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout", "3"])
     rollout.reply_to = replies.append
-    session = _build_session(adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"))
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"))
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
@@ -369,7 +371,7 @@ def test_infer_rollout_rejects_drain(monkeypatch):
     replies = []
     drain = _REGISTRY.parse_argv(["infer", "rollout", "drain"])
     drain.reply_to = replies.append
-    session = _build_session(adapter, policy, ("infer prompt 把零件放好", drain, "session quit"))
+    session = _build_session(adapter, policy, (PROMPT_CMD, drain, "session quit"))
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
@@ -386,43 +388,10 @@ def test_infer_rollout_rejects_invalid_mode(monkeypatch):
     replies = []
     bad = _REGISTRY.parse_argv(["infer", "rollout", "0"])
     bad.reply_to = replies.append
-    session = _build_session(adapter, policy, ("infer prompt 把零件放好", bad, "session quit"))
+    session = _build_session(adapter, policy, (PROMPT_CMD, bad, "session quit"))
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
-    assert replies[0].status == "rejected"
-    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
-
-
-def test_infer_prompt_command_sets_policy_prompt(monkeypatch):
-    """会话内 ``infer prompt <text>``：预置推理文本指令（推理/录制前必须非空）。"""
-    adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    replies = []
-    prompt_cmd = _REGISTRY.parse_argv(["infer", "prompt", "把零件放好"])
-    prompt_cmd.reply_to = replies.append
-    session = _build_session(adapter, policy, (prompt_cmd, "session quit"))
-
-    assert session.run() == RunResult.FINISHED
-    assert policy.prompt == "把零件放好"
-    assert session.prompt == "把零件放好"  # 会话 status 上报当前 prompt
-    assert replies[0].status == "ok"
-    assert replies[0].data["prompt"] == "把零件放好"
-
-
-def test_infer_prompt_requires_text(monkeypatch):
-    """``infer prompt`` 缺文本 → rejected（不崩溃，不误改 prompt）。"""
-    adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    replies = []
-    bad = _REGISTRY.parse_argv(["infer", "prompt"])
-    bad.reply_to = replies.append
-    session = _build_session(adapter, policy, (bad, "session quit"))
-
-    assert session.run() == RunResult.FINISHED
-    assert policy.prompt is None
     assert replies[0].status == "rejected"
     assert replies[0].code == ErrorCode.INVALID_ARGUMENT
 
@@ -438,7 +407,7 @@ def test_infer_capture_episode_recording_toggles(monkeypatch):
     end = _REGISTRY.parse_argv(["capture", "episode", "end"])
     start.reply_to = replies.append
     end.reply_to = replies.append
-    session = _build_session(adapter, policy, ("infer prompt 把零件放好", start, end, "session quit"))
+    session = _build_session(adapter, policy, (PROMPT_CMD, start, end, "session quit"))
 
     assert session.run() == RunResult.FINISHED
     assert adapter.start_capture_calls == 1
@@ -572,6 +541,7 @@ def test_infer_config_set_applies_to_running_policy(monkeypatch):
     assert replies[0].status == "ok"
     assert replies[0].data["written"] == {"prompt": "把零件放好"}
     assert policy.prompt == "把零件放好"  # 立刻应用到策略客户端
+    assert session.prompt == "把零件放好"  # 会话 status 上报当前 prompt
     assert config["policy"]["prompt"] == "把零件放好"  # 同时写入内存态（下次会话生效）
     assert session.policy_config_status()["missing"] == []
 
@@ -624,7 +594,7 @@ def test_infer_capture_sync_syncs_meta(monkeypatch):
     replies = []
     sync = _REGISTRY.parse_argv(["capture", "sync", '{"operator": "policy", "task_name": "把零件放好"}'])
     sync.reply_to = replies.append
-    session = _build_session(adapter, policy, ("infer prompt 把零件放好", sync, "session quit"))
+    session = _build_session(adapter, policy, (PROMPT_CMD, sync, "session quit"))
 
     assert session.run() == RunResult.FINISHED
     assert adapter.synced_meta == [{"operator": "policy", "task_name": "把零件放好"}]
@@ -703,9 +673,7 @@ def test_infer_rollout_continuous_replies_started_and_stops(monkeypatch):
     cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
     cont.reply_to = replies.append
     # None = 无命令空档：让持续推理推一步后再 session quit
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", cont, None, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, cont, None, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "ok"
@@ -725,7 +693,7 @@ def test_infer_continuous_records_episode(monkeypatch):
     session = _build_session(
         adapter,
         policy,
-        ("infer prompt 把零件放好", "infer rollout continuous", start, end, "session quit"),
+        (PROMPT_CMD, "infer rollout continuous", start, end, "session quit"),
     )
 
     assert session.run() == RunResult.FINISHED
@@ -742,9 +710,7 @@ def test_infer_rollout_without_frame_is_rejected_not_error(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 0
@@ -800,9 +766,7 @@ def test_infer_rollout_auto_connects(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert policy.connect_calls == 1  # 自动连接一次，无需先 infer connect
@@ -1135,9 +1099,7 @@ def test_infer_rollout_requires_warmup(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=True
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=True)
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
@@ -1161,9 +1123,7 @@ def test_infer_rollout_drops_action_when_reply_deadline_passed(monkeypatch):
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
     rollout.meta[META_REPLY_DEADLINE] = time.monotonic() - 1.0  # 模拟 submit 早已超时
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 1  # 推理照常跑（块会进 RTC 队列）
@@ -1188,9 +1148,7 @@ def test_infer_rollout_auto_connect_failure_replies_error(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert policy.connect_calls == 1  # 单次尝试，不无限重试
@@ -1271,9 +1229,7 @@ def test_rollout_stop_discards_cached_chunks(monkeypatch):
     cont.reply_to = replies.append
     stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
     stop.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, cont, None, stop, "session quit"), warmup_required=False)
     resets = []
     monkeypatch.setattr(session.rtc, "reset", lambda: resets.append("reset"))
 
@@ -1303,9 +1259,7 @@ def test_infer_rollout_action_repr_rounds_to_display_digits(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].data["action"] == [-0.062, 0.447, 0.0]  # 3 位小数（-0.0 → 0.0）
@@ -1325,7 +1279,7 @@ def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
     single.reply_to = replies.append
     # None = 无命令空档：让持续推理推一步后再下发 stop
     session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"), warmup_required=False
+        adapter, policy, (PROMPT_CMD, cont, None, stop, single, "session quit"), warmup_required=False
     )
 
     assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
@@ -1381,9 +1335,7 @@ def test_infer_rollout_refused_during_teleop(monkeypatch):
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
     rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
+    session = _build_session(adapter, policy, (PROMPT_CMD, rollout, "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
     assert policy.infer_calls == 1  # 推理照常跑（只是不下发）

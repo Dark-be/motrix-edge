@@ -117,7 +117,7 @@ class InferRolloutRequest(BaseModel):
     """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续）。
 
     多步（count）与 drain（缓存推理）模式已取消（多余字段被忽略）；prompt 不随 rollout 传，
-    由会话内 ``infer prompt`` 预置（为空不能开始推理 / 录制）。
+    由策略配置项 ``prompt`` 预置（经 ``POST /v1/infers/config``；为空不能开始推理 / 录制）。
     """
 
     mode: Literal["single", "continuous"] | None = Field(
@@ -125,10 +125,6 @@ class InferRolloutRequest(BaseModel):
     )
 
 
-class InferPromptRequest(BaseModel):
-    """POST /v1/infers/prompt 请求体：文本指令（仅需要 prompt 的策略，如 openpi）。"""
-
-    prompt: str = Field(..., min_length=1, description="文本指令（需要 prompt 的策略推理前必须设置）")
 
 
 class InferSyncRequest(BaseModel):
@@ -169,7 +165,6 @@ class InferConfigRequest(BaseModel):
     内存态 ``policy`` 段：``runtime: True`` 的键立即应用到运行中的策略客户端（下一请求生效），
     ``runtime: False`` 的键（host / port、模型路径…）要退出会话重进才生效，回执 ``deferred``
     列出这些键。未知键 / 类型不符 / 必填为空 → 400；空值（``null`` / 空串）表示清除该项。
-    仅需 prompt 的策略也可用 ``POST /v1/infers/prompt`` 快捷入口。
     """
 
     config: dict = Field(default_factory=dict, description="策略配置项（按当前策略 schema 校验）")
@@ -234,7 +229,6 @@ __all__ = [
     "CommandResponse",
     "InferConfigRequest",
     "InferEnterRequest",
-    "InferPromptRequest",
     "InferRTCRequest",
     "InferRolloutRequest",
     "InferSyncRequest",

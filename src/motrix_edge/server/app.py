@@ -54,7 +54,7 @@ from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.routes import build_routers
 from motrix_edge.server.rpent import RpentService
-from motrix_edge.session.upload_session import UploadSession
+from motrix_edge.session.upload import UploadSession
 from motrix_edge.utils.version import get_package_version
 
 if TYPE_CHECKING:  # 可选依赖（--extra webrtc）：仅类型标注用，import 时不触碰 aiortc

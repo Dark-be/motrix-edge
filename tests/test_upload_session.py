@@ -321,7 +321,7 @@ def test_pack_requires_scan_and_selection(tmp_path):
 def test_pack_rolls_back_when_move_fails(tmp_path, monkeypatch):
     """移动失败 → 回滚（已移动的移回原处 + 删掉空包目录）→ 500；源数据不丢。"""
     session = _packed_session(tmp_path, 2)
-    import motrix_edge.session.upload_session as module
+    import motrix_edge.session.upload as module
 
     real_move = module.shutil.move
     calls = {"count": 0}
@@ -351,7 +351,7 @@ def test_pack_keeps_leftovers_when_rollback_also_fails(tmp_path, monkeypatch):
     因此宁可留下残留让人来收拾，也不静默删除。
     """
     session = _packed_session(tmp_path, 1)  # 选中 episode_0（.mcap + .json）
-    import motrix_edge.session.upload_session as module
+    import motrix_edge.session.upload as module
 
     real_move = module.shutil.move
     calls = {"count": 0}
