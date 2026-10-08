@@ -7,6 +7,8 @@
 包内 yml（`edge.yml` / `capture.yml`）**只是示例**（随包分发、只读）：首次访问把示例**播种**到
 `<根>/config/`，之后以那份副本为准。CLI 分两处：入口与子命令在 `__main__.py`（console script `motrix-edge` 与
 `python -m motrix_edge` 共用同一 `main()`），交互式会话集中在 `utils/cli.py`（`CliSession`）。
+启动时的输出由 `utils/banner.py` 统一：**终端打卡片**（路径 / 服务地址 / 常用命令，`print`，不受日志级别过滤），
+非终端（systemd / `nohup` / 管道）或开了文件日志时改打（补打）一行摘要（`debug_print`）。
 
 > ⚠️ **播种是一次性的**：包内示例的后续更新**不会**自动覆盖现场副本（想回到示例：删掉
 > `<根>/config/<name>` 再跑一次）。`<cwd>` 兜底的含义是「从不同目录启动 → 读不同配置 / 写不同日志」，
@@ -61,6 +63,8 @@
 >
 > 级别只作用于 `debug_print`（终端 + 文件）：**uvicorn 的级别独立**（两侧都固定
 > `log_level="info"`），所以调到 `DEBUG` 不会让 uvicorn 更啰嗦，uvicorn 也不会输出 DEBUG。
+> 启动**卡片**是 UI（`print`，见 `utils/banner.py`）——不受级别过滤、也不进日志文件；
+> 非终端或开了文件日志时改打一行**摘要**（走 `debug_print`，受级别过滤）。
 >
 > uvicorn 的 access 日志行为两侧一致（各自实现 `utils/logging.uvicorn_log_config`）：缺省
 > **静默**（NullHandler，防长期运行刷屏）；`MOTRIX_EDGE_LOG_FILE=1` 时只写各自日志根下的
@@ -96,9 +100,6 @@
 | `CONFIG_DIR` / `LOG_PATH`    | 模块级导出（`LOG_PATH` 供 `debug_print` 与 uvicorn 日志使用）                 |
 
 -   `CaptureMetaStore` 写 `capture.yml`：直接写 `<根>/config/capture.yml`（首次缺省访问时播种示例）。
-
--   `CaptureMetaStore` 写 `capture.yml`：用可写配置路径（外界目录优先，否则状态目录；首次缺省
-    访问时把包内默认播种到可写位置）。
 
 配置段：
 

@@ -19,6 +19,7 @@
 ``motrix_edge/utils/cli.py``，`node.py` 只保留 EdgeNode 生命周期核心库。
 """
 
+import sys
 import threading
 
 from motrix_edge.command import CommandBus, build_command_registry
@@ -32,13 +33,17 @@ def _print_version() -> None:
     print(f"motrix-edge {get_package_version()}")
 
 
-def _start_web(app, host: str, port: int):
+def _start_web(app, host: str, port: int, *, quiet_startup: bool = False):
     """后台线程运行 FastAPI 服务，返回 uvicorn.Server（置 should_exit=True 停止）。
 
     uvicorn 日志由 ``MOTRIX_EDGE_LOG_FILE`` 开关控制（与 ``debug_print`` 同一开关，缺省关闭）：
     开启时 access / error 写入 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5，与
     ``logs/log_*.txt`` 分开），HTTP access 只写文件；关闭时只静默 HTTP access（不写文件、
     不刷终端），uvicorn 启动 / 错误日志仍写终端（端口占用等排障信息不丢）。
+
+    ``quiet_startup``（终端已打启动卡片时置位）：把 uvicorn 的**启动 INFO** 降到 WARNING——
+    “Started server process” / “Uvicorn running on …” 与卡片里的服务地址重复；WARNING 以上的
+    排障信息（如端口被占用）照常输出。
     """
     import os
 
@@ -53,7 +58,7 @@ def _start_web(app, host: str, port: int):
     # （不留空 logs/），也不在此处另判一次环境变量（同一开关两处判会口径漂移）
     if file_log_enabled():
         os.makedirs(log_dir, exist_ok=True)
-    log_config = uvicorn_log_config(os.path.join(log_dir, "uvicorn.log"))
+    log_config = uvicorn_log_config(os.path.join(log_dir, "uvicorn.log"), quiet_startup=quiet_startup)
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info", log_config=log_config))
     threading.Thread(target=server.run, name="web", daemon=True).start()
     return server
@@ -66,9 +71,9 @@ def _run_node(args) -> None:
     ``edge.yml`` —— ``config.get_root_dir()`` = ``$MOTRIX_EDGE_DIR``，未设置时回落 ``<cwd>/motrix-edge``，
     配置在 ``<根>/config/``（首次访问把包内示例播种过去；见 ``config`` 包 docstring）。
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
-    node），本地 CLI 按键保留。
+    node），本地 CLI 按键保留（**仅当 stdin 是终端**；非交互场景不启用输入线程）。
     """
-    from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_state_dir, load_config
+    from motrix_edge.config import config_path, get_root_dir, load_config
     from motrix_edge.utils.load_file import load_yaml
 
     explicit = getattr(args, "config", None)
@@ -80,10 +85,11 @@ def _run_node(args) -> None:
         config_source = explicit
     else:
         base_cfg = load_config("edge.yml")
-        config_source = config_path("edge.yml") or "packaged default (edge.yml)"
+        config_source = str(config_path("edge.yml"))
 
     from importlib.util import find_spec
 
+    from motrix_edge.adapter import DEFAULT_DISCOVER_HOST, DEFAULT_DISCOVER_PORT
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
     from motrix_edge.server import create_app
@@ -91,45 +97,45 @@ def _run_node(args) -> None:
     from motrix_edge.server.meta import CaptureMetaService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.rpent import RpentService
-    from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled, set_log_level
+    from motrix_edge.utils.banner import show_card, startup_card, startup_summary
+    from motrix_edge.utils.data_handler import debug_print, file_log_enabled, set_log_level
 
     # 日志级别：**只**读 ``edge.yml`` 的 ``INFO_LEVEL``（不写 → 代码缺省 INFO），经
     # ``set_log_level`` 解析进进程内 ``_LOG_LEVEL``——**不写 ``os.environ``**，也无环境变量开关。
-    # 必须先于下面那行横幅：横幅自身也受级别过滤（级别 ≥ WARNING 时启动信息静默）
+    # 必须先于启动概览：概览里那行摘要也受级别过滤（级别 ≥ WARNING 时静默）
     log_level = set_log_level(base_cfg.get("INFO_LEVEL"))
-    config_dir = get_config_dir()
-    file_log_state = "ON" if file_log_enabled() else f"OFF ({ENV_LOG_FILE}=0)"
-    debug_print(
-        "EdgeNode",
-        f"Loaded config: {config_source}"
-        f" | config_dir={config_dir or 'packaged default (read-only)'}"
-        f" | state_dir={get_state_dir()}"
-        f" | log_dir={get_log_dir()}"
-        f" | log_level={log_level}"
-        f" | file_logging={file_log_state}",
-        "INFO",
-    )
 
     server_cfg = base_cfg.get("server", {})
     host = server_cfg.get("host", "0.0.0.0")
     port = server_cfg.get("port", 8000)
-
-    debug_print(
-        "EdgeNode",
-        "session run capture=启动采集  session run infer=启动推理 （选择+启动一步完成） \n"
-        "session quit=退出当前会话 | 推理单步: infer rollout \n"
-        "通用操作: node reset=节点复位/ERROR恢复  robot reset=机器人复位  robot estop=急停 \n"
-        f"web: http://{host}:{port} （node 的独立线程，接受外部 HTTP 请求）",
-        "INFO",
-    )
+    # 启动概览（终端卡片 / 一行摘要，规则见 ``utils/banner.py``）：以下字段两边共用
+    adapter_cfg = base_cfg.get("adapter") or {}
+    overview = {
+        "version": get_package_version(),
+        "root": str(get_root_dir()),
+        "config_source": config_source,
+        "log_level": log_level,
+        "file_logging": file_log_enabled(),
+        "web_url": f"http://{host}:{port}",
+        "adapter_target": f"http://{adapter_cfg.get('host') or DEFAULT_DISCOVER_HOST}"
+        f":{int(adapter_cfg.get('port') or DEFAULT_DISCOVER_PORT)}",
+    }
+    card_shown = show_card()
+    if card_shown:
+        print(startup_card(**overview))
+    if not card_shown or overview["file_logging"]:
+        debug_print("EdgeNode", startup_summary(**overview), "INFO")
 
     # 共享命令总线：web / CLI 输入线程 push，EdgeNode 主循环 poll。
     registry = build_command_registry()
     bus = CommandBus()
-    cli = CliSession(registry)
 
-    # prompt_toolkit 负责行编辑、历史、补全和并发输出保护。
-    threading.Thread(target=cli.run, args=(bus,), name="cli-input", daemon=True).start()
+    # 交互式 CLI **只在终端**启用：非终端 stdin（systemd / ``nohup`` / 管道 / ``docker -d``）
+    # 既没有可读输入（起了只会刷 ^M），构造 ``PromptSession`` 还会打
+    # "Input is not a terminal (fd=0)" 警告；prompt_toolkit 负责行编辑 / 历史 / 补全 / 并发输出保护。
+    if sys.stdin.isatty():
+        cli = CliSession(registry)
+        threading.Thread(target=cli.run, args=(bus,), name="cli-input", daemon=True).start()
 
     # node 主线程持续运行；web 是 node 的独立线程（node 接收 web 请求）
     # 单 adapter 包：node 启动后按 adapter.host/port 探测并绑定唯一 adapter，采集 / 推理都基于它
@@ -170,6 +176,7 @@ def _run_node(args) -> None:
         ),
         host,
         port,
+        quiet_startup=card_shown,
     )
     try:
         node.run()  # 主线程：持续运行，直到 Ctrl-C
