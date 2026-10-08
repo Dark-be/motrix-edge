@@ -47,6 +47,7 @@ class SinglePiperRobot(BaseRobot):
     GRIPPER = 1  # Follower 单臂：1 夹爪（gripper 空间）
     IMAGE_NAMES: list[str] = []  # 无相机
     IMAGES: dict[str, tuple[int, int]] = {}
+    CAMERA_KINDS: dict[str, str] = {}
     SHM_NAME = "single_piper_obs"
 
     # 默认复位目标（config 未提供时使用）：6 关节 0 + 夹爪张开 1
@@ -54,6 +55,7 @@ class SinglePiperRobot(BaseRobot):
     DEFAULT_INIT_GRIPPER = [1.0]
     # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports）----
     PORT_ROLES = ("leader", "follower")  # 主 / 从臂 CAN 接口名
+    PORT_KINDS = {role: "can" for role in PORT_ROLES}
 
     def __init__(self, robot_config: dict | None = None):
         robot_config = dict(robot_config or {})

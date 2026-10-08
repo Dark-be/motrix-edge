@@ -32,7 +32,7 @@
 - 写配置：:func:`writable_config_path` = ``<根>/config/...``（机器档案 / 机型覆盖都写这里）；
 - **``<cwd>`` 兜底的含义**：从不同目录启动 → 读不同配置 / 写不同日志。现场与容器请显式设
   ``MOTRIX_ROBOT_PIPELINE_DIR``（容器内必须是容器可见路径，否则落容器可写层、重启即丢）。
-  生成 / 更新档案：机器档案一键脚本（用 :mod:`config.probe` 枚举设备、逐个插识别角色）。
+  生成 / 更新档案：``bash scripts/setup_robot.sh``（用 :mod:`config.probe` 枚举设备、逐个插识别角色）。
 
 本模块在 import 时计算模块级 ``CONFIG_DIR`` / ``LOG_PATH``（环境变量须在进程启动前设置）。
 """
@@ -136,7 +136,7 @@ PROFILE_HEADER = """\
 # 机器档案（每台机器一份）：只写「这台机器不同」的键，其余继承机型 yml（深合并）。
 # 常见键：robot.name / robot.ports / robot.cameras / robot.gravity.arms.<臂>.params /
 #         collector.save_dir / can.bindings（USB 物理口 -> <目标CAN名>:<波特率>）。
-# 生成 / 更新：机器档案一键脚本 --config <机型> --machine <本机名>
+# 生成 / 更新：bash scripts/setup_robot.sh --config <机型> --machine <本机名>
 # 生效：robot server 启动时按 --machine / MOTRIX_ROBOT_PIPELINE_MACHINE / hostname 自动叠加。
 """
 
@@ -211,7 +211,7 @@ def save_config_override(name: str, patch: dict) -> Path:
 def _override_header(name: str) -> str:
     """机型 yml 的注释头（每次写入重新生成，所以文件里的注释不必手改）。"""
     return (
-        f"# {name}：本机实际配置（由机器档案一键脚本 --target config 生成 / 更新）。\n"
+        f"# {name}：本机实际配置（由 scripts/setup_robot.sh --target config 生成 / 更新）。\n"
         "# 注意：包内示例的后续更新不会自动生效——只写差异请改用机器档案（robot/<machine>.yml）。\n"
     )
 
@@ -278,7 +278,7 @@ def load_config(name: str, machine: str | None = None) -> dict:
     path = machine_path(resolved)
     if not path.exists():
         if machine is not None:
-            raise FileNotFoundError(f"机器档案不存在：{path}（先跑机器档案一键脚本生成）")
+            raise FileNotFoundError(f"机器档案不存在：{path}（先跑 bash scripts/setup_robot.sh 生成）")
         return cfg
     overlay = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(overlay, dict):

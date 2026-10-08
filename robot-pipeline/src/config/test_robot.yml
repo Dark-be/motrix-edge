@@ -1,3 +1,8 @@
+# ⚠️ 本文件是**示例配置**（随包分发、只读、不含现场值）：实际运行配置在 <根>/config/——
+#   <根> = $MOTRIX_ROBOT_PIPELINE_DIR，未设置时回落 <cwd>/motrix-robot-pipeline（配置 / 日志同一个根）：
+#     · 整份机型配置：<根>/config/<本文件名>（首次访问把本示例**播种**过去，之后以它为准）
+#     · 只写差异：    <根>/config/robot/<机器名>.yml（深合并到机型配置上）
+#   生成 / 更新：bash scripts/setup_robot.sh（见 robot-pipeline/README.md「机器档案」）
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
 # 服务器监听地址（命令行 --host/--port 可覆盖）

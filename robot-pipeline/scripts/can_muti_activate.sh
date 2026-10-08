@@ -1,12 +1,22 @@
 #!/bin/bash
-declare -A USB_PORTS
+# 把机械臂插的 **USB 物理口**绑定到**固定 CAN 名**（left / right / m_left / m_right）：换设备、重启、
+# 换顺序都不用改配置。
+#
+# 绑定表来自 **robot 配置里的 ``can.bindings``**（与 robot server **同一套加载**：读 ``<根>/config/`` 下的
+# ``<机型>.yml``（首次访问播种包内示例），再叠加机器档案 ``robot/<machine>.yml``）：
+#       can:
+#         bindings:
+#           "3-2.2:1.0": "left:1000000"   # USB 物理口(bus-info) -> <目标CAN名>:<波特率>
+# 生成 / 更新：bash scripts/setup_robot.sh（交互式逐个插设备自动填；--target config 写进机型 yml）
+#
+# 用法: sudo bash scripts/can_muti_activate.sh [--config <机型|yml>] [--machine <名>] [--list] [--dry-run] [--ignore]
+#   缺省：按 $MOTRIX_ROBOT_PIPELINE_CFG（机型名）→ 否则机器档案 <根>/config/robot/${MOTRIX_ROBOT_PIPELINE_MACHINE:-$(hostname)}.yml
+#   <根> = $MOTRIX_ROBOT_PIPELINE_DIR，未设时回落 <cwd>/motrix-robot-pipeline
 
-# 键 = USB 物理口 bus-info（ethtool -i <canX> | grep bus-info）；值 = <目标名>:<波特率>
-# 同一物理口稳定、与设备无关；换 USB 口 / 换 HUB 会变（用 --list 核对后再填）
-USB_PORTS["3-2.2:1.0"]="left:1000000"
-USB_PORTS["3-2.1:1.0"]="right:1000000"
-USB_PORTS["3-1.3:1.0"]="m_left:1000000"
-USB_PORTS["3-1.5:1.0"]="m_right:1000000"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+declare -A USB_PORTS # 由配置里的 can.bindings 填充（见 load_bindings）
+CONFIG=""           # 机型名（如 dual_piper）或 yml 路径（--config）；空 → 由 python 按环境变量 / 机器档案解析
+MACHINE=""          # 机器档案名（--machine）；空 → 由 python 按 MOTRIX_ROBOT_PIPELINE_MACHINE / hostname 解析
 
 # ---------------- 参数 ----------------
 IGNORE_CHECK=false # --ignore：跳过「CAN 接口数 == 配置条数」的交互确认
@@ -15,31 +25,60 @@ DRY_RUN=false      # --dry-run：只打印将执行的 ip 命令
 
 usage() {
     cat <<'EOF'
-用法: sudo bash scripts/can_muti_activate.sh [--list] [--dry-run] [--ignore]
+用法: sudo bash scripts/can_muti_activate.sh [--config <机型|yml>] [--machine <名>] [--list] [--dry-run] [--ignore]
 
+  --config <机型|yml>  机型名（如 dual_piper → 读 <根>/config/dual_piper.yml + 机器档案叠加，
+                       与 robot server 同一份）或 yml 路径；缺省 $MOTRIX_ROBOT_PIPELINE_CFG
+  --machine <名>       机器档案名（<根>/config/robot/<名>.yml）；缺省 $MOTRIX_ROBOT_PIPELINE_MACHINE / hostname
   --list      只打印 现状 ↔ 配置 对照表（不改动，无需 root）
   --dry-run   打印将要执行的 ip 命令（不改动，无需 root）
   --ignore    跳过「CAN 接口数 == 配置条数」的交互确认
   -h, --help  显示本帮助
 
-USB_PORTS（本脚本顶部）：键 = USB 物理口 bus-info（ethtool -i <canX> | grep bus-info），
-值 = <目标接口名>:<波特率>。
+can.bindings（robot 配置里）：**键** = USB 物理口 bus-info（ethtool -i <canX> | grep bus-info），
+**值** = <目标接口名>:<波特率>。同一物理口稳定、与设备无关；换 USB 口 / 换 HUB 会变——
+重新跑 bash scripts/setup_robot.sh 即可（或看 --list 核对后手改配置）。
 
 注意：绑定过程会 down + 改名接口，执行前请确认机械臂已停止、没有正在跑的 CAN 通信。
 EOF
 }
 
-for arg in "$@"; do
-    case "$arg" in
-        --list) LIST_ONLY=true ;;
-        --dry-run) DRY_RUN=true ;;
-        --ignore) IGNORE_CHECK=true ;;
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config)
+            if [ -z "${2:-}" ]; then
+                echo "❌ [ERROR]: --config 需要一个机型名或 yml 路径" >&2
+                exit 2
+            fi
+            CONFIG="$2"
+            shift 2
+            ;;
+        --machine)
+            if [ -z "${2:-}" ]; then
+                echo "❌ [ERROR]: --machine 需要一个机器名" >&2
+                exit 2
+            fi
+            MACHINE="$2"
+            shift 2
+            ;;
+        --list)
+            LIST_ONLY=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --ignore)
+            IGNORE_CHECK=true
+            shift
+            ;;
         -h | --help)
             usage
             exit 0
             ;;
         *)
-            echo "❌ [ERROR]: 未知参数 '$arg'" >&2
+            echo "❌ [ERROR]: 未知参数 '$1'" >&2
             usage >&2
             exit 2
             ;;
@@ -79,13 +118,50 @@ bus_info_of() { ethtool -i "$1" 2>/dev/null | awk -F': ' '/^bus-info/{print $2}'
 bitrate_of() { ip -details link show "$1" 2>/dev/null | sed -n 's/.*bitrate \([0-9]\+\).*/\1/p' | head -1; }
 is_up() { ip -br link show "$1" 2>/dev/null | grep -qw UP && echo yes || echo no; }
 
+# ---------------- 机器档案 → 绑定表 ----------------
+# 选 python：能 ``import yaml`` 才用（项目 venv 未 uv sync / 系统 python 无 pyyaml 都不算数）
+PYTHON_CMD=()
+for candidate in "$ROOT_DIR/.venv/bin/python" python3; do
+    if command -v "$candidate" >/dev/null && "$candidate" -c "import yaml" 2>/dev/null; then
+        PYTHON_CMD=("$candidate")
+        break
+    fi
+done
+if [ ${#PYTHON_CMD[@]} -eq 0 ] && command -v uv >/dev/null && uv run python -c "import yaml" 2>/dev/null; then
+    PYTHON_CMD=(uv run python) # 最后手段：按 pyproject 解析依赖（可能触发同步）
+fi
+
+resolve_profile_args() {
+    # 拼 python 参数：--dump-bindings [<机型|yml>] [--machine <名>]（不传值 → 由 python 解析机器档案）
+    DUMP_ARGS=(--dump-bindings)
+    [ -n "$CONFIG" ] && DUMP_ARGS+=("$CONFIG")
+    [ -n "$MACHINE" ] && DUMP_ARGS+=(--machine "$MACHINE")
+}
+
+load_bindings() {
+    # robot 配置的 can.bindings → USB_PORTS（每行 "<bus-info>\t<目标名>:<波特率>"）
+    local dump
+    [ ${#PYTHON_CMD[@]} -gt 0 ] || die "找不到可用的 python（需要 pyyaml）：先 uv sync"
+    resolve_profile_args
+    if ! dump="$(PYTHONPATH="$ROOT_DIR/src" "${PYTHON_CMD[@]}" -m config.setup "${DUMP_ARGS[@]}")"; then
+        die "读 robot 配置失败（见上面报错）：config=${CONFIG:-（按 MOTRIX_ROBOT_PIPELINE_CFG / 机器档案）} machine=${MACHINE:-（MOTRIX_ROBOT_PIPELINE_MACHINE / hostname）}"
+    fi
+    while IFS=$'\t' read -r port value; do
+        [ -n "$port" ] && USB_PORTS["$port"]="$value"
+    done <<<"$dump"
+    [ "${#USB_PORTS[@]}" -gt 0 ] || die "配置里的 can.bindings 为空（用 bash scripts/setup_robot.sh 生成）"
+    echo "[INFO]: 绑定表来自 robot 配置（${CONFIG:+config=$CONFIG }machine=${MACHINE:-MOTRIX_ROBOT_PIPELINE_MACHINE / hostname}，${#USB_PORTS[@]} 条）"
+}
+
+load_bindings
+
 # ---------------- 配置校验（值格式 + 目标名唯一）----------------
 declare -A PORT_TARGET PORT_BITRATE
 declare -A NAME_OWNER # 目标名 → 端口（重复检测；必须 declare -A，写成 NAME_OWNER=() 会变成索引数组）
 for port in "${!USB_PORTS[@]}"; do
     value="${USB_PORTS[$port]}"
     if [[ ! "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
-        die "USB_PORTS[\"$port\"]=\"$value\" 格式不正确，应为 <目标名>:<波特率>（如 left:1000000）"
+        die "can.bindings[\"$port\"]=\"$value\" 格式不正确，应为 <目标名>:<波特率>（如 left:1000000）"
     fi
     name="${BASH_REMATCH[1]}"
     br="${BASH_REMATCH[2]}"
@@ -97,7 +173,7 @@ for port in "${!USB_PORTS[@]}"; do
     PORT_BITRATE["$port"]="$br"
 done
 PREDEFINED_COUNT=${#USB_PORTS[@]}
-[ "$PREDEFINED_COUNT" -gt 0 ] || die "USB_PORTS 为空：先在脚本顶部配置 <USB 口>=<目标名>:<波特率>"
+[ "$PREDEFINED_COUNT" -gt 0 ] || die "绑定表为空：先用 bash scripts/setup_robot.sh 生成机器档案的 can.bindings"
 
 # ---------------- 系统现状采集 ----------------
 mapfile -t SYS_IFACES < <(ip -br link show type can 2>/dev/null | awk 'NF {print $1}')

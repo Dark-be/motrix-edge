@@ -57,9 +57,11 @@ class DualPiperRobot(BaseRobot):
     GRIPPER_DEADZONE = 0.2  # piper 抓取死区：小于 0.2 视为闭合（0）
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
+    CAMERA_KINDS = {name: "realsense" for name in IMAGE_NAMES}  # 三路均为 RealSense（填序列号）
     SHM_NAME = "dual_piper_obs"
     # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports / robot.cameras）----
     PORT_ROLES = ("left_master", "right_master", "left", "right")  # 控制器端口（主手 / 从臂）
+    PORT_KINDS = {role: "can" for role in PORT_ROLES}  # 主手 / 从臂均为 CAN 接口名
 
     # ---- 臂接线：左/右臂各一个 PiperController（执行）----
     # 本类只管两件事：**取数**（get_observation_qpos / get_observation_gripper）与**下发**；位姿目标在这里
