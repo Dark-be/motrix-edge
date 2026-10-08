@@ -230,17 +230,22 @@ class EdgeNode:
         return self._capture_status
 
     def _log_state(self, state):
-        """状态进入日志（NodeLifecycle.on_enter 钩子，消息在进入时求值）。"""
+        """状态进入日志（NodeLifecycle.on_enter 钩子，消息在进入时求值）。
+
+        统一格式 ``<状态> · <一句话>``：状态在前便于扫读，“下一步做什么”只给可操作的（IDLE 给探测目标、
+        ERROR 给恢复命令）。
+        """
         if state == NodeState.INIT:
-            debug_print("EdgeNode", "INIT: 节点初始化中（构造后默认状态）。", "INFO")
+            debug_print("EdgeNode", "INIT · 节点初始化中（构造后默认状态）", "INFO")
         elif state == NodeState.IDLE:
-            debug_print("EdgeNode", "IDLE: 无 adapter，正在探测机器人进程...", "INFO")
+            host, port = self._adapter_target()
+            debug_print("EdgeNode", f"IDLE · 等待机器人进程（探测 {host}:{port}）", "INFO")
         elif state == NodeState.READY:
-            debug_print("EdgeNode", f"READY: adapter 就绪（{self.adapter_type or self.adapter_name}）。", "INFO")
+            debug_print("EdgeNode", f"READY · 已绑定 {self.adapter_name}（{self.adapter_type or '-'}）", "INFO")
         elif state == NodeState.ACTIVE:
-            debug_print("EdgeNode", f"ACTIVE: 任务执行中（{self.session_type}）。", "INFO")
+            debug_print("EdgeNode", f"ACTIVE · {self.session_type} 会话执行中", "INFO")
         else:
-            debug_print("EdgeNode", "ERROR: 硬件故障或通信异常，等待恢复(rr)。", "ERROR")
+            debug_print("EdgeNode", "ERROR · 硬件 / 通信异常，恢复：node reset", "ERROR")
 
     # ------------------------------------------------------------------
     # 主控制循环（完整持续的控制流程，直到 Ctrl-C）
@@ -251,14 +256,13 @@ class EdgeNode:
         INIT 仅存在于初始化阶段（构造后默认状态）；进入 IDLE 后不再回 INIT（状态机
         单向转移）。重复调用（已离开 INIT）为 no-op。
         """
-        debug_print("EdgeNode", "初始化完成，进入 IDLE 开始探测机器人进程...", "INFO")
-        self.lifecycle.transition(NodeState.IDLE)
+        self.lifecycle.transition(NodeState.IDLE)  # 状态入日志在 _log_state（不在两处各说一遍）
         return self.state
 
     def run(self):
         """持续监听命令并驱动生命周期。返回最终状态。"""
         self.initialize()  # 初始化（INIT → IDLE）；INIT 仅存在于初始化阶段
-        debug_print("EdgeNode", "EdgeNode 主循环启动，持续监听命令...", "INFO")
+        debug_print("EdgeNode", "主循环启动，开始消费命令（Ctrl-C 退出）", "DEBUG")
         try:
             while True:
                 self._tick()  # 周期任务：探测 / 失联检查 / 任务线程收尾
@@ -766,6 +770,16 @@ class EdgeNode:
         result = self._task_result if self._task_result is not None else RunResult.FINISHED
         self._handle_result(result)
 
+    def _adapter_target(self) -> tuple[str, int]:
+        """机器人进程的探测目标 ``(host, port)``：``edge.yml`` 的 ``adapter`` 段，缺省用 adapter 包常量。
+
+        探测（:meth:`_probe_adapter`）与状态日志（``IDLE · 等待机器人进程``）共用，缺省值只有一处。
+        """
+        from motrix_edge.adapter import DEFAULT_DISCOVER_HOST, DEFAULT_DISCOVER_PORT
+
+        cfg = (self.base_cfg or {}).get("adapter") or {}
+        return str(cfg.get("host") or DEFAULT_DISCOVER_HOST), int(cfg.get("port") or DEFAULT_DISCOVER_PORT)
+
     def _probe_adapter(self) -> None:
         """IDLE 下周期 discover 机器人进程：找到 → 实例化并绑定 → READY。
 
@@ -776,12 +790,10 @@ class EdgeNode:
         if now - self._last_probe < self.probe_interval:
             return
         self._last_probe = now
-        from motrix_edge.adapter import DEFAULT_DISCOVER_HOST, DEFAULT_DISCOVER_PORT, discover_adapter
+        from motrix_edge.adapter import discover_adapter
 
-        # 解析 adapter 段（host/port）→ discover_adapter 一步完成「发现 + 实例化」
-        adapter_cfg = self.base_cfg.get("adapter") or {}
-        host = adapter_cfg.get("host", DEFAULT_DISCOVER_HOST)
-        port = adapter_cfg.get("port", DEFAULT_DISCOVER_PORT)
+        # 探测目标（host/port）与状态日志共用 ``_adapter_target``：缺省值不在这里再写一遍
+        host, port = self._adapter_target()
         adapter = discover_adapter(host=host, port=port)  # 返回 None 或实例化后的 adapter
         if adapter is None:
             return
