@@ -62,6 +62,8 @@ class TestRobot(BaseRobot):
     )
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
+    # 相机是 TestVisionSensor（无硬件）→ setup 脚本不探测（virtual）
+    CAMERA_KINDS = {name: "virtual" for name in IMAGE_NAMES}
     SHM_NAME = "test_robot_obs"
 
     def __init__(self, robot_config: dict | None = None):

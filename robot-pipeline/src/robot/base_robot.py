@@ -195,6 +195,12 @@ class BaseRobot:
         # 机械臂侧状态缓存（控制线程每拍 sample_qpos() 覆盖；观测线程只读）
         self.motion_state: dict | None = None
 
+    # ---- 硬件设备类型（机器档案探测用：``scripts/setup_robot.sh`` 据此决定「这类设备怎么找」）----
+    # 键 = ``PORT_ROLES`` / ``IMAGE_NAMES``；值 = ``config.probe`` 的 kind（can / serial /
+    # realsense / v4l2 / virtual）。声明齐全才能一键填档；漏声明 → setup 脚本报错要求补（不猜）。
+    PORT_KINDS: dict[str, str] = {}
+    CAMERA_KINDS: dict[str, str] = {}
+
     # ---- 硬件接线（robot.ports / robot.cameras：**值必填**，代码内不存现场值）----
     def _required_devices(self, section: str, keys: tuple[str, ...]) -> dict[str, str]:
         """读取**必填**的硬件接线 ``robot.<section>.<key>``；缺失 / 空串 → ValueError。

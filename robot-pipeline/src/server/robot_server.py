@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import argparse
 
-from config import load_config  # noqa: E402
+from config import load_config, machine_path, resolve_machine  # noqa: E402
 from env import get_env  # noqa: E402
 from server.contract_server import create_app, serve  # noqa: E402
 from utils.data_handler import debug_print, set_log_level  # noqa: E402
@@ -40,16 +40,35 @@ from utils.data_handler import debug_print, set_log_level  # noqa: E402
 _DEFAULT_CFG = "test_robot.yml"
 
 
-def build_app(config_name: str | None = None):
+def _machine_note(machine: str | None) -> str:
+    """启动日志里的机器档案说明：``<名>（档案 <路径>）`` / ``<名>（无档案 → 按机型默认）`` / ``-``。"""
+    if not machine:
+        return "-"
+    path = machine_path(machine)
+    return f"{machine}（档案 {path}）" if path.exists() else f"{machine}（无档案 → 按机型默认）"
+
+
+def build_app(config_name: str | None = None, machine: str | None = None):
     """按机器人控制配置构造运行环境并构建 /v1 契约应用（服务器本身不读配置）。
+
+    ``machine`` = 机器档案名（``<根>/config/robot/<machine>.yml``，``<根>`` = ``$MOTRIX_ROBOT_PIPELINE_DIR``
+    或 ``<cwd>/motrix-robot-pipeline``）：只写「这台机器
+    不同」的键（``ports`` / ``cameras`` / ``name`` / ``save_dir`` / ``gravity.arms`` / ``can.bindings``），
+    深合并到机型配置上；缺省按 ``MOTRIX_ROBOT_PIPELINE_MACHINE`` / hostname 解析（生成档案见
+    ``scripts/setup_robot.sh``）。
 
     监听地址取自配置 ``server`` 段（host/port），存入 ``app.state`` 供启动时读取；
     discover 上报的 endpoint 也使用该地址。
     """
     name = config_name or _DEFAULT_CFG
-    cfg = load_config(name)
+    cfg = load_config(name, machine)
     # 日志级别与 edge 同一套语义：环境变量 > yml 的 INFO_LEVEL > INFO（详见 utils.data_handler）
-    debug_print("SERVER", f"config={name} | log_level={set_log_level(cfg.get('INFO_LEVEL'))}", "INFO")
+    debug_print(
+        "SERVER",
+        f"config={name} | machine={_machine_note(resolve_machine(machine))} | "
+        f"log_level={set_log_level(cfg.get('INFO_LEVEL'))}",
+        "INFO",
+    )
     server_cfg = cfg.get("server") or {}
     host = server_cfg.get("host")
     port = server_cfg.get("port")
@@ -70,10 +89,16 @@ def main():
     parser.add_argument(
         "--config", default=None, help="config file name under config; default: $ROBOT_SERVER_CFG or test_robot"
     )
+    parser.add_argument(
+        "--machine",
+        default=None,
+        help="machine profile name under <root>/config/robot ($MOTRIX_ROBOT_PIPELINE_DIR); "
+        "default: $MOTRIX_ROBOT_PIPELINE_MACHINE or hostname",
+    )
     parser.add_argument("--host", default=None, help="override host (default: config server.host or 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None, help="override port (default: config server.port or 8090)")
     args = parser.parse_args()
-    app_obj = build_app(args.config) if args.config else app
+    app_obj = build_app(args.config, args.machine) if (args.config or args.machine) else app
     host = args.host or getattr(app_obj.state, "host", None)
     port = args.port or getattr(app_obj.state, "port", None)
     serve(app_obj, host=host, port=port)
