@@ -243,6 +243,15 @@ def resolve_config_file(name: str) -> Path:
     return Path(str(resources.files(__package__).joinpath(name)))
 
 
+def effective_config_path(name: str) -> Path:
+    """该机型配置**实际生效**的文件路径（``.yml`` 后缀可省）：本地副本优先，否则包内示例。
+
+    与 :func:`load_config` 同一取值口径，供启动清单 / 排障打印真实来源——现场「改了包内示例
+    不生效」用路径一比就能看出读的是哪份。
+    """
+    return resolve_config_file(_yml_name(name))
+
+
 def _base_config(name: str) -> dict:
     """机型配置本体（不含机器档案）：先播种，再读 ``<根>/config/<name>``；读不到 → 包内示例 / {}。"""
     name = _yml_name(name)
@@ -309,6 +318,7 @@ __all__ = [
     "seed_config",
     "list_configs",
     "resolve_config_file",
+    "effective_config_path",
     "load_config",
     "machine_path",
     "resolve_machine",
