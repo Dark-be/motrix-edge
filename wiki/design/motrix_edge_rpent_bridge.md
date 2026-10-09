@@ -227,23 +227,63 @@ robots/motrix_edge/
 | `prompt_bundle`：一份 prompt 服务所有 planner                                                                   | 照搬：工具在 prompt 里用**裸名**（`move_delta`）；只在某处提一次 Claude Code / Codex 显示成 `mcp__rpent__<name>`                                                        |
 | `tasks.py` 任务集 + VLA 条件文本                                                                                | 我们自己写；先放一个 smoke 任务（见下）                                                                                                                                 |
 
-### 工具集（建议与 edge 原语一一对应）
+### 工具清单（给 LLM 的能力面）
 
 **分工铁律**：只有非 `@readonly` 工具返回后由 `Toolkit` 自动跑的 `dump_state` 会碰 edge 观测；
 `view_env_state` / `view_camera_meta` 都是读当步落盘 artifact 的本地工具。
 
-| 工具名                                 | 调用的 edge 方法                                     | 回执里必须读的字段                                                             |
-| -------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `move_delta`                           | `env.move_delta`（`arm?` + `delta_xyz`）             | **`reached`** / `final_err` / `elapsed_s` / `stalled` / `timeout`              |
-| `rotate_delta`                         | `env.rotate_delta`（`arm?` + `delta_rpy`）           | 同上                                                                           |
-| `open_gripper` / `close_gripper`       | `env.set_gripper(arm?, open)`                        | `reached` / `final_err` / `stalled`（见下）                                    |
-| `recover_joint_posture`                | `env.recover_joint_posture(reason)`                  | `reached` / `gripper_preserved`（true = 关节回 home + 保持夹爪开合）           |
-| `reset_home`                           | `env.reset`                                          | `states`（机器人回 home，**夹爪也回 home**；不恢复桌面场景，被夹持物可能掉落） |
-| `get_robot_state`（可选，`@readonly`） | `env.get_robot_state`                                | `pose`（rpy）/ `left_arm` / `right_arm`（含 quat `tcp_pose`）                  |
-| `view_env_state` / `view_camera_meta`  | **不打 edge**（读本步落盘 PNG / `camera_meta.json`） | 本地 artifact                                                                  |
+#### 坐标系（每个工具的参数系都写死在 description 里，别让 agent 猜）
+
+| 系名             | 含义                                             | 谁提供                            | 出现在哪些工具                                                     |
+| ---------------- | ------------------------------------------------ | --------------------------------- | ------------------------------------------------------------------ |
+| `world`          | 左臂基座（标定产物的 `world`，别名 `left_base`） | `frames.json` + `/v1/depth`       | `move_to` / `look_at` 的**输入**、`get_object_position` 的**输出** |
+| **末端（工具）** | 该臂法兰系（工具伸出方向 = 法兰 `+z`）           | 运行期快照（`pose_target` 的 FK） | `move_delta` / `rotate_delta`（**唯一**参考系）                    |
+| `base`           | 该臂基座系（`FK(q)` 的原点 / 轴向）              | 运动学                            | 工具清单里**没有**工具直接用它（edge 内部换算中转）                |
+
+⚠️ **分工铁律**：**增量看末端自己，绝对看 `world`**——`move_delta(delta_xyz=[0, 0, 0.05])` 指沿
+**工具**方向伸出 5 cm（不是基座竖直向上）；`move_to(target=[x, y, z])` / `look_at(target)` 的
+`target` 是 `world` 点（与 `get_object_position` 的输出同一套，agent 不需要自己换算）。**没有**
+`space` 参数可选参考系（早年有过 `space="base"|"ego"`，已删）。
+
+#### A. 观测 / 查询（`@readonly`）
+
+| 工具名                                | edge 方法                                            | 参数                                     | 回执里必须读的字段                                                         |
+| ------------------------------------- | ---------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------- |
+| `get_robot_state`                     | `env.get_robot_state`                                | —                                        | `pose`（rpy）/ `left_arm` / `right_arm`（含 quat `tcp_pose`）              |
+| `get_object_position`（**新增**）     | `env.get_object_position`                            | `camera` / `x` / `y`（像素或归一化坐标） | `xyz_world`（**米，`world` 帧**）/ `frame` / `world` / `depth_m` / `valid` |
+| `view_env_state` / `view_camera_meta` | **不打 edge**（读本步落盘 PNG / `camera_meta.json`） | —                                        | 本地 artifact                                                              |
+
+#### B. 绝对动作
+
+| 工具名                  | edge 方法                   | 参数                                                                 | 回执里必须读的字段                                                            |
+| ----------------------- | --------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `reset_home`            | `env.reset`                 | —                                                                    | `states`（机器人回 home，**夹爪也回 home**；不恢复桌面场景）                  |
+| `recover_joint_posture` | `env.recover_joint_posture` | `reason`                                                             | `reached` / `gripper_preserved`                                               |
+| `look_at`（**新增**）   | `env.look_at`               | `target`[3]（`world`，米）/ `arm?` / `keep?` / `settle?`             | `reached` / `turned_deg` / `final_err_rad` / `base_source` / `large_rotation` |
+| `move_to`（**新增**）   | `env.move_to`               | `target`[3]（`world`，米）/ `rpy?`[3]（`world`）/ `arm?` / `settle?` | `reached` / `target_base` / `base_source` / `final_err`                       |
+
+#### C. 增量动作（**一律末端系** = 沿 / 绕工具自身三轴）
+
+`move_delta` / `rotate_delta` 的 `delta_*` **只**按末端系解释：`x` 有值 = 沿末端**当前** x 轴走——
+不是“让绝对目标的 x 变成这个值”（那是 `move_to` 干的事）。edge 用快照姿态换算成该臂基座系增量后
+下发（机器人侧的 `pose_delta` 只认基座系），叠加仍归机器人侧。
+
+| 工具名         | edge 方法          | 参数                                               | 回执里必须读的字段                                                                   |
+| -------------- | ------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `move_delta`   | `env.move_delta`   | `arm?` / `delta_xyz`[3]（米，末端系）/ `settle?`   | `reached` / `final_err` / `delta_frame` / **`converted_delta_base`** / `base_source` |
+| `rotate_delta` | `env.rotate_delta` | `arm?` / `delta_rpy`[3]（弧度，末端系）/ `settle?` | 同上                                                                                 |
+
+#### E. 夹爪
+
+| 工具名                           | edge 方法                     | 参数   | 回执里必须读的字段                                                           |
+| -------------------------------- | ----------------------------- | ------ | ---------------------------------------------------------------------------- |
+| `open_gripper` / `close_gripper` | `env.set_gripper(arm?, open)` | `arm?` | `reached` / `final_err` / `stalled`（**`stalled` = 已接触/夹住，不是失败**） |
 
 **不注册**：`request_scene_reset`（属探索模式 + 操作员介导的**场景**恢复，真机必须人工）、
-`back_project` / `segment`（依赖 RPent 本地标定，我们没提供内参/外参）、`request_operator_verdict`（探索模式）。
+`segment`（依赖 RPent 本地的分割模型；edge 只给几何）、`request_operator_verdict`（探索模式）。
+`back_project` **改由 `get_object_position` 承接**——以前「不注册」的理由是「依赖 RPent 本地标定、
+我们没提供内参 / 外参」；现在 edge 侧有彩色内参（`GET /v1/cameras`）与标定外参（`frames` 产物），
+反投影 + 坐标变换一条龙在 edge 完成，RPent 侧**不需要**再做本地标定。
 
 **位姿能力是前置条件**（真机 dual piper 曾踩过）：适配器**没声明 `pose_delta` 空间**时
 （也就没有 `observations/pose_target`）——`move_delta` / `rotate_delta` 会
@@ -312,6 +352,98 @@ robots/motrix_edge/
 edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成功的证据，`dump_state` 随后
 落盘的图会看到夹住。故夹爪工具应把 `stalled` 当「已接触」，不要与 `move_delta` 的受阻同等对待；
 若想要「不阻塞、只看观测」，逐次传 `settle=False`（回 `reached: null`）或放宽 `rot_tol`。
+
+### 新工具语义细节
+
+#### `get_object_position(camera, x, y)`
+
+-   **输入**：`camera`（`cam_head` / `cam_left_wrist` / `cam_right_wrist`）+ `x` / `y`，**只收归一化**
+    坐标（`[0, 1]`，0.5 = 画面中心）：预览是 320×240 降采样图，与源分辨率（如 640×480）不是同一网格，
+    让模型自己换算像素反而容易错；回执回显 `u_px` / `v_px` 供核对（传像素值 → 直接 `argument` 错，
+    **不静默截断**）；
+-   **输出**：`xyz_world`（米，`world` 帧 = 左臂基座）+ `xyz_camera`（相机光学系）+ `frame` / `world`
+    （帧名与物理别名一起给）+ `depth_m` / `valid` / `u_px` / `v_px`；
+-   **不可用**（三者必须分得开，agent 的处置方式不同）：该像素没有有效深度（原始值 0）→
+    `kind=no_depth`（换个点）；没有外参（未标定 / 产物里没有该相机）→ `kind=uncalibrated`；腕相机
+    **缺同拍位姿** → `kind=no_pose` 且只给 `xyz_camera`（**先停稳再取一帧**）；
+-   **不可用时仍是 `ok=true`**（调用本身成功，只是这个点没答案）：原因在 `available=false` +
+    `kind` / `reason`，不逼 agent 走「重试」分支；
+-   **时序**：腕相机的世界坐标用**同一拍**的 `observations/pose` 合成 ⇒ **运动中的读数不准**；
+-   **单点原语**：只回答「这个像素是哪个 3D 点」。物体中心 / 区域 / 点云由上层聚合（多次调用取中位数
+    即可），edge 不做分割、也不做点云。
+
+#### `look_at(target, *, arm=None, keep="target", settle=None)`
+
+-   **语义**：把末端**工具轴**指向 `target`（`world` 帧，米），**位置不变**；
+-   **工具轴** = `ego_axes.forward`（装配约定，缺省法兰 `+z`；见下「末端系三轴」），回执回显
+    `pointing_axis`；
+-   **姿态解 = 无 roll 的规范解**（`roll ≡ 0`）：`R = Rz(yaw)·Ry(pitch)`；指向轴 `z` 时
+    `pitch = acos(±u_z)`、`yaw = atan2(±u_y, ±u_x)`——「工具不歪头」是**定义**，不靠优化。
+    ⚠️ 因此它**不保证是最小旋转**（从指向 `+z` 转到指向 `+y` 是 120° 而不是 90°）；要「少转一点」
+    就用 `rotate_delta` 自己分步；
+-   **指向轴不能是 `y`**：`roll = 0` 时 `y` 轴恒在水平面内 → 只能指向与末端**同高**的点；配成 `y` 且
+    目标不在同一水平面 → `ok=false kind=unsupported`（不悄悄给一个歪头解）；
+-   **xyz 基准 `keep`**：`"target"`（缺省）= 用机器人侧**目标位姿**的 xyz（不把 MIT 稳态误差写进新
+    目标）；`"measured"` = 用实测 xyz（让姿态绕「现在真实所在的位置」转）。回执 `base_source` 标注
+    实际来源（目标位姿不可用时整条退实测并标注，不混源）；
+-   **`target` 是 `world` 点，而末端 xyz 在「该臂自己的基座系」**（`observations/pose` = 该臂
+    `FK(q)`）——故**逐臂**先按 `T_world_base(arm)` 换算到基座系再算方向。左臂恒等（`world` 的定义
+    就是它的基座）；非左臂需要外参，缺产物 → `ok=false kind=uncalibrated`（不拿一个差一个基座
+    间距——这台约 642 mm、可指错数十度——的方向去转姿态）。回执 `target_base` 给出换算后的点，
+    现场可直接核对；
+-   **回执**：`turned_deg`（每个被选臂转了多少度）/ `large_rotation`（> 60° 提示负载与线缆风险，
+    **不拒绝**）/ `target`（下发的绝对位姿）/ `target_base`（换算到各臂基座系后的点，与
+    `turned_deg` 同序）+ `settle` 那套；
+-   **可达性**：位置不变、只改姿态，仍可能腕部奇异 / 超关节限位 → 机器人侧 IK 拒绝 → `ok=false` 或
+    `reached=false`；此时正确做法是先 `move_delta` 挪一点再 `look_at`，而不是原地重试；
+-   **下发**：绝对 `pose` 目标（机器人侧 IK 解算），走与 `move_delta` 同一套 `settle` 判到位。
+
+#### `move_to(target, *, arm=None, rpy=None, settle=None)`
+
+-   **语义**：把末端**移到 `world` 帧的给定点**（绝对目标，机器人侧 IK）——**唯一的绝对位移工具**，
+    与 `get_object_position` / `look_at` 共用 `world`（agent 不需要自己换算坐标系）；
+-   **`rpy` 可选**：同样是 `world` 帧的末端姿态（不给 = 保持当前**目标**姿态）；换算按
+    `R_base = R_base_world · R_world`；
+-   **坐标系换算**：逐臂按 `T_world_base(arm)` 换算（与 `look_at` 同一套）；左臂恒等，非左臂缺外参 →
+    `kind=uncalibrated`（不拿错坐标系去动）；回执 `target_base` 给出换算后的点供核对；
+-   **回执**：`action_space="pose"` / `target`（下发的绝对位姿）/ `base_source` / + `settle` 那套。
+
+#### 增量：一律按**末端系**（无 `space` 开关）
+
+| 增量           | 表达系                                   | 谁算 |
+| -------------- | ---------------------------------------- | ---- |
+| `delta_xyz`[3] | 末端（工具）系（前后 / 左右 / 上下）     | edge |
+| `delta_rpy`[3] | 末端（工具）系（左右转 / 上下转 / 自转） | edge |
+
+-   **为什么必须在上位换算**：机器人侧的 `pose_delta` 是**基座系**的 chart 相加（基准 =
+    `FK(关节段目标)`），它不知道「沿末端哪根轴」；换算公式 `d_base = R_cur · d_tool`
+    （平移，**精确**：机器人只是在它的目标 xyz 上做矢量加法）；
+-   **旋转下发的是 chart 增量**：`Δrpy = wrap(rpy(R_cur · ΔR_tool) - rpy_cur)`——因为机器人把 rpy
+    **逐分量相加**，而 `matrix_to_rpy(R_cur · ΔR_tool · R_curᵀ)` 那种共轭写法相加后并不等于旋转复合
+    （实测 `pitch=45°` 绕末端 z 转 20° 偏 **10.7°**、`pitch=89°` 偏 **28°**；chart 增量写法误差为
+    **0**，`pitch` 接近 `±90°` 时增量数值会变大，那里优先用 `look_at`）；
+-   **快照与竞态**：`R_cur` 取**下发前**的 `observations/pose_target`（取目标而不是实测：底层 MIT 有
+    稳态误差，用实测当基准会把误差逐条写进新目标）；窗口内被第三方（遥操作 / CLI / 别的会话）改了
+    目标 → 既有的 `base_changed` 检查标出来；目标位姿不可用 → `kind=state`（不猜、不退实测）；
+-   **回执**：`delta_frame="tool"` / **`converted_delta_base`**（逐臂换算结果，含旋转的 chart 增量）
+    / `base_source` / `ego_axes` —— 现场据此核对「我让它往前，它到底往哪走了」；
+-   **单步上限**：平移每分量 ≤ `max_step`（缺省 0.05 m）、旋转每分量 ≤ `max_rot`（缺省 0.35 rad）；
+    要更多就分步。
+
+#### 末端系三轴（`server.rpent.ego_axes`，**上机必须验证**）
+
+```yaml
+server:
+    rpent:
+        # 末端系三轴 ↔ 法兰哪根轴：**装配事实**，由本字段声明（缺省见下），随 env.get_env_meta 回显
+        ego_axes: { forward: "+z", left: "+x", up: "+y" }
+```
+
+-   缺省 `forward = "+z"` 的依据：`j6` 的转轴就是法兰 `+z`（夹爪 / 探针只能沿它伸出），DH 的
+    `d6 = 0.091` 也沿 `z`；
+-   **验证（上机 1 分钟）**：先 `move_delta(delta_xyz=[0.0, 0.0, 0.02])` 只动 2 cm，看
+    它实际朝哪走（回执 `converted_delta_base` 与肉眼方向一致 → 配置正确）；三根轴**必须互不相同**——
+    配重了启动即 `ValueError`，不按含糊映射动机械臂。
 
 ### 实际取值（edge 认到的机器）
 

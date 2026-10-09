@@ -36,6 +36,20 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import VALUE_LAYOUT_SEPARATOR
 from motrix_edge.command import SOURCE_RPENT, CommandError
+from motrix_edge.geometry import (
+    IDENTITY,
+    ROLL_FREE,
+    WORLD_ALIAS,
+    WORLD_ARM,
+    EgoAxes,
+    FrameError,
+    base_delta_from_ego,
+    base_rotation_delta_from_ego,
+    invert_transform,
+    pointing_rpy,
+    transform_points,
+    turned_deg,
+)
 from motrix_edge.lease import LeaseError, LeaseManager, LeaseState
 from motrix_edge.utils.data_handler import debug_print
 
@@ -75,6 +89,19 @@ _VALUE_KEYS: dict[str, tuple[str, str]] = {
     SOURCE_MEASURED: (KEY_QPOS, KEY_POSE),
 }
 
+#: 增量工具的参考系：**末端（工具 / 法兰）系**。``env.move_delta`` / ``env.rotate_delta`` 的
+#: ``delta_xyz`` / ``delta_rpy`` 都按它解释（“沿末端当前 x 轴走”），**没有** ``space`` 开关：
+#: 上位换算成该臂基座系增量后下发（机器人侧的 ``pose_delta`` 只认基座系）。
+DELTA_FRAME = "tool"
+
+#: ``look_at`` 的 ``keep``：保持不变的 xyz 取哪里——机器人侧目标位姿（缺省）还是实测位姿。
+KEEP_TARGET = "target"
+KEEP_MEASURED = "measured"
+LOOK_AT_KEEPS = (KEEP_TARGET, KEEP_MEASURED)
+
+#: ``look_at`` 转角超过它就在回执里标 ``large_rotation``（负载 / 线缆风险；不拒绝执行）。
+LARGE_ROTATION_DEG = 60.0
+
 # ---- 服务 --------------------------------------------------------------------
 
 
@@ -100,6 +127,7 @@ class RpentService:
         commands=None,
         leases: LeaseManager | None = None,
         *,
+        depth=None,
         base_cfg: dict | None = None,
         lease_id: str | None = None,
         step_hz: float | None = None,
@@ -107,7 +135,14 @@ class RpentService:
         self._view = EdgeNodeView(node)
         self._commands = commands
         self._leases = leases or LeaseManager()
+        # 像素 → 3D 坐标（``env.get_object_position``）：复用 ``/v1/depth`` 的深度服务实例
+        # （同源：同一份最新观测缓存 + 同一套标定外参）。未注入 → 该方法报 ``unavailable``。
+        self._depth = depth
         cfg = dict(((base_cfg or {}).get("server") or {}).get("rpent") or {})
+        # 末端（工具）系的轴命名（``ego_axes``；缺省 forward=+z / left=+x / up=+y）：
+        # 现场自描述给 agent（它不该写死哪根轴是「前方」），也是 ``look_at`` 的指向轴。
+        # 「前后左右上下」到底对应法兰哪根轴是现场事实，故可配 + 随回执 / 自描述回显。
+        self._ego_axes = EgoAxes.from_mapping(cfg.get("ego_axes"))
         self._pinned_lease_id = lease_id if lease_id is not None else cfg.get("lease_id")
         self._step_hz = step_hz if step_hz is not None else cfg.get("step_hz")
         self._action_layout = cfg.get("action_layout")
@@ -128,10 +163,13 @@ class RpentService:
             "env.get_camera_meta": self._get_camera_meta,
             "env.get_observation": self._get_observation,
             "env.get_robot_state": self._get_robot_state,
+            "env.get_object_position": self._get_object_position,
             "env.get_task_language": self._get_task_language,
             "env.reset": self._reset,
             "env.move_delta": self._move_delta,
             "env.rotate_delta": self._rotate_delta,
+            "env.move_to": self._move_to,
+            "env.look_at": self._look_at,
             "env.set_gripper": self._set_gripper,
             "env.recover_joint_posture": self._recover_joint_posture,
             "env.step": self._step,
@@ -268,6 +306,22 @@ class RpentService:
             # ``env.get_observation`` 返回的键（相机按名展开）；``qpos`` = 状态向量、``action`` = 目标向量
             "observation_keys": ["states", "qpos", "gripper", "pose", "action", "raw_camera_frames", "images"],
             "call_endpoint": "/call",
+            # 末端（工具）系的轴命名（``space`` 已删：增量**只**有末端系语义）/ ``look_at`` 的指向轴
+            # 都是**装配事实**，由本字段自描述（RPent 侧不要写死），现场可改 ``server.rpent.ego_axes``。
+            "ego_axes": self._ego_axes.as_dict(),
+            "delta_frame": DELTA_FRAME,
+            "move_to": {"input_frame": "world"},
+            "look_at": {
+                "pointing_axis": self._ego_axes.forward,
+                "roll": ROLL_FREE,
+                "keeps": list(LOOK_AT_KEEPS),
+                "large_rotation_deg": LARGE_ROTATION_DEG,
+                "input_frame": "world",
+                # ``world`` 点会被换算到**该臂基座系**再算方向（见 ``_point_in_arm_base``）：
+                # 非 ``left`` 臂要有外参，否则报 ``uncalibrated``。
+                "world_arm": WORLD_ARM,
+            },
+            "object_position": {"input": "normalized u / v", "source": "/v1/depth"},
             "lease": self.lease_status(),
             "settle": self.settle_status(),
             **self._camera_payload(),
@@ -591,15 +645,376 @@ class RpentService:
             parts.append(np.concatenate([np.asarray(arm_home, dtype=np.float32), [grip]]))
         return np.concatenate(parts).astype(np.float32), source
 
-    def _move_delta(self, *args, arm: str | None = None, delta_xyz: Any = None, settle: Any = None) -> dict:
-        """``env.move_delta``：相对位移 → 下发 ``pose_delta`` 增量（**基准归机器人侧**，本层不算绝对目标）。"""
-        arm, delta = split_arm_and_vector(args, arm, delta_xyz, "delta_xyz", expected=3)
-        return self._pose_delta(arm, delta, what="move_delta", settle=settle)
+    def _move_delta(
+        self,
+        *args,
+        arm: str | None = None,
+        delta_xyz: Any = None,
+        settle: Any = None,
+    ) -> dict:
+        """``env.move_delta``：**沿末端当前坐标系**的相对位移 → 下发 ``pose_delta`` 增量。
 
-    def _rotate_delta(self, *args, arm: str | None = None, delta_rpy: Any = None, settle: Any = None) -> dict:
-        """``env.rotate_delta``：相对姿态（rpy 增量，弧度）→ 下发 ``pose_delta`` 的姿态分量增量（基准归机器人侧）。"""
+        ``delta_xyz``（米）在**末端（工具）系**里给：``x`` 有值 = 沿末端**当前** x 轴走，而不是
+        “让绝对目标的 x 变成这个值”。上位用当前**目标位姿**的姿态换算到该臂基座系
+        （``d_base = R_cur · d_tool``），叠加仍归机器人侧（见 ``_delta_tool_frame``）。
+        """
+        arm, delta = split_arm_and_vector(args, arm, delta_xyz, "delta_xyz", expected=3)
+        return self._delta_tool_frame(arm, delta, what="move_delta", offset=0, settle=settle)
+
+    def _rotate_delta(
+        self,
+        *args,
+        arm: str | None = None,
+        delta_rpy: Any = None,
+        settle: Any = None,
+    ) -> dict:
+        """``env.rotate_delta``：**绕末端当前坐标系**的相对姿态（``delta_rpy`` 弧度）。
+
+        “左右转 / 上下转 / 自转” = 绕末端自己三轴。注意下发的是**chart 增量**而不是
+        ``matrix_to_rpy(R · ΔR · Rᵀ)``：机器人把 rpy **逐分量相加**，而我们算出来的是矩阵复合，
+        两者在目标 ``pitch`` 不为 0 时差得很多（``pitch=45°`` 绕末端 z 转 20° 会偏 10.7°）——
+        见 ``base_rotation_delta_from_ego``。
+        """
         arm, delta = split_arm_and_vector(args, arm, delta_rpy, "delta_rpy", expected=3)
-        return self._pose_delta(arm, delta, what="rotate_delta", offset=3, settle=settle)
+        return self._delta_tool_frame(arm, delta, what="rotate_delta", offset=3, settle=settle)
+
+    def _delta_tool_frame(self, arm: str | None, delta: np.ndarray, *, what: str, offset: int, settle: Any) -> dict:
+        """末端系增量 → 基座系增量后下发（唯一的增量路径，不再有 ``space`` 开关）。
+
+        为什么换算必须在上位：机器人侧的 ``pose_delta`` 是**基座系**的 rpy chart 相加
+        （基准 = ``FK(关节段目标)``），它不知道“沿末端哪根轴”。换算用**快照**
+        （``observations/pose_target`` 的姿态），窗口内被第三方（遥操作 / CLI / 别的会话）改了目标 →
+        既有的 ``base_changed`` 检查会标出来；快照本身就不可用 → 报 ``state``，不猜。
+        """
+        _adapter, arms = self._view.require_adapter_with_arms()
+        if not self._view.supports(ActionSpace.POSE_DELTA):
+            raise RpentError(
+                f"adapter does not support {ActionSpace.POSE_DELTA.value} actions; {what} unavailable "
+                "(robot side must declare pose_delta: 增量叠加在关节段目标上)",
+                kind="unsupported",
+            )
+        indices = self._arm_indices(arm, arms)
+        stride = self._qpos_stride(ActionSpace.POSE)
+        snapshot = self._qpos(ActionSpace.POSE, frame=self._view.frame(), source=SOURCE_TARGET)
+        vector = np.zeros(stride * max(len(arms), 1), dtype=np.float32)
+        converted: list[np.ndarray] = []
+        for index in indices:
+            start = index * stride
+            rpy = None if snapshot is None else np.asarray(snapshot, dtype=np.float64)[start + 3 : start + 6]
+            if rpy is None or not np.all(np.isfinite(rpy)):
+                raise RpentError(
+                    f"{what}: 末端系增量需要当前**目标位姿**（observations/pose_target）的姿态做换算，"
+                    "但机器人没有发布它——先确认位姿观测",
+                    kind="state",
+                )
+            step = base_delta_from_ego(rpy, delta) if offset == 0 else base_rotation_delta_from_ego(rpy, delta)
+            converted.append(np.asarray(step, dtype=np.float64))
+            vector[start + offset : start + offset + 3] += np.asarray(step, dtype=np.float32)
+        return self._pose_delta(
+            arm,
+            delta,
+            what=what,
+            settle=settle,
+            vector=vector,
+            extra={
+                "delta_frame": DELTA_FRAME,
+                "converted_delta_base": converted,
+                "ego_axes": self._ego_axes.as_dict(),
+                "base_source": SOURCE_TARGET,
+            },
+        )
+
+    def _move_to(
+        self,
+        *args,
+        target: Any = None,
+        arm: str | None = None,
+        rpy: Any = None,
+        settle: Any = None,
+    ) -> dict:
+        """``env.move_to``：把末端**移到 ``world`` 帧的给定点**（绝对目标，机器人侧 IK 解算）。
+
+        ``target`` = ``world``（= 左臂基座，米）下的 xyz；``rpy`` 可选（同样是 ``world`` 帧的末端
+        姿态，不给 = 保持当前目标姿态）。这是**唯一的绝对位移工具**，也是它跟增量工具的分工：
+        增量看末端自己（``move_delta`` / ``rotate_delta``），绝对看 ``world``（``move_to`` /
+        ``look_at`` / ``get_object_position`` 三者同一套坐标系，agent 不用换算）。
+
+        内部按 ``T_world_base(arm)`` 换算到该臂基座系（与 ``look_at`` 同一套，见
+        ``_point_in_arm_base``）；非左臂未标定 → ``uncalibrated``，不拿错坐标系去动。
+        """
+        if args:  # 位置参数：(target) 或 (arm, target)
+            values = list(args)
+            if arm is None and values and isinstance(values[0], str):
+                arm = str(values.pop(0))
+            if target is None and values:
+                target = values.pop(0)
+        point = np.asarray(target, dtype=np.float64).reshape(-1)
+        if point.size < 3 or not np.all(np.isfinite(point[:3])):
+            raise RpentError(
+                f"move_to: target must be 3 finite numbers (world frame, meters), got {target!r}",
+                kind="argument",
+            )
+        point = point[:3]
+        rpy_world = None
+        if rpy is not None:
+            rpy_world = np.asarray(rpy, dtype=np.float64).reshape(-1)
+            if rpy_world.size < 3 or not np.all(np.isfinite(rpy_world[:3])):
+                raise RpentError(f"move_to: rpy must be 3 finite numbers (world frame), got {rpy!r}", kind="argument")
+            rpy_world = rpy_world[:3]
+        _adapter, arms = self._view.require_adapter_with_arms()
+        if self._view.value_dim(ActionSpace.POSE) <= 0:
+            raise RpentError(
+                "move_to 需要机器人提供末端位姿（observations/pose）：本机型没声明",
+                kind="unsupported",
+            )
+        frame = self._view.frame()
+        pose = self._qpos(ActionSpace.POSE, frame=frame, source=KEEP_TARGET)
+        base_source = "pose_target"
+        if pose is None:  # 目标位姿不可用 → 整条退实测（姿态基准与回执标注一致，不混源）
+            pose, base_source = self._qpos(ActionSpace.POSE, frame=frame, source=SOURCE_MEASURED), "pose"
+        if pose is None:
+            raise RpentError(
+                "move_to 需要当前末端位姿（pose_target / pose）——机器人没有发布它",
+                kind="state",
+            )
+        indices = self._arm_indices(arm, arms)
+        stride = self._qpos_stride(ActionSpace.POSE)
+        command = np.asarray(pose, dtype=np.float32).copy()
+        targets: list[list[float]] = []
+        for index in indices:
+            start = index * stride
+            name = str(arms[index]) if index < len(arms) else ""
+            point_base = self._point_in_arm_base(_adapter, name, point)
+            command[start : start + 3] = point_base.astype(np.float32)
+            if rpy_world is not None:
+                # ``world`` 下的姿态 → 该臂基座系：``R_base = R_base_world · R_world``。
+                T_world_base = self._world_from_base(_adapter, name)
+                command[start + 3 : start + 6] = matrix_to_rpy(
+                    T_world_base[:3, :3].T @ rpy_to_matrix(rpy_world)
+                ).astype(np.float32)
+            targets.append([round(float(value), 6) for value in point_base])
+        reply = {
+            "ok": True,
+            "arm": arm,
+            "action_space": ActionSpace.POSE.value,
+            "input_frame": "world",
+            "base_source": base_source,
+            "target_base": targets,  # 换算到各臂基座系后的点（与 indices 同序，便于现场核对）
+            "target": command,
+            "states": self._state_vector(frame),
+        }
+        if self._dry_run:
+            return {**reply, **self._dry_run_receipt()}
+        sent = self._push_qpos(command, ActionSpace.POSE, with_gripper=False)
+        return {**reply, "sent": sent, **self._settle_action(command, indices, ActionSpace.POSE, settle)}
+
+    def _get_object_position(
+        self,
+        *args,
+        camera: str | None = None,
+        x: Any = None,
+        y: Any = None,
+    ) -> dict:
+        """``env.get_object_position``：**归一化**像素 → 该点的 3D 坐标（米，``world`` 帧）。
+
+        与 ``GET /v1/depth`` **同一份实现**（同源观测缓存 + 同一套内参 / 外参），只把回执整成 agent
+        好读的形状，并把失败原因**分开**：
+
+        - ``no_depth``：该像素没有有效深度（原始值 0，不是「距离 0」）；
+        - ``uncalibrated``：没有外参（未标定 / 产物里没有该相机）——连相机系坐标都给不出；
+        - ``no_pose``：腕相机的世界坐标需要**同一拍**的臂位姿，这一拍没有——``xyz_camera`` 照常给。
+
+        只收**归一化**坐标（``x`` / ``y`` ∈ [0, 1]，0.5 = 画面中心）：预览是 320×240 降采样图，与
+        源分辨率（如 640×480）不是同一网格，让 agent 自己换算像素反而容易错——统一归一化，回执
+        回显 ``u_px`` / ``v_px`` 供核对。
+
+        不可用时回执仍是 ``ok=true``（调用本身成功，只是这个点没答案）：原因在 ``kind`` / ``reason``，
+        不逼 agent 走「重试」分支。
+        """
+        if args:  # 位置参数：(camera, x, y) 或 (x, y)
+            values = list(args)
+            if camera is None and values and isinstance(values[0], str):
+                camera = str(values.pop(0))
+            if x is None and values:
+                x = values.pop(0)
+            if y is None and values:
+                y = values.pop(0)
+        if self._depth is None:
+            raise RpentError(
+                "env.get_object_position 需要深度服务（未注入）——用 GET /v1/depth 直查或启用该面",
+                kind="unavailable",
+            )
+        name = str(camera or "").strip()
+        if not name:
+            raise RpentError("get_object_position: camera is required", kind="argument")
+        if x is None or y is None:
+            raise RpentError("get_object_position: x / y（归一化）are required", kind="argument")
+        try:
+            u, v = float(x), float(y)
+        except (TypeError, ValueError) as exc:
+            raise RpentError(f"get_object_position: x / y must be numbers, got {x!r} / {y!r}", kind="argument") from exc
+        if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+            raise RpentError(
+                f"get_object_position: x / y must be **normalized** in [0, 1] (0.5 = 画面中心), got {u} / {v}",
+                kind="argument",
+            )
+        body = self._depth.depth(camera=name, u=u, v=v, lease_id=self._resolve_lease_id())
+        available = body.get("xyz_world") is not None
+        kind: str | None = None
+        reason: str | None = None
+        if not body.get("valid") or body.get("depth_m") is None:
+            kind, reason = "no_depth", "该像素没有有效深度（深度原始值 0）——换一个点或换一台相机"
+        elif body.get("xyz_camera") is None:
+            kind, reason = "uncalibrated", "没有可用外参（未标定 / 产物里没有这台相机）"
+        elif not available:
+            kind, reason = (
+                "no_pose",
+                "腕相机的世界坐标要用**同一拍**的臂位姿合成，这一拍没有——先让臂停稳再查",
+            )
+        return {
+            "ok": True,
+            "available": available,
+            "kind": kind,
+            "reason": reason,
+            "camera": body.get("camera"),
+            "x": u,
+            "y": v,
+            "u_px": body.get("u_px"),
+            "v_px": body.get("v_px"),
+            "depth_m": body.get("depth_m"),
+            "valid": body.get("valid"),
+            "xyz_camera": body.get("xyz_camera"),
+            "xyz_world": body.get("xyz_world"),
+            "frame": body.get("frame"),
+            "world": body.get("world"),
+            "source": "/v1/depth",
+        }
+
+    def _look_at(
+        self,
+        *args,
+        target: Any = None,
+        arm: str | None = None,
+        keep: str = KEEP_TARGET,
+        settle: Any = None,
+    ) -> dict:
+        """``env.look_at``：把末端工具轴指向 ``target``（``world`` 帧 / 米），**位置不变**。
+
+        工具轴 = ``ego_axes.forward``（缺省法兰 ``+z`` = 夹爪 / 探针伸出方向）；姿态取**无 roll**
+        的规范解（``roll ≡ 0``）：``z`` 轴指向给 ``pitch = acos(±u_z)``、``yaw = atan2(±u_y, ±u_x)``。
+        指向轴若被配成 ``y`` 轴，``roll = 0`` 时它恒在水平面内 → 只能指向与末端同高的点，此处
+        **直接报错**（``unsupported``），不悄悄给一个歪头解。
+
+        ``target`` 是 ``world`` 点，而末端 xyz 在各臂**自己的基座系**（``observations/pose`` = 该臂
+        ``FK(q)``）——故逐臂先按 ``T_world_base`` 换算到基座系再算方向（左臂恒等；右臂差一个基座
+        间距，直接用会指错数十度）。没有标定产物时：左臂照做（``world`` 的定义就是它），**其余臂报
+        ``uncalibrated``**——不拿一个错方向去转姿态。回执 ``target_base`` 给出换算后的点供核对。
+
+        ``keep`` 决定「不变」的 xyz 取哪里：``target``（缺省）= 机器人侧**目标位姿**（不把 MIT 稳态
+        误差写进新目标，与写原语同一口径）；``measured`` = 实测位姿（让姿态绕「现在真实所在的位置」
+        转）。目标位姿不可用时**整条**退实测并在回执 ``base_source`` 标注，不混源。
+
+        下发的是**绝对** ``pose`` 目标（机器人侧 IK 解算），随后按 ``settle`` 判到位：位置不变、只改
+        姿态**也可能**解不出来（腕部奇异 / 超关节限位）→ 机器人侧拒绝 → ``ok=false`` /
+        ``reached=false``；此时正确做法是先 ``move_delta`` 挪一点再 ``look_at``。
+        """
+        if args:  # 位置参数：(target) 或 (arm, target)
+            values = list(args)
+            if arm is None and values and isinstance(values[0], str):
+                arm = str(values.pop(0))
+            if target is None and values:
+                target = values.pop(0)
+        point = np.asarray(target, dtype=np.float64).reshape(-1)
+        if point.size < 3 or not np.all(np.isfinite(point[:3])):
+            raise RpentError(
+                f"look_at: target must be 3 finite numbers (world frame, meters), got {target!r}",
+                kind="argument",
+            )
+        point = point[:3]
+        source = str(keep or KEEP_TARGET).strip().lower()
+        if source not in LOOK_AT_KEEPS:
+            raise RpentError(f"look_at: keep must be one of {list(LOOK_AT_KEEPS)}, got {keep!r}", kind="argument")
+        _adapter, arms = self._view.require_adapter_with_arms()
+        if self._view.value_dim(ActionSpace.POSE) <= 0:
+            raise RpentError(
+                "look_at 需要机器人提供末端位姿（observations/pose）：本机型没声明",
+                kind="unsupported",
+            )
+        frame = self._view.frame()
+        # 回执里的 ``base_source`` 说明「不变的 xyz 取自哪里」——keep 已指定实测时不能被下面的
+        # 「目标不可用 → 退实测」分支盖掉，故这里就按 keep 定死。
+        base_source = "pose_target" if source == KEEP_TARGET else "pose"
+        pose = self._qpos(ActionSpace.POSE, frame=frame, source=source)
+        if pose is None and source == KEEP_TARGET:  # 目标位姿不可用 → 整条退实测并标注
+            pose, base_source = self._qpos(ActionSpace.POSE, frame=frame, source=SOURCE_MEASURED), "pose"
+        if pose is None:
+            raise RpentError(
+                "look_at 需要当前末端位姿（pose_target / pose）——机器人没有发布它",
+                kind="state",
+            )
+        indices = self._arm_indices(arm, arms)
+        stride = self._qpos_stride(ActionSpace.POSE)
+        snapshot = np.asarray(pose, dtype=np.float64)
+        command = np.asarray(pose, dtype=np.float32).copy()
+        turned: list[float] = []
+        directions: list[list[float]] = []
+        for index in indices:
+            start = index * stride
+            # ``target`` 是 **world** 点，而 ``snapshot[start:start+3]`` 是**该臂基座系**的 xyz——
+            # 两者不同系，必须先换算再相减（左臂恒等；右臂差一个基座间距，直接用会指错 40°+）。
+            name = str(arms[index]) if index < len(arms) else ""
+            point_base = self._point_in_arm_base(_adapter, name, point)
+            try:
+                rpy_new = pointing_rpy(self._ego_axes.forward, point_base - snapshot[start : start + 3])
+            except ValueError as exc:
+                raise RpentError(f"look_at: {exc}", kind="unsupported") from exc
+            turned.append(turned_deg(snapshot[start + 3 : start + 6], rpy_new))
+            directions.append([round(float(value), 6) for value in point_base])
+            command[start + 3 : start + 6] = rpy_new.astype(np.float32)
+        reply = {
+            "ok": True,
+            "arm": arm,
+            "action_space": ActionSpace.POSE.value,
+            "keep": source,
+            "base_source": base_source,
+            "input_frame": "world",
+            "target_base": directions,  # 换算到各臂基座系后的点（与 turned_deg 同序，便于现场核对）
+            "pointing_axis": self._ego_axes.forward,
+            "roll": ROLL_FREE,
+            "turned_deg": turned,
+            "large_rotation": bool(turned) and max(turned) > LARGE_ROTATION_DEG,
+            "target": command,
+            "states": self._state_vector(frame),
+        }
+        if self._dry_run:
+            return {**reply, **self._dry_run_receipt()}
+        sent = self._push_qpos(command, ActionSpace.POSE, with_gripper=False)
+        return {**reply, "sent": sent, **self._settle_action(command, indices, ActionSpace.POSE, settle)}
+
+    def _world_from_base(self, adapter, arm: str) -> np.ndarray:
+        """``T_world_base(arm)``：``world`` 点 / 姿态 ↔ 该臂基座系的唯一换算入口。
+
+        ``world`` 的定义就是左臂基座（``WORLD_ARM`` / ``WORLD_ALIAS``）——该臂**恒等**、不需要产物；
+        其余臂靠产物里的 ``T_world_base``。缺产物 / 该臂没声明锚定 → ``uncalibrated``：宁可拒绝，
+        也不拿一个差一个基座间距（这台约 642 mm）的坐标系去动。
+        """
+        frames = getattr(adapter, "frame_set", None)
+        if frames is None:
+            if str(arm) == WORLD_ARM:
+                return IDENTITY.copy()
+            raise RpentError(
+                f"arm {arm!r} 需要 world 外参（{WORLD_ALIAS} 的 T_world_base）才能把 world 坐标换算到"
+                f"该臂基座系，但当前没有标定产物——先标定，或改用 arm={WORLD_ARM!r}",
+                kind="uncalibrated",
+            )
+        try:
+            return np.asarray(frames.world_from_base(str(arm)), dtype=np.float64)
+        except FrameError as exc:
+            raise RpentError(str(exc), kind="uncalibrated") from exc
+
+    def _point_in_arm_base(self, adapter, arm: str, point: np.ndarray) -> np.ndarray:
+        """``world`` 点 → **该臂基座系**（``look_at`` 的指向 / ``move_to`` 的位置都在臂自己的系里比）。"""
+        return transform_points(invert_transform(self._world_from_base(adapter, arm)), point)
 
     def _set_gripper(self, *args, arm: str | None = None, open: Any = True, settle: Any = None) -> dict:
         """``env.set_gripper``：夹爪开合 —— 只改夹爪槽，其余维**保持目标**（关节 qpos）。
@@ -707,7 +1122,14 @@ class RpentService:
     # ---- 控制内部 -----------------------------------------------------------
 
     def _pose_delta(
-        self, arm: str | None, delta: np.ndarray, *, what: str, offset: int = 0, settle: Any = None
+        self,
+        arm: str | None,
+        delta: np.ndarray,
+        *,
+        what: str,
+        settle: Any = None,
+        vector: np.ndarray | None = None,
+        extra: dict | None = None,
     ) -> dict:
         """位姿增量下发（``pose_delta``）：增量叠加在**机器人的关节段目标**上（本层不算绝对目标）。
 
@@ -726,19 +1148,16 @@ class RpentService:
         改动，回执如实标注，不默认为自己的）。
         """
         _adapter, arms = self._view.require_adapter_with_arms()
-        space = ActionSpace.POSE_DELTA
-        if not self._view.supports(space):
+        action_space = ActionSpace.POSE_DELTA
+        if not self._view.supports(action_space):
             raise RpentError(
-                f"adapter does not support {space.value} actions; {what} unavailable "
+                f"adapter does not support {action_space.value} actions; {what} unavailable "
                 "(robot side must declare pose_delta: 增量叠加在关节段目标上)",
                 kind="unsupported",
             )
-        stride = self._qpos_stride(space)
+        stride = self._qpos_stride(action_space)
         indices = self._arm_indices(arm, arms)
-        vector = np.zeros(stride * max(len(arms), 1), dtype=np.float32)  # qpos：每臂「值 6 + 夹爪 1」
-        for index in indices:
-            start = index * stride + offset
-            vector[start : start + delta.size] += delta
+        vector = np.asarray(vector, dtype=np.float32).reshape(-1)  # 已逐臂换算好的基座系增量
         frame = self._view.frame()
         before = self._qpos(ActionSpace.POSE, frame=frame, source=SOURCE_TARGET)
         predicted = None if before is None else self._add_pose_delta(before, vector, stride)
@@ -747,12 +1166,13 @@ class RpentService:
             "ok": True,
             "arm": arm,
             "delta": delta,
-            "action_space": space.value,
+            "action_space": action_space.value,
             "states": self._state_vector(frame),
+            **(extra or {}),
         }
         if self._dry_run:  # 只回预测的绝对目标，不碰机器人
             return {**reply, "target": predicted, "target_source": predicted_source, **self._dry_run_receipt()}
-        self._push_qpos(vector, space, with_gripper=False)
+        self._push_qpos(vector, action_space, with_gripper=False)
         reference, flags = self._pose_target_reference(before, predicted, settle)
         if reference is None:  # 命令未落地 / 无目标位姿：不谎报到位
             return {
