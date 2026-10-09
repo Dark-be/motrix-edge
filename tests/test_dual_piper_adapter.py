@@ -20,6 +20,7 @@ import pytest
 
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
+    DEPTH_PREFIX,
     KEY_ACTION,
     KEY_POSE,
     KEY_QPOS,
@@ -29,8 +30,10 @@ from motrix_edge.adapter.base import (
 from motrix_edge.adapter.dual_piper_adapter import DualPiperAdapter
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_CAMERAS,
     FIELD_LAYOUT,
     FIELD_TELEOP_ENABLED,
+    PATH_CAMERAS,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_EXECUTE,
@@ -72,6 +75,7 @@ class _Response:
 class _FakeHttp:
     def __init__(self, get_body=None):
         self.posts = []
+        self.gets = []  # GET 调用记录（断言元数据只查一次）
         self.get_body = get_body or {}
         self.closed = False
 
@@ -80,6 +84,7 @@ class _FakeHttp:
         return _Response()
 
     def get(self, url):
+        self.gets.append(url)
         return _Response(self.get_body.get(url, {}))
 
     def close(self):
@@ -219,6 +224,112 @@ def test_observe_builds_edge_observation(monkeypatch):
         encoded = obs[f"{CAMERA_PREFIX}{name}"]
         assert isinstance(encoded, bytes)
         assert cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR) is not None
+
+
+def _camera_meta_payload(depth_cameras=("cam_head", "cam_left_wrist", "cam_right_wrist")) -> dict:
+    """机器人进程 ``GET /v1/cameras`` 的响应体（三路相机；只有给定相机有深度）。"""
+    cameras = []
+    for name in ("cam_head", "cam_left_wrist", "cam_right_wrist"):
+        has_depth = name in depth_cameras
+        cameras.append(
+            {
+                "name": name,
+                "width": 640,
+                "height": 480,
+                "intrinsics": {"fx": 600.0, "fy": 600.0, "cx": 320.0, "cy": 240.0},
+                "depth": {"scale": 0.001, "aligned_to_color": True} if has_depth else None,
+            }
+        )
+    return {FIELD_CAMERAS: cameras}
+
+
+def _depth_reader(depths, images=None):
+    """假 ObsShmReader：帧里带深度区（``None`` = 该帧没有 ``depths`` 键）。"""
+    payload = {
+        "qpos": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
+        "action": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
+        "images": images or [np.full((8, 8, 3), 40, dtype=np.uint8) for _ in range(3)],
+    }
+    if depths is not None:
+        payload["depths"] = depths
+
+    class _Reader:
+        def __init__(self, name):
+            pass
+
+        def read(self):
+            return payload
+
+        def close(self):
+            pass
+
+    return _Reader
+
+
+def test_observe_reads_depth_and_caches_camera_meta(monkeypatch):
+    """机器人开了深度：观测带 ``observations/depth/<cam>``（uint16 原样透传，不经 JPEG）。"""
+    depths = [np.full((8, 8), 1000 + index, dtype=np.uint16) for index in range(3)]
+    monkeypatch.setattr("motrix_edge.adapter.http_shm_adapter.ObsShmReader", _depth_reader(depths))
+    http = _FakeHttp({PATH_CAMERAS: _camera_meta_payload()})
+    adapter = _adapter(http)
+
+    obs = adapter.observe()
+
+    assert obs is not None
+    for index, name in enumerate(("cam_head", "cam_left_wrist", "cam_right_wrist")):
+        depth = obs[f"{DEPTH_PREFIX}{name}"]
+        assert depth.dtype == np.uint16 and int(depth[0, 0]) == 1000 + index
+    # 相机元数据（内参 / 深度比例）惰性查一次并缓存：第二次 observe 不再发请求
+    assert adapter.depth_camera_names() == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
+    assert adapter.camera_infos()["cam_head"]["depth"]["scale"] == 0.001
+    adapter.observe()
+    assert http.gets == [PATH_CAMERAS]
+
+
+def test_observe_drops_depth_when_stream_count_mismatch(monkeypatch):
+    """深度流路数与进程上报的深度相机数不符 → 本次不透传深度（不静默错位到别的相机名）。"""
+    monkeypatch.setattr(
+        "motrix_edge.adapter.http_shm_adapter.ObsShmReader",
+        _depth_reader([np.full((8, 8), 1000, dtype=np.uint16)]),  # 只 1 路，但上报告知 3 路有深度
+    )
+    adapter = _adapter(_FakeHttp({PATH_CAMERAS: _camera_meta_payload()}))
+
+    obs = adapter.observe()
+
+    assert obs is not None
+    assert not [key for key in obs if key.startswith(DEPTH_PREFIX)]  # 路数不符：宁可不给
+    assert f"{CAMERA_PREFIX}cam_head" in obs  # 图像不受影响
+
+
+def test_observe_without_camera_metadata_keeps_images(monkeypatch):
+    """旧版进程没有 ``/v1/cameras``（或查询失败）：深度不可用，但图像 / 状态观测照常。"""
+    monkeypatch.setattr(
+        "motrix_edge.adapter.http_shm_adapter.ObsShmReader",
+        _depth_reader([np.full((8, 8), 1000, dtype=np.uint16)]),
+    )
+    adapter = _adapter(_FakeHttp())  # 元数据端点无内容
+
+    obs = adapter.observe()
+
+    assert obs is not None
+    assert adapter.camera_infos() == {}
+    assert adapter.depth_camera_names() == []
+    assert not [key for key in obs if key.startswith(DEPTH_PREFIX)]
+    assert f"{CAMERA_PREFIX}cam_head" in obs
+
+
+def test_depth_follows_enabled_cameras(monkeypatch):
+    """``configure()`` 裁剪相机后：只给启用相机发布深度（与图像同一口径）。"""
+    depths = [np.full((8, 8), 1000 + index, dtype=np.uint16) for index in range(3)]
+    monkeypatch.setattr("motrix_edge.adapter.http_shm_adapter.ObsShmReader", _depth_reader(depths))
+    adapter = _adapter(_FakeHttp({PATH_CAMERAS: _camera_meta_payload()}))
+    adapter.configure(enabled_cameras=["cam_head"])
+
+    obs = adapter.observe()
+
+    assert obs is not None
+    assert [key for key in obs if key.startswith(DEPTH_PREFIX)] == [f"{DEPTH_PREFIX}cam_head"]
+    assert [key for key in obs if key.startswith(CAMERA_PREFIX)] == [f"{CAMERA_PREFIX}cam_head"]
 
 
 def _pose_reader(pose, pose_dim, images=None):

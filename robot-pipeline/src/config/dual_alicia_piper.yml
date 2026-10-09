@@ -28,6 +28,11 @@ robot:
     cam_head: "" # 头部 RealSense 序列号：**现场填写**（留空 → 启动报错）
     cam_left_wrist: "" # 左腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
     cam_right_wrist: "" # 右腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
+  # 深度观测（见 wiki/design/robot_pipeline_depth.md）：本机型**只有 cam_head** 具备深度
+  # （两腕是网络摄像头）；输出对齐到彩色图的深度图，由 edge 的 GET /v1/depth 查询像素深度。
+  depth:
+    enabled: true # 缺省 true；false = 不开深度流
+    cameras: [] # 空 / 缺省 = 所有具备深度的相机（这里 = cam_head）
   # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
   # 只装在执行臂（Piper 从手 left / right）；Alicia 主手只读，不装载。
   gravity:
