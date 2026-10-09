@@ -1664,8 +1664,8 @@ def test_look_at_points_tool_axis_without_roll(env) -> None:
     rpy = np.asarray(reply["target"], dtype=np.float64).reshape(-1)[3:6]
     assert rpy[0] == 0.0, "look_at 必须是无 roll 的规范解"
     assert np.allclose(rpy_to_matrix(rpy) @ np.array([0.0, 0.0, 1.0]), [0.0, 1.0, 0.0], atol=1e-6)
-    pushed, space = adapter.rollout_calls[-1]
-    assert space is ActionSpace.POSE, "look_at 下发的是**绝对** pose 目标"
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose", "look_at 下发的是**绝对** pose 目标"
     assert np.allclose(pushed[0:3], [0.1, 0.2, 0.3]), "位置不能被 look_at 改动"
     assert reply["turned_deg"][0] > 60.0 and reply["large_rotation"] is True
     assert reply["base_source"] == "pose_target" and reply["pointing_axis"] == "+z"
@@ -1734,8 +1734,8 @@ def test_look_at_converts_world_point_into_the_arm_own_base(env) -> None:
 
     reply = service.call("env.look_at", kwargs={"arm": "right", "target": target_world.tolist(), "settle": False})
 
-    pushed, space = adapter.rollout_calls[-1]
-    assert space is ActionSpace.POSE
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose"
     axis = rpy_to_matrix(np.asarray(pushed[9:12], dtype=np.float64)) @ np.array([0.0, 0.0, 1.0])
     expected = unit(target_world - np.asarray(offset) - np.asarray(pose[6:9]))  # 换算到右基座系后减末端
     assert np.allclose(axis, expected, atol=1e-5), "工具轴应指向「换算到右臂基座系」后的目标"
@@ -1776,8 +1776,8 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     forward = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0]})
     assert forward["delta_frame"] == "tool" and forward["delta_axes"] == ["forward", "left", "up"]
     assert np.allclose(forward["converted_delta_base"][0], [0.05, 0.0, 0.0], atol=1e-6), "x = 前"
-    pushed, space = adapter.rollout_calls[-1]
-    assert space is ActionSpace.POSE_DELTA, "语义增量最终仍走 pose_delta（基准归机器人侧）"
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose_delta", "语义增量最终仍走 pose_delta（基准归机器人侧）"
     assert np.allclose(pushed[0:3], [0.05, 0.0, 0.0], atol=1e-6)
     assert np.allclose(pushed[3:6], [0.0, 0.0, 0.0])  # 平移不碰姿态
 
@@ -1852,8 +1852,8 @@ def test_move_to_sends_absolute_pose_from_world_point(env) -> None:
 
     reply = service.call("env.move_to", kwargs={"arm": "right", "target": target_world})
 
-    pushed, space = adapter.rollout_calls[-1]
-    assert space is ActionSpace.POSE, "move_to 下发绝对位姿（机器人侧 IK）"
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose", "move_to 下发绝对位姿（机器人侧 IK）"
     assert np.allclose(pushed[6:9], np.asarray(target_world) - np.asarray(offset), atol=1e-6)
     assert np.allclose(pushed[9:12], pose[9:12]), "不给 rpy → 保持当前目标姿态"
     assert np.allclose(pushed[0:6], pose[0:6]), "未指定的臂不动"
