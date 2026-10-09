@@ -94,6 +94,7 @@ def _run_node(args) -> None:
     from motrix_edge.node import EdgeNode
     from motrix_edge.server import create_app
     from motrix_edge.server.command import CommandService
+    from motrix_edge.server.depth import DepthService
     from motrix_edge.server.meta import CaptureMetaService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.rpent import RpentService
@@ -159,9 +160,11 @@ def _run_node(args) -> None:
         webrtc = WebRTCService(node, leases=leases)
     # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存
     preview_service = PreviewService(node, leases=leases)
+    # 像素深度查询（与预览同源：同一份最新观测缓存 + 机器人上报的相机内参）
+    depth_service = DepthService(node, leases=leases)
     # RPent 兼容的 RPC 面（POST /call）：外部 agent（LLM + VLA 编排）经它驱动 edge；
     # 写 / 观测方法沿用同一套 Edge 级租约（RPent 不带头，租约 id 由服务自行解析）
-    rpent_service = RpentService(node, commands, leases=leases, base_cfg=base_cfg)
+    rpent_service = RpentService(node, commands, leases=leases, depth=depth_service, base_cfg=base_cfg)
     # 注：``uploads`` 不在此传 —— ``create_app`` 缺省按 ``base_cfg.upload`` 自建（见其 docstring）。
     web = _start_web(
         create_app(
@@ -171,6 +174,7 @@ def _run_node(args) -> None:
             lease_manager=leases,
             webrtc=webrtc,
             preview=preview_service,
+            depth=depth_service,
             meta=meta,
             rpent=rpent_service,
         ),

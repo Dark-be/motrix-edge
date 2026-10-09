@@ -51,6 +51,7 @@ from motrix_edge.command import (
     CommandDispatcher,
     CommandError,
     CommandResult,
+    get_rtc_params,
     handle_policy_config,
     ok_result,
     parse_bool,
@@ -62,11 +63,13 @@ from motrix_edge.command import (
 )
 from motrix_edge.errors import ErrorCode
 from motrix_edge.frame import FrameManager
+from motrix_edge.geometry import FrameSet, flatten_transform, pose_to_transform
 from motrix_edge.lease import Lease, LeaseManager, LeaseState
 from motrix_edge.node import EdgeNode, NodeState
 from motrix_edge.policy import policy_config_runtime_keys
 from motrix_edge.server import create_app
 from motrix_edge.server.command import CommandService
+from motrix_edge.server.depth import DepthService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.session.base import RunResult, SessionState
@@ -283,6 +286,8 @@ class FakeRobot:
         self.teleop_enabled = False  # 遥操作运行位（capture / infer status 展示）
         self.teleop_mode = None  # 人工接管模式（absolute / delta）
         self.teleop_calls: list[tuple[bool, str | None]] = []  # 收到的 set_teleop（断言实际下发）
+        # 统一坐标系外参（镜像 ``GET /v1/cameras`` 的 ``frames`` 段）：None = 未标定
+        self.frames_payload: dict | None = None
 
     def set_teleop(self, enabled, mode=None):
         """遥操作 / 人工接管开关（镜像适配器契约：记录调用 + 更新运行位）。"""
@@ -296,6 +301,41 @@ class FakeRobot:
     def capture_status(self):
         """采集状态：未启用 → None（适配器决定运行位 / 元信息 / 数据目录）。"""
         return None
+
+    def camera_infos(self):
+        """相机静态元数据（镜像机器人进程 ``GET /v1/cameras``）：只有 cam_head 有深度。"""
+        return {
+            "cam_head": {
+                "name": "cam_head",
+                "width": 640,
+                "height": 480,
+                "intrinsics": {"fx": 600.0, "fy": 600.0, "cx": 320.0, "cy": 240.0},
+                "depth": {"scale": 0.001, "aligned_to_color": True},
+                "mount": "fixed",
+                "arm": None,
+            },
+            "cam_left_wrist": {
+                "name": "cam_left_wrist",
+                "width": 640,
+                "height": 480,
+                "intrinsics": {"fx": 600.0, "fy": 600.0, "cx": 320.0, "cy": 240.0},
+                "depth": None,
+                "mount": "wrist",
+                "arm": "left",
+            },
+        }
+
+    def frame_set(self):
+        """标定外参（镜像 adapter 的 ``frame_set()``）：未标定 → ``None``。"""
+        return None if not self.frames_payload else FrameSet.from_payload(self.frames_payload)
+
+    def pose_by_arm(self, pose):
+        """位姿向量 → 按臂名的 6 维块（镜像 adapter 契约：本替身两臂 × 每臂 6 维）。"""
+        array = np.asarray([] if pose is None else pose, dtype=float).reshape(-1)
+        if array.size != 6 * len(self.enabled_arms):
+            return {}
+        blocks = array.reshape(len(self.enabled_arms), 6)
+        return {arm: blocks[index].copy() for index, arm in enumerate(self.enabled_arms)}
 
     def safe_stop(self):
         pass
@@ -657,6 +697,209 @@ def test_preview_returns_latest_observation():
     # 清理会话
     assert client.delete("/v1/captures", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
+
+
+def make_depth_client(node):
+    """绑定「正在运行的 fake node」+ 共享 LeaseManager + DepthService（深度与预览同源）。"""
+    bus = CommandBus()
+    node.command_source = bus
+    leases = LeaseManager()
+    node.lease_manager = leases
+    threading.Thread(target=node.run, name="fake-node", daemon=True).start()
+    return TestClient(
+        create_app(
+            BASE_CFG,
+            node=node,
+            commands=CommandService(bus, leases=leases),
+            lease_manager=leases,
+            depth=DepthService(node, leases=leases),
+        )
+    )
+
+
+def _depth_frame(rows: int = 4, cols: int = 8) -> np.ndarray:
+    """合成深度图（HxW，uint16 毫米）：逐列线性——第 u 列 = 1000 + 100·u（便于阶断言到 0.1m）。"""
+    return np.repeat((1000 + 100 * np.arange(cols, dtype=np.uint16))[None, :], rows, axis=0)
+
+
+def test_depth_requires_lease_and_known_camera():
+    """GET /v1/depth：受控操作（无租约 → 409 / 异租约 → 403）；无深度帧或未知相机 → 404。"""
+    node = FakeNode()
+    client = make_depth_client(node)
+    assert client.get("/v1/depth", params={"camera": "cam_head"}).status_code == 409  # 无活跃租约
+    lease = install_lease(client)
+    assert client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": "other"}).status_code == 403
+    # 尚无观测帧（FrameManager 空）→ 404（不猜、不回 0）
+    missing = client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": lease})
+    assert missing.status_code == 404 and "available" in missing.json()["detail"]
+    # 未知相机（即使有帧）→ 404
+    node.frame_manager.update({"observations/depth/cam_head": _depth_frame()})
+    unknown = client.get("/v1/depth", params={"camera": "cam_left_wrist"}, headers={"X-Lease-Id": lease})
+    assert unknown.status_code == 404
+    assert "cam_head" in unknown.json()["detail"]  # 回执列出可用相机，便于排障
+
+
+def test_depth_returns_meters_for_normalized_pixel():
+    """GET /v1/depth：归一化坐标 → 源像素 → 米（回带 depth_scale 与彩色内参，供反投影）。"""
+    node = FakeNode()
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    node.frame_manager.update({"observations/depth/cam_head": _depth_frame()})
+    r = client.get("/v1/depth", params={"camera": "cam_head", "u": 0.5, "v": 0.5}, headers={"X-Lease-Id": lease})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["camera"] == "cam_head"
+    assert (body["width"], body["height"]) == (8, 4)  # 源分辨率（非预览降采样尺寸）
+    assert (body["u_px"], body["v_px"]) == (4, 2)  # 0.5 × 8 / 0.5 × 4
+    assert body["depth_raw"] == 1400  # u = 4 → 1000 + 100×4
+    assert body["depth_m"] == pytest.approx(1.4)  # × depth_scale 0.001
+    assert body["valid"] is True
+    assert body["depth_scale"] == 0.001
+    assert body["intrinsics"] == {"fx": 600.0, "fy": 600.0, "cx": 320.0, "cy": 240.0}
+    # u = 1.0 落在最后一个像素（不越界）
+    edge = client.get(
+        "/v1/depth", params={"camera": "cam_head", "u": 1.0, "v": 0.0}, headers={"X-Lease-Id": lease}
+    ).json()
+    assert edge["u_px"] == 7 and edge["depth_raw"] == 1700
+
+
+def test_depth_zero_pixel_is_invalid():
+    """深度原始值 0 = 该像素**测不到**（不是「距离 0」）→ valid=false 且 depth_m=null。"""
+    node = FakeNode()
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    frame = _depth_frame()
+    frame[2, 4] = 0  # 挖掉 (u=4, v=2) 这个像素
+    node.frame_manager.update({"observations/depth/cam_head": frame})
+    body = client.get(
+        "/v1/depth", params={"camera": "cam_head", "u": 0.5, "v": 0.5}, headers={"X-Lease-Id": lease}
+    ).json()
+    assert body["depth_raw"] == 0
+    assert body["depth_m"] is None
+    assert body["valid"] is False
+
+
+def test_depth_rejects_bad_coordinates():
+    """归一化坐标越界 → 400（不静默夹到边界）；非数值由 HTTP 层校验 → 422。"""
+    node = FakeNode()
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    node.frame_manager.update({"observations/depth/cam_head": _depth_frame()})
+    for params in ({"u": 1.5}, {"u": -0.1}, {"v": 2}):
+        r = client.get(
+            "/v1/depth",
+            params={"camera": "cam_head", **params},
+            headers={"X-Lease-Id": lease},
+        )
+        assert r.status_code == 400, params
+    bad_type = client.get("/v1/depth", params={"camera": "cam_head", "u": "abc"}, headers={"X-Lease-Id": lease})
+    assert bad_type.status_code == 422  # 类型错误由 FastAPI 入参校验拦下（拦在业务层之前）
+
+
+def test_depth_501_when_not_enabled():
+    """未注入 DepthService → 501（与 /v1/preview 同规则）。"""
+    assert TestClient(create_app(BASE_CFG)).get("/v1/depth", params={"camera": "cam_head"}).status_code == 501
+
+
+def _frames_payload(*, wrist_camera: str = "cam_left_wrist") -> dict:
+    """标定产物（``frames.json`` 形状）：一路固定相机 + 一路腕相机。
+
+    ``wrist_camera`` 默认 ``cam_left_wrist``（现实机型）；测**腕相机随动合成**时传 ``cam_head``
+    ——本替身只有 ``cam_head`` 有深度，而坐标换算必须先拿到米深度才能走到腕相机那一段
+    （现实中三路 RealSense 都有深度，见 ``dual_piper``）。
+    """
+    cameras: dict[str, dict] = {}
+    if wrist_camera != "cam_head":
+        cameras["cam_head"] = {
+            "mount": "fixed",
+            "T_world_cam": flatten_transform(pose_to_transform([0.0, 0.0, 0.5, 0.0, 0.0, 0.0])),
+            "rms_m": 0.002,
+        }
+    cameras[wrist_camera] = {
+        "mount": "wrist",
+        "arm": "left",
+        "T_flange_cam": flatten_transform(pose_to_transform([0.05, 0.0, 0.08, 0.0, 0.0, 0.0])),
+        "rms_m": 0.003,
+    }
+    return {
+        "version": 1,
+        "world": "left_base",
+        "rpy_order": "zyx",
+        "arms": {
+            "left": {"T_world_base": flatten_transform(np.eye(4))},
+            "right": {"T_world_base": flatten_transform(pose_to_transform([0.3, 0.0, 0.0, 0.0, 0.0, 0.0]))},
+        },
+        "cameras": cameras,
+        "table": None,
+    }
+
+
+def test_depth_coordinates_need_calibration():
+    """无标定产物 → 坐标字段全 ``null``，但深度照常给（坐标是**纯增量**）。"""
+    node = FakeNode()
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    node.frame_manager.update({"observations/depth/cam_head": _depth_frame()})
+    body = client.get(
+        "/v1/depth", params={"camera": "cam_head", "u": 0.5, "v": 0.5}, headers={"X-Lease-Id": lease}
+    ).json()
+    assert body["depth_m"] == pytest.approx(1.4)  # 深度本身不受影响
+    assert body["xyz_camera"] is None and body["xyz_world"] is None
+    assert body["frame"] is None and body["world"] is None
+
+
+def test_depth_reports_world_coordinates_when_calibrated():
+    """有标定产物 → 给相机系与 ``world`` 坐标（固定相机：反投影 + 常数外参）。"""
+    node = FakeNode()
+    node.adapter.frames_payload = _frames_payload()
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    node.frame_manager.update({"observations/depth/cam_head": _depth_frame()})
+    body = client.get(
+        "/v1/depth", params={"camera": "cam_head", "u": 0.5, "v": 0.5}, headers={"X-Lease-Id": lease}
+    ).json()
+    # 内参 cx=320 / cy=240：u_px=4 远小于主点 → x 为负、z = 深度
+    assert body["xyz_camera"][2] == pytest.approx(1.4)
+    assert body["xyz_world"][2] == pytest.approx(1.9)  # 相机在 z=0.5（正对世界系）
+    assert body["frame"] == "world" and body["world"] == "left_base"
+
+
+def test_depth_wrist_camera_needs_pose_for_world():
+    """腕相机：有标定但**当拍无位姿** → 只丢 ``xyz_world``（``xyz_camera`` 照常给），不报错。"""
+    node = FakeNode()
+    node.adapter.frames_payload = _frames_payload(wrist_camera="cam_head")
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    # 只有深度帧、不给位姿（机器人不提供位姿 / 本拍缺失）
+    node.frame_manager.update({"observations/depth/cam_head": _depth_frame()})
+    body = client.get(
+        "/v1/depth", params={"camera": "cam_head", "u": 0.5, "v": 0.5}, headers={"X-Lease-Id": lease}
+    ).json()
+    assert body["depth_m"] == pytest.approx(1.4)
+    assert body["xyz_camera"] is not None
+    assert body["xyz_world"] is None and body["frame"] is None
+
+
+def test_depth_wrist_camera_composes_same_frame_pose():
+    """腕相机 + 同拍位姿 → ``xyz_world`` 随位姿变（基座 → 法兰 → 相机三级合成）。"""
+    node = FakeNode()
+    node.adapter.frames_payload = _frames_payload(wrist_camera="cam_head")
+    client = make_depth_client(node)
+    lease = install_lease(client)
+    poses = {
+        "observations/depth/cam_head": _depth_frame(),
+        "observations/pose": np.zeros(12, dtype=float),  # 两臂都恒等
+    }
+    node.frame_manager.update(poses)
+    body = client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": lease}).json()
+    assert body["xyz_world"] is not None and body["frame"] == "world"
+    first = body["xyz_world"]
+    # 左臂绕 yaw 转 0.5 rad → 同一点的世界坐标随之变化
+    moved = np.zeros(12, dtype=float)
+    moved[5] = 0.5
+    node.frame_manager.update({**poses, "observations/pose": moved})
+    second = client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": lease}).json()
+    assert not np.allclose(first, second["xyz_world"])
 
 
 def wait_node_state(node, state, timeout=2.0):
@@ -1796,6 +2039,26 @@ def test_infers_sync_syncs_capture_meta():
     assert client.post("/v1/infers/sync", json={"meta": {}}).status_code == 403
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
+
+
+def test_infers_rtc_status_without_session_reports_configured_params():
+    """无推理会话时 status 的 rtc = **配置级** ``policy.rtc`` 快照（enabled / params；无运行字段）。
+
+     未进入会话也要能看到当前生效的 H / P / E / S（与 ``infer rtc`` 回读同一份，任何状态可用）；
+    步号 / 预取计数等运行字段只在会话内上报（不在这里编造默认值）。
+    """
+    node = FakeNode()
+    client = make_infers_client(node)
+    snap = client.get("/v1/infers").json()
+    assert snap["rtc"]["params"] == get_rtc_params(node.base_cfg)
+    assert snap["rtc"]["enabled"] is True
+    for key in ("index", "remaining", "fetches", "last_chunk"):
+        assert key not in snap["rtc"]
+    # 配置级写入（``infer rtc set`` 写的就是这一份，任何状态可用）后快照跟随
+    node.base_cfg["policy"] = {"rtc": {"suffix_len": 7, "enabled": False}}
+    snap = client.get("/v1/infers").json()
+    assert snap["rtc"]["params"]["suffix_len"] == 7
+    assert snap["rtc"]["enabled"] is False
 
 
 def test_infers_rtc_configure_and_status():

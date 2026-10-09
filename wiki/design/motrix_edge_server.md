@@ -72,6 +72,7 @@ flowchart TD
 | POST            | `/v1/infers` + `/v1/infers/rollout`、`/v1/infers/episode/start·end`、`/v1/infers/sync`、`/v1/infers/rtc`、`/v1/infers/config` | 推理会话控制（写 → 各条命令；读 → `status.py`）                                                                                    | —（命令 + 快照）   |
 | GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                                                                               | 本地 episode 扫描 / 选择 / 打包 + 上传队列                                                                                         | UploadService      |
 | GET             | `/v1/preview`                                                                                                                 | 最新观测预览（须租约）                                                                                                             | PreviewService     |
+| GET             | `/v1/depth`                                                                                                                   | 像素深度查询（归一化坐标 → 米；须租约）                                                                                            | DepthService       |
 | POST            | `/v1/webrtc/offer`                                                                                                            | WebRTC 推流信令（须租约）                                                                                                          | WebRTCService      |
 | GET             | `/v1/captures/meta`                                                                                                           | 采集元信息选项（前端选择列表，免租约）                                                                                             | CaptureMetaService |
 | POST            | `/v1/captures/sync`                                                                                                           | 同步采集元信息到机器人进程（须租约）                                                                                               | —（命令）          |
@@ -181,19 +182,19 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
 采集为**观测会话**：写端点（`POST` / `DELETE /v1/captures`、`/v1/captures/sync`）经
 `CommandService` 提交命令（与 CLI 同名词），读端点（status / precheck / meta）直读快照或 store：
 
-| 方法   | 路径                      | 租约          | 说明                                                                                                                                               |
-| ------ | ------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                                                  |
-| GET    | `/v1/captures`            | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id |
-| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                                                    |
-| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`capture.yml` 的 `meta` 段，前端选择列表）                                                                                         |
-| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                                                        |
-| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                                                          |
-| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                                                     |
-| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                                                                             |
-| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加）                                                           |
-| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                                                     |
-| GET    | `/v1/preview`             | 必需          | 最新观测预览（qpos / action / pose 末端位姿 + 相机名 / 臂名；**不要求会话**，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）     |
+| 方法   | 路径                      | 租约          | 说明                                                                                                                                                                |
+| ------ | ------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                                                                   |
+| GET    | `/v1/captures`            | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id                  |
+| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                                                                     |
+| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`capture.yml` 的 `meta` 段，前端选择列表）                                                                                                          |
+| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                                                                         |
+| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                                                                           |
+| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                                                                      |
+| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                                                                                              |
+| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加）                                                                            |
+| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                                                                      |
+| GET    | `/v1/preview`             | 必需          | 最新观测预览（qpos / action / pose 末端位姿 + 相机名 / 臂名 + **有深度的相机名**；**不要求会话**，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)） |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 
@@ -202,6 +203,27 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
 > 本地扫描 / 打包见 `/v1/uploads`）。实际数据落盘 / 校验 / 上传 **待完成**：后续按
 > hardware adapter 契约完成 **CaptureBundle**（manifest / checksum → Local Spool →
 > Uploader，服务端确认后才删），属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
+
+## /v1/depth（像素深度查询）
+
+回答「画面里某个像素有多远」——深度图由机器人进程发布（已对齐到彩色图），Edge 侧从
+**最新观测帧缓存**（与 `/v1/preview` 同源）取值换算成米；**不向机器人进程发观测请求**。
+
+| 方法 | 路径        | 租约 | 参数                                                                    | 说明                                                                                                                                                  |
+| ---- | ----------- | ---- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET  | `/v1/depth` | 必需 | `camera`（相机名）；`u` / `v` **归一化坐标** `[0,1]`（缺省 `0.5` 中心） | 返回 `depth_raw` / `depth_m` / `valid` + `depth_scale` / `intrinsics`（反投影输入）+ `xyz_camera` / `xyz_world` / `frame` / `world`（标定外参可用时） |
+
+-   **坐标用归一化值**：`/v1/preview` 与 WebRTC 推的是 Edge 侧降采样图（320×240），调用方在
+    预览里点到的像素与源分辨率不是同一网格；归一化后两边一致，响应回显 `u_px` / `v_px` 便于核对。
+-   `depth_raw == 0` = 该像素**测不到**（RealSense 语义）→ `valid: false`、`depth_m: null`
+    （不回 0.0 这种会被下游当真值的米数）。
+-   回执带 `intrinsics`（**彩色内参**，对齐后深度与彩图共用像素网格）与 `depth_scale`——
+    「像素 → 机器人坐标」的反投影输入。
+-   `xyz_camera`（相机光学系）与 `xyz_world`（统一 `world` 帧，缺省= 左臂基座）是**纯增量**：
+    未标定 / 缺内参 / 腕相机缺**同拍**位姿 → 相应字段为 `null`，**不报错**（深度本身不依赖外参）；
+    帧名与标定流程见 [统一坐标系与外参](./robot_pipeline_frames.md)。
+-   错误：未注入服务 `501`；缺租约 `409` / 异租约 `403`；相机无深度 / 未知 / 无观测帧 `404`；
+    坐标越界 `400`（非数值由 FastAPI 入参校验拦下 `422`）。
 
 ## /v1/uploads（本地 episode 扫描与打包）
 
@@ -242,18 +264,18 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 **rollout 录制** = `capture episode start/end`（robot 不关心推理/采集）；写端点经 `CommandService`
 提交命令（与 CLI 逐条对应），`GET /v1/infers` 读只读快照：
 
-| 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                                                            |
-| ------ | -------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/infers`               | 必需          | `enter`：`session run infer`（可选 body `policy_type` / `config`——**整份策略配置**，含公共项端点 `host` / `port`，会话级：进入会话时固化）                                                                                                                                      |
-| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / **warmed_up / warming / warmup_error / dropped_actions** / metadata / prompt / capture_meta / capture_status / rtc / policy_config（端点 host / port 与 warmup_required 在 `policy_config.items` 里）/ lease_id |
-| POST   | `/v1/infers/connect`       | 必需          | `infer connect`：**启动 / 查询异步预热**（连接 + prepare + 取一块丢弃，不下发动作）；立即回执 `started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等；预热进度看 `GET /v1/infers`                                                                                   |
-| POST   | `/v1/infers/rollout`       | 必需          | `infer rollout`：单步（缺省）/ `continuous` 持续推理，回执含 action                                                                                                                                                                                                             |
-| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`，机器人按帧录 mcap）                                                                                                                                                                                                             |
-| POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`，进程保存 episode）                                                                                                                                                                                                                |
-| POST   | `/v1/infers/sync`          | 必需          | `capture sync`：同步采集元信息（默认 `operator=policy` / `task_name=prompt`）                                                                                                                                                                                                   |
-| POST   | `/v1/infers/rtc`           | 必需          | `infer rtc set`：运行期设置 RTC 参数（可部分；非法 / 违反交叉约束 → 400）                                                                                                                                                                                                       |
-| POST   | `/v1/infers/config`        | 必需          | `infer config set`：按**当前策略 schema** 设置配置项（含公共项端点 `host` / `port`，与其它项同一校验；未知键 / 类型不符 / 越界 / 必填为空 → 400）                                                                                                                               |
-| DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                                                        |
+| 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                                                                                                                                            |
+| ------ | -------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/infers`               | 必需          | `enter`：`session run infer`（可选 body `policy_type` / `config`——**整份策略配置**，含公共项端点 `host` / `port`，会话级：进入会话时固化）                                                                                                                                                                                                                      |
+| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / **warmed_up / warming / warmup_error / dropped_actions** / metadata / prompt / capture_meta / capture_status / rtc（会话内 = 运行状态；无会话 = 配置级 `policy.rtc` 快照，仅 `enabled` / `params`）/ policy_config（端点 host / port 与 warmup_required 在 `policy_config.items` 里）/ lease_id |
+| POST   | `/v1/infers/connect`       | 必需          | `infer connect`：**启动 / 查询异步预热**（连接 + prepare + 取一块丢弃，不下发动作）；立即回执 `started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等；预热进度看 `GET /v1/infers`                                                                                                                                                                   |
+| POST   | `/v1/infers/rollout`       | 必需          | `infer rollout`：单步（缺省）/ `continuous` 持续推理，回执含 action                                                                                                                                                                                                                                                                                             |
+| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`，机器人按帧录 mcap）                                                                                                                                                                                                                                                                                             |
+| POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`，进程保存 episode）                                                                                                                                                                                                                                                                                                |
+| POST   | `/v1/infers/sync`          | 必需          | `capture sync`：同步采集元信息（默认 `operator=policy` / `task_name=prompt`）                                                                                                                                                                                                                                                                                   |
+| POST   | `/v1/infers/rtc`           | 必需          | `infer rtc set`：运行期设置 RTC 参数（可部分；非法 / 违反交叉约束 → 400）                                                                                                                                                                                                                                                                                       |
+| POST   | `/v1/infers/config`        | 必需          | `infer config set`：按**当前策略 schema** 设置配置项（含公共项端点 `host` / `port`，与其它项同一校验；未知键 / 类型不符 / 越界 / 必填为空 → 400）                                                                                                                                                                                                               |
+| DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                                                                                                                                        |
 
 ## 状态读取（只读缓存）
 
