@@ -15,7 +15,7 @@
 import alicia_d_sdk
 import numpy as np
 from alicia_d_sdk.utils.logger import BeautyLogger, LogLevel
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .arm_controller import ArmController
 

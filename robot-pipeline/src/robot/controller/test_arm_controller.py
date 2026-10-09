@@ -13,7 +13,7 @@
 # in compliance with the license file.
 
 import numpy as np
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .arm_controller import ArmController
 

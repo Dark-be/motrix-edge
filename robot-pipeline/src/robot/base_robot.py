@@ -46,7 +46,7 @@ motrix_edge.profile**——每个机器人的 obs/action 形态（动作维度 /
 import time
 
 import numpy as np
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 
 class BaseRobot:

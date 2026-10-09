@@ -57,7 +57,7 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
