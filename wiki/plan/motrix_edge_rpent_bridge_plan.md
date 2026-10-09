@@ -147,11 +147,12 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         `large_rotation` / `base_source`
 -   [x] `env.move_to(target, rpy=, arm=, settle=)`：`target` / `rpy` 都是 `world` 帧，逐臂按
         `T_world_base(arm)` 换算后按 `pose`（绝对）下发（非左臂缺外参 → `uncalibrated`）
--   [x] `move_delta` / `rotate_delta`：**只**有末端系语义（`space` 已删）。平移用快照姿态旋到基座系
-        （`d_base = R_cur · d_tool`，精确）；旋转下发的是**chart 增量**
-        `wrap(rpy(R_cur · ΔR_tool) - rpy_cur)`——旧写法（共轭 `R·ΔR·Rᵀ` 的 rpy）与机器人侧「rpy 逐分量
-        相加」不一致（`pitch=45°` 转 20° 偏 10.7°）。回执 `delta_frame` / `converted_delta_base` /
-        `base_source`，窗口竞态交给既有 `base_changed` 检查
+-   [x] `move_delta` / `rotate_delta`：**只**有末端系语义（`space` 已删），且分量是**语义量**
+        （`x` 前 / `y` 左 / `z` 上 → `ego_axes.basis()` 映到法兰轴）。平移用快照姿态旋到基座系
+        （`d_base = R_cur · basis · d_sem`，精确）；旋转下发的是**chart 增量**
+        `wrap(rpy(R_cur · basis·ΔR_sem·basisᵀ) - rpy_cur)`——旧写法（共轭 `R·ΔR·Rᵀ` 的 rpy）与机器人侧
+        「rpy 逐分量相加」不一致（`pitch=45°` 转 20° 偏 10.7°）。回执 `delta_frame` /
+        `converted_delta_base` / `base_source`，窗口竞态交给既有 `base_changed` 检查
 -   [x] 几何工具：把「轴对齐到方向的最小旋转」与「末端系增量 → 基座系增量」放进
         `motrix_edge.geometry`（纯 numpy、可离线单测；`rpy` 约定与 `rpent/layout.py` 已验一致）
 -   [x] 测试：四个方法各一条 happy path + 失败路径（无深度 / 未标定 / 缺位姿 / IK 拒绝 /
@@ -161,7 +162,8 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 ### 已拍板（2026-10-09）
 
 1. **`look_at` 朝向轴**：法兰 `+z`（`j6` 转轴 / DH `d6` 沿 z），**`roll ≡ 0`** 的规范解；
-2. **末端系三轴**：可配 `server.rpent.ego_axes`（缺省 `forward=+z` / `left=+x` / `up=+y`），
+2. **末端系三轴**：可配 `server.rpent.ego_axes`（缺省 `forward=+z` / `left=+y` / `up=-x`——
+   2026-10-09 真机实测：法兰 `+x` 向下 ⇒ 上取 `-x`，`+z` 是工具伸出方向），
    随 `env.get_env_meta` 回显，**上机 1 分钟验证**（发 2 cm 看方向）；
 3. **工具形态**：相对 = `move_delta` / `rotate_delta`（**只**有末端系，不再有 `space` 开关）；
    绝对 = `move_to`（`world` 点）/ `look_at`（`world` 点）——**增量看末端自己、绝对看 `world`**；
@@ -170,6 +172,11 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
    共轭 rpy 三元组（后者相加后与旋转复合不等价——实测 `pitch=45°` 偏 10.7°）。
 6. **绝对位移工具名**（2026-10-09 拍板）：正式名 = **`move_to`** —— op 层与 RPent 面**同名**
    （原 op 名 `goto` 弃用），避免「两个面各一个名字」；`env.move_to` 已在代码里，op 行同步改名。
+7. **增量的分量是语义量**（2026-10-09 三次拍板）：`delta_xyz` / `delta_rpy` 的 `x` = 前 / `y` = 左 /
+   `z` = 上（旋转 = 绕 前 / 左 / 上 轴），经 `ego_axes.basis()` 映到法兰轴。**0 位时与基座系一致**
+   （`x` → 基座 `+x`、`y` → `+y`、`z` → `+z`）——实机复验：0 位下发 `x=+0.05` →
+   `(0.0498, 0, 0.004)`（前）、`z=+0.05` → `(-0.004, 0, 0.0498)`（上）、`y=+0.05` → `(0, 0.05, 0)`（左）；
+   裸法兰轴会让“往前”变成给 `-x`（随装配变，写进 prompt 就是硬编码）。
 
 ## 未决（待拍板）
 

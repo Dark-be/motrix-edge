@@ -31,6 +31,10 @@ server:
     settle:
       pos_tol: 0.05 # 位置容差（米）：与姿态**分别**判定，不把米和弧度混进一个阈值
       rot_tol: 0.4 # 姿态 / 关节容差（弧度）：≈23°，盖住 MIT 静态误差
+    # 末端（工具）系三轴 ↔ 法兰哪根轴：**装配事实**，随 env.get_env_meta 回显给 agent。
+    # 缺省（dual piper 真机实测）：forward=+z（工具伸出方向）/ left=+y / up=-x（法兰 +x 向下）。
+    # 换机型 / 换支架后必须重验：`move_delta(delta_xyz=[0, 0, 0.02])` 只动 2 cm，看实际朝哪走。
+    ego_axes: { forward: "+z", left: "+y", up: "-x" }
 
 # 上传服务（UploadService，/v1/uploads/*；见 wiki/design/motrix_edge_upload.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。

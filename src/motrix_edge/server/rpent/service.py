@@ -44,7 +44,7 @@ from motrix_edge.geometry import (
     EgoAxes,
     FrameError,
     base_delta_from_ego,
-    base_rotation_delta_from_ego,
+    chart_increment,
     invert_transform,
     pointing_rpy,
     transform_points,
@@ -89,9 +89,11 @@ _VALUE_KEYS: dict[str, tuple[str, str]] = {
     SOURCE_MEASURED: (KEY_QPOS, KEY_POSE),
 }
 
-#: 增量工具的参考系：**末端（工具 / 法兰）系**。``env.move_delta`` / ``env.rotate_delta`` 的
-#: ``delta_xyz`` / ``delta_rpy`` 都按它解释（“沿末端当前 x 轴走”），**没有** ``space`` 开关：
-#: 上位换算成该臂基座系增量后下发（机器人侧的 ``pose_delta`` 只认基座系）。
+#: 增量工具的参考系：**末端（工具）系**——``env.move_delta`` / ``env.rotate_delta`` 的
+#: ``delta_xyz`` / ``delta_rpy`` 分量语义固定为 **``x = 向前 / y = 向左 / z = 向上``**（由
+#: ``server.rpent.ego_axes`` 映射到法兰哪根轴），可用 ``EgoAxes.basis()`` 一步换基到法兰系。
+#: **0 位（关节全 0）时这一组轴与基座系重合**（dual piper 实测：法兰 ``+z`` = 基座 ``+x`` 即“前”、
+#: 法兰 ``-x`` = 基座 ``+z`` 即“上”），臂一动则跟着末端走。没有 ``space`` 开关。
 DELTA_FRAME = "tool"
 
 #: ``look_at`` 的 ``keep``：保持不变的 xyz 取哪里——机器人侧目标位姿（缺省）还是实测位姿。
@@ -310,6 +312,7 @@ class RpentService:
             # 都是**装配事实**，由本字段自描述（RPent 侧不要写死），现场可改 ``server.rpent.ego_axes``。
             "ego_axes": self._ego_axes.as_dict(),
             "delta_frame": DELTA_FRAME,
+            "delta_axes": ["forward", "left", "up"],
             "move_to": {"input_frame": "world"},
             "look_at": {
                 "pointing_axis": self._ego_axes.forward,
@@ -652,11 +655,12 @@ class RpentService:
         delta_xyz: Any = None,
         settle: Any = None,
     ) -> dict:
-        """``env.move_delta``：**沿末端当前坐标系**的相对位移 → 下发 ``pose_delta`` 增量。
+        """``env.move_delta``：**沿末端语义轴**的相对位移 → 下发 ``pose_delta`` 增量。
 
-        ``delta_xyz``（米）在**末端（工具）系**里给：``x`` 有值 = 沿末端**当前** x 轴走，而不是
-        “让绝对目标的 x 变成这个值”。上位用当前**目标位姿**的姿态换算到该臂基座系
-        （``d_base = R_cur · d_tool``），叠加仍归机器人侧（见 ``_delta_tool_frame``）。
+        ``delta_xyz``（米）的分量固定为 **``x = 向前 / y = 向左 / z = 向上``**（0 位时与基座系一致：
+        实测法兰 ``+z`` = 基座 ``+x``（前）、法兰 ``-x`` = 基座 ``+z``（上）），再由 ``ego_axes``
+        映射到法兰哪根轴——**不是**“直接拿法兰 xyz”（那在 0 位会变成往下走）。上位用当前**目标位姿**
+        的姿态换算到该臂基座系（``d_base = R_cur · d_tool``），叠加仍归机器人侧（见 ``_delta_tool_frame``）。
         """
         arm, delta = split_arm_and_vector(args, arm, delta_xyz, "delta_xyz", expected=3)
         return self._delta_tool_frame(arm, delta, what="move_delta", offset=0, settle=settle)
@@ -668,23 +672,26 @@ class RpentService:
         delta_rpy: Any = None,
         settle: Any = None,
     ) -> dict:
-        """``env.rotate_delta``：**绕末端当前坐标系**的相对姿态（``delta_rpy`` 弧度）。
+        """``env.rotate_delta``：**绕末端语义轴**的相对姿态（``delta_rpy`` 弧度）。
 
-        “左右转 / 上下转 / 自转” = 绕末端自己三轴。注意下发的是**chart 增量**而不是
-        ``matrix_to_rpy(R · ΔR · Rᵀ)``：机器人把 rpy **逐分量相加**，而我们算出来的是矩阵复合，
-        两者在目标 ``pitch`` 不为 0 时差得很多（``pitch=45°`` 绕末端 z 转 20° 会偏 10.7°）——
-        见 ``base_rotation_delta_from_ego``。
+        “左右转 / 上下转 / 自转” = 绕 **``z = 向上`` / ``y = 向左`` / ``x = 向前``** 三轴（0 位时与基座系
+        一致），由 ``ego_axes`` 映射到法兰轴后换基：``ΔR_flange = M · ΔR_semantic · Mᵀ``，再算
+        **chart 增量**下发。不下发 ``matrix_to_rpy(R · ΔR · Rᵀ)``：机器人把 rpy **逐分量相加**，
+        两者在目标 ``pitch`` 不为 0 时差得很多（``pitch=45°`` 绕轴转 20° 偏 10.7°）——见 ``chart_increment``。
         """
         arm, delta = split_arm_and_vector(args, arm, delta_rpy, "delta_rpy", expected=3)
         return self._delta_tool_frame(arm, delta, what="rotate_delta", offset=3, settle=settle)
 
     def _delta_tool_frame(self, arm: str | None, delta: np.ndarray, *, what: str, offset: int, settle: Any) -> dict:
-        """末端系增量 → 基座系增量后下发（唯一的增量路径，不再有 ``space`` 开关）。
+        """语义系增量 → 基座系增量后下发（唯一的增量路径，不再有 ``space`` 开关）。
 
-        为什么换算必须在上位：机器人侧的 ``pose_delta`` 是**基座系**的 rpy chart 相加
+        为什么换算必须在上位：机器人侧的 ``pose_delta`` 是**基座系**的 chart 相加
         （基准 = ``FK(关节段目标)``），它不知道“沿末端哪根轴”。换算用**快照**
         （``observations/pose_target`` 的姿态），窗口内被第三方（遥操作 / CLI / 别的会话）改了目标 →
         既有的 ``base_changed`` 检查会标出来；快照本身就不可用 → 报 ``state``，不猜。
+
+        分量语义（``x/y/z`` = 前/左/上）先经 ``ego_axes.basis()`` 换到**法兰系**（0 位时这组轴与基座
+        系重合），再做“法兰系 → 基座系”：平移旋转矢量，旋转换基后取 chart 增量。
         """
         _adapter, arms = self._view.require_adapter_with_arms()
         if not self._view.supports(ActionSpace.POSE_DELTA):
@@ -698,6 +705,8 @@ class RpentService:
         snapshot = self._qpos(ActionSpace.POSE, frame=self._view.frame(), source=SOURCE_TARGET)
         vector = np.zeros(stride * max(len(arms), 1), dtype=np.float32)
         converted: list[np.ndarray] = []
+        semantic = np.asarray(delta, dtype=np.float64).reshape(3)[:3]  # (forward, left, up)
+        basis = self._ego_axes.basis()  # 语义系 → 法兰系
         for index in indices:
             start = index * stride
             rpy = None if snapshot is None else np.asarray(snapshot, dtype=np.float64)[start + 3 : start + 6]
@@ -707,7 +716,11 @@ class RpentService:
                     "但机器人没有发布它——先确认位姿观测",
                     kind="state",
                 )
-            step = base_delta_from_ego(rpy, delta) if offset == 0 else base_rotation_delta_from_ego(rpy, delta)
+            step = (
+                base_delta_from_ego(rpy, basis @ semantic)
+                if offset == 0
+                else chart_increment(rpy, basis @ rpy_to_matrix(semantic) @ basis.T)
+            )
             converted.append(np.asarray(step, dtype=np.float64))
             vector[start + offset : start + offset + 3] += np.asarray(step, dtype=np.float32)
         return self._pose_delta(
@@ -718,6 +731,7 @@ class RpentService:
             vector=vector,
             extra={
                 "delta_frame": DELTA_FRAME,
+                "delta_axes": ["forward", "left", "up"],  # delta_xyz / delta_rpy 的分量语义
                 "converted_delta_base": converted,
                 "ego_axes": self._ego_axes.as_dict(),
                 "base_source": SOURCE_TARGET,
@@ -999,6 +1013,8 @@ class RpentService:
         也不拿一个差一个基座间距（这台约 642 mm）的坐标系去动。
         """
         frames = getattr(adapter, "frame_set", None)
+        if callable(frames):  # 真实适配器上是**方法**（``HttpShmAdapter.frame_set()``，惰性查询 + 缓存）；
+            frames = frames()  # 假件 / 未来实现可能直接给属性，故两者都要认
         if frames is None:
             if str(arm) == WORLD_ARM:
                 return IDENTITY.copy()
