@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .arm_controller import ArmController
 

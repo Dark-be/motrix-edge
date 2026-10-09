@@ -15,7 +15,7 @@
 # execute 控制器执行动作的函数 需要子类实现
 # action: Dict[str, Any] 包含控制器需要执行的动作信息的字典
 # is_delta: bool 表示action中的动作信息是否为增量
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 
 class Controller:
