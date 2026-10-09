@@ -24,12 +24,46 @@ import numpy as np
 # from skimage.metrics import structural_similarity as ssim
 from config import LOG_PATH
 
+# 环境变量名（单点定义：与 motrix_edge 侧同名——两个子项目在同一台机器 / 同一容器里认
+# 同一套变量；重复是刻意的，两项目需能独立部署、不互相 import）。
+# 只有文件日志开关：日志级别是配置项（该机型 yml 的 ``INFO_LEVEL``），刻意不设环境变量。
+ENV_LOG_FILE = "MOTRIX_EDGE_LOG_FILE"
 
-def _get_log_file():
-    log_dir = LOG_PATH
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_FILE = os.path.join(log_dir, f"log_{timestamp}.txt")
+# 日志级别与文件日志：与 motrix_edge 侧同一套语义、同一套变量名，只是落点各自独立
+# （``config.get_log_dir()`` → ``motrix-robot-pipeline/logs/``）。
+DEFAULT_LOG_LEVEL = "INFO"
+LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+_LOG_LEVEL: str = DEFAULT_LOG_LEVEL
+
+# 进程内缓存日志文件路径：首次写日志时确定（含时间戳），之后固定复用
+_LOG_FILE: str | None = None
+
+
+def file_log_enabled() -> bool:
+    """文件日志开关（环境变量 ``MOTRIX_EDGE_LOG_FILE``，**缺省关闭**，防长期运行塞满磁盘）。"""
+    return os.getenv(ENV_LOG_FILE, "0").strip().lower() not in ("0", "false", "no")
+
+
+def set_log_level(configured: str | None = None) -> str:
+    """解析并设置进程内日志级别，返回生效值（启动时调用一次）。
+
+    唯一来源是 ``configured``（该机型 yml 的 ``INFO_LEVEL``）：不设 / 值非法 → ``"INFO"``。
+    **不写 ``os.environ``**（避免配置继承给子进程 / 被其他库读到）——与 motrix_edge 侧同语义。
+    """
+    global _LOG_LEVEL
+    level = (configured or DEFAULT_LOG_LEVEL).upper()
+    _LOG_LEVEL = level if level in LOG_LEVELS else DEFAULT_LOG_LEVEL
+    return _LOG_LEVEL
+
+
+def _get_log_file() -> str:
+    """日志文件路径（含时间戳）：首次写入时确定，之后进程内复用。"""
+    global _LOG_FILE
+    if _LOG_FILE is None:
+        log_dir = str(LOG_PATH)
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        _LOG_FILE = os.path.join(log_dir, f"log_{timestamp}.txt")
     return _LOG_FILE
 
 
@@ -97,16 +131,10 @@ def dict_to_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def debug_print(name, info, level="INFO", end="\n", flush=True):
-    levels = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
-    if level not in levels.keys():
+    if level.upper() not in LOG_LEVELS:
         debug_print("DEBUG_PRINT", f"level setting error : {level}", "ERROR")
         return
-    env_level = os.getenv("INFO_LEVEL", "INFO").upper()
-    env_level_value = levels.get(env_level, 20)
-
-    msg_level_value = levels.get(level.upper(), 20)
-
-    if msg_level_value < env_level_value:
+    if LOG_LEVELS[level.upper()] < LOG_LEVELS.get(_LOG_LEVEL, 20):
         return
 
     colors = {
@@ -121,16 +149,15 @@ def debug_print(name, info, level="INFO", end="\n", flush=True):
     msg = f"[{level}][{name}] {info}"
     print(f"{color}{msg}{endc}", end=end, flush=flush)
 
-    # 写入日志文件 (INFO及以上级别)
-    # if msg_level_value >= 20:  # 20 is INFO
-    #     log_file_path = _get_log_file()
-    #     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    #     try:
-    #         with open(log_file_path, "a", encoding="utf-8") as f:
-    #             f.write(f"[{timestamp}]{msg}\n")
-    #     except Exception as e:
-    #         # 避免递归调用
-    #         print(f"\033[91m[ERROR][DEBUG_PRINT] Failed to write log to file: {e}\033[0m")
+    # 写入日志文件（INFO 及以上；MOTRIX_EDGE_LOG_FILE=0 关闭文件写入）
+    if LOG_LEVELS[level.upper()] >= 20 and file_log_enabled():
+        log_file_path = _get_log_file()
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        try:
+            with open(log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}]{msg}\n")
+        except Exception as e:  # 写盘失败不影响主流程（也不递归调用 debug_print）
+            print(f"\033[91m[ERROR][DEBUG_PRINT] Failed to write log to file: {e}\033[0m")
 
 
 KEY_DICT = {

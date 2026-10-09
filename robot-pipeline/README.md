@@ -114,6 +114,21 @@ host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras
 2. `<根>/config/robot/<machine>.yml`：机器档案，只写差异，深合并到机型 yml 上（见下节）；
 3. `<根>/config/gravity/*.json`：重力参数标定产物（`scripts/fit_gravity.py --install` 写入）。
 
+日志与环境变量（与 motrix_edge **共用同一套变量名**，同一份仓库根 `.env`；实现各自独立）：
+
+-   **日志级别**：只读该机型 yml 的 `INFO_LEVEL`（`DEBUG` / `INFO` / `WARNING` / `ERROR`），不写 →
+    代码缺省 `INFO`；**没有环境变量开关**（多一个开关就会静默盖掉 yml）；启动时经
+    `set_log_level()` 解析一次，**不写 `os.environ`**；
+-   **文件日志开关**：`MOTRIX_EDGE_LOG_FILE`（缺省关闭）；开启后写 `<根>/logs/`
+    （`<根> = $MOTRIX_ROBOT_PIPELINE_DIR`，未设 → `<cwd>/motrix-robot-pipeline/`），与 edge 的
+    `$MOTRIX_EDGE_DIR/logs/` 分开；
+-   **uvicorn 日志**：与 edge 同构（`utils/logging.uvicorn_log_config`）——HTTP access 缺省
+    **静默**（防长期运行刷屏）；开启 `MOTRIX_EDGE_LOG_FILE` 后 access 只写 `<日志目录>/uvicorn.log`
+    （轮转 10MB × 5，纯文本），uvicorn 启动 / 错误日志始终写终端。⚠️ 只有
+    `python src/server/robot_server.py`（走 `serve()`）会应用该配置；用
+    `uvicorn server.robot_server:app` 启动时是 uvicorn 默认行为；
+-   **裸跑（无 docker）** 复用仓库根 `.env`：`uv run --env-file ../.env python src/server/robot_server.py`。
+
 `robot.name` 是**进程展示名**（可选，覆盖机器人类常量 `NAME`），也是 `/v1/discover` 上报给 Edge
 的名字（控制台 / 状态接口显示的就是它）；不写则用机型默认名 `NAME`。同型号多台机器按机器命名
 （如 `dual_piper_pc16`），便于控制台区分与采集元信息（mcap 同名 JSON 里的 `robot_name`）。

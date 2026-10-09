@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
-from utils.data_handler import debug_print
+from utils.data_handler import debug_print, set_log_level
 
 from .arm_controller import ArmController
 
@@ -210,9 +210,7 @@ class PiperController(ArmController):
 
 
 if __name__ == "__main__":
-    import os
-
-    os.environ["INFO_LEVEL"] = "DEBUG"
+    set_log_level("DEBUG")
 
     controller = PiperController("robot_controller")
     controller.connect(port="can_left")

@@ -14,31 +14,37 @@
 
 """uvicorn 日志配置 —— 由 ``MOTRIX_EDGE_LOG_FILE`` 开关决定是否写文件（缺省关闭）。
 
-开启：HTTP access 写 ``logs/uvicorn.log``、启动 / 错误日志终端 + 文件；关闭：只有 HTTP
-access 静默，启动 / 错误日志仍写终端（不写文件）。
-与 ``data_handler.debug_print`` 的 ``logs/log_*.txt`` 共用同一开关（纯文本无 ANSI 颜色）。
+与 motrix_edge 侧的 ``utils/logging.py`` **同一套语义、同一个开关名**（实现各自独立，两项目
+需能独立部署）：开启 → HTTP access 写 ``<根>/logs/uvicorn.log``（``<根> = $MOTRIX_ROBOT_PIPELINE_DIR``
+或 ``<cwd>/motrix-robot-pipeline``）、
+启动 / 错误日志终端 + 文件；关闭（缺省）→ 只有 HTTP access 静默，启动 / 错误日志仍写终端
+（不写文件）。与 ``utils/data_handler.debug_print`` 的 ``log_*.txt`` 共用同一开关
+（纯文本无 ANSI 颜色）。
 """
 
 import copy
 
 from uvicorn.config import LOGGING_CONFIG
 
-from motrix_edge.utils.data_handler import file_log_enabled
+from utils.data_handler import file_log_enabled
 
 
 def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
-    """构建 uvicorn 日志配置（经 ``uvicorn.Config(log_config=...)`` 生效）。
+    """构建 uvicorn 日志配置（经 ``uvicorn.run(log_config=...)`` 生效）。
 
     ``file_enabled`` 缺省读 ``MOTRIX_EDGE_LOG_FILE``（与 ``debug_print`` 同一开关，**缺省关闭**）：
 
-    - 开启：HTTP access → **只写文件**（``logs/uvicorn.log``，RotatingFileHandler 10MB × 5），
-      uvicorn 启动 / 错误 → 终端 + 文件；不刷终端；
-    - 关闭（缺省）：HTTP access **丢弃**（NullHandler）——不写文件、不占终端
-      （防长期运行刷屏 / 塞满磁盘）；uvicorn 启动 / 错误日志仍走默认终端 handler
-      （不写文件）——端口占用 bind 失败、uvicorn 内部异常在终端可见，排障不丢现场。
+    - 开启：HTTP access → **只写文件**（RotatingFileHandler 10MB × 5），uvicorn 启动 / 错误
+      → 终端 + 文件；不刷终端；
+    - 关闭（缺省）：HTTP access **丢弃**（NullHandler）——不写文件、不占终端（防长期运行刷屏 /
+      塞满磁盘）；uvicorn 启动 / 错误日志仍走默认终端 handler（不写文件）——端口占用 bind
+      失败、uvicorn 内部异常在终端可见，排障不丢现场。
 
-    注意：不能手动 ``logger.addHandler`` —— uvicorn 启动 ``configure_logging()``
-    会 ``dictConfig`` 覆盖已有 handler；必须经 ``log_config`` 传入。
+    注意：不能手动 ``logger.addHandler`` —— uvicorn 启动 ``configure_logging()`` 会
+    ``dictConfig`` 覆盖已有 handler；必须经 ``log_config`` 传入。
+
+    另注意：``uvicorn server.robot_server:app`` 这种 CLI 启动方式不经过 ``serve()``，
+    不会应用本配置（届时是 uvicorn 默认行为）；推荐用 ``python src/server/robot_server.py``。
     """
     if file_enabled is None:
         file_enabled = file_log_enabled()
