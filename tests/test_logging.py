@@ -16,7 +16,7 @@
 
 from uvicorn.config import LOGGING_CONFIG
 
-from motrix_edge.utils.data_handler import file_log_enabled
+from motrix_edge.utils.data_handler import file_log_enabled, set_log_level
 from motrix_edge.utils.logging import uvicorn_log_config
 
 
@@ -31,6 +31,20 @@ def test_file_log_enabled_reads_env(monkeypatch):
     assert file_log_enabled() is False
     monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "on")
     assert file_log_enabled() is True
+
+
+def test_set_log_level_comes_from_config(monkeypatch):
+    """级别**只**来自配置（yml 的 ``INFO_LEVEL``）：不设 / 非法值 → INFO。
+
+    回归：曾支持 ``MOTRIX_EDGE_LOG_LEVEL`` 环境变量覆盖；现按「配置一处生效」删掉——
+    该变量即便还在环境里也必须**被忽略**（否则 compose 转发一次就静默盖死 yml）。
+    """
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_LEVEL", "error")
+    assert set_log_level("DEBUG") == "DEBUG"  # yml 的值生效，环境变量不参与解析
+    assert set_log_level("debug") == "DEBUG"  # 大小写归一
+    assert set_log_level("nope") == "INFO"  # 非法值 → 缺省
+    assert set_log_level() == "INFO"  # yml 没写 → 缺省
+    set_log_level("INFO")  # 复原模块级状态，避免影响其他用例
 
 
 def test_uvicorn_log_config_default_keeps_error_output():

@@ -31,11 +31,11 @@
 from __future__ import annotations
 
 import argparse
-import os
 
 from config import load_config  # noqa: E402
 from env import get_env  # noqa: E402
 from server.contract_server import create_app, serve  # noqa: E402
+from utils.data_handler import debug_print, set_log_level  # noqa: E402
 
 _DEFAULT_CFG = "test_robot.yml"
 
@@ -48,7 +48,8 @@ def build_app(config_name: str | None = None):
     """
     name = config_name or _DEFAULT_CFG
     cfg = load_config(name)
-    os.environ.setdefault("INFO_LEVEL", cfg.get("INFO_LEVEL", "INFO"))
+    # 日志级别与 edge 同一套语义：环境变量 > yml 的 INFO_LEVEL > INFO（详见 utils.data_handler）
+    debug_print("SERVER", f"config={name} | log_level={set_log_level(cfg.get('INFO_LEVEL'))}", "INFO")
     server_cfg = cfg.get("server") or {}
     host = server_cfg.get("host")
     port = server_cfg.get("port")
