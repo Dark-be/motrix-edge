@@ -114,7 +114,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 -   [x] **机器人侧位姿观测（robotics 侧）**：`DualPiperRobot` 已加 `POSE = 12` +
         `get_observation_pose()`（由**同一拍关节角**经 `robot/kinematics` 的正解解算；SDK 法兰位姿
         **不在运行时链路**，只在现场标定时读作对照）——RPent 启动自检的 `pose_dim_per_arm` 因此为 6。
--   [x] **机器人侧位姿动作下发（求解器，不经 `move_p`）**：`action_space=pose` 时
+-   [x] **机器人侧位姿动作下发（求解器，不经 `move_p`）**：`layout="pose"` 时
         每臂位姿由 `robot/kinematics` 解算一次 → 关节目标 → 限速 + MIT；
         `DualPiperAdapter.ACTION_SPACES` 已声明 `pose`，故 `env.move_delta` /
         `rotate_delta` / `goto` 对真机 piper 可用（解算失败 → 422、不改既有目标）。

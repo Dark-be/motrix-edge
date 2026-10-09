@@ -3,9 +3,9 @@
 ## 摘要
 
 按 [robot-pipeline 位姿动作](../design/robot_pipeline_cartesian.md) 落地
-`action_space=pose`：新增 `robot/kinematics`（DH / 正解 / 雅可比 / DLS 逆解），
-`BaseRobot` 增加动作空间声明与位姿目标钩子，`DualPiperRobot` 接线（每臂解算 → 关节目标 → MIT），
-env / contract server 透传 `action_space`，edge adapter 声明 `pose`。
+`layout="pose"`：新增 `robot/kinematics`（DH / 正解 / 雅可比 / DLS 逆解），
+`BaseRobot` 增加动作声明与位姿目标钩子，`DualPiperRobot` 接线（每臂解算 → 关节目标 → MIT），
+env / contract server 透传 `layout`（+ `arms` 作用域），edge adapter 声明 `pose`。
 
 > 收敛结果（经用户多轮校正）：**运动学与位姿解算全在控制器**，robot 层只有骨架；机器人类只做取数与转发；
 > **阻抗 / 力矩前馈暂不实现**（下发只有关节角，`kp` / `kd` / `t_ff` 用 MIT 缺省值）。
@@ -32,7 +32,7 @@ env / contract server 透传 `action_space`，edge adapter 声明 `pose`。
         运动学 `POSE_MAP`）。
 -   [x] `base_robot.py`（**只留骨架**）：`ACTION_SPACES` / `ACTION_SPACE_JOINT` / `ACTION_SPACE_POSE` /
         `CARTESIAN_DIM_PER_ARM`、`normalize_action_space()`、`CartesianActionError`；`execute()` / `rollout()`
-        接受 `action_space`；目标状态机 + 逐拍限速插值 + 遥操作映射 + 观测组装；子类钩子
+        接受 `layout`（+ `arms`）；目标状态机 + 逐拍限速插值 + 遥操作映射 + 观测组装；子类钩子
         `_prepare_target()`（缺省只支持关节空间）/ `get_observation_qpos()` / `get_observation_pose()`
         （缺省 `None` = 不提供位姿）/ `_apply_action()`——**基类不碰位姿语义、不碰运动学**。
 -   [x] `dual_piper_robot.py` / `test_robot.py`：**编排 + 取数 + 下发**（`_prepare_target()` 里对
@@ -43,16 +43,16 @@ env / contract server 透传 `action_space`，edge adapter 声明 `pose`。
 
 ## 阶段三：链路透传
 
--   [x] `env/base_env.py`：`robot_execute` / `robot_rollout(action, action_space=None)` 入队并透传；
-        `_check_action_dim` 增加动作空间校验；`_drain_commands` 把 `ValueError`（目标不可达 / 空间不支持）
+-   [x] `env/base_env.py`：`robot_execute` / `robot_rollout(action, layout=None, arms=None)` 入队并透传；
+        `plan_layout()` 校验维度 / 段名 / 有限性 / 作用域；`_drain_commands` 把 `ValueError`（目标不可达 / 段不支持）
         与硬件故障分开——前者只记 WARNING，**不置 `last_error`**（不影响 health）。
--   [x] `server/contract_server.py`：`ActionRequest.action_space`（缺省 `joint`）；execute / rollout
+-   [x] `server/contract_server.py`：`ActionRequest.layout`（缺省 `joint`）+ `arms`（未知字段 → 422）；execute / rollout
         透传；`/` 调试端点上报 `action_spaces`。
 -   [x] `src/motrix_edge/adapter/`：`ActionSpace.POSE`（`= "pose"`）+ `dual_piper_adapter.ACTION_SPACES`
-        声明 `pose`；`base.RobotAdapter.execute` / `http_shm_adapter.execute` 接受并透传 `action_space`；
-        新增 `_require_full_arms_for_cartesian()` 守卫（部分臂启用时位姿动作**拒绝**——未启用臂用
-        `HOME_QPOS`（关节值）填充，不能当位姿下发）。
--   [x] `http_contract.py`：`/v1/execute` 与 `/v1/rollout` 的 body 文档补 `action_space`（含失败语义）。
+        声明 `pose`；`base.RobotAdapter.execute` / `http_shm_adapter.execute` 接受并透传 `layout` / `arms`；
+        新增 `_expand_layout()` 的守卫（部分臂启用时位姿段**拒绝**——未启用臂没有「同段 HOME」可填，
+        不能当位姿下发）。
+-   [x] `http_contract.py`：`/v1/execute` 与 `/v1/rollout` 的 body 文档补 `layout` / `arms`（含失败语义）。
 
 ## 阶段四：现场校验脚本与文档
 
