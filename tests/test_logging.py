@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""日志开关测试：``MOTRIX_LOG_FILE`` 解析 + uvicorn log_config 的 handler 裁剪。"""
+"""日志开关测试：``MOTRIX_EDGE_LOG_FILE`` 解析 + uvicorn log_config 的 handler 裁剪。"""
 
 from uvicorn.config import LOGGING_CONFIG
 
@@ -21,12 +21,16 @@ from motrix_edge.utils.logging import uvicorn_log_config
 
 
 def test_file_log_enabled_reads_env(monkeypatch):
-    monkeypatch.delenv("MOTRIX_LOG_FILE", raising=False)
+    monkeypatch.delenv("MOTRIX_EDGE_LOG_FILE", raising=False)
     assert file_log_enabled() is False  # 缺省关闭
-    monkeypatch.setenv("MOTRIX_LOG_FILE", "1")
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "1")
     assert file_log_enabled() is True
-    monkeypatch.setenv("MOTRIX_LOG_FILE", "false")
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "false")
     assert file_log_enabled() is False
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "")
+    assert file_log_enabled() is False
+    monkeypatch.setenv("MOTRIX_EDGE_LOG_FILE", "on")
+    assert file_log_enabled() is True
 
 
 def test_uvicorn_log_config_default_keeps_error_output():

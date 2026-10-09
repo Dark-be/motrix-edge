@@ -35,7 +35,7 @@ def _print_version() -> None:
 def _start_web(app, host: str, port: int):
     """后台线程运行 FastAPI 服务，返回 uvicorn.Server（置 should_exit=True 停止）。
 
-    uvicorn 日志由 ``MOTRIX_LOG_FILE`` 开关控制（与 ``debug_print`` 同一开关，缺省关闭）：
+    uvicorn 日志由 ``MOTRIX_EDGE_LOG_FILE`` 开关控制（与 ``debug_print`` 同一开关，缺省关闭）：
     开启时 access / error 写入 ``logs/uvicorn.log``（RotatingFileHandler，10MB × 5，与
     ``logs/log_*.txt`` 分开），HTTP access 只写文件；关闭时只静默 HTTP access（不写文件、
     不刷终端），uvicorn 启动 / 错误日志仍写终端（端口占用等排障信息不丢）。
@@ -93,16 +93,17 @@ def _run_node(args) -> None:
     from motrix_edge.server.infer import InferService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
-    from motrix_edge.utils.data_handler import debug_print, file_log_enabled
+    from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled
 
     # 打印生效路径；文件日志默认关闭，因此这里只报告目录、不创建目录。
+    file_log_state = "ON" if file_log_enabled() else f"OFF ({ENV_LOG_FILE}=0)"
     debug_print(
         "EdgeNode",
         f"Loaded config: {config_source}"
         f" | root_dir={get_root_dir()}"
         f" | config_dir={get_config_dir()}"
         f" | log_dir={get_log_dir()}"
-        f" | file_logging={'ON' if file_log_enabled() else 'OFF (MOTRIX_LOG_FILE=0)'}",
+        f" | file_logging={file_log_state}",
         "INFO",
     )
     os.environ["INFO_LEVEL"] = base_cfg.get("INFO_LEVEL", "DEBUG")
