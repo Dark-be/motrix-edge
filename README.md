@@ -93,6 +93,25 @@ uv run ruff check .
 npm run format    # ruff format + prettier
 ```
 
+### 本机变量（`.env`）
+
+本机相关变量（如容器挂载路径）写入仓库根**不入库**的 `.env`，样例见 [`.env.example`](.env.example)。
+同一份 `.env` 同时服务三种场景，因此只用朴素的 `KEY=value` 写法（避开 compose 独有的
+引号 / 多行语法，保证三方都能读）：
+
+-   **docker compose**：自动读取项目目录的 `.env` 做 `${}` 插值，并在 `environment:` 段转发
+    需要进入容器的变量（**根目录变量除外**：`.env` 里的是宿主路径，容器内改用
+    `*_IN_CONTAINER`，缺省落在挂载卷内）；
+-   **裸跑（无 docker）**：`uv run --env-file .env motrix-edge run`；
+-   **shell**：`set -a; . ./.env; set +a`。
+
+这份 `.env` **同时服务 `motrix_edge` 与 `robot-pipeline`**（两个子项目认同一套变量名；各自有一个根目录
+变量，配置 / 日志都落在其下：edge `$MOTRIX_EDGE_DIR`、robot-pipeline `$MOTRIX_ROBOT_PIPELINE_DIR`，
+未设时回落启动目录）。根目录变量写**宿主路径**（裸跑用）；容器内由 compose 翻译成容器可见路径
+（`*_IN_CONTAINER`，缺省落在挂载卷内 → 持久），因此同一份 `.env` 两种运行方式通用、落点还是同一个
+宿主目录。完整列表见
+[配置与命令行](wiki/design/motrix_edge_config.md#环境变量)。
+
 机器人承载端（robot-pipeline）为独立子项目，需单独 `uv sync`，详见
 [robot-pipeline/README.md](robot-pipeline/README.md)。
 

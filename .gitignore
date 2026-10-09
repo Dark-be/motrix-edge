@@ -26,13 +26,22 @@ code-quality-report.json
 py-coverage.xml
 py-report.xml
 
-# 包内默认 capture.yml 播种到 CWD（config.get_state_dir 缺省回退 CWD）——不属仓库内容。
+# 包内默认 capture.yml 的可写副本（播种产物：<根>/config/capture.yml，根在仓库内时命中本规则）、
+# 以及其它落点不固定的配置副本——不属仓库内容。
 capture.yml
 
 .vscode/
 .pytest_cache
 data/
 logs/
+
+# 本机变量（.env；样例见入库的 .env.example）：只在本机生效，不入库
+.env
+
+# 两个项目的根目录兜底（<cwd>/motrix-edge/、<cwd>/motrix-robot-pipeline/）：配置副本 + 日志，
+# 从仓库内启动（跑脚本 / 跑测试）时会生成；显式设了环境变量则落在那些目录，不受此影响。
+motrix-edge/
+motrix-robot-pipeline/
 
 # vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
 src/lerobot/
