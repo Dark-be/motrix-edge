@@ -21,7 +21,8 @@
 职责面（角色）：
   discover/health  发现并检查硬件（discover / health / ready / release）
   capabilities    声明能力（动作维度 / 观测布局 / 相机）
-  observe         读取最新观测缓存（JPEG 图像 + qpos；**不推进 / 不影响适配器运行**）
+  observe         读取最新观测缓存（JPEG 图像 + 状态 / 目标向量 + 位姿 + 深度图；
+                  **不推进 / 不影响适配器运行**）
   execute         执行动作指令（直接下发）
   capture_status  采集状态（运行位 + 元信息 + 数据目录/列表；进程自维护）
   rollout         推理闭环（被推理任务消费）
@@ -36,7 +37,7 @@
   - **采集下沉、无回合控制**：数据采集（录制写盘）由适配器 / 机器人进程自维护——Edge
     进入采集会话后只读共享内存观测并展示，**不驱动回合**。adapter 只预留一个**采集状态**
     接口（``capture_status()``）返回运行位（进程是否正在采集）+ 元信息 + 数据目录 / 列表，
-    供 server 状态上报。观测键契约（KEY_QPOS / KEY_ACTION / CAMERA_PREFIX）在此单点定义。
+    供 server 状态上报。观测键契约（KEY_QPOS / KEY_ACTION / CAMERA_PREFIX / DEPTH_PREFIX）在此单点定义。
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
+
+from motrix_edge.adapter.http_contract import FIELD_DEPTH  # 相机元数据的深度段键名（单点定义）
 
 # ---- 观测键契约（standard_obs 字典的键名，与 ACT 采集格式一致）----------------
 # ``observations/qpos`` = **状态向量**：每臂「**值 + 夹爪**」交错（值段当前是关节角；机器人整体切位姿时
@@ -62,6 +65,10 @@ KEY_POSE = "observations/pose"
 # 「目标 − 实测」即 MIT 稳态误差。同样随位姿存在（``POSE = 0`` 时无此键）。
 KEY_POSE_TARGET = "observations/pose_target"
 CAMERA_PREFIX = "observations/images/"
+# **深度图**（``observations/depth/<cam>``）：``uint16[H][W]`` **已对齐到同名彩色图**的深度图
+# （同一像素网格；``0`` = 该像素无有效深度），原始值 × ``depth_scale`` = 米。只有**具备深度的
+# 相机**（RealSense 类）且进程上报时该键才出现——图像键仍在，深度是**附加**观测，不是替代。
+DEPTH_PREFIX = "observations/depth/"
 
 # execute / rollout 的一维动作输入：CLI/HTTP 常用 list，policy 常用 ndarray。
 Action = Sequence[float] | np.ndarray
@@ -144,6 +151,15 @@ def image_names_of(keys) -> list[str]:
     ``RobotCapabilities.image_names`` 与 ``server/preview`` 共用本函数。
     """
     return [k[len(CAMERA_PREFIX) :] for k in keys if k.startswith(CAMERA_PREFIX)]
+
+
+def depth_names_of(keys) -> list[str]:
+    """从观测键里挑出**深度**相机名（``observations/depth/<name>`` → ``<name>``）。
+
+    与 ``image_names_of`` 同口径：可传声明的观测键清单，也可传某一帧观测的键——
+    ``server/preview`` 用它报「哪些相机当前有深度」。
+    """
+    return [k[len(DEPTH_PREFIX) :] for k in keys if k.startswith(DEPTH_PREFIX)]
 
 
 @dataclass
@@ -235,6 +251,10 @@ class RobotAdapter(ABC):
     DEFAULT_ENABLED_ARMS: tuple[str, ...] = ()
     # 相机布局：{相机名: 分辨率 (width, height)}（configure 校验 / 挑选用）
     IMAGES: dict[str, tuple[int, int]] = {}
+    # **具备深度**的相机（``IMAGES`` 的子序；空 = 本适配器无深度相机）：硬件事实（RealSense 类
+    # 相机有、网络摄像头没有），故属**能力声明**（类常量）——进 ``capabilities.observation_keys``
+    # 供前端 / 调用方展示；**实际生效**的深度相机由机器人进程上报（进程可经配置关闭部分相机），
+    # 见 ``depth_camera_names()``。
 
     def __init__(self, name: str = "", *, endpoint: str | None = None, shm_name: str | None = None):
         """身份与连接参数由 discover 赋予（缺省为空 = 进程内测试，回退类常量）。
@@ -521,6 +541,21 @@ class RobotAdapter(ABC):
         blocks = array.reshape(arms, per_arm)
         return blocks[:, :-1].reshape(-1), blocks[:, -1].copy()
 
+    def pose_by_arm(self, pose) -> dict[str, np.ndarray]:
+        """位姿向量（``observations/pose``，启用臂 × 每臂 ``xyz + rpy``）→ **按臂名**的 6 维块。
+
+        与 :meth:`split_state` 同款口径：形状对不上（无臂概念 / 维数不符 / 空）→ 空 dict，
+        **不猜布局**——调用方（如 ``GET /v1/depth`` 的腕相机外参合成）据此跳过坐标换算。
+        顺序与 ``enabled_arms`` 对齐（布局的单一事实来源在适配器）。
+        """
+        array = np.asarray(pose, dtype=np.float64).reshape(-1)
+        per_arm = self.effective_pose_dim_per_arm()
+        arms = [str(arm) for arm in (self.enabled_arms or [])]
+        if per_arm <= 0 or not arms or array.size != per_arm * len(arms):
+            return {}
+        blocks = array.reshape(len(arms), per_arm)
+        return {arm: blocks[index, :6].copy() for index, arm in enumerate(arms)}
+
     def effective_pose_dim_per_arm(self) -> int:
         """**生效**的每臂位姿维数（0 = 本机/本适配器不提供位姿）。
 
@@ -545,6 +580,25 @@ class RobotAdapter(ABC):
         return per_arm * len(self.enabled_arms)
 
     # ---- observe（读取最新观测缓存，被预览 / policy 推理消费）------------------
+    def camera_infos(self) -> dict[str, dict]:
+        """机器人进程上报的相机元数据（相机名 → 元数据）；缺省空 = 进程未上报。
+
+        含**彩色内参**（对齐后深度图与彩色图共用同一像素网格，即反投影用的就是它）与深度的
+        ``scale``（原始值 → 米）；无深度的相机其元数据里没有深度段。数据来自进程的只读端点
+        ``GET /v1/cameras``（静态元数据，子类惰性查询一次并缓存）。
+        """
+        return {}
+
+    def depth_camera_names(self) -> list[str]:
+        """机器人进程上报「有深度」的相机名（顺序 = 进程上报顺序 = 机器人相机声明顺序）。
+
+        这就是**共享内存里深度流的顺序**——adapter 按它把深度图对齐到相机名（count 不一致即
+        错位，宁可不给深度，见 ``observe()``）。进程未上报（未连机器人 / 旧版进程）→ 空列表：
+        **没有深度不是错误**，图像与状态观测照常。``configure()`` 裁剪相机后，只有启用相机的
+        深度图会进观测（与图像同口径：按**全部**声明相机对齐、按启用相机暴露）。
+        """
+        return [name for name, info in self.camera_infos().items() if (info or {}).get(FIELD_DEPTH)]
+
     @abstractmethod
     def observe(self) -> dict | None:
         """返回适配器维护的最新观测缓存；尚无首帧时返回 ``None``。

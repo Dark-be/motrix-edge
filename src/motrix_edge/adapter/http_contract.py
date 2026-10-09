@@ -26,6 +26,7 @@
 | ---- | ------------------------ | ---------------------- | ---------------------------------------------- |
 | POST | ``/v1/discover``         | —                      | ``{status, robot}``（robot 自描述见下）    |
 | GET  | ``/v1/health``           | —                      | ``{ok, detail, control_hz, measured_hz}``      |
+| GET  | ``/v1/cameras``          | —                      | ``{cameras}``（尺寸 / 彩色内参 / 深度比例；静态） |
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
 | POST | ``/v1/execute``          | ``{action, layout?, arms?}`` | ``{status}``                                   |
 | POST | ``/v1/rollout``          | ``{action, layout?, arms?}`` | ``{status}``                                   |
@@ -50,6 +51,9 @@
   位姿为锚点，只把主臂**增量**叠加到从臂 target（从臂不突变）。只发 ``{enabled}`` 的调用方
   行为不变；robot-pipeline 侧语义见
   [robot-pipeline 遥操作](../../../wiki/design/robot_pipeline_teleop.md)。
+- ``/v1/cameras``：相机**静态元数据**（尺寸 / **彩色内参** / 深度比例）——深度图已对齐到彩色图，
+  故反投影只需要这一套内参；edge 侧惰性查询一次并缓存，用于 ``GET /v1/depth``。
+  相机无深度能力时其 ``depth`` 段为 ``null``。
 - ``/v1/execute`` 与 ``/v1/rollout`` 的 ``layout``（段名取值 ``joint`` / ``pose`` /
   ``pose_delta`` / ``gripper``，缺省 ``joint``）：声明 ``action`` 的语义——``joint`` 为关节空间绝对
   目标（每臂 6 关节角），``pose`` 为末端位姿绝对目标（每臂 xyz + rpy），``pose_delta`` 为位姿
@@ -71,9 +75,12 @@
 
 from __future__ import annotations
 
+from motrix_edge.geometry.extrinsics import MOUNT_FIXED, MOUNT_WRIST, MOUNTS  # 外参取值单点（与帧模型同一份）
+
 # ---- 端点路径 ----
 PATH_DISCOVER = "/v1/discover"  # 机器人进程自描述探活（不初始化；声明支持的 adapter 类型）
 PATH_HEALTH = "/v1/health"  # 健康检查
+PATH_CAMERAS = "/v1/cameras"  # 相机静态元数据（尺寸 / 彩色内参 / 深度比例 / 安装方式 + 标定产物）
 PATH_RESET = "/v1/reset"  # 程序复位到 home
 PATH_EXECUTE = "/v1/execute"  # 直接下发 raw 动作
 PATH_ROLLOUT = "/v1/rollout"  # 推理闭环：模型 action（按 layout / arms 下发）
@@ -117,9 +124,35 @@ FIELD_CAPABILITIES = "capabilities"  # robot：能力 dict（capture / execute /
 FIELD_ENDPOINT = "endpoint"  # robot：SDK HTTP 指令地址
 FIELD_SHM_NAME = "shm_name"  # robot：观测共享内存通道名
 FIELD_RUNNING = "running"  # discover / capture status / robot：是否运行（语义随端点：进程运行 / 采集进行中）
+FIELD_CAMERAS = "cameras"  # cameras：相机元数据列表
+FIELD_WIDTH = "width"  # cameras：彩色 / 深度图宽（像素）
+FIELD_HEIGHT = "height"  # cameras：彩色 / 深度图高（像素）
+FIELD_INTRINSICS = "intrinsics"  # cameras：**彩色内参**（对齐后深度与彩图共用像素网格）
+FIELD_FX = "fx"  # intrinsics：x 方向焦距（像素）
+FIELD_FY = "fy"  # intrinsics：y 方向焦距（像素）
+FIELD_CX = "cx"  # intrinsics：主点 x（像素）
+FIELD_CY = "cy"  # intrinsics：主点 y（像素）
+FIELD_DEPTH = "depth"  # cameras：深度能力段（null = 无深度）
+FIELD_DEPTH_SCALE = "scale"  # cameras.depth：深度原始值 → 米的比例
+FIELD_ALIGNED_TO_COLOR = "aligned_to_color"  # cameras.depth：深度是否已对齐到彩色图
+FIELD_MOUNT = "mount"  # cameras：安装方式（fixed | wrist）——**装配事实**，与标定无关
+FIELD_ARM = "arm"  # cameras：腕相机的承载臂（固定相机为 null）
+FIELD_FRAMES = "frames"  # cameras 响应：统一坐标系外参产物（``frames.json`` 原样；未标定 null）
+INTRINSICS_KEYS = (FIELD_FX, FIELD_FY, FIELD_CX, FIELD_CY)  # 内参字段顺序（单点）
+
+# ---- 坐标查询字段（``GET /v1/depth``）----
+FIELD_XYZ_CAMERA = "xyz_camera"  # 该像素在**相机光学系**下的 [x, y, z]（米；缺外参 / 无深度 → null）
+FIELD_XYZ_WORLD = "xyz_world"  # 同一点在 ``world`` 下的 [x, y, z]（米）
+FIELD_FRAME = "frame"  # ``xyz_world`` 的帧名（如 "world"）；不可用 → null
+FIELD_WORLD = "world"  # ``world`` 的物理别名（如 "left_base"）；不可用 → null
 
 # ---- 状态值 ----
 VALUE_STATUS_ACCEPTED = "accepted"
+
+# ---- 相机安装方式取值（与帧模型同一份：``motrix_edge.geometry.extrinsics``）----
+VALUE_MOUNT_FIXED = MOUNT_FIXED  # 固定相机（外参 = T_world_cam，直接用）
+VALUE_MOUNT_WRIST = MOUNT_WRIST  # 腕相机（外参 = T_flange_cam，运行期乘同拍 FK(q)）
+MOUNT_VALUES = MOUNTS
 
 # ---- teleop 模式取值（robot 层同名常量在 robot-pipeline 的 BaseRobot.TELEOP_MODES）----
 VALUE_TELEOP_MODE_ABSOLUTE = "absolute"  # 主臂绝对位姿直连从臂 target（示教采集）

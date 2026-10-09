@@ -27,6 +27,12 @@ robot:
     cam_head: "" # 头部 RealSense 序列号：**现场填写**（留空 → 启动报错）
     cam_left_wrist: "" # 左腕 RealSense 序列号：**现场填写**（留空 → 启动报错）
     cam_right_wrist: "" # 右腕 RealSense 序列号：**现场填写**（留空 → 启动报错）
+  # 深度观测（见 wiki/design/robot_pipeline_depth.md）：RealSense 相机额外输出**对齐到彩色图**
+  # 的深度图（observations/depth/<cam>），由 edge 的 GET /v1/depth 查询像素深度（米）。
+  # 不进数据集（采集器只收 observations/images/）；关掉可省带宽（三路 ≈1.8MB/帧 @10Hz）。
+  depth:
+    enabled: true # 缺省 true；false = 完全不开深度流
+    cameras: [] # 空 / 缺省 = 该机型所有具备深度的相机（这里 = 三路 RealSense）
   # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
   # 只装在执行臂（left / right）；参数未标定前是占位文件（全 0）→ t_ff 恒为 0。
   # **双臂不能共用一套参数**（装配与现场误差不同）：左臂标定完写进 arms.left.params。

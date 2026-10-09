@@ -18,7 +18,7 @@
 双控制器 + 3 相机。本骨架只声明布局 / 控制状态机（**无 profile**，obs/action 形态由
 类常量固定，与 DualPiperAdapter 协定一致）；硬件 SDK（alicia_d_sdk / pyAgxArm /
 pyrealsense2 / v4l2）**仅在机器人端安装**，接入时在 ``connect()`` / ``get_observation_qpos()`` /
-``get_observation_images()`` / ``_apply_action()`` 中填充。
+``get_observation_frames()`` / ``_apply_action()`` 中填充。
 
 遥操作：``teleop_enabled`` 默认 False（adapter 通讯控制中暂时均处于 false）；
 接入位见 ``_get_teleop_target()``（master 主手 → slave 从手）。
@@ -53,6 +53,10 @@ class DualAliciaPiperRobot(BaseRobot):
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     # 头部 = RealSense（序列号）；腕部 = USB 相机（V4L2 稳定软链 /dev/v4l/by-id/*）
     CAMERA_KINDS = {"cam_head": "realsense", "cam_left_wrist": "v4l2", "cam_right_wrist": "v4l2"}
+    # 具备深度的相机：**只有** cam_head（RealSense）；两腕是网络摄像头，无深度
+    DEPTH_CAMERAS: tuple[str, ...] = ("cam_head",)
+    # 腕部相机 → 承载臂（装配事实）：两路腕相机为网络摄像头（无深度），但仍随臂动
+    WRIST_CAMERAS: dict[str, str] = {"cam_left_wrist": "left", "cam_right_wrist": "right"}
     SHM_NAME = "dual_piper_obs"
     # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports / robot.cameras）----
     PORT_ROLES = ("left_master", "right_master", "left", "right")  # 控制器端口（主手 / 从臂）
@@ -94,7 +98,11 @@ class DualAliciaPiperRobot(BaseRobot):
         self.controllers["left_arm"].connect(port=self.ports["left"], gravity=gravity)
         self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
         debug_print(self.name, "Setup controllers done", "INFO")
-        self.sensors["cam_head"].connect(device=self.camera_devices["cam_head"], pixel_format="jpg")
+        self.sensors["cam_head"].connect(
+            device=self.camera_devices["cam_head"],
+            pixel_format="jpg",
+            enable_depth="cam_head" in self.depth_cameras,  # 三路里只有头部是 RealSense
+        )
         self.sensors["cam_left_wrist"].connect(device=self.camera_devices["cam_left_wrist"], pixel_format="jpg")
         self.sensors["cam_right_wrist"].connect(device=self.camera_devices["cam_right_wrist"], pixel_format="jpg")
         debug_print(self.name, "Setup sensors done", "INFO")
@@ -133,29 +141,30 @@ class DualAliciaPiperRobot(BaseRobot):
             values.append(np.nan if gripper is None else float(np.asarray(gripper, dtype=np.float64).reshape(-1)[0]))
         return np.asarray(values, dtype=np.float64)
 
-    def get_observation_images(self) -> list:
-        """读取当前帧原始观测的 images——从相机传感器直接取 color。
+    def get_observation_frames(self) -> list:
+        """读取各相机**本拍**帧（顺序对齐 IMAGE_NAMES）——彩色恒有，深度仅在开启时有。
 
-        顺序对齐 IMAGE_NAMES（cam_head / cam_left_wrist / cam_right_wrist）；任一无帧时报错。
-        相机按 sensor.pixel_format 区分：jpg → color 为 JPEG bytes（此处 imdecode）；
-        raw → color 已解码为 RGB ndarray（直接使用）。
+        cam_head（RealSense）开启深度时，彩色与深度来自**同一次取帧**（深度已对齐到彩色图）；
+        两腕是网络摄像头，``depth`` 恒为 ``None``。相机按 sensor.pixel_format 区分：
+        jpg → color 为 JPEG bytes（此处 imdecode）；raw → 已解码为 RGB ndarray（直接用）。
         """
-        images = []
+        frames = []
         for name in self.IMAGE_NAMES:
             sensor = self.sensors[name]
             info = sensor.get_information()
             color = info.get("color") if info else None
             if color is None:
-                raise RuntimeError(f"DualPiperRobot.get_observation_images: 相机 {name} 无帧")
+                raise RuntimeError(f"{self.name}.get_observation_frames: 相机 {name} 无帧")
             if getattr(sensor, "pixel_format", V4l2Sensor.PIXEL_FORMAT_JPG) != V4l2Sensor.PIXEL_FORMAT_JPG:
-                images.append(color)  # raw（V4l2/Realsense）：已解码为 RGB（HxWx3）
-                continue
-            decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
-            if decoded is None:
-                debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
-                decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
-            images.append(decoded[:, :, ::-1])  # BGR → RGB
-        return images
+                decoded = color  # raw（V4l2/Realsense）：已解码为 RGB（HxWx3）
+            else:
+                decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
+                if decoded is None:
+                    debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
+                    decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
+                decoded = decoded[:, :, ::-1]  # BGR → RGB
+            frames.append({"color": decoded, "depth": info.get("depth")})
+        return frames
 
     def _apply_action(self, action: np.ndarray):
         """把底层目标向量 ``[关节段 | 夹爪段]`` 拆分到 slave 从臂下发（限速已在 step() 内完成）。

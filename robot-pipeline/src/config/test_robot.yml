@@ -17,6 +17,11 @@ robot:
   step_rad: 0.01 # 每帧最大关节增量（rad），env 控制线程限速接近 target
   init_joint: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] # 初始关节角（rad，每臂 6），env reset 时设置
   init_gripper: [1, 1] # 初始夹爪开合（每臂 1，1 = 张开）
+  # 深度观测（见 wiki/design/robot_pipeline_depth.md）：虚拟相机**合成**深度（无需硬件）——
+  # cam_head 逐列线性（depth_mm = 1000 + u），用于端到端验证「像素 → 米」。
+  depth:
+    enabled: true # 缺省 true；false = 不开深度流
+    cameras: [] # 空 / 缺省 = 所有具备深度的相机（这里 = cam_head）
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:

@@ -27,6 +27,7 @@ from motrix_edge.adapter.base import (
     ACTION_SPACE_JOINT,
     ACTION_SPACE_POSE,
     CAMERA_PREFIX,
+    DEPTH_PREFIX,
     KEY_ACTION,
     KEY_POSE,
     KEY_QPOS,
@@ -37,6 +38,7 @@ from motrix_edge.adapter.base import (
     RobotAdapter,
     RobotCapabilities,
 )
+from motrix_edge.geometry import FrameSet
 
 
 class FakeRobotAdapter(RobotAdapter):
@@ -61,6 +63,11 @@ class FakeRobotAdapter(RobotAdapter):
         "cam_left_wrist": (640, 480),
         "cam_right_wrist": (640, 480),
     }
+    # 具备深度的相机（镜像 robot-pipeline 的 ``test_robot``：只有 cam_head 有合成深度）
+    DEPTH_CAMERAS: tuple[str, ...] = ("cam_head",)
+    DEPTH_SCALE = 0.001  # 深度原始值 → 米
+    DEPTH_MM_AT_U0 = 1000  # 合成深度：depth[.., u] = 1000 + u（毫米）——u=0 处 1.0 m
+    CAMERA_FOCAL_PX = 600.0  # 合成内参：fx = fy
 
     def __init__(self, config=None, *, available=True):
         super().__init__()
@@ -83,6 +90,12 @@ class FakeRobotAdapter(RobotAdapter):
         self._gripper = np.ones(self.ACTION_DIM_PER_ARM[ACTION_SPACE_GRIPPER], dtype=float)
         self._pose = np.zeros(self.ACTION_DIM_PER_ARM[ACTION_SPACE_POSE], dtype=float)
         self._action = np.zeros(self.ACTION_DIM_PER_ARM[ACTION_SPACE_JOINT], dtype=float)
+        # 统一坐标系外参（镜像 ``GET /v1/cameras`` 的 ``frames`` 段）：None = 未标定
+        self.frames_payload: dict | None = None
+
+    def frame_set(self) -> FrameSet | None:
+        """标定外参：测试替身由 ``frames_payload`` 注入（None = 未标定）——形状与产线同一份。"""
+        return None if not self.frames_payload else FrameSet.from_payload(self.frames_payload)
 
     # -- 观测布局（状态向量 = 值段 + 夹爪段）------------------------------------
     def _state_vector(self) -> np.ndarray:
@@ -101,6 +114,7 @@ class FakeRobotAdapter(RobotAdapter):
     @property
     def capabilities(self) -> RobotCapabilities:
         keys = [KEY_QPOS, KEY_ACTION, KEY_POSE] + [f"{CAMERA_PREFIX}{img}" for img in self.IMAGES]
+        keys += [f"{DEPTH_PREFIX}{img}" for img in self.DEPTH_CAMERAS]
         return RobotCapabilities(
             robot_model_id=self.ROBOT_MODEL_ID,
             action_dim=self.action_dims[ACTION_SPACE_JOINT],
@@ -116,6 +130,27 @@ class FakeRobotAdapter(RobotAdapter):
     @property
     def images(self) -> list[str]:
         return list(self.IMAGES)
+
+    # -- 相机元数据（静态：内参 / 深度比例；镜像机器人进程的 GET /v1/cameras）----
+    def camera_infos(self) -> dict[str, dict]:
+        """各相机元数据：**只有 cam_head 有深度**（与 robot-pipeline 的 test_robot 一致）。"""
+        infos: dict[str, dict] = {}
+        for name, (width, height) in self.IMAGES.items():
+            infos[name] = {
+                "name": name,
+                "width": width,
+                "height": height,
+                "intrinsics": {
+                    "fx": self.CAMERA_FOCAL_PX,
+                    "fy": self.CAMERA_FOCAL_PX,
+                    "cx": width / 2.0,
+                    "cy": height / 2.0,
+                },
+                "depth": (
+                    {"scale": self.DEPTH_SCALE, "aligned_to_color": True} if name in self.DEPTH_CAMERAS else None
+                ),
+            }
+        return infos
 
     # -- 健康 / 释放 ----------------------------------------------------------
     def release(self) -> None:
@@ -135,6 +170,11 @@ class FakeRobotAdapter(RobotAdapter):
             frame = np.full((64, 64, 3), 128, dtype=np.uint8)
             ok, buf = cv2.imencode(".jpg", frame)
             obs[f"{CAMERA_PREFIX}{img}"] = buf.tobytes() if ok else b""
+        # 深度：合成逐列线性（u=0 处 DEPTH_MM_AT_U0 毫米），与 robot-pipeline 的虚拟相机同款
+        for name in self.DEPTH_CAMERAS:
+            width, height = self.IMAGES[name]
+            column = np.arange(width, dtype=np.uint16) + np.uint16(self.DEPTH_MM_AT_U0)
+            obs[f"{DEPTH_PREFIX}{name}"] = np.repeat(column[None, :], height, axis=0)
         return obs
 
     # -- 执行 / 推理 -----------------------------------------------------------
