@@ -166,7 +166,7 @@ flowchart LR
 -   `contract_server`：`ActionRequest` 增加 `layout`（缺省 `joint`）与 `arms`，execute / rollout 透传到
     env；`/` 调试端点上报 `action_spaces`。
 -   Edge：`DualPiperAdapter.ACTION_SPACES` 声明 `pose`，RPent 的 `move_delta` /
-    `rotate_delta` 与 primitives 的 `goto` / `move_rel` 由此可用。
+    `rotate_delta` 与 primitives 的 `move_to` / `move_rel` 由此可用。
 
 ## 失败与安全
 

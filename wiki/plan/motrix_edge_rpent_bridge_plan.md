@@ -17,7 +17,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         submit / push 两类通道不变。
 -   [x] `server/app.py`：`CommandResponse` 新增 `deprecated`；`/v1/commands` 与 `CommandRequest`
         文档串同步新命名。
--   [ ] 原语执行器（`server/primitives.py` + node 侧执行线程）：`goto` / `move_rel` /
+-   [ ] 原语执行器（`server/primitives.py` + node 侧执行线程）：`move_to` / `move_rel` /
         `rotate_rel` / `gripper` / `recover` / `wait` / `stop`，到位 / 受阻 / 超时 / 中止终态，
         参数钳制（工作空间盒 / 单步上限 / 值域 / `max_wait`）。
 -   [ ] `GET /v1/preview/<cam>.jpg`（单帧 JPEG，给外部喂 LLM）。
@@ -118,7 +118,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 -   [x] **机器人侧位姿动作下发（求解器，不经 `move_p`）**：`layout="pose"` 时
         每臂位姿由 `robot/kinematics` 解算一次 → 关节目标 → 限速 + MIT；
         `DualPiperAdapter.ACTION_SPACES` 已声明 `pose`，故 `env.move_delta` /
-        `rotate_delta` / `goto` 对真机 piper 可用（解算失败 → 422、不改既有目标）。
+        `rotate_delta` / `move_to` 对真机 piper 可用（解算失败 → 422、不改既有目标）。
         `move_p` 仍**不引入**（与 MIT 互斥）；见 [位姿动作](../design/robot_pipeline_cartesian.md)。
 -   [ ] 端到端联调记录（**唯一硬门槛**）：RPent `--env-endpoint http://<edge>:8000` + RPent 自跑的
         VLA，跑通一次真实任务（`dry_run` 下已用官方 client 验完零下发）。
@@ -136,7 +136,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         绝对 / 增量 / 夹爪）+ 「不注册」修正（`back_project` 改由 `get_object_position` 承接）
 -   [x] `look_at` / `move_to` / `get_object_position` / 末端系增量 的语义、参数、回执、
         失败模式与钳制写入设计文档
--   [x] 原语文档（`/v1/primitives` 面）同步 op 行（`goto` 一行改成 world 语义、增量改末端系）
+-   [x] 原语文档（`/v1/primitives` 面）同步 op 行（`goto` 改名 `move_to` 并改成 world 语义、增量改末端系）
 
 ### 实现（已完成）
 
@@ -168,6 +168,8 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 4. **坐标工具输入**：**只收归一化** `u` / `v`（传像素 → `argument` 错）。
 5. **旋转换算**（2026-10-09 二次拍板）：机器人侧 rpy 是 **chart 相加**，故上位下发 chart 增量而不是
    共轭 rpy 三元组（后者相加后与旋转复合不等价——实测 `pitch=45°` 偏 10.7°）。
+6. **绝对位移工具名**（2026-10-09 拍板）：正式名 = **`move_to`** —— op 层与 RPent 面**同名**
+   （原 op 名 `goto` 弃用），避免「两个面各一个名字」；`env.move_to` 已在代码里，op 行同步改名。
 
 ## 未决（待拍板）
 

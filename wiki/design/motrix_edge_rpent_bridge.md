@@ -542,7 +542,7 @@ server:
 ## 分期
 
 -   **Phase A**：命名统一（`<scope>/<verb>` capability + 别名 + `CMD_*` 派生）+ primitives
-    落地（**只落 RPent 需要的子集**：`goto` / `move_rel` / `rotate_rel` / `gripper` / `recover` /
+    落地（**只落 RPent 需要的子集**：`move_to` / `move_rel` / `rotate_rel` / `gripper` / `recover` /
     `wait` / `stop`——完整清单与语义以 [边缘原语接口](./motrix_edge_primitives.md) 为准）；
 -   **Phase B**：`POST /call` facade（`env.*` / `healthz` 子集）+ `states` 键 +
     meta 自描述（`action_dim` / `action_space` / `explicit_reset_only`）+ 外部动作块布局转换 +

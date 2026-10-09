@@ -10,7 +10,7 @@
 > **已经先行的子集**：RPent 面（`POST /call` 的 `env.*`）按本文语义交付了
 > `move_delta` / `rotate_delta` / `gripper` / `recover`（见 [RPent 对接契约](./motrix_edge_rpent_bridge.md)）；
 > **本文的 `/v1/primitives` 端点、原语执行器、参数钳制（工作空间盒 / 单步上限 / `max_wait`）
-> 与 `goto` / `wait` / `stop` 仍未实现**。
+> 与 `move_to` / `wait` / `stop` 仍未实现**。
 
 ## 摘要
 
@@ -21,7 +21,7 @@
 edge 只提供两件**确定性、可安全校验**的事：
 
 1. **观测查询（pull）**：当前状态（末端位姿 / 夹爪 / qpos / action）+ 相机帧；
-2. **原语执行（write）**：`goto` / `move_rel` / `rotate_rel` / `gripper` / `recover` / `wait` / `stop`，
+2. **原语执行（write）**：`move_to` / `move_rel` / `rotate_rel` / `gripper` / `recover` / `wait` / `stop`，
    **含到位判定**（观测位姿对**机器人侧目标位姿**的误差）、超时 / 受阻终态、可中止。
 
 外部 agent 的典型一拍：`GET /v1/primitives`（能力）→ 需要就看图 → `POST /v1/primitives`
@@ -88,7 +88,7 @@ flowchart LR
 | GET  | `/v1/depth`                 | **已实现**：像素深度（`?camera=&u=&v=`，归一化坐标 → 米），与 `/v1/preview` 同源同租约规则；回执带彩色内参与深度比例（反投影输入，见 [深度观测](./robot_pipeline_depth.md)）                        |
 
 -   **受控操作**：全部须持 Edge 租约（与 `/v1/commands` / `/v1/preview` 同规则）；
--   **同步优先**：外部生成的代码（`robot.goto(...)` 这类）天然是阻塞语义 → `wait=true` 是缺省，
+-   **同步优先**：外部生成的代码（`robot.move_to(...)` 这类）天然是阻塞语义 → `wait=true` 是缺省，
     edge 在服务线程里等终态（不阻塞 uvicorn 事件循环：执行在 node 线程，HTTP 只轮询状态）；
 -   **不做**：事件流 / SSE / 对话接口 / 历史检索 / 预算记账 / 人工确认（这些归外部；edge 只记请求日志）。
 
@@ -96,7 +96,7 @@ flowchart LR
 
 | op           | args（缺省）                                                                                                    | 语义                                                                                                                                                                                                                                                                                                | 钳制                                                                       |
 | ------------ | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `goto`       | `pos`[3]（**`world` 帧**，米）、`rpy?`[3]（`world`）、`arm?`、`tol_pos?` / `tol_rot?`（缺省见下）、`timeout?`=5 | 笛卡尔点到点：`pos` 是 `world`（= 左臂基座）点，edge 逐臂按 `T_world_base(arm)` 换算到该臂基座系后 `adapter.rollout(target, layout="pose")`，机器人侧 IK（左臂恒等；非左臂缺外参 → `uncalibrated`）                                                                                             | 目标须在工作空间盒内；`rpy` 需机器人支持                                   |
+| `move_to`    | `pos`[3]（**`world` 帧**，米）、`rpy?`[3]（`world`）、`arm?`、`tol_pos?` / `tol_rot?`（缺省见下）、`timeout?`=5 | 笛卡尔点到点：`pos` 是 `world`（= 左臂基座）点，edge 逐臂按 `T_world_base(arm)` 换算到该臂基座系后 `adapter.rollout(target, layout="pose")`，机器人侧 IK（左臂恒等；非左臂缺外参 → `uncalibrated`）                                                                                                 | 目标须在工作空间盒内；`rpy` 需机器人支持                                   |
 | `move_rel`   | `delta`[3]（米，**末端系**）、`arm?`、`tol_pos?` / `tol_rot?`、`timeout?`                                       | 相对位移（「沿着工具方向往前伸一点」）：`delta` 按**末端（工具）系**解释，edge 用快照姿态换算（`d_base = R_cur · d_tool`）后只下发 `pose_delta` 位移增量，**叠加 / 基准仍归机器人侧**（不在上位算绝对目标，理由见 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「增量原语的基准与到位判定」）     | 单次位移 ≤ `max_step`（缺省 0.05 m）                                       |
 | `rotate_rel` | `delta_rpy`[3]（弧度，**末端系**）、`arm?`、`tol_pos?` / `tol_rot?`、`timeout?`                                 | 相对姿态（绕末端自身三轴转）：edge 下发的是**chart 增量** `wrap(rpy(R_cur · ΔR_tool) - rpy_cur)`——机器人把 rpy 逐分量相加，共轭写法（`R·ΔR·Rᵀ` 的 rpy）相加后并不等于旋转复合（`pitch=45°` 绕末端 z 转 20° 偏 10.7°）                                                                               | 单次姿态增量 ≤ `max_rot`（缺省 0.35 rad）                                  |
 | `look_at`    | `target`[3]（`world` 帧 / 米）、`arm?`、`keep?`（`target` 缺省 / `measured`）、`tol_*?` / `timeout?`            | 把末端工具轴（法兰 `+z`）指向 `target`，**位置不变**：姿态取**无 roll 的规范解**（`roll ≡ 0`；指向轴为 `y` 时不可解 → `unsupported`）。`target` 是 `world` 点，而末端 xyz 在各臂自己的基座系 → 逐臂先按 `T_world_base(arm)` 换算再算方向（左臂恒等；非左臂缺外参 → `uncalibrated`，不拿错方向去转） | 位置基准缺省取**机器人侧目标位姿**；`turned_deg > 60°` 标 `large_rotation` |
@@ -105,7 +105,7 @@ flowchart LR
 | `wait`       | `seconds`                                                                                                       | 保持当前目标等待（不新下发）                                                                                                                                                                                                                                                                        | ≤ `max_wait`（缺省 10 s）                                                  |
 | `stop`       | —                                                                                                               | 清目标、保持当前位姿（软停）。与 `abort` 的区别：`stop` 自身就是一个原语（外部主动「停在这里」），`abort` 针对**另一个**已提交的 `primitive_id` 中止（终态 `aborted`）                                                                                                                              | —                                                                          |
 
--   **参考系只有两个，且不给选**：`goto`（RPent 面方法名 = `env.move_to`，同一套语义）/ `look_at` / 坐标查询的输入输出都是 `world`（左臂
+-   **参考系只有两个，且不给选**：`move_to`（**op 名与 RPent 方法名同名**：`env.move_to`，一套语义两个面共用）/ `look_at` / 坐标查询的输入输出都是 `world`（左臂
     基座帧 = `left_base`；工具内部按 `T_world_base(arm)` 换算到该臂基座系）；`move_rel` /
     `rotate_rel` 的增量都是**末端（工具）系**。**没有** `space` 参数可选参考系（早年有过
     `space="base"|"ego"`，已删：相对就该是相对末端）。参考系写进 RPent 工具 description（见
@@ -117,7 +117,7 @@ flowchart LR
 -   参数非法 / 越界 → **400 拒绝**（不静默截断：截断会让外部 agent 的"心理模型"与实际执行脱节）；
 -   原语集**按能力协商**：机器人没有夹爪 → 清单里没有 `gripper`；无力控 → 不出现 `press`
     （力控原语留待 Phase C）；
--   下发通道**复用 `/v1/rollout`**：**绝对**目标（`goto`）用 `layout="pose"`、**增量**原语
+-   下发通道**复用 `/v1/rollout`**：**绝对**目标（`move_to`）用 `layout="pose"`、**增量**原语
     （`move_rel` / `rotate_rel`）用 `layout="pose_delta"`（edge → adapter → robot-pipeline），
     **robot 侧零新增端点**（两个动作空间随位姿动作 MR 引入）。
 -   增量原语的**基准与到位参考都在机器人侧**：edge 不下发绝对目标，也不缓存基准位姿。
@@ -153,7 +153,7 @@ flowchart LR
 回执带 `error_m` / `error_rad`（终态时的**位置 / 姿态误差，分项报**——与 facade 的
 `final_err_m` / `final_err_rad` 同口径，agent 据此看出「差在哪一项」）、`elapsed`、`reason`（人读说明）。
 
-`target` 指**本原语下发目标在机器人侧的落点**：`goto` 是 edge 指定的绝对位姿；
+`target` 指**本原语下发目标在机器人侧的落点**：`move_to` 是 edge 指定的绝对位姿；
 `move_rel` / `rotate_rel` 是机器人按增量叠加出的目标位姿（读 `observations/pose_target`）。
 edge **不自己算绝对目标**——理由（稳态误差逐条累积、读-算-写竞态窗口）见
 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「增量原语的基准与到位判定」。
@@ -173,7 +173,7 @@ edge **不自己算绝对目标**——理由（稳态误差逐条累积、读-�
 
 ## 安全
 
--   **白名单 + 参数钳制**：op 仅限清单内；`goto` 目标限工作空间盒；`move_rel` 限单步；
+-   **白名单 + 参数钳制**：op 仅限清单内；`move_to` 目标限工作空间盒；`move_rel` 限单步；
     `rotate_rel` 限单次姿态增量；`gripper` 限值域；`wait` 限时长（配置位置**待定**，
     见「未决项」3）；
 -   **不 eval 任何模型输出**：外部 agent 生成的是"原语调用"，edge 只解析结构化参数；
@@ -203,7 +203,7 @@ for step in range(max_steps):
 ## 分期
 
 -   **Phase A**：`GET/POST /v1/primitives` + `GET /v1/primitives/{id}` + `abort`；原语执行器
-    （`goto` / `move_rel` / `rotate_rel` / `gripper` / `recover` / `wait` / `stop`，即上表全部）+ 到位 / 停滞 / 超时判定 + 参数钳制；
+    （`move_to` / `move_rel` / `rotate_rel` / `gripper` / `recover` / `wait` / `stop`，即上表全部）+ 到位 / 停滞 / 超时判定 + 参数钳制；
     观测补 `GET /v1/preview/<cam>.jpg`；单飞与会话互斥（409）。
 -   **Phase B**：`blocked` 的 robot 侧上报（`at_target/blocked`）、姿态容差的实机标定复核、
     可选轻量事件流（长任务的进度推送）、前端**原语状态面板**（只读：当前 op / 误差 / 终态 + 急停）。
