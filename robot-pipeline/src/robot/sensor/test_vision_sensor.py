@@ -20,19 +20,50 @@ from .sensor import Sensor
 
 
 class TestVisionSensor(Sensor):
+    # 合成深度的固定参数（无硬件，取值必须**确定性**——测试要阶断言到具体米数）：
+    # ``depth[y, x] = DEPTH_MM_AT_U0 + x``（毫米）→ ``depth_m = (DEPTH_MM_AT_U0 + x) × DEPTH_SCALE``
+    DEPTH_SCALE = 0.001  # 深度原始值 → 米
+    DEPTH_MM_AT_U0 = 1000  # u = 0 处的深度（毫米）
+    FOCAL_PX = 600.0  # 合成内参：fx = fy（像素）
+
     def __init__(self, name="test_vision_sensor"):
         super().__init__(name)
         self.timestep = 0
         self.width = 640
         self.height = 480
         self.is_jpeg = True
+        self.enable_depth = False
 
-    def connect(self, is_jpeg=True, seed=0):
+    def connect(self, is_jpeg=True, seed=0, enable_depth=False):
+        """``enable_depth=True`` 时额外合成深度图（尺寸同彩色，无需硬件）。"""
         self.is_jpeg = is_jpeg
         self.seed = seed
+        self.enable_depth = bool(enable_depth)
+
+    def camera_info(self) -> dict:
+        """相机静态元数据（键名与 edge adapter 契约一致）：合成内参 / 深度比例。
+
+        真实相机的内参由硬件标定（``RealsenseSensor.camera_info()``）；虚拟相机用固定值，
+        便于端到端验证「像素 → 米」链路（反投影仍需 Phase 2 的外参）。
+        """
+        info = {
+            "name": self.name,
+            "width": int(self.width),
+            "height": int(self.height),
+            "intrinsics": {
+                "fx": float(self.FOCAL_PX),
+                "fy": float(self.FOCAL_PX),
+                "cx": self.width / 2.0,
+                "cy": self.height / 2.0,
+            },
+            "depth": None,
+        }
+        if self.enable_depth:
+            info["depth"] = {"scale": float(self.DEPTH_SCALE), "aligned_to_color": True}
+        return info
 
     def get_information(self):
-        """读取完整观测（color），不做 collect_info 过滤。"""
+        """读取完整观测（color 恒有；enable_depth 时额外合深度图），不做 collect_info 过滤。"""
         image = {}
 
         self.timestep += 1  # 每帧增加
@@ -59,6 +90,11 @@ class TestVisionSensor(Sensor):
             image["color"] = jpeg_image
         else:
             image["color"] = img
+
+        if self.enable_depth:
+            # 合成深度（uint16 毫米）：与彩色同尺寸、逐列线性——像素 u 处的深度恒定可预测
+            column = np.arange(self.width, dtype=np.uint16) + np.uint16(self.DEPTH_MM_AT_U0)
+            image["depth"] = np.repeat(column[None, :], self.height, axis=0)
 
         return image
 

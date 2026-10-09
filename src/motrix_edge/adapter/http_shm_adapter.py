@@ -21,7 +21,10 @@
   ``set_teleop`` / 采集回合控制；
 - **共享内存观测上行**：读取状态向量（``observations/qpos``，每臂「值 + 夹爪」）/ 目标向量
   （``action``，同维同布局）/ 实测位姿 / 目标位姿（``observations/pose`` /
-  ``observations/pose_target``）与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；
+  ``observations/pose_target``）与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；机器人开启深度时
+  一并读深度图（``observations/depth/<cam>``，uint16、对齐到彩色图）；
+- **相机元数据查询**：``GET /v1/cameras`` 取**彩色内参**与深度比例（静态，惰性一次 + 缓存），
+  供 ``GET /v1/depth`` 把像素深度换算成米（反投影输入）；
 - **状态查询**：``health`` 实时查询进程，``capture_status`` 查询采集状态（运行位 / 元信息 / 数据目录）。
 
 **子类只需声明类常量**（身份 / 能力 / 连接参数 / 臂布局 / 相机布局），本基类提供全部
@@ -42,6 +45,7 @@ import numpy as np
 
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
+    DEPTH_PREFIX,
     KEY_ACTION,
     KEY_POSE,
     KEY_POSE_TARGET,
@@ -56,16 +60,20 @@ from motrix_edge.adapter.base import (
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
     FIELD_ARMS,
+    FIELD_CAMERAS,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
     FIELD_DETAIL,
+    FIELD_FRAMES,
     FIELD_LAYOUT,
     FIELD_MEASURED_HZ,
     FIELD_META,
+    FIELD_NAME,
     FIELD_OK,
     FIELD_RUNNING,
     FIELD_TELEOP_ENABLED,
     FIELD_TELEOP_MODE,
+    PATH_CAMERAS,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
@@ -78,6 +86,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_TELEOP,
 )
 from motrix_edge.adapter.shm_contract import ObsShmReader
+from motrix_edge.geometry import FrameSet
 from motrix_edge.utils.data_handler import debug_print
 
 # 位姿量纲防护阀值：明显超出这些范围的位姿视为「量纲 / 坐标系写错」（如把 0.001mm 整数
@@ -127,6 +136,12 @@ class HttpShmAdapter(RobotAdapter):
         self._shm: ObsShmReader | None = None  # 共享内存观测读者（观测上行）
         self._running = False  # 机器人进程最近一次确认是否运行（health 实时刷新）
         self._pose_problem_logged: str | None = None  # 位姿不可用原因（同原因只记一条）
+        # 相机静态元数据（GET /v1/cameras：彩色内参 / 深度比例）：**成功才缓存**（瞬态失败下帧重试）
+        self._camera_meta: dict[str, dict] | None = None
+        self._camera_meta_problem: str | None = None  # 元数据不可用原因（同原因只记一条）
+        self._frames: FrameSet | None = None  # 统一坐标系外参产物（未标定 → None）
+        self._frames_problem: str | None = None  # 产物不可用原因（同原因只记一条）
+        self._depth_mismatch_logged: str | None = None  # 深度路数 / 形状不符原因（同原因只记一条）
 
         # 本地记录（便于调试与无硬件测试）
         self.executed: list[list[float]] = []
@@ -169,6 +184,9 @@ class HttpShmAdapter(RobotAdapter):
             obs_keys.append(KEY_POSE)
             obs_keys.append(KEY_POSE_TARGET)
         obs_keys += [f"{CAMERA_PREFIX}{img}" for img in self.images]
+        # 深度键只对**具备深度**的启用相机声明（``DEPTH_CAMERAS`` = 类常量能力声明；实际生效相机
+        # 以机器人进程上报为准，见 ``depth_camera_names()``——这里是「能不能有深度」）
+        obs_keys += [f"{DEPTH_PREFIX}{img}" for img in self.images if img in self.DEPTH_CAMERAS]
         return RobotCapabilities(
             robot_model_id=self.robot_model_id,
             robot_model_version=self.robot_model_version,
@@ -323,6 +341,76 @@ class HttpShmAdapter(RobotAdapter):
         self._client().post(PATH_CAPTURE_END)
 
     # ---- observe（共享内存观测上行）---------------------------------------------
+    def camera_infos(self) -> dict[str, dict]:
+        """相机静态元数据（``GET /v1/cameras``：尺寸 / **彩色内参** / 深度比例 / 安装方式），惰性查询 + 缓存。
+
+        深度图已对齐到彩色图，故反投影只用这一套彩色内参；查询失败（进程未就绪 / 旧版进程无
+        该端点）→ **不缓存**（下帧重试）并返回空 dict：深度与坐标换算不可用，图像观测照常。
+        """
+        self._ensure_camera_meta()
+        return self._camera_meta or {}
+
+    def frame_set(self) -> FrameSet | None:
+        """统一坐标系外参（同一次 ``GET /v1/cameras`` 的 ``frames`` 段）→ :class:`FrameSet`。
+
+        未标定（老进程不报该段 / 现场没跑标定）→ ``None``；产物非法 → ``None`` + 一条 WARNING
+        ——坐标字段（``xyz_*``）不可用，**其余链路一律照常**（与深度/内参同款「可关」口径）。
+        """
+        self._ensure_camera_meta()
+        return self._frames
+
+    def _ensure_camera_meta(self) -> None:
+        """惰性查询一次相机元数据（内参 + 外参产物）：成功才缓存，失败留给下一次。"""
+        if self._camera_meta is not None:
+            return
+        infos, frames = self._fetch_camera_meta()
+        if infos:  # 成功才缓存；失败留给下一次（进程可能刚在启动）
+            self._camera_meta = infos
+            self._frames = frames
+
+    def _fetch_camera_meta(self) -> tuple[dict[str, dict], FrameSet | None]:
+        """查询进程相机元数据（``GET /v1/cameras``）；失败 → ``({}, None)``（同原因只告警一条）。"""
+        try:
+            resp = self._client().get(PATH_CAMERAS)
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as exc:  # noqa: BLE001 进程未就绪 / 旧版进程无该端点
+            problem = str(exc) or exc.__class__.__name__
+            if problem != self._camera_meta_problem:
+                self._camera_meta_problem = problem
+                debug_print(
+                    self.name,
+                    f"camera metadata unavailable ({problem}); depth / intrinsics unavailable",
+                    "WARNING",
+                )
+            return {}, None
+        self._camera_meta_problem = None
+        infos: dict[str, dict] = {}
+        for item in body.get(FIELD_CAMERAS) or []:
+            name = str(item.get(FIELD_NAME) or "")
+            if name:
+                infos[name] = dict(item)
+        return infos, self._parse_frames(body.get(FIELD_FRAMES))
+
+    def _parse_frames(self, payload) -> FrameSet | None:
+        """``frames`` 段 → :class:`FrameSet`（缺失 → ``None``；非法 → ``None`` + 一条 WARNING）。"""
+        if not payload:
+            return None
+        try:
+            frames = FrameSet.from_payload(payload)
+        except Exception as exc:  # noqa: BLE001 产物坏了不该让观测 / 预览跟着挂
+            problem = str(exc) or exc.__class__.__name__
+            if problem != self._frames_problem:
+                self._frames_problem = problem
+                debug_print(
+                    self.name,
+                    f"calibration frames unavailable ({problem}); depth coordinates unavailable",
+                    "WARNING",
+                )
+            return None
+        self._frames_problem = None
+        return frames
+
     def observe(self) -> dict | None:
         """读取共享内存最新观测帧（SDK 进程产出），图像编码为 JPEG（Edge 契约）。
 
@@ -332,7 +420,8 @@ class HttpShmAdapter(RobotAdapter):
         状态**与动作空间无关**：``observations/qpos`` = **状态向量**（每臂「值 + 夹爪」交错）、
         ``action`` = **同维同布局**的目标向量、``observations/pose`` = **实测**位姿、
         ``observations/pose_target`` = **目标**位姿（= ``FK(关节段目标)``，随位姿一起提供）；
-        故数采 / 策略拿到的永远是「值 + 夹爪」那一条向量。
+        故数采 / 策略拿到的永远是「值 + 夹爪」那一条向量。机器人开启深度时额外给
+        ``observations/depth/<cam>``（uint16、**已对齐到彩色图**，``0`` = 无效像素）。
         """
         if self._shm is None:
             self._shm = ObsShmReader(self.shm_name)  # 惰性 attach（首次观测时）
@@ -369,7 +458,25 @@ class HttpShmAdapter(RobotAdapter):
         for image, name in zip(frame["images"], self._full_image_names, strict=True):
             if name in self.images:
                 obs[f"{CAMERA_PREFIX}{name}"] = self._encode_jpeg(image)
+        # 深度（机器人开启时）：共享内存里的顺序 = **进程上报的深度相机顺序**，故先按全部上报
+        # 相机对齐、再只暴露启用相机（与图像同一口径）；路数对不上宁可不给深度（不错位）
+        depths = frame.get("depths")
+        if depths:
+            names = self.depth_camera_names()
+            if len(names) != len(depths):
+                self._warn_depth_mismatch(f"depth streams {len(depths)} != reported depth cameras {len(names)} {names}")
+            else:
+                for depth, name in zip(depths, names, strict=True):
+                    if name in self.images:
+                        obs[f"{DEPTH_PREFIX}{name}"] = depth
         return obs
+
+    def _warn_depth_mismatch(self, problem: str) -> None:
+        """深度流路数与上报相机不符：**一次一条** ERROR（同原因不刷屏），本拍不透传深度。"""
+        if problem == self._depth_mismatch_logged:
+            return
+        self._depth_mismatch_logged = problem
+        debug_print(self.name, f"depth dropped ({problem})", "ERROR")
 
     @staticmethod
     def _encode_jpeg(rgb: np.ndarray) -> bytes:

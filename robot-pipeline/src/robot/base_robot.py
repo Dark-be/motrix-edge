@@ -73,6 +73,7 @@ from dataclasses import dataclass
 import numpy as np
 from utils.data_handler import debug_print
 
+from motrix_edge.adapter.http_contract import FIELD_ARM, FIELD_MOUNT, VALUE_MOUNT_FIXED, VALUE_MOUNT_WRIST
 from robot.kinematics import wrap_angles
 
 
@@ -106,11 +107,19 @@ class BaseRobot:
     GRIPPER = 2  # ``gripper`` 空间维度（每臂 1 夹爪）
     IMAGE_NAMES: list[str] = []  # 相机名（observations/images/<name>）
     IMAGES: dict[str, tuple[int, int]] = {name: (640, 480) for name in IMAGE_NAMES}  # 相机名 -> (w, h)
+    # **具备深度**的相机（``IMAGE_NAMES`` 的子序；空 = 本机型无深度相机）：与相机型号一致
+    # （RealSense 有、网络摄像头没有）的**硬件事实**，故内置；是否**启用**深度由配置
+    # ``robot.depth``（enabled / cameras）决定，见 ``depth_camera_names()``。
+    DEPTH_CAMERAS: tuple[str, ...] = ()
+    # **腕部相机 → 承载臂**（装配事实：装在末端法兰上 → 世界位姿**随臂动**，外参只能是
+    # ``T_flange_cam``）。固定相机（头部 / 工作台）不在表里；与 ``DEPTH_CAMERAS`` 一样由子类
+    # 声明，不来自标定产物（未标定时调用方也该知道这路相机会不会随臂动）。
+    WRIST_CAMERAS: dict[str, str] = {}
     SHM_NAME = "robot_obs"  # 观测共享内存名（server 侧发布）
 
     # ---- 臂与取数 / 下发（子类按自己的接线实现）----
     # 机器人只做两件事：**从控制器 / 传感器取数**（``get_observation_qpos`` / ``get_observation_gripper`` /
-    # ``get_observation_images``）与**下发目标**（``_apply_action`` / ``_prepare_target``）。
+    # ``get_observation_frames``）与**下发目标**（``_apply_action`` / ``_prepare_target``）。
     # 运动学（FK / IK / 限位）都在控制器里（``robot/controller``），本层不碰。
 
     # ---- 动作空间（取值与 edge 契约 ActionSpace 同名）----
@@ -134,6 +143,10 @@ class BaseRobot:
     KEY_ACTION = "action"  # 目标向量键（每臂「关节目标 + 夹爪目标」；无指令时回退 qpos）
     KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打点）
     CAMERA_PREFIX = "observations/images/"  # 相机图像键前缀（<prefix><cam_name>）
+    # 深度图键前缀（``<prefix><cam_name>``）：``uint16[H][W]``、**已对齐到同名彩色图**的深度图
+    # （``0`` = 无效像素）；原始值 × ``depth_scale`` = 米（比例与内参见 ``camera_meta()``）。
+    # 只对**生效的深度相机**（配置开启 ∩ ``DEPTH_CAMERAS``）写键，无深度的机型 / 相机关怀不变。
+    DEPTH_PREFIX = "observations/depth/"
 
     # ---- 状态向量（``observations/qpos`` / ``action``）的布局 ----
     # 状态 / 目标向量 = 每臂「**值 + 夹爪**」交错展开（双臂 7 + 7 = 14、单臂 7）；低位（值段）当前是
@@ -194,6 +207,10 @@ class BaseRobot:
 
         # 机械臂侧状态缓存（控制线程每拍 sample_qpos() 覆盖；观测线程只读）
         self.motion_state: dict | None = None
+
+        # 深度观测：**生效**的深度相机（顺序 = IMAGE_NAMES 子序；空 = 不开深度）——由配置
+        # ``robot.depth`` 决定；取帧（``connect()``）与发布（``capture_frames()``）都用它。
+        self.depth_cameras = self._resolve_depth_cameras()
 
     # ---- 硬件设备类型（机器档案探测用：``scripts/setup_robot.sh`` 据此决定「这类设备怎么找」）----
     # 键 = ``PORT_ROLES`` / ``IMAGE_NAMES``；值 = ``config.probe`` 的 kind（can / serial /
@@ -902,18 +919,87 @@ class BaseRobot:
         self.motion_state = state
         return self.motion_state
 
-    def capture_images(self) -> dict:
-        """读取各相机帧并组装为契约键（``observations/images/<cam_name>``）——观测线程调用。
+    # ---- 相机与深度（彩色 + 深度观测；相机元数据供 robot server 上报）------------------
+    def _resolve_depth_cameras(self) -> list[str]:
+        """解析 ``robot.depth`` → **生效的深度相机**（顺序 = ``IMAGE_NAMES`` 子序）。
 
-        子类实现 ``get_observation_images()``（返回顺序对齐 IMAGE_NAMES 的帧列表）。
+        - ``enabled: false`` → 空（完全不开深度流）；
+        - ``cameras`` 缺省 / 空 → 该机型**全部**具备深度的相机（``DEPTH_CAMERAS``）；
+        - 给了则必须是 ``DEPTH_CAMERAS`` 的子集，否则 ValueError（不替现场猜，也不静默丢弃——
+          与 ``robot.ports`` / ``robot.cameras`` 同一口径）；
+        - 未知键打 WARNING（发现拼写错误，不影响启动）。
         """
-        # 相机成员：observations/images/<cam_name>（顺序对齐 IMAGE_NAMES）
-        return {
-            f"{self.CAMERA_PREFIX}{name}": img for name, img in zip(self.IMAGE_NAMES, self.get_observation_images())
-        }
+        depth_config = self.robot_config.get("depth") or {}
+        unknown = [key for key in depth_config if key not in ("enabled", "cameras")]
+        if unknown:
+            debug_print(self.name, f"robot.depth 未知键 {unknown}（可用：['enabled', 'cameras']），已忽略", "WARNING")
+        if not bool(depth_config.get("enabled", True)):
+            return []
+        requested = [str(name).strip() for name in (depth_config.get("cameras") or [])]
+        if not requested:
+            return [name for name in self.IMAGE_NAMES if name in self.DEPTH_CAMERAS]
+        unsupported = [name for name in requested if name not in self.DEPTH_CAMERAS]
+        if unsupported:
+            raise ValueError(
+                f"{self.name}: robot.depth.cameras 含无深度能力的相机 {unsupported}（可用：{list(self.DEPTH_CAMERAS)}）"
+            )
+        return [name for name in self.IMAGE_NAMES if name in requested]
+
+    def depth_camera_names(self) -> list[str]:
+        """**生效**的深度相机名（顺序 = ``IMAGE_NAMES`` 子序）：配置开关 ∩ 具备深度的相机。
+
+        取帧（``connect()`` 传 ``enable_depth``）与观测发布（``capture_frames()``）共用它，
+        故「开了哪几路深度」只有一个来源。
+        """
+        return list(self.depth_cameras)
+
+    def get_camera_info(self, name: str) -> dict:
+        """单个相机的**静态**元数据（键名与 edge adapter 契约一致）——子类按需覆盖。
+
+        缺省直接问 sensor（``RealsenseSensor.camera_info()``：尺寸 / 彩色内参 / 深度比例）；
+        无 sensor（虚拟 / 无相机机器人）时回退 ``IMAGES`` 声明的尺寸、内参为空。
+        """
+        sensor = self.sensors.get(name)
+        if sensor is not None and hasattr(sensor, "camera_info"):
+            return dict(sensor.camera_info())
+        width, height = self.IMAGES.get(name, (0, 0))
+        return {"name": name, "width": int(width), "height": int(height), "intrinsics": {}, "depth": None}
+
+    def camera_mount(self, name: str) -> tuple[str, str | None]:
+        """相机的安装方式 → ``(mount, arm)``：
+
+        - ``("wrist", "<臂名>")``：相机装在末端法兰上，世界位姿**随臂动**（外参只能是
+          ``T_flange_cam``，运行期乘同拍 ``FK(q)``）；
+        - ``("fixed", None)``：装在工作台 / 机身，外参是常数 ``T_world_cam``。
+
+        **装配事实**（类常量 ``WRIST_CAMERAS``），不依赖标定产物——未标定时调用方也该知道「这路相机
+        会不会随臂动」。
+        """
+        arm = self.WRIST_CAMERAS.get(name)
+        return (VALUE_MOUNT_WRIST, str(arm)) if arm else (VALUE_MOUNT_FIXED, None)
+
+    def camera_meta(self) -> list[dict]:
+        """各相机静态元数据（顺序 = ``IMAGE_NAMES``）——robot server 的 ``GET /v1/cameras`` 用。
+
+        深度段只对**生效的深度相机**保留：配置关掉某相机深度 → 该相机 ``depth: null``，
+        与实际发布行为一致（不报一个拿不到的能力）；另附**安装方式**（``mount`` / ``arm``，
+        装配事实）。标定外参本身另有一个载体（``frames``，即 ``frames.json`` 原样），不在这里
+        逐相机重复变换矩阵。
+        """
+        depth_names = self.depth_camera_names()
+        infos = []
+        for name in self.IMAGE_NAMES:
+            info = self.get_camera_info(name)
+            if name not in depth_names:
+                info["depth"] = None
+            mount, arm = self.camera_mount(name)
+            info[FIELD_MOUNT] = mount
+            info[FIELD_ARM] = arm
+            infos.append(info)
+        return infos
 
     def build_observation(self) -> dict | None:
-        """组装完整观测 = 最新缓存机械臂状态 + 本拍相机帧（**观测线程调用**）。
+        """组装完整观测 = 最新缓存机械臂状态 + 本拍相机帧（彩色 + 深度）——**观测线程调用**。
 
         控制线程尚未采到第一拍（启动瞬间）或机械臂读取持续失败时 ``motion_state`` 为空，
         此时返回 None（本拍不出观测，由 env 观测线程跳过，下一拍重试）。
@@ -922,10 +1008,10 @@ class BaseRobot:
         if state is None:
             return None
         timestamp = time.time()  # 观测拍时刻（取帧前打点；取帧 / 落盘耗时不计入）
-        return {**state, **self.capture_images(), self.KEY_TIMESTAMP: timestamp}
+        return {**state, **self.capture_frames(), self.KEY_TIMESTAMP: timestamp}
 
     def get_observation(self) -> dict:
-        """完整观测 = 现场采样机械臂状态 + 相机帧（**单线程调用**）。
+        """完整观测 = 现场采样机械臂状态 + 相机帧（彩色 + 深度，**单线程调用**）。
 
         ⚠️ 相机取帧会阻塞，故**勿在控制线程调用**（会拖慢机械臂步进）；env 双线程序列下
         控制线程用 ``sample_qpos()``、观测线程用 ``build_observation()``，
@@ -933,7 +1019,7 @@ class BaseRobot:
         """
         state = self.sample_qpos()
         timestamp = time.time()  # 帧时刻（取帧前打点，与 build_observation 同口径）
-        return {**state, **self.capture_images(), self.KEY_TIMESTAMP: timestamp}
+        return {**state, **self.capture_frames(), self.KEY_TIMESTAMP: timestamp}
 
     def get_observation_qpos(self) -> np.ndarray:
         """当前帧**关节角**（扁平 ``QPOS`` 维，每臂 6）——**子类实现**。
@@ -973,12 +1059,31 @@ class BaseRobot:
         """
         raise NotImplementedError
 
-    def get_observation_images(self) -> list:
-        """读取各相机 raw RGB 帧（list，顺序对齐 IMAGE_NAMES；子类实现）。
+    def get_observation_frames(self) -> list:
+        """读取各相机**本拍**帧（list，顺序对齐 ``IMAGE_NAMES``；子类实现）。
 
-        由 ``capture_images()`` 组装为 observations/images/<cam_name> 成员（观测线程调用）。
+        每项 ``{"color": <RGB uint8 HxWx3>, "depth": <uint16 HxW> | None}``——彩色恒有，
+        深度仅在该相机开启深度时有值（无深度能力 / 未开启 → ``None``）。**一次取帧同时得到
+        彩色与深度**（``get_information()`` 是阻塞取帧，不可为深度再读一次：那会是不同帧）。
+        由 ``capture_frames()`` 组装为契约键（图像恒有、深度只对生效深度相机）。
         """
         raise NotImplementedError
+
+    def capture_frames(self) -> dict:
+        """读取各相机本拍帧并组装契约键（彩色 + 深度）——观测线程调用。
+
+        ``observations/images/<cam>`` 恒有；``observations/depth/<cam>`` 只对**生效的深度
+        相机**（``depth_camera_names()``）且该拍确实拿到深度时写入——深度与彩色同拍同源。
+        """
+        depth_names = self.depth_camera_names()
+        frames = self.get_observation_frames()
+        out: dict = {}
+        for name, frame in zip(self.IMAGE_NAMES, frames, strict=True):
+            out[f"{self.CAMERA_PREFIX}{name}"] = frame["color"]
+            depth = frame.get("depth")
+            if depth is not None and name in depth_names:
+                out[f"{self.DEPTH_PREFIX}{name}"] = depth
+        return out
 
     def get_action(self) -> np.ndarray | None:
         """当前**关节段目标**（底层实际控制量，始终关节语义；分段排布）；未下发过 → None。

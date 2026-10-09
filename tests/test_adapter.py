@@ -35,6 +35,7 @@ from motrix_edge.adapter import (
 from motrix_edge.adapter import test_adapter as test_adapter_mod
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
+    DEPTH_PREFIX,
     KEY_ACTION,
     KEY_POSE,
     KEY_POSE_TARGET,
@@ -239,6 +240,8 @@ def test_capabilities_declares_action_dim_and_observation_keys():
         f"{CAMERA_PREFIX}cam_head",
         f"{CAMERA_PREFIX}cam_left_wrist",
         f"{CAMERA_PREFIX}cam_right_wrist",
+        # 深度键：只对**具备深度**的启用相机声明（test_robot 只有 cam_head 有合成深度）
+        f"{DEPTH_PREFIX}cam_head",
     ]
     assert caps.image_names == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
 

@@ -58,6 +58,11 @@ class DualPiperRobot(BaseRobot):
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     CAMERA_KINDS = {name: "realsense" for name in IMAGE_NAMES}  # 三路均为 RealSense（填序列号）
+    # 具备深度的相机：三路 RealSense 均有（是否**启用**由 robot.depth 配置决定）
+    DEPTH_CAMERAS: tuple[str, ...] = tuple(IMAGE_NAMES)
+    # 腕部相机 → 承载臂（装配事实）：两路腕相机随臂动 → 外参只能是 ``T_flange_cam``
+    # （见 ``wiki/design/robot_pipeline_frames.md``）；``cam_head`` 固定在头部。
+    WRIST_CAMERAS: dict[str, str] = {"cam_left_wrist": "left", "cam_right_wrist": "right"}
     SHM_NAME = "dual_piper_obs"
     # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports / robot.cameras）----
     PORT_ROLES = ("left_master", "right_master", "left", "right")  # 控制器端口（主手 / 从臂）
@@ -255,7 +260,12 @@ class DualPiperRobot(BaseRobot):
         self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
         debug_print(self.name, "Setup controllers done", "INFO")
         for name in self.IMAGE_NAMES:
-            self.sensors[name].connect(device=self.camera_devices[name], pixel_format="jpg")
+            self.sensors[name].connect(
+                device=self.camera_devices[name],
+                pixel_format="jpg",
+                # 深度只给**生效的深度相机**开（配置 robot.depth：缺省 = 三路全开）
+                enable_depth=name in self.depth_cameras,
+            )
         debug_print(self.name, "Setup sensors done", "INFO")
         self.ready = True
 
@@ -270,29 +280,31 @@ class DualPiperRobot(BaseRobot):
             sensor.disconnect()
             debug_print(self.name, f"Disconnect sensor {name} done", "INFO")
 
-    def get_observation_images(self) -> list:
-        """读取当前帧原始观测的 images——从相机传感器直接取 color。
+    def get_observation_frames(self) -> list:
+        """读取各相机**本拍**帧（顺序对齐 IMAGE_NAMES）——彩色恒有，深度仅在开启时有。
 
-        顺序对齐 IMAGE_NAMES（cam_head / cam_left_wrist / cam_right_wrist）；任一无帧时报错。
+        每相机只调一次 ``get_information()``：彩色与深度来自**同一次取帧**（深度已对齐到
+        彩色图），所以两图同拍同源；未开启深度的相机 ``depth`` 为 ``None``。
         相机按 sensor.pixel_format 区分：jpg → color 为 JPEG bytes（此处 imdecode）；
         raw → color 已解码为 RGB ndarray（直接使用）。
         """
-        images = []
+        frames = []
         for name in self.IMAGE_NAMES:
             sensor = self.sensors[name]
             info = sensor.get_information()
             color = info.get("color") if info else None
             if color is None:
-                raise RuntimeError(f"DualPiperRobot.get_observation_images: 相机 {name} 无帧")
+                raise RuntimeError(f"DualPiperRobot.get_observation_frames: 相机 {name} 无帧")
             if getattr(sensor, "pixel_format", V4l2Sensor.PIXEL_FORMAT_JPG) != V4l2Sensor.PIXEL_FORMAT_JPG:
-                images.append(color)  # raw（V4l2/Realsense）：已解码为 RGB（HxWx3）
-                continue
-            decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
-            if decoded is None:
-                debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
-                decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
-            images.append(decoded[:, :, ::-1])  # BGR → RGB
-        return images
+                decoded = color  # raw（V4l2/Realsense）：已解码为 RGB（HxWx3）
+            else:
+                decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
+                if decoded is None:
+                    debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
+                    decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
+                decoded = decoded[:, :, ::-1]  # BGR → RGB
+            frames.append({"color": decoded, "depth": info.get("depth")})
+        return frames
 
     def _get_teleop_target(self) -> np.ndarray | None:
         """遥操作**关节段**接入位：master 主手 → slave 从手（左→左、右→右）。

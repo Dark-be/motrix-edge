@@ -28,6 +28,7 @@ env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程�
 端点（前缀 /v1）:
     POST /v1/discover      自描述探活
     GET  /v1/health        {ok, detail}
+    GET  /v1/cameras       相机静态元数据（尺寸 / 彩色内参 / 深度比例）
     POST /v1/reset         复位到 home（非阻塞）
     POST /v1/execute       raw 动作 {action}
     POST /v1/rollout       推理动作 {action}（**人工接管中 → 409**）
@@ -59,23 +60,33 @@ from config import get_log_dir
 from env.base_env import TakeoverActiveError
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from robot.calibration.store import load_frames
 from utils.data_handler import debug_print, file_log_enabled
 from utils.logging import uvicorn_log_config
 
-from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS
+from motrix_edge.adapter.base import CAMERA_PREFIX, DEPTH_PREFIX, KEY_ACTION, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
     FIELD_ACTION_DIM,
     FIELD_ACTION_DIMS,
     FIELD_ACTION_LAYOUTS,
+    FIELD_ALIGNED_TO_COLOR,
+    FIELD_ARM,
+    FIELD_CAMERAS,
     FIELD_CAPABILITIES,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
+    FIELD_DEPTH,
+    FIELD_DEPTH_SCALE,
     FIELD_DETAIL,
     FIELD_ENDPOINT,
+    FIELD_FRAMES,
     FIELD_HEAD_SKIP,
+    FIELD_HEIGHT,
+    FIELD_INTRINSICS,
     FIELD_MEASURED_HZ,
     FIELD_META,
+    FIELD_MOUNT,
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
     FIELD_OK,
@@ -88,6 +99,9 @@ from motrix_edge.adapter.http_contract import (
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
     FIELD_TYPE,
+    FIELD_WIDTH,
+    INTRINSICS_KEYS,
+    PATH_CAMERAS,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
@@ -100,6 +114,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_SAFE_STOP,
     PATH_TELEOP,
     TELEOP_MODES,
+    VALUE_MOUNT_FIXED,
     VALUE_STATUS_ACCEPTED,
 )
 from motrix_edge.adapter.shm_contract import ObsShmWriter
@@ -172,6 +187,44 @@ def _robot_image_names(robot) -> list[str]:
     return []
 
 
+def _robot_depth_names(robot) -> list[str]:
+    """机器人**生效**的深度相机名（顺序 = 深度流在共享内存里的顺序）。
+
+    取机器人的 ``depth_camera_names()``（配置开关 ∩ 具备深度的相机）——无深度 / 未实现的
+    替身机器人 → 空列表（不占深度区）。
+    """
+    names = getattr(robot, "depth_camera_names", None)
+    if callable(names):
+        return [str(name) for name in names()]
+    return []
+
+
+def _camera_payload(info: dict) -> dict:
+    """相机元数据 → HTTP 契约形状（**键名单点在这里收口**）。
+
+    机器人层只管给值（尺寸 / 内参 / 深度比例 / 安装方式），键名与嵌套形状在服务边界按契约常量拼装：
+    多余 / 缺失的键不会漂到网络上（缺失内参 → 0.0；无深度 → ``depth: null``）。
+    标定外参**不在这里逐相机重复**：整份产物另有一个载体（响应级 ``frames``，见 :func:`cameras`）。
+    """
+    intrinsics = info.get(FIELD_INTRINSICS) or {}
+    depth = info.get(FIELD_DEPTH) or None
+    return {
+        FIELD_NAME: str(info.get(FIELD_NAME) or ""),
+        FIELD_WIDTH: int(info.get(FIELD_WIDTH) or 0),
+        FIELD_HEIGHT: int(info.get(FIELD_HEIGHT) or 0),
+        FIELD_INTRINSICS: {key: float(intrinsics.get(key) or 0.0) for key in INTRINSICS_KEYS},
+        FIELD_DEPTH: None
+        if not depth
+        else {
+            FIELD_DEPTH_SCALE: float(depth.get(FIELD_DEPTH_SCALE) or 0.0),
+            FIELD_ALIGNED_TO_COLOR: bool(depth.get(FIELD_ALIGNED_TO_COLOR, False)),
+        },
+        # 安装方式（装配事实）：fixed = 外参常数；wrist = 随臂动（外参只能是 T_flange_cam）
+        FIELD_MOUNT: str(info.get(FIELD_MOUNT) or VALUE_MOUNT_FIXED),
+        FIELD_ARM: None if info.get(FIELD_ARM) is None else str(info.get(FIELD_ARM)),
+    }
+
+
 def _robot_capabilities(robot) -> dict[str, bool]:
     capabilities = getattr(robot, "CAPABILITIES", None)
     if isinstance(capabilities, dict) and capabilities:
@@ -236,11 +289,13 @@ class _ShmPublisher:
 
         写入 qpos（**状态向量**：每臂「值 + 夹爪」）+ action（**同维同布局**的目标向量）+
         pose（实测位姿）+ pose_target（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位
-        可见）+ raw RGB 图像；位姿（与目标位姿）仅在机器人提供（``POSE > 0``）时写入（否则不占该区）。
+        可见）+ raw RGB 图像 + 深度图（机器人开启深度时；已对齐到彩色图）；位姿（与目标位姿）
+        仅在机器人提供（``POSE > 0``）时写入，深度仅在**生效的深度相机**有值时写入（否则不占该区）。
         """
         if obs is None or obs.get(KEY_QPOS) is None:
             return
         image_names = _robot_image_names(self.robot)
+        depth_names = _robot_depth_names(self.robot)
         standard = {
             KEY_QPOS: obs[KEY_QPOS],
             KEY_ACTION: obs.get(KEY_ACTION) if obs.get(KEY_ACTION) is not None else obs[KEY_QPOS].copy(),
@@ -252,6 +307,12 @@ class _ShmPublisher:
             standard[KEY_POSE_TARGET] = obs[KEY_POSE_TARGET]  # 目标位姿（= FK(关节段目标)）
         for name in image_names:
             standard[f"{CAMERA_PREFIX}{name}"] = obs[f"{CAMERA_PREFIX}{name}"]
+        depths = []
+        for name in depth_names:
+            depth = obs.get(f"{DEPTH_PREFIX}{name}")
+            if depth is not None:
+                standard[f"{DEPTH_PREFIX}{name}"] = depth
+                depths.append(depth)
         self.last_obs = standard
         if self._writer is None:
             self._writer = self._create_writer()
@@ -261,17 +322,21 @@ class _ShmPublisher:
             pose=standard.get(KEY_POSE),
             pose_target=standard.get(KEY_POSE_TARGET),
             images=[standard[f"{CAMERA_PREFIX}{n}"] for n in image_names],
+            # 深度区宽度固定：路数对不上（某相机本拍无深度）就不传，宁可本帧深度停在上一次
+            depths=depths if len(depths) == len(depth_names) else None,
         )
 
     def _create_writer(self) -> ObsShmWriter:
         """创建共享内存写者（上次进程残留 → attach 后 unlink 重建）。
 
         区域宽度：qpos / action = **状态向量维数**（每臂「值 + 夹爪」，双臂 14）；
-        pose / pose_target = 每臂 6 × 臂数（不提供位姿 → 0）。
+        pose / pose_target = 每臂 6 × 臂数（不提供位姿 → 0）；深度区 = **生效的深度相机**数
+        （无深度 → 0，不占区）。
         """
         # 相机尺寸（假设各相机一致）；无相机机器人（IMAGES 为空）用占位尺寸，image_count=0 无图像数据
         image_size = next(iter(getattr(self.robot, "IMAGES", {}).values()), (640, 480))
         image_names = _robot_image_names(self.robot)
+        depth_names = _robot_depth_names(self.robot)
         qpos_dim = _robot_state_dim(self.robot)
 
         def build() -> ObsShmWriter:
@@ -283,6 +348,8 @@ class _ShmPublisher:
                 action_dim=qpos_dim,
                 pose_dim=_robot_pose_dim(self.robot),
                 pose_target_dim=_robot_pose_dim(self.robot),  # 目标位姿随实测位姿同生共死
+                depth_count=len(depth_names),
+                depth_size=image_size,  # 深度已对齐到彩色图 → 同尺寸
             )
 
         try:
@@ -351,6 +418,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             "endpoints": [
                 PATH_DISCOVER,
                 PATH_HEALTH,
+                PATH_CAMERAS,
                 PATH_RESET,
                 PATH_EXECUTE,
                 PATH_ROLLOUT,
@@ -394,7 +462,8 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
                 FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION]
                 + ([KEY_POSE, KEY_POSE_TARGET] if _robot_pose_dim(robot) > 0 else [])
-                + [f"{CAMERA_PREFIX}{n}" for n in image_names],
+                + [f"{CAMERA_PREFIX}{n}" for n in image_names]
+                + [f"{DEPTH_PREFIX}{n}" for n in _robot_depth_names(robot)],
                 FIELD_CAPABILITIES: _robot_capabilities(robot),
                 FIELD_ENDPOINT: endpoint,
                 FIELD_SHM_NAME: robot.SHM_NAME,
@@ -413,6 +482,29 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             FIELD_DETAIL: detail,
             FIELD_CONTROL_HZ: h.get("control_hz"),
             FIELD_MEASURED_HZ: h.get("measured_hz"),
+        }
+
+    # ---------------------------------------------------------------- 相机元数据（静态）
+    @app.get(PATH_CAMERAS)
+    def cameras():
+        """相机静态元数据 ``{cameras: [...], frames: ...}``：尺寸 / **彩色内参** / 深度比例 /
+        安装方式 + **统一坐标系外参产物**。
+
+        深度图已**对齐到彩色图**，故反投影只需这一套内参；无深度的相机 ``depth`` 为 ``null``。
+        静态数据（不随帧变，进不了共享内存的逐帧区），Edge adapter 惰性查询一次并缓存，
+        供 ``GET /v1/depth`` 把像素深度换算成米与 ``world`` 坐标。未就绪时 503（sensor 尚无可读
+        内参——宁可不给，也不报 0 值内参）。
+
+        ``frames`` = 标定产物 ``<根>/config/calibration/frames.json`` **原样**（单点形状在
+        ``motrix_edge.geometry.FrameSet``）；未标定 / 产物非法 → ``null``（坐标功能关闭，其余照常）。
+        """
+        _require_ready()
+        meta = getattr(robot, "camera_meta", None)
+        infos = meta() if callable(meta) else []
+        frames = load_frames()
+        return {
+            FIELD_CAMERAS: [_camera_payload(info) for info in infos],
+            FIELD_FRAMES: None if frames is None else frames.to_payload(),
         }
 
     # ---------------------------------------------------------------- 指令
@@ -550,6 +642,18 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 continue
             ok, buf = cv2.imencode(".jpg", cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR))
             out[f"images/{name}"] = base64.b64encode(buf.tobytes()).decode("ascii") if ok else None
+        # 深度（生效的深度相机）：调试端点不回传整张深度图，只给形状与原始值范围
+        for name in _robot_depth_names(robot):
+            depth = obs.get(f"{DEPTH_PREFIX}{name}")
+            if depth is None:
+                out[f"depth/{name}"] = None
+                continue
+            values = np.asarray(depth, dtype=np.uint16)
+            out[f"depth/{name}"] = {
+                "shape": list(values.shape),
+                "min_raw": int(values.min()),
+                "max_raw": int(values.max()),
+            }
         return out
 
     return app
