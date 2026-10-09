@@ -68,8 +68,6 @@ def _run_node(args) -> None:
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
     node），本地 CLI 按键保留。
     """
-    import os
-
     from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_root_dir, load_config
     from motrix_edge.utils.load_file import load_yaml
 
@@ -93,9 +91,12 @@ def _run_node(args) -> None:
     from motrix_edge.server.infer import InferService
     from motrix_edge.server.preview import PreviewService
     from motrix_edge.server.webrtc import WebRTCService
-    from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled
+    from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled, set_log_level
 
-    # 打印生效路径；文件日志默认关闭，因此这里只报告目录、不创建目录。
+    # 日志级别：**只**读 ``edge.yml`` 的 ``INFO_LEVEL``（不写 → 代码缺省 INFO），经
+    # ``set_log_level`` 解析进进程内 ``_LOG_LEVEL``——**不写 ``os.environ``**，也无环境变量开关。
+    # 必须先于下面那行横幅：横幅自身也受级别过滤（级别 ≥ WARNING 时启动信息静默）
+    log_level = set_log_level(base_cfg.get("INFO_LEVEL"))
     file_log_state = "ON" if file_log_enabled() else f"OFF ({ENV_LOG_FILE}=0)"
     debug_print(
         "EdgeNode",
@@ -103,10 +104,10 @@ def _run_node(args) -> None:
         f" | root_dir={get_root_dir()}"
         f" | config_dir={get_config_dir()}"
         f" | log_dir={get_log_dir()}"
+        f" | log_level={log_level}"
         f" | file_logging={file_log_state}",
         "INFO",
     )
-    os.environ["INFO_LEVEL"] = base_cfg.get("INFO_LEVEL", "DEBUG")
 
     server_cfg = base_cfg.get("server", {})
     host = server_cfg.get("host", "0.0.0.0")
