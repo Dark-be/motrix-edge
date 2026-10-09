@@ -62,8 +62,9 @@ def _start_web(app, host: str, port: int):
 def _run_node(args) -> None:
     """加载配置并启动 EdgeNode（阻塞式主循环，直到 Ctrl-C）。
 
-    配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省选择性加载——环境变量
-    ``MOTRIX_CONFIG_DIR`` 指向的外界配置优先，否则包内默认 ``edge.yml``（只读兜底）。
+    配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省从**实际配置目录**读
+    ``edge.yml`` —— ``config.get_root_dir()`` = ``$MOTRIX_EDGE_DIR``，未设置时回落 ``<cwd>/motrix-edge``，
+    配置在 ``<根>/config/``（首次访问把包内示例播种过去；见 ``config`` 包 docstring）。
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
     node），本地 CLI 按键保留。
     """
@@ -81,7 +82,7 @@ def _run_node(args) -> None:
         config_source = explicit
     else:
         base_cfg = load_config("edge.yml")
-        config_source = config_path("edge.yml") or "packaged default (config/edge.yml)"
+        config_source = config_path("edge.yml") or "packaged default (edge.yml)"
 
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
@@ -93,7 +94,7 @@ def _run_node(args) -> None:
     from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.utils.data_handler import debug_print, file_log_enabled
 
-    # 打印配置来源 + 状态 / 日志目录（区分环境变量 MOTRIX_CONFIG_DIR vs 包内默认；文件日志默认关闭）
+    # 打印配置来源 + 状态 / 日志目录（根目录环境变量 vs <cwd> 兜底；文件日志默认关闭）
     config_dir = get_config_dir()
     debug_print(
         "EdgeNode",
@@ -165,12 +166,12 @@ def main():
     """CLI 入口。
 
     子命令：
-      run [--config <path>]  启动 EdgeNode（--config 指定配置文件路径；缺省 config/edge.yml）
+      run [--config <path>]  启动 EdgeNode（--config 指定 yaml 路径；缺省 ``<根>/config/edge.yml``）
       adapters list          列出所有已注册的机器人 / 策略适配器
       adapters detail        列出所有已注册机器人适配器的能力详情（静态，不探活）
       version                显示 motrix-edge 版本号
 
-    无子命令时等价 ``run``（缺省加载 config/edge.yml）。
+    无子命令时等价 ``run``（缺省 ``<根>/config/edge.yml``，首次访问由包内示例播种）。
     """
     import argparse
 

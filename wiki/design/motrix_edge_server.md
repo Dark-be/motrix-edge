@@ -74,7 +74,7 @@ correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动�
 | POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                |
 | GET    | `/v1/captures`            | 无            | 状态快照：node_state / session / adapter / **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id |
 | GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                  |
-| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段，前端选择列表）                                                |
+| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`capture.yml` 的 `meta` 段，前端选择列表）                                                       |
 | POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                      |
 | PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                        |
 | DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                   |

@@ -8,7 +8,8 @@
 #   bash scripts/start.sh --help                           # 查看 server 参数说明（用默认配置）
 #
 # 说明:
-#   - 配置放 src/config/（包内默认）；首个非“-”开头的参数视为配置名，其余参数透传给 server
+#   - 配置 / 日志根：$MOTRIX_ROBOT_PIPELINE_DIR（未设 → <cwd>/motrix-robot-pipeline）；
+#     首个非“-”开头的参数视为配置名，其余参数透传给 server
 #   - 未指定配置名且 stdin 是交互终端时，弹出数字菜单供选择（dual_piper 排首位）；否则回退默认 test_robot.yml
 #   - 等价命令: uv run python src/server/robot_server.py --config <name> [args...]
 

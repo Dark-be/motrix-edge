@@ -201,7 +201,7 @@ class EdgeNode:
         # 采集状态缓存（adapter.capture_status()）：运行位 + 采集员 / 任务名等元信息 +
         # 数据目录；主循环（READY / ACTIVE）周期刷新，server /v1/captures 只读缓存。
         self._capture_status = None
-        # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令读写；缺省用
+        # 采集元信息选项存储（capture.yml）：capture meta 配置命令读写；缺省用
         # 默认路径（与 server / 会话同源），测试可注入临时 store。
         self.capture_meta_store = capture_meta_store if capture_meta_store is not None else CaptureMetaStore()
 
@@ -321,7 +321,7 @@ class EdgeNode:
             return
 
         # 采集元信息选项（capture meta list/add/edit/delete/delete-key）：配置级命令，任何状态
-        # 均可用（读写 config/capture.yml 的 meta 段；与 infer config 同一语义，与会话状态机解耦）。
+        # 均可用（读写 capture.yml 的 meta 段；与 infer config 同一语义，与会话状态机解耦）。
         if cmd.name in (
             CMD_CAPTURE_META_LIST,
             CMD_CAPTURE_META_ADD,

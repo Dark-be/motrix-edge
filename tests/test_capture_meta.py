@@ -32,7 +32,7 @@ from motrix_edge.utils.commands import (
 )
 
 # ---------------------------------------------------------------------------
-# CaptureMetaStore：config/capture.yml（meta 段）读写 —— 无硬件可跑
+# CaptureMetaStore：capture.yml（meta 段）读写 —— 无硬件可跑
 # ---------------------------------------------------------------------------
 
 
@@ -145,13 +145,13 @@ def test_store_write_keeps_file_mode(tmp_path):
 
 def test_store_seed_creates_readable_file_mode(tmp_path, monkeypatch):
     """首次播种落 0644：配置文件是给人看 / 给人改的，不能因为 mkstemp 变成 0600。"""
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    store = CaptureMetaStore()  # 缺省路径 → 状态目录（XDG_STATE_HOME/motrix）
+    monkeypatch.setenv("MOTRIX_EDGE_DIR", str(tmp_path))
+    store = CaptureMetaStore()  # 缺省路径 → <根>/config/capture.yml
 
     meta = store.list_meta()  # 首次读触发惰性播种
 
-    assert meta == {"operator": ["张三", "李四"], "task_name": ["桌面前移", "双臂搬运"]}  # 包内默认
+    assert store.path == tmp_path / "config" / "capture.yml"
+    assert meta == {"operator": ["张三", "李四"], "task_name": ["桌面前移", "双臂搬运"]}  # 包内示例
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o644
 
 

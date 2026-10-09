@@ -3,8 +3,8 @@
 ## 摘要
 
 采集元信息（采集人员 / 采集任务等）在 `capture.yml` 中维护为**可拓展的「分类 →
-选项数组」**（包内默认只读；可写副本位于 `MOTRIX_CONFIG_DIR` 外界目录或**状态目录**
-（XDG `XDG_STATE_HOME`，不是采集数据目录）），由
+选项数组」**（包内示例只读，首次访问**播种**为可写副本 `<根>/config/capture.yml`，
+`<根> = $MOTRIX_EDGE_DIR` 或 `<cwd>/motrix-edge/`；不是采集数据目录），由
 管理入口有两条、写的是同一份数据：CLI 命令族 `capture meta`（list / add / edit / delete /
 delete-key）与 HTTP `/v1/captures/meta`（GET 读列表，POST / PATCH / DELETE 增改删）。前端（web
 console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类动态渲染，选项的增 / 改 / 删
@@ -13,8 +13,7 @@ console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类�
 
 ## 目标与原则
 
--   **单一事实来源**：元信息选项存于 `capture.yml`（`meta` 段；包内默认，外界目录 /
-    状态目录可写副本），CLI / HTTP 统一经
+-   **单一事实来源**：元信息选项存于 `capture.yml`（`meta` 段；包内示例，可写副本 `<根>/config/capture.yml`），CLI / HTTP 统一经
     `CaptureMetaStore` 读写（写回保留文件其它顶层键），无内存态副本。
 -   **可拓展**：任意分类（key）→ 选项数组；`capture meta add <新key> <值>` 自动创建新分类，
     无需改代码 / 改 schema。
@@ -101,8 +100,9 @@ capture meta delete-key operator
 
 ## 分发与状态可用性
 
--   `CaptureMetaStore`：`utils/capture_meta.py`；缺省可写路径（外界目录 `MOTRIX_CONFIG_DIR` /
-    状态目录），包内默认在**首次读 / 写时惰性播种**；可注入临时路径（测试）。
+-   `CaptureMetaStore`：`utils/capture_meta.py`；缺省路径 = `<根>/config/capture.yml`
+    （`<根> = $MOTRIX_EDGE_DIR` 或 `<cwd>/motrix-edge`），包内示例在**首次读 / 写时惰性播种**；
+    可注入临时路径（测试）。
 -   **进程内单实例**：`EdgeNode` 持有一份，并注入给会话（`get_session(capture_meta_store=…)`）
     与 `CaptureService`（`capture_meta_store or node.capture_meta_store`，最后才自建）——
     全进程**一份数据、一把锁**（路径规则仍由 `CaptureMetaStore` 缺省逻辑统一决定）。

@@ -1,3 +1,6 @@
+# ⚠️ 本文件是**示例配置**（随包分发、只读）：首次访问会把本示例**播种**为可写副本，之后读写它——
+#   可写副本 = <根>/config/capture.yml，<根> = $MOTRIX_EDGE_DIR（未设 → <cwd>/motrix-edge/）。
+#   之后的增删改（capture meta 命令）落在那份副本上，不再回写本示例。
 # 采集元信息选项（capture meta 命令维护；可拓展任意分类 → 选项数组）。
 # 结构：meta.<分类> = [选项, ...]；示例分类 operator（采集人员）/ task_name（采集任务）。
 # 管理命令：capture meta list / add <key> <value> / edit <key> <old> <new>

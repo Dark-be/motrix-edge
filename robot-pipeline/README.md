@@ -23,7 +23,7 @@ scripts/
   can_muti_activate.sh    # USB 物理口 → CAN 名绑定（用法见「CAN 总线配置」）
 src/                      # robot-pipeline 包（src 布局，包名 config/env/robot/server/...）
   config/                 # robot server 配置 + 加载逻辑
-    __init__.py           # load_config / get_config_dir（MOTRIX_CONFIG_DIR 优先，包内默认兜底）
+    __init__.py           # load_config / get_config_dir（``<根>/config`` 播种副本 → 包内示例兜底）
     *.yml                 # test_robot / dual_piper / dual_alicia_piper / single_piper
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
@@ -106,8 +106,13 @@ host/port）、`robot`（name / type / step_rad / init_qpos / `ports` / `cameras
 -   `dual_alicia_piper.yml` —— `robot.type: dual_alicia_piper_robot`
 -   `single_piper.yml` —— `robot.type: single_piper_robot`
 
-配置加载分层（`src/config/__init__.py`，与 motrix_edge 同机制）：环境变量
-`MOTRIX_CONFIG_DIR` 指向的外界配置目录优先，否则读包内默认 `*.yml`（只读兜底）。
+配置加载（`src/config/__init__.py`，与 motrix_edge 同机制）：**包内 `src/config/*.yml` 只是示例**
+（随包分发、只读、零现场值）。实际配置在**一个根目录**下——`<根> = $MOTRIX_ROBOT_PIPELINE_DIR`，
+未设时回落 `<cwd>/motrix-robot-pipeline/`（配置与日志同一个根）：
+
+1. `<根>/config/<机型>.yml`：整份机型配置（首次访问把包内示例**播种**过去，之后以它为准）；
+2. `<根>/config/robot/<machine>.yml`：机器档案，只写差异，深合并到机型 yml 上（见下节）；
+3. `<根>/config/gravity/*.json`：重力参数标定产物（`scripts/fit_gravity.py --install` 写入）。
 
 `robot.name` 是**进程展示名**（可选，覆盖机器人类常量 `NAME`），也是 `/v1/discover` 上报给 Edge
 的名字（控制台 / 状态接口显示的就是它）；不写则用机型默认名 `NAME`。同型号多台机器按机器命名

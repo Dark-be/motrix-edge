@@ -32,18 +32,18 @@ CLI / 控制面 ──CommandBus──▶ EdgeNode（node 生命周期状态机�
 
 `motrix_edge` 包内主要模块：
 
-| 模块 / 子包 | 职责                                                                                                                                                |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `node.py`   | `EdgeNode` 生命周期状态机、命令分发、周期任务                                                                                                       |
-| `adapter/`  | RobotAdapter HAL：`HttpShmAdapter` 共享基类（HTTP 指令下行 + 共享内存观测上行）+ `DualPiperAdapter` / `TestRobotAdapter`，以及 `/v1` / 共享内存契约 |
-| `session/`  | 任务会话：`CaptureSession`（数采）/ `InferSession`（推理）；文件会话：`UploadSession`（本地 episode 扫描 / 选择 / 打包）                            |
-| `policy/`   | 推理策略客户端（openpi 等）；`InferSession` 内经 ws 请求推理节点                                                                                    |
-| `server/`   | HTTP 控制面（`/v1/*`）+ WebRTC 观测推流                                                                                                             |
-| `frame/`    | `FrameManager` 观测帧缓冲（preview / WebRTC 消费）                                                                                                  |
-| `identity/` | Edge 设备身份声明与请求元数据                                                                                                                       |
-| `lease/`    | Edge 级租约机制（`LeaseManager`）                                                                                                                   |
-| `utils/`    | 命令总线（CommandBus）/ 采集元信息选项（`capture_meta`）/ data handler 等工具                                                                       |
-| `config/`   | 配置加载：`MOTRIX_CONFIG_DIR` 外界目录覆盖 + 包内默认 `edge.yml` / `capture.yml`（package data，只读兜底）                                          |
+| 模块 / 子包 | 职责                                                                                                                                                      |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node.py`   | `EdgeNode` 生命周期状态机、命令分发、周期任务                                                                                                             |
+| `adapter/`  | RobotAdapter HAL：`HttpShmAdapter` 共享基类（HTTP 指令下行 + 共享内存观测上行）+ `DualPiperAdapter` / `TestRobotAdapter`，以及 `/v1` / 共享内存契约       |
+| `session/`  | 任务会话：`CaptureSession`（数采）/ `InferSession`（推理）；文件会话：`UploadSession`（本地 episode 扫描 / 选择 / 打包）                                  |
+| `policy/`   | 推理策略客户端（openpi 等）；`InferSession` 内经 ws 请求推理节点                                                                                          |
+| `server/`   | HTTP 控制面（`/v1/*`）+ WebRTC 观测推流                                                                                                                   |
+| `frame/`    | `FrameManager` 观测帧缓冲（preview / WebRTC 消费）                                                                                                        |
+| `identity/` | Edge 设备身份声明与请求元数据                                                                                                                             |
+| `lease/`    | Edge 级租约机制（`LeaseManager`）                                                                                                                         |
+| `utils/`    | 命令总线（CommandBus）/ 采集元信息选项（`capture_meta`）/ data handler 等工具                                                                             |
+| `config/`   | 配置与日志路径（一个根目录：配置 `<根>/config` + 日志 `<根>/logs`；`<根>` = `MOTRIX_EDGE_DIR` 或 `<cwd>/motrix-edge`；包内 yml 是**示例**，首次访问播种） |
 
 > adapter 经 Python **entry point**（`motrix_edge.adapters` 组）注册接入，当前内置
 > `test_robot`（虚拟，离线联调）与 `dual_piper`（双臂 Piper）；外部 SDK / 包亦可按同一
@@ -76,7 +76,7 @@ edge 经 `RobotAdapter` 下发指令（`execute` / `rollout` / `safe_stop` / `re
 ```text
 src/motrix_edge/     # edge 包（任务运行时）：node / adapter / session / policy /
                      #   server / frame / identity / lease / utils / config
-src/motrix_edge/config/edge.yml   # 边缘节点配置（package data；MOTRIX_CONFIG_DIR 同名文件覆盖）
+src/motrix_edge/config/edge.yml   # 边缘节点配置**示例**（package data；首次访问播种到 <根>/config/）
 robot-pipeline/      # 机械臂底层承载（独立 uv 子项目）：src 下 config / env /
                      #   robot / server / collector / utils，启动脚本在 scripts/
 wiki/                # 设计与计划文档

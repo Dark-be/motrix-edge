@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""CaptureMetaStore —— 采集元信息选项存储（config/capture.yml）。
+"""CaptureMetaStore —— 采集元信息选项存储（capture.yml）。
 
 元信息选项为**可拓展**的「分类 → 选项数组」结构（如 ``operator``=采集人员、
 ``task_name``=采集任务），由 ``capture meta`` 命令族（list / add / edit / delete /
@@ -50,13 +50,14 @@ class CaptureMetaStore:
 
     线程安全（RLock）：CLI / HTTP 命令可能并发管理选项，**读与写共用同一把锁**（读侧
     不会再读到半截文件）；写盘为**原子替换**（临时文件 + ``os.replace``）。选项按添加
-    顺序保持；写回时保留文件其它顶层键。``path`` 缺省用**可写配置路径**（外部配置目录
-    ``MOTRIX_CONFIG_DIR`` 优先，否则状态目录；首次缺省访问时把包内默认播种到该位置），
-    测试可注入临时路径。``meta`` 缺失 / 非映射 / 选项非列表 → 视为空（非法键忽略）。
+    顺序保持；写回时保留文件其它顶层键。``path`` 缺省用**实际配置路径**
+    （``<根>/config/capture.yml``，``<根>`` = ``$MOTRIX_EDGE_DIR`` 或 ``<cwd>/motrix-edge``；
+    首次缺省访问时把包内示例播种到该位置），测试可注入临时路径。``meta`` 缺失 / 非映射 /
+    选项非列表 → 视为空（非法键忽略）。
     """
 
     def __init__(self, path: str | Path | None = None):
-        # 可写配置路径：外部配置目录（MOTRIX_CONFIG_DIR）优先，否则状态目录（包内默认只读）
+        # 缺省：实际配置路径 <根>/config/capture.yml（找不到时由 _seed_default_if_missing 播种包内示例）
         if path is None:
             self.path = writable_config_path("capture.yml")
             self._seed_on_access = True  # 惰性播种（构造不做 IO，见 _seed_default_if_missing）
@@ -66,21 +67,18 @@ class CaptureMetaStore:
         self._lock = threading.RLock()
 
     def _seed_default_if_missing(self) -> None:
-        """把包内默认 ``capture.yml``（只读）播种到可写位置——**惰性**（首次读 / 写时）。
+        """把包内示例 ``capture.yml`` 播种到实际配置路径——**惰性**（首次读 / 写时）。
 
-        构造期不做 IO：配置目录 / 状态目录不可写时（只读挂载、权限受限）不能把
-        ``EdgeNode`` / ``CaptureService`` 的构造弄挂。播种失败只记 WARNING（后续读得到
-        空集合，写会以明确错误拒绝），不影响节点启动。
+        构造期不做 IO：配置目录不可写时（只读挂载、权限受限）不能把 ``EdgeNode`` /
+        ``CaptureService`` 的构造弄挂。播种失败只记 WARNING（后续读得到空集合，写会以明确错误拒绝），
+        不影响节点启动。
         """
         if not getattr(self, "_seed_on_access", False) or self.path.exists():
             return
-        from motrix_edge.config import load_config
+        from motrix_edge.config import seed_config
 
-        default = load_config("capture.yml")
-        if not default:
-            return
         try:
-            self._write_document(default)
+            seed_config("capture.yml")
         except OSError as exc:  # 只读 / 无权限：降级为「无默认选项」，不阻断启动
             debug_print("capture_meta", f"seed default capture.yml failed: {exc}", "WARNING")
 

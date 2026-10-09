@@ -76,7 +76,7 @@ class CaptureService:
         self._node = node  # 正在运行的 EdgeNode（由 node 程序主线程持有）
         self._bus = bus  # 共享命令总线：web / CLI 线程 push，EdgeNode 主循环 poll
         self._leases = leases or LeaseManager()  # Edge 级租约（独立于任务，受控操作校验用）
-        # 采集元信息选项存储（config/capture.yml）：**进程内单实例**——优先用注入的，
+        # 采集元信息选项存储（capture.yml）：**进程内单实例**——优先用注入的，
         # 其次复用节点持有的那一份（与 CLI 命令 / 会话共用同一数据与同一把锁），最后才自建；
         # 测试可注入临时 store。
         self._meta_store = capture_meta_store or getattr(node, "capture_meta_store", None) or CaptureMetaStore()
@@ -183,7 +183,7 @@ class CaptureService:
         return {"status": "accepted", "meta": result.data.get("meta")}
 
     def meta(self) -> dict:
-        """采集元信息选项（config/capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
+        """采集元信息选项（capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
         return {"meta": self._meta_store.list_meta()}
 
     # -- 元信息选项管理（配置数据，与 CLI ``capture meta`` 命令族同一实现）----------
