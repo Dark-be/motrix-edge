@@ -308,6 +308,7 @@ robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 | ---- | -------------------- | --------------------------------- | ------------------------------------------------------------------------------- |
 | POST | `/v1/discover`       | —                                 | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
 | GET  | `/v1/health`         | —                                 | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
+| GET  | `/v1/cameras`        | —                                 | 相机静态元数据（尺寸 / **彩色内参** / 深度比例；Edge 侧缓存后供 `/v1/depth`）   |
 | POST | `/v1/reset`          | —                                 | 复位到 home（非阻塞）                                                           |
 | POST | `/v1/execute`        | `{action: [...], layout?, arms?}` | 直接下发 raw 动作（`layout="pose"` → 机器人侧解算）                             |
 | POST | `/v1/rollout`        | `{action: [...], layout?, arms?}` | 推理动作（**遥操作中 → 409**：推理让位；IK 失败 → 422）                         |
