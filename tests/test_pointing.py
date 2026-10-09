@@ -85,9 +85,17 @@ def test_pointing_rpy_rejects_nonzero_roll_and_zero_direction() -> None:
 
 def test_ego_axes_mapping_and_delta() -> None:
     default = EgoAxes()
-    assert default.as_dict() == {"forward": "+z", "left": "+x", "up": "+y"}
+    assert default.as_dict() == {"forward": "+z", "left": "+y", "up": "-x"}
     assert np.allclose(default.delta(forward=0.1), [0.0, 0.0, 0.1])
-    assert np.allclose(default.delta(left=0.2, up=-0.3), [0.2, -0.3, 0.0])
+    # 「向左 0.2、向上 0.3」= 法兰 (+0.2·y) + (+0.3·(-x)) = (-0.3, 0.2, 0)
+    # （真机实测：法兰 +x 向下 ⇒ up 取 -x；这是**装配约定**，换机型要重验）
+    assert np.allclose(default.delta(left=0.2, up=0.3), [-0.3, 0.2, 0.0])
+    # basis()：列 = 前 / 左 / 上 在法兰系下的矢量——增量换基（含旋转）都走它
+    basis = default.basis()
+    assert np.allclose(basis @ np.array([1.0, 0.0, 0.0]), [0.0, 0.0, 1.0])  # 前 = 法兰 +z
+    assert np.allclose(basis @ np.array([0.0, 1.0, 0.0]), [0.0, 1.0, 0.0])  # 左 = 法兰 +y
+    assert np.allclose(basis @ np.array([0.0, 0.0, 1.0]), [-1.0, 0.0, 0.0])  # 上 = 法兰 -x
+    assert np.isclose(float(np.linalg.det(basis)), 1.0)  # 右手系（换基矩阵是旋转）
 
     custom = EgoAxes.from_mapping({"forward": "+y", "left": "+x", "up": "+z"})
     assert np.allclose(custom.delta(forward=0.1), [0.0, 0.1, 0.0])  # 现场改成 y 轴向前也支持

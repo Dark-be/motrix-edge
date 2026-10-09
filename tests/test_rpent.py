@@ -34,6 +34,7 @@ from motrix_edge.adapter.base import (
     RobotAdapter,
     RobotCapabilities,
 )
+from motrix_edge.geometry import IDENTITY, EgoAxes, FrameSet
 from motrix_edge.lease import BEIJING_TZ, Lease, LeaseManager, LeaseState
 from motrix_edge.node import NodeState
 from motrix_edge.server import create_app
@@ -104,6 +105,10 @@ class FakeAdapter(RobotAdapter):
             self.pose_target = np.asarray(default_pose(), dtype=np.float32).copy()
         super().__init__(name="Test Robot")
         self.images = ["cam_head"]
+        # 统一坐标系外参（与 ``HttpShmAdapter.frame_set`` 同一契约：是**方法**，不是属性——
+        # 旧假件写成属性，于是 ``getattr(adapter, "frame_set")`` 拿不到 FrameSet 的 bug 藏住了）。
+        # 测试里用 ``_frame_set`` 注入；未标定 → ``None``。
+        self._frame_set: FrameSet | None = None
         self.rollout_calls: list[tuple[np.ndarray, str]] = []
         self.reset_calls = 0
         self.refuse = False
@@ -119,6 +124,15 @@ class FakeAdapter(RobotAdapter):
         self.apply_delta = True
         # ``target_shift``：模拟「同拍有第三方也改了目标」（遥操作接管 / CLI 直控）——用于 base_changed 用例
         self.target_shift: np.ndarray | None = None
+
+    def frame_set(self) -> FrameSet | None:
+        """与真实适配器（``HttpShmAdapter``）**同形：方法是方法，不是属性**。
+
+        旧假件把 ``frame_set`` 写成属性，于是 ``getattr(adapter, "frame_set")`` 拿到的是
+        ``FrameSet`` 而不是绑定方法——测试全绿，生产里的 ``look_at`` 却炸在
+        ``'function' object has no attribute 'world_from_base'``。注入用 ``_frame_set``。
+        """
+        return self._frame_set
 
     def observation_frame(self) -> dict:
         """当前机器人状态 → 观测帧（含 ``observations/pose_target``，与实测位姿同一拍）。"""
@@ -531,17 +545,18 @@ def test_move_delta_sends_delta_and_reports_robot_target(env):
     result = service.call("env.move_delta", kwargs={"delta_xyz": [0.01, 0.0, 0.0]})
 
     # 下发：一条 ``pose_delta``（每臂 6 维增量），**不碰夹爪**（旧实现会顺手把实测夹爪当绝对目标重发）
+    # 分量语义 = x 前 / y 左 / z 上：夹具姿态 rpy=0（= 法兰系与基座系重合）时“前进”就是法兰 +z。
     assert len(adapter.rollout_calls) == 1
     values, layout = adapter.rollout_calls[-1]
     assert layout == "pose_delta" and values.shape == (12,)
-    assert values == pytest.approx([0.01, 0.0, 0.0, 0.0, 0.0, 0.0] * 2)
+    assert values == pytest.approx([0.0, 0.0, 0.01, 0.0, 0.0, 0.0] * 2)
 
     # 回执：机器人侧的目标位姿（RPent 布局：每臂「位姿 6 + 夹爪 1」）
     target = np.asarray(result["target"])
     assert target.shape == (14,)
     assert result["action_space"] == "pose_delta" and result["target_source"] == "pose_target"
-    assert target[:3] == pytest.approx([0.11, 0.2, 0.3])
-    assert target[7:10] == pytest.approx([0.41, 0.5, 0.6])  # 未指定 arm → 两臂同加
+    assert target[:3] == pytest.approx([0.1, 0.2, 0.31])  # 左臂：前进 1 cm = 基座 +z（夹具 rpy=0）
+    assert target[7:10] == pytest.approx([0.4, 0.5, 0.61])  # 未指定 arm → 两臂同加
     assert target[6] == pytest.approx(0.25) and target[13] == pytest.approx(0.75)  # 夹爪保持
 
 
@@ -1415,7 +1430,7 @@ def test_move_delta_flags_base_changed_when_target_moves_elsewhere():
     target = np.asarray(result["target"])
     assert target[1] == pytest.approx(0.25)  # 左臂 y：0.2 + 第三方 0.05
     assert target[8] == pytest.approx(0.55)  # 右臂 y：0.5 + 第三方 0.05
-    assert target[7] == pytest.approx(0.41)  # 右臂 x：0.4 + 自己的 0.01
+    assert target[9] == pytest.approx(0.61)  # 右臂 z：0.6 + 自己的 1 cm（前进 = 基座 +z）
 
 
 def test_move_delta_reports_timeout_when_never_reached():
@@ -1543,3 +1558,352 @@ def test_recover_falls_back_to_adapter_reset_without_home():
     result = service.call("env.recover_joint_posture")
     assert adapter.reset_calls == 1 and result["fallback"] == "adapter.reset()"
     assert result["gripper_preserved"] is False
+
+
+# ---------------------------------------------------------------------------
+# 感知与末端系动作（Phase D：get_object_position / look_at / space="ego"）
+# ---------------------------------------------------------------------------
+
+
+class StubDepth:
+    """深度服务假件：直接回一条 ``/v1/depth`` 形状的回执（记录调用参数）。"""
+
+    def __init__(self, body: dict | None = None):
+        self.body = dict(body or {})
+        self.calls: list[tuple] = []
+
+    def depth(self, camera, u=0.5, v=0.5, lease_id=None):
+        self.calls.append((camera, u, v))
+        return dict(self.body)
+
+
+def depth_body(**overrides) -> dict:
+    """一条「有坐标」的深度回执（按需覆盖成各失败路径）。"""
+    body = {
+        "camera": "cam_head",
+        "u": 0.5,
+        "v": 0.5,
+        "u_px": 320,
+        "v_px": 240,
+        "depth_m": 0.75,
+        "valid": True,
+        "xyz_camera": [0.01, 0.02, 0.75],
+        "xyz_world": [0.11, 0.32, 0.05],
+        "frame": "world",
+        "world": "left_base",
+    }
+    body.update(overrides)
+    return body
+
+
+def service_with_depth(depth, *, cfg: dict | None = None):
+    """装一个带深度服务的 RPent 服务（租约已签发）→ ``(service, adapter)``。"""
+    adapter = FakeAdapter()
+    node = FakeNode(adapter)
+    leases = LeaseManager()
+    install_lease(leases)
+    service = RpentService(node, StubCommands(), leases=leases, depth=depth, base_cfg=cfg or BASE_CFG)
+    return service, adapter
+
+
+def test_get_object_position_returns_world_coordinates() -> None:
+    """归一化像素 → ``world`` 坐标：与 ``/v1/depth`` 同一份实现，帧名 / 别名一起给。"""
+    depth = StubDepth(depth_body())
+    service, _adapter = service_with_depth(depth)
+    reply = service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 0.5, "y": 0.4})
+    assert reply["ok"] is True and reply["available"] is True
+    assert reply["xyz_world"] == [0.11, 0.32, 0.05]
+    assert reply["xyz_camera"] == [0.01, 0.02, 0.75]
+    assert (reply["frame"], reply["world"]) == ("world", "left_base")
+    assert reply["kind"] is None and reply["reason"] is None
+    assert depth.calls == [("cam_head", 0.5, 0.4)]  # 归一化坐标原样透传
+
+
+@pytest.mark.parametrize(
+    "overrides,kind",
+    [
+        ({"valid": False, "depth_m": None, "xyz_camera": None, "xyz_world": None}, "no_depth"),
+        ({"xyz_camera": None, "xyz_world": None}, "uncalibrated"),
+        ({"xyz_world": None}, "no_pose"),
+    ],
+)
+def test_get_object_position_separates_failure_kinds(overrides: dict, kind: str) -> None:
+    """三种「没答案」必须分得开：没有深度 / 未标定 / 腕相机缺同拍位姿（agent 处置方式不同）。"""
+    service, _adapter = service_with_depth(StubDepth(depth_body(**overrides)))
+    reply = service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 0.5, "y": 0.5})
+    assert reply["ok"] is True  # 调用本身成功，只是这个点没答案（不逼 agent 走重试分支）
+    assert reply["available"] is False and reply["kind"] == kind and reply["reason"]
+
+
+def test_get_object_position_rejects_pixel_coordinates() -> None:
+    """只收归一化坐标：给了像素值（>1）要明确报错，不能当成归一化截断。"""
+    service, _adapter = service_with_depth(StubDepth(depth_body()))
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 320, "y": 240})
+    assert excinfo.value.kind == "argument"
+
+
+def test_get_object_position_without_depth_service() -> None:
+    """没注入深度服务 → ``unavailable``（而不是 500）。"""
+    adapter = FakeAdapter()
+    leases = LeaseManager()
+    install_lease(leases)
+    service = RpentService(FakeNode(adapter), StubCommands(), leases=leases, base_cfg=BASE_CFG)
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 0.5, "y": 0.5})
+    assert excinfo.value.kind == "unavailable"
+
+
+def test_look_at_points_tool_axis_without_roll(env) -> None:
+    """``look_at``：位置不动、工具轴（``+z``）指向目标、``roll ≡ 0``。"""
+    service, _node, adapter, *_ = env
+    pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
+    adapter.pose_target = rpent_pose_target(pose)
+    adapter.pose = np.asarray(pose, dtype=np.float32)
+    reply = service.call("env.look_at", kwargs={"arm": "left", "target": [0.1, 1.2, 0.3], "settle": False})
+    rpy = np.asarray(reply["target"], dtype=np.float64).reshape(-1)[3:6]
+    assert rpy[0] == 0.0, "look_at 必须是无 roll 的规范解"
+    assert np.allclose(rpy_to_matrix(rpy) @ np.array([0.0, 0.0, 1.0]), [0.0, 1.0, 0.0], atol=1e-6)
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose", "look_at 下发的是**绝对** pose 目标"
+    assert np.allclose(pushed[0:3], [0.1, 0.2, 0.3]), "位置不能被 look_at 改动"
+    assert reply["turned_deg"][0] > 60.0 and reply["large_rotation"] is True
+    assert reply["base_source"] == "pose_target" and reply["pointing_axis"] == "+z"
+
+
+def test_look_at_uses_measured_pose_when_asked(env) -> None:
+    """``keep="measured"``：姿态绕**实测**所在的位置转（回执如实标注 ``base_source``）。"""
+    service, _node, adapter, *_ = env
+    adapter.pose_target = rpent_pose_target([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0])
+    adapter.pose = np.asarray([0.1, 0.2, 0.35, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0], dtype=np.float32)
+    adapter.track = False  # 冻结实测位姿（否则假件每拍朝目标挪一步，断言会漂）
+    reply = service.call(
+        "env.look_at", kwargs={"arm": "left", "target": [0.1, 1.2, 0.35], "keep": "measured", "settle": False}
+    )
+    assert reply["base_source"] == "pose"
+    pushed, _space = adapter.rollout_calls[-1]
+    assert pushed[2] == pytest.approx(0.35)  # 位置取实测（0.35 而不是目标的 0.30）
+
+
+def test_look_at_rejects_bad_target_and_keep(env) -> None:
+    service, *_ = env
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.look_at", kwargs={"target": [0.1, 0.2], "settle": False})
+    assert excinfo.value.kind == "argument"
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.look_at", kwargs={"target": [0.1, 0.2, 0.3], "keep": "target_pose", "settle": False})
+    assert excinfo.value.kind == "argument"
+
+
+def test_look_at_reports_unsupported_when_pointing_axis_cannot_be_roll_free() -> None:
+    """把指向轴配成 ``y``：``roll = 0`` 时它恒水平 → 报 ``unsupported``，不悄悄给歪头解。"""
+    cfg = {"server": {"rpent": {"ego_axes": {"forward": "+y", "left": "+x", "up": "+z"}}}}
+    service, adapter = service_with_depth(StubDepth(depth_body()), cfg=cfg)
+    adapter.pose_target = rpent_pose_target([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0])
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.look_at", kwargs={"arm": "left", "target": [0.0, 0.0, 1.0], "settle": False})
+    assert excinfo.value.kind == "unsupported"
+
+
+def anchored_frames(offset=(0.0, -0.6416, 0.0)) -> FrameSet:
+    """产物形状的帧集合：左臂恒等、右臂锚在 ``offset``（这台实机约 642 mm）。"""
+    right = np.eye(4)
+    right[:3, 3] = np.asarray(offset, dtype=np.float64)
+    return FrameSet(arms={"left": IDENTITY, "right": right}, cameras={})
+
+
+def unit(vector) -> np.ndarray:
+    values = np.asarray(vector, dtype=np.float64)
+    return values / np.linalg.norm(values)
+
+
+def test_look_at_converts_world_point_into_the_arm_own_base(env) -> None:
+    """右臂：``target`` 是 ``world`` 点，而末端 xyz 在**右臂基座系** → 必须先换算再算方向。
+
+    不换算就会差一个基座间距（这台 642 mm），指向偏十几到几十度——本用例同时守住「偏了要看得见」。
+    """
+    service, _node, adapter, *_ = env
+    offset = (-0.0005, -0.6416, 0.0)
+    adapter._frame_set = anchored_frames(offset)
+    pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
+    # 契约：``pose_target`` 与 ``observations/pose`` 同一布局（每臂 6 维、**不含夹爪**）——
+    # 若用 ``rpent_pose_target``（每臂 7 维含夹爪）会把右臂段整体错位一格，本用例就白测了。
+    adapter.pose_target = np.asarray(pose, dtype=np.float32)
+    adapter.pose = np.asarray(pose, dtype=np.float32)  # 冻结实测（右臂段 = 同一值）
+    target_world = np.array([0.2, 1.0, 0.35])
+
+    reply = service.call("env.look_at", kwargs={"arm": "right", "target": target_world.tolist(), "settle": False})
+
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose"
+    axis = rpy_to_matrix(np.asarray(pushed[9:12], dtype=np.float64)) @ np.array([0.0, 0.0, 1.0])
+    expected = unit(target_world - np.asarray(offset) - np.asarray(pose[6:9]))  # 换算到右基座系后减末端
+    assert np.allclose(axis, expected, atol=1e-5), "工具轴应指向「换算到右臂基座系」后的目标"
+    naive = unit(target_world - np.asarray(pose[6:9]))
+    off = np.degrees(np.arccos(np.clip(axis @ naive, -1.0, 1.0)))
+    assert off > 10.0, "这一个用例就是防「不换算也自圆其说」：两者必须真的差得多"
+    assert np.allclose(pushed[6:9], pose[6:9]), "位置不能被 look_at 改动"
+    assert reply["input_frame"] == "world"
+    assert np.allclose(reply["target_base"][0], target_world - np.asarray(offset))
+
+
+def test_look_at_needs_extrinsics_for_non_world_arm(env) -> None:
+    """未标定：左臂照旧（``world`` 的定义就是它的基座），其余臂报 ``uncalibrated``，不猜。"""
+    service, _node, adapter, *_ = env
+    adapter._frame_set = None
+    pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
+    adapter.pose_target = np.asarray(pose, dtype=np.float32)
+    adapter.pose = np.asarray(pose, dtype=np.float32)
+    left = service.call("env.look_at", kwargs={"arm": "left", "target": [0.1, 1.2, 0.3], "settle": False})
+    assert left["ok"] is True and np.allclose(left["target_base"][0], [0.1, 1.2, 0.3])  # 恒等：原样
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.look_at", kwargs={"arm": "right", "target": [0.1, 1.2, 0.3], "settle": False})
+    assert excinfo.value.kind == "uncalibrated"
+    assert len(adapter.rollout_calls) == 1, "报错的那次不下发任何指令（只有左臂那次成功下发）"
+
+
+def test_move_delta_uses_semantic_axes(env) -> None:
+    """``move_delta`` 的分量语义：**x = 前 / y = 左 / z = 上**（0 位时与基座系一致）。
+
+    姿态取 ``rpy = (0, 90°, 0)``（竖臂的 0 位，真机实测 85°，这里取到 90° 便于读）：此时
+    ``x = 前`` 应变成基座 ``+x``、``z = 上`` 应变成基座 ``+z``、``y = 左`` = 基座 ``+y``。
+    旧行为（直接拿**法兰** xyz）在同一个姿态下 ``x`` 是往**下**走的——本用例就是钉这件事。
+    """
+    service, _node, adapter, *_ = env
+    pose = [0.1, 0.2, 0.3, 0.0, np.pi / 2, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
+    adapter.pose_target = np.asarray(pose, dtype=np.float32)
+
+    forward = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0]})
+    assert forward["delta_frame"] == "tool" and forward["delta_axes"] == ["forward", "left", "up"]
+    assert np.allclose(forward["converted_delta_base"][0], [0.05, 0.0, 0.0], atol=1e-6), "x = 前"
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose_delta", "语义增量最终仍走 pose_delta（基准归机器人侧）"
+    assert np.allclose(pushed[0:3], [0.05, 0.0, 0.0], atol=1e-6)
+    assert np.allclose(pushed[3:6], [0.0, 0.0, 0.0])  # 平移不碰姿态
+
+    up = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05]})
+    assert np.allclose(up["converted_delta_base"][0], [0.0, 0.0, 0.05], atol=1e-6), "z = 上"
+
+    left = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0]})
+    assert np.allclose(left["converted_delta_base"][0], [0.0, 0.05, 0.0], atol=1e-6), "y = 左"
+
+
+def test_rotate_delta_chart_increment_is_exact(env) -> None:
+    """绕语义轴转：换基后的旋转必须与矩阵复合**精确一致**（不是一阶近似）。
+
+    机器人把 rpy 逐分量相加，而我们算的是矩阵复合——共轭写法（``matrix_to_rpy(R·ΔR·Rᵀ)``）相加后
+    在目标 ``pitch`` 不为 0 时会偏（``pitch=45°`` 绕轴转 20° 偏 10.7°），故下发的是
+    ``wrap(rpy(R·ΔR) − rpy)`` 这个 chart 差。本用例同时钉住“绕 z = 上 = 绕基座 z 转”。"""
+    service, _node, adapter, *_ = env
+    rpy = np.array([0.0, np.radians(45.0), 0.0])
+    adapter.pose_target = np.asarray([0.1, 0.2, 0.3, *rpy, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0], dtype=np.float32)
+    delta_semantic = [0.0, 0.0, np.radians(20.0)]  # 绕“上”转 20°
+
+    reply = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic})
+    basis = EgoAxes().basis()  # 语义系 → 法兰系
+    exact = rpy_to_matrix(rpy) @ (basis @ rpy_to_matrix(delta_semantic) @ basis.T)
+    chart = np.asarray(reply["converted_delta_base"][0], dtype=np.float64)
+    applied = rpy_to_matrix((rpy + chart + np.pi) % (2 * np.pi) - np.pi)  # 机器人侧：逐分量相加
+    off = np.degrees(np.arccos(np.clip((np.trace(exact.T @ applied) - 1) / 2, -1, 1)))
+    assert off < 1e-6, f"chart 增量相加后应与矩阵复合一致，实测偏 {off:.2f}°"
+    # 转轴 = 语义“上”轴（在基座系里的方向）
+    axis_expected = rpy_to_matrix(rpy) @ (basis @ np.array([0.0, 0.0, 1.0]))
+    angle = np.degrees(np.arccos(np.clip((np.trace(exact.T @ rpy_to_matrix(rpy)) - 1) / 2, -1, 1)))
+    assert angle == pytest.approx(20.0, abs=1e-4)
+    assert np.allclose(axis_expected, rpy_to_matrix(rpy) @ (basis @ np.array([0.0, 0.0, 1.0])), atol=1e-12)
+    pushed, _space = adapter.rollout_calls[-1]
+    assert np.allclose(pushed[0:3], [0.0, 0.0, 0.0])  # 旋转不碰位置
+    assert np.allclose(pushed[3:6], chart, atol=1e-6)
+
+
+def test_rotate_delta_identity_target_maps_semantic_axes(env) -> None:
+    """姿态为 0 时，语义轴直接落到法兰轴（up = 法兰 ``-x``、left = 法兰 ``+y``）。
+
+    所以“绕上转 0.1”= 绕法兰 ``-x`` 转 0.1 → chart 增量 ``(-0.1, 0, 0)``；这也是为什么
+    实机 0 位（法兰系 ≈ 基座系转 90°）时“绕上转”在基座系里就是绕 ``z`` 转。
+    """
+    service, _node, adapter, *_ = env
+    adapter.pose_target = rpent_pose_target(default_pose())
+    up = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1]})
+    assert np.allclose(up["converted_delta_base"][0], [-0.1, 0.0, 0.0], atol=1e-6)  # 上 = 法兰 -x
+    adapter.pose_target = rpent_pose_target(default_pose())  # 假机器人已把上一条增量叠进目标 → 复位
+    left = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0]})
+    assert np.allclose(left["converted_delta_base"][0], [0.0, 0.1, 0.0], atol=1e-6)  # 左 = 法兰 +y
+
+
+def test_delta_needs_target_pose_for_conversion(env) -> None:
+    """末端系增量必须知道当前姿态：机器人不发布目标位姿 → ``state`` 错，不猜。"""
+    service, _node, adapter, *_ = env
+    adapter.pose_target = None
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.move_delta", kwargs={"delta_xyz": [0.01, 0.0, 0.0]})
+    assert excinfo.value.kind == "state"
+
+
+def test_move_to_sends_absolute_pose_from_world_point(env) -> None:
+    """``move_to``：`target` 是 ``world`` 点 → 换算到该臂基座系后发**绝对** ``pose``。"""
+    service, _node, adapter, *_ = env
+    offset = (-0.0005, -0.6416, 0.0)
+    adapter._frame_set = anchored_frames(offset)
+    pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
+    adapter.pose_target = np.asarray(pose, dtype=np.float32)
+    adapter.pose = np.asarray(pose, dtype=np.float32)  # 冻结实测（否则假件每拍朝目标挪一步）
+    target_world = [0.2, 1.0, 0.35]
+
+    reply = service.call("env.move_to", kwargs={"arm": "right", "target": target_world})
+
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose", "move_to 下发绝对位姿（机器人侧 IK）"
+    assert np.allclose(pushed[6:9], np.asarray(target_world) - np.asarray(offset), atol=1e-6)
+    assert np.allclose(pushed[9:12], pose[9:12]), "不给 rpy → 保持当前目标姿态"
+    assert np.allclose(pushed[0:6], pose[0:6]), "未指定的臂不动"
+    assert reply["input_frame"] == "world" and reply["action_space"] == "pose"
+    assert np.allclose(reply["target_base"][0], np.asarray(target_world) - np.asarray(offset))
+
+
+def test_move_to_converts_world_rpy_into_the_arm_base(env) -> None:
+    """给了 ``rpy``（同样是 ``world`` 帧）→ 按 ``R_base = R_base_world · R_world`` 换算。"""
+    service, _node, adapter, *_ = env
+    adapter._frame_set = anchored_frames((0.0, -0.6416, 0.0))  # 旋转=I → 姿态换算也是恒等
+    adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
+    adapter.pose = np.asarray(default_pose(), dtype=np.float32)
+    rpy_world = [0.0, 0.0, 0.3]
+    service.call("env.move_to", kwargs={"arm": "right", "target": [0.2, 1.0, 0.35], "rpy": rpy_world})
+    pushed, _space = adapter.rollout_calls[-1]
+    assert np.allclose(pushed[9:12], rpy_world, atol=1e-6)
+
+
+def test_move_to_needs_extrinsics_for_non_world_arm(env) -> None:
+    """未标定：左臂照旧（``world`` 的定义就是它的基座），其余臂报 ``uncalibrated``。"""
+    service, _node, adapter, *_ = env
+    adapter._frame_set = None
+    adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
+    adapter.pose = np.asarray(default_pose(), dtype=np.float32)
+    left = service.call("env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35]})
+    assert np.allclose(np.asarray(left["target"])[0:3], [0.15, 0.25, 0.35], atol=1e-6)  # 恒等：原样
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.move_to", kwargs={"arm": "right", "target": [0.15, 0.25, 0.35]})
+    assert excinfo.value.kind == "uncalibrated"
+
+
+def test_move_to_rejects_bad_target(env) -> None:
+    service, *_ = env
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.move_to", kwargs={"target": [0.1, 0.2]})
+    assert excinfo.value.kind == "argument"
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.move_to", kwargs={"target": [0.1, 0.2, 0.3], "rpy": [0.0, 0.1]})
+    assert excinfo.value.kind == "argument"
+
+
+def test_env_meta_describes_delta_frame_and_look_at(client) -> None:
+    """自描述里带上末端系与 ``look_at`` / ``move_to`` 的约定（RPent 侧不要写死）。"""
+    body = client.post("/call", json={"method": "env.get_env_meta", "args": [], "kwargs": {}}).json()
+    assert body["ok"] is True
+    meta = body["result"]
+    assert meta["ego_axes"] == {"forward": "+z", "left": "+y", "up": "-x"}
+    assert meta["delta_frame"] == "tool"  # 增量只有一种参考系，没有 space 开关
+    assert meta["delta_axes"] == ["forward", "left", "up"]  # delta 分量语义 = x 前 / y 左 / z 上
+    assert meta["move_to"]["input_frame"] == "world"
+    assert meta["look_at"]["roll"] == 0.0 and meta["look_at"]["input_frame"] == "world"
+    assert meta["object_position"]["input"] == "normalized u / v"

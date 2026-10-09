@@ -42,11 +42,16 @@ from motrix_edge.geometry.transforms import matrix_to_rpy, rpy_to_matrix
 #: 合法的轴向写法：``"+x"`` / ``"-z"`` 之类（大小写不敏感）。
 AXIS_SPECS = tuple(f"{sign}{name}" for name in ("x", "y", "z") for sign in ("+", "-"))
 
-#: 缺省装配约定：工具伸出方向 = 法兰 ``+z``（``j6`` 的转轴就是它，夹爪 / 探针只能沿它伸出；
-#: DH 的 ``d6 = 0.091`` 也沿 ``z``），另外两根横轴取 ``x`` / ``y``。
+#: 缺省装配约定（**2026-10-09 dual piper 真机小步实测**）：
+#: - ``forward = "+z"``：夹爪 / 探针只能沿 ``j6`` 转轴（法兰 ``+z``）伸出，DH 的 ``d6 = 0.091``
+#:   也沿 ``z``——实测在这一姿态下 ``+z`` 就是**向前**（工具伸出方向）；
+#: - ``up = "-x"``：实测法兰 ``+x`` 是**向下**，所以“上”取它的反向；
+#: - ``left = "+y"``：右手系自洽（``forward × left = up`` ⟺ ``z × y = -x``）。
+#: 三根轴是**装配事实**，换机型 / 换支架后必须重验（下面“上机 1 分钟验证”），现场可用
+#: ``server.rpent.ego_axes`` 覆盖。
 DEFAULT_FORWARD = "+z"
-DEFAULT_LEFT = "+x"
-DEFAULT_UP = "+y"
+DEFAULT_LEFT = "+y"
+DEFAULT_UP = "-x"
 
 #: ``look_at`` 的 roll 约定：恒为 0（见 :func:`pointing_rpy`）。
 ROLL_FREE = 0.0
@@ -82,7 +87,7 @@ class EgoAxes:
 
     @classmethod
     def from_mapping(cls, raw: Mapping | None) -> EgoAxes:
-        """``{"forward": "+z", "left": "+x", "up": "+y"}`` → :class:`EgoAxes`（缺键取缺省）。"""
+        """``{"forward": "+z", "left": "+y", "up": "-x"}`` → :class:`EgoAxes`（缺键取缺省）。"""
         block = dict(raw or {})
         axes = cls(
             forward=str(block.get("forward", DEFAULT_FORWARD)),
@@ -100,12 +105,18 @@ class EgoAxes:
     def as_dict(self) -> dict[str, str]:
         return {"forward": self.forward, "left": self.left, "up": self.up}
 
+    def basis(self) -> np.ndarray:
+        """三个语义轴在**法兰系**下的列向量（``d_flange = basis @ d_semantic``）。
+
+        分量顺序 = ``(forward, left, up)`` = RPC 里的 ``delta_xyz`` / ``delta_rpy`` 的 x / y / z。
+        0 位（关节全 0）时它正好把“前 / 左 / 上”搬到基座系：dual piper 实测法兰 ``+z`` = 基座
+        ``+x``（前）、法兰 ``-x`` = 基座 ``+z``（上）、法兰 ``+y`` = 基座 ``+y``（左）。
+        """
+        return np.column_stack([axis_vector(self.forward), axis_vector(self.left), axis_vector(self.up)])
+
     def delta(self, *, forward: float = 0.0, left: float = 0.0, up: float = 0.0) -> np.ndarray:
-        """三个带符号分量 → **末端系**下的三矢量（米 / 弧度，取决于怎么用）。"""
-        vector = np.zeros(3, dtype=np.float64)
-        for spec, value in ((self.forward, forward), (self.left, left), (self.up, up)):
-            vector += float(value) * axis_vector(spec)
-        return vector
+        """三个带符号分量 → **法兰系**下的三矢量（米 / 弧度，取决于怎么用）。"""
+        return self.basis() @ np.array([float(forward), float(left), float(up)], dtype=np.float64)
 
 
 def _unit_direction(direction: Sequence[float]) -> np.ndarray:
@@ -165,22 +176,24 @@ def base_delta_from_ego(rpy: Sequence[float], delta: Sequence[float]) -> np.ndar
     return rotate_vector(rpy, delta)
 
 
-def base_rotation_delta_from_ego(rpy: Sequence[float], delta_rpy: Sequence[float]) -> np.ndarray:
-    """末端系旋转增量 → 机器人侧要的**基座系 ``rpy`` chart 增量**。
+def chart_increment(rpy: Sequence[float], delta_matrix) -> np.ndarray:
+    """**基座系** chart 增量：``wrap(rpy(R_cur · ΔR) - rpy_cur)``。
 
-    机器人把 ``pose_delta`` 的 rpy **逐分量相加**（``target_rpy += Δrpy``，基准 = 关节段目标的正
-    解），而 rpy 是 chart：相加 ≠ 旋转复合（目标 ``pitch`` 不为 0 时差得很多，实测 ``pitch=45°``
-    绕末端 ``z`` 转 ``20°`` 会偏 **10.7°**；``pitch=89°`` 偏 **28°**）。
+    机器人把 ``pose_delta`` 的 rpy **逐分量相加**，而 rpy 是 chart：相加 ≠ 旋转复合（目标
+    ``pitch`` 不为 0 时差得很多，实测 ``pitch=45°`` 绕末端 z 转 20° 偏 **10.7°**）。给出“能凑出目标
+    姿态的 chart 差”后，机器人相加的结果与 ``R_cur · ΔR`` **精确一致**。
 
-    所以这里不下发“基座系旋转增量”的 rpy 三元组，而是直接给出**能凑出目标姿态的 chart 差**：
-    ``Δrpy = wrap(rpy(R_target · ΔR_ego) - rpy_target)``——机器人相加后得到的姿态与
-    ``R_target · ΔR_ego`` **精确一致**（``pitch`` 接近 ``±90°`` 时 chart 增量会变大：那里是
-    gimbal 邻近，但相加结果仍然精确；要大角度改姿态请用 ``look_at`` / 绝对 ``pose``）。
+    ``ΔR`` 是**法兰系**下的旋转矩阵（语义系的旋转先用 ``EgoAxes.basis()`` 换基：
+    ``ΔR_flange = M · ΔR_semantic · Mᵀ``——转轴像矢量一样换基）。
     """
-    target = rpy_to_matrix(rpy)
-    composed = matrix_to_rpy(target @ rpy_to_matrix(delta_rpy))
+    composed = matrix_to_rpy(rpy_to_matrix(rpy) @ np.asarray(delta_matrix, dtype=np.float64))
     delta = composed - np.asarray(rpy, dtype=np.float64).reshape(3)[:3]
     return (delta + math.pi) % (2.0 * math.pi) - math.pi  # wrap 到 (-π, π]：差值可能跨分支
+
+
+def base_rotation_delta_from_ego(rpy: Sequence[float], delta_rpy: Sequence[float]) -> np.ndarray:
+    """**法兰系** rpy 增量 → 机器人侧要的**基座系 chart 增量**（语义系请先换基，见 ``chart_increment``）。"""
+    return chart_increment(rpy, rpy_to_matrix(delta_rpy))
 
 
 def turned_deg(rpy_from: Sequence[float], rpy_to: Sequence[float]) -> float:
@@ -202,6 +215,7 @@ __all__ = [
     "axis_vector",
     "base_delta_from_ego",
     "base_rotation_delta_from_ego",
+    "chart_increment",
     "parse_axis",
     "pointing_rpy",
     "rotate_vector",

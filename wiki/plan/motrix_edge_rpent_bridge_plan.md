@@ -17,7 +17,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         submit / push 两类通道不变。
 -   [x] `server/app.py`：`CommandResponse` 新增 `deprecated`；`/v1/commands` 与 `CommandRequest`
         文档串同步新命名。
--   [ ] 原语执行器（`server/primitives.py` + node 侧执行线程）：`goto` / `move_rel` /
+-   [ ] 原语执行器（`server/primitives.py` + node 侧执行线程）：`move_to` / `move_rel` /
         `rotate_rel` / `gripper` / `recover` / `wait` / `stop`，到位 / 受阻 / 超时 / 中止终态，
         参数钳制（工作空间盒 / 单步上限 / 值域 / `max_wait`）。
 -   [ ] `GET /v1/preview/<cam>.jpg`（单帧 JPEG，给外部喂 LLM）。
@@ -98,9 +98,10 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         `recover_joint_posture` / `reset_home`），attach-only 接 `--env-endpoint`，不复用 franka 包；
         客户端启动自检读 `lease.satisfied` / `expires_in_s` / `pose_dim_per_arm`，
         `settle.*` 上下限从 meta 实时取（不硬编码）。
--   [x] **不加入绝对位移动词**（`env.move_to` / `goto`）：RPent 真机包的 `move_delta` 相对语义
-        已够用（客户端可用 `get_robot_state` 的 pose 现算 delta），且绝对跳转需先有工作空间盒 /
-        单步上限；待原语执行器落地时一并评估（详见设计文档）。
+-   [x] **~~不加入绝对位移动词~~（2026-10-09 反转）**：原判断「`move_delta` 相对语义已够用」不再成立——
+        相对增量改按**末端系**解释后，agent 拿 `get_object_position` 得到的 `world` 点没法直接换算成
+        「沿末端该走多少」，于是补了 `env.move_to`（`target` / `rpy` 都是 `world`）。工作空间盒与
+        单步上限仍待原语执行器落地时一并评估。
 -   [x] **`dry_run` 安全修复**（RPent 侧 review 发现）：把 `dry_run` 检查前移到四条写原语 +
         `env.reset`（回 `dry_run` / `sent: false` / `reached: null` / `reason`），`_push_qpos`
         兜底报错；修掉模块与 `_settle_action` 两处旧 docstring、`set_gripper` 的 `sent: true`
@@ -117,13 +118,65 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 -   [x] **机器人侧位姿动作下发（求解器，不经 `move_p`）**：`layout="pose"` 时
         每臂位姿由 `robot/kinematics` 解算一次 → 关节目标 → 限速 + MIT；
         `DualPiperAdapter.ACTION_SPACES` 已声明 `pose`，故 `env.move_delta` /
-        `rotate_delta` / `goto` 对真机 piper 可用（解算失败 → 422、不改既有目标）。
+        `rotate_delta` / `move_to` 对真机 piper 可用（解算失败 → 422、不改既有目标）。
         `move_p` 仍**不引入**（与 MIT 互斥）；见 [位姿动作](../design/robot_pipeline_cartesian.md)。
 -   [ ] 端到端联调记录（**唯一硬门槛**）：RPent `--env-endpoint http://<edge>:8000` + RPent 自跑的
         VLA，跑通一次真实任务（`dry_run` 下已用官方 client 验完零下发）。
 -   [ ] **写方互斥**（真机跑之前建议补）：facade 目前只校验租约，**不看 node 会话**——
         RPent 与 edge 自己的 infer 会话同时下发会交叉；遥操作已有保护（adapter 拒拍 →
         `ok=false kind=state`），但 infer / capture 会话需显式互斥 + 单飞。
+
+## Phase D —— 感知与末端系动作（本轮新增的四个工具）
+
+给 LLM 的能力面（工具清单见 [RPent 对接契约](../design/motrix_edge_rpent_bridge.md)「工具清单」）。
+
+### 设计（已落文档）
+
+-   [x] 工具清单整理：**两个坐标系**（`world` = 绝对 / 坐标查询；末端系 = 增量）+ 分组表（观测 /
+        绝对 / 增量 / 夹爪）+ 「不注册」修正（`back_project` 改由 `get_object_position` 承接）
+-   [x] `look_at` / `move_to` / `get_object_position` / 末端系增量 的语义、参数、回执、
+        失败模式与钳制写入设计文档
+-   [x] 原语文档（`/v1/primitives` 面）同步 op 行（`goto` 改名 `move_to` 并改成 world 语义、增量改末端系）
+
+### 实现（已完成）
+
+-   [x] `env.get_object_position(camera, x, y)`（只收归一化）：包一层 `DepthService.depth()`，
+        把 `/v1/depth` 的 `xyz_*` 与失败路径映射成 `ok=false kind=no_depth|uncalibrated|no_pose`
+-   [x] `env.look_at(target, arm=, keep=, settle=)`：快照 `pose_target` → 最小旋转求 `rpy` →
+        按 `pose`（绝对）下发 → `settle.wait_for_reached` 判到位；回执加 `turned_deg` /
+        `large_rotation` / `base_source`
+-   [x] `env.move_to(target, rpy=, arm=, settle=)`：`target` / `rpy` 都是 `world` 帧，逐臂按
+        `T_world_base(arm)` 换算后按 `pose`（绝对）下发（非左臂缺外参 → `uncalibrated`）
+-   [x] `move_delta` / `rotate_delta`：**只**有末端系语义（`space` 已删），且分量是**语义量**
+        （`x` 前 / `y` 左 / `z` 上 → `ego_axes.basis()` 映到法兰轴）。平移用快照姿态旋到基座系
+        （`d_base = R_cur · basis · d_sem`，精确）；旋转下发的是**chart 增量**
+        `wrap(rpy(R_cur · basis·ΔR_sem·basisᵀ) - rpy_cur)`——旧写法（共轭 `R·ΔR·Rᵀ` 的 rpy）与机器人侧
+        「rpy 逐分量相加」不一致（`pitch=45°` 转 20° 偏 10.7°）。回执 `delta_frame` /
+        `converted_delta_base` / `base_source`，窗口竞态交给既有 `base_changed` 检查
+-   [x] 几何工具：把「轴对齐到方向的最小旋转」与「末端系增量 → 基座系增量」放进
+        `motrix_edge.geometry`（纯 numpy、可离线单测；`rpy` 约定与 `rpent/layout.py` 已验一致）
+-   [x] 测试：四个方法各一条 happy path + 失败路径（无深度 / 未标定 / 缺位姿 / IK 拒绝 /
+        `base_changed`），几何换算用「已知姿态 → 期望增量」钉住
+-   [ ] 单飞与写方互斥：Phase C 的欠账在实现这四个（尤其 `look_at`）之前最好先补
+
+### 已拍板（2026-10-09）
+
+1. **`look_at` 朝向轴**：法兰 `+z`（`j6` 转轴 / DH `d6` 沿 z），**`roll ≡ 0`** 的规范解；
+2. **末端系三轴**：可配 `server.rpent.ego_axes`（缺省 `forward=+z` / `left=+y` / `up=-x`——
+   2026-10-09 真机实测：法兰 `+x` 向下 ⇒ 上取 `-x`，`+z` 是工具伸出方向），
+   随 `env.get_env_meta` 回显，**上机 1 分钟验证**（发 2 cm 看方向）；
+3. **工具形态**：相对 = `move_delta` / `rotate_delta`（**只**有末端系，不再有 `space` 开关）；
+   绝对 = `move_to`（`world` 点）/ `look_at`（`world` 点）——**增量看末端自己、绝对看 `world`**；
+4. **坐标工具输入**：**只收归一化** `u` / `v`（传像素 → `argument` 错）。
+5. **旋转换算**（2026-10-09 二次拍板）：机器人侧 rpy 是 **chart 相加**，故上位下发 chart 增量而不是
+   共轭 rpy 三元组（后者相加后与旋转复合不等价——实测 `pitch=45°` 偏 10.7°）。
+6. **绝对位移工具名**（2026-10-09 拍板）：正式名 = **`move_to`** —— op 层与 RPent 面**同名**
+   （原 op 名 `goto` 弃用），避免「两个面各一个名字」；`env.move_to` 已在代码里，op 行同步改名。
+7. **增量的分量是语义量**（2026-10-09 三次拍板）：`delta_xyz` / `delta_rpy` 的 `x` = 前 / `y` = 左 /
+   `z` = 上（旋转 = 绕 前 / 左 / 上 轴），经 `ego_axes.basis()` 映到法兰轴。**0 位时与基座系一致**
+   （`x` → 基座 `+x`、`y` → `+y`、`z` → `+z`）——实机复验：0 位下发 `x=+0.05` →
+   `(0.0498, 0, 0.004)`（前）、`z=+0.05` → `(-0.004, 0, 0.0498)`（上）、`y=+0.05` → `(0, 0.05, 0)`（左）；
+   裸法兰轴会让“往前”变成给 `-x`（随装配变，写进 prompt 就是硬编码）。
 
 ## 未决（待拍板）
 
