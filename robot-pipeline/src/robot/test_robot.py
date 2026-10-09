@@ -26,7 +26,7 @@
 
 import cv2
 import numpy as np
-from utils.base.data_handler import debug_print  # noqa: E402
+from utils.data_handler import debug_print  # noqa: E402
 
 from robot.base_robot import BaseRobot
 from robot.controller.test_arm_controller import TestArmController  # noqa: E402
