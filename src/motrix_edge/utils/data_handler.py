@@ -17,19 +17,21 @@ import os
 
 from motrix_edge.config import get_log_dir
 
+ENV_LOG_FILE = "MOTRIX_EDGE_LOG_FILE"
+
 # 进程内缓存日志文件路径：首次 debug_print 时确定（含时间戳），之后固定复用——
 # 避免每次写日志都重新 makedirs + 生成新文件名（旧实现跨秒产生海量日志文件）。
 _LOG_FILE: str | None = None
 
 
 def file_log_enabled() -> bool:
-    """文件日志开关（环境变量 ``MOTRIX_LOG_FILE``，**缺省关闭**，防长期运行塞满磁盘）。
+    """文件日志开关（环境变量 ``MOTRIX_EDGE_LOG_FILE``，**缺省关闭**，防长期运行塞满磁盘）。
 
     单点定义：``debug_print``（``logs/log_*.txt``）与 uvicorn 日志
     （``utils/logging.uvicorn_log_config``，``logs/uvicorn.log``）共用本函数，
     避免同一个开关在两处各判一次（口径漂移 / 求值时机不同）。终端打印不受影响。
     """
-    return os.getenv("MOTRIX_LOG_FILE", "0").strip().lower() not in ("0", "false", "no")
+    return os.getenv(ENV_LOG_FILE, "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _get_log_file() -> str:
@@ -67,7 +69,7 @@ def debug_print(name, info, level="INFO", end="\n", flush=True):
     msg = f"[{level}][{name}] {info}"
     print(f"{color}{msg}{endc}", end=end, flush=flush)
 
-    # 写入日志文件（INFO 及以上；MOTRIX_LOG_FILE=0 关闭文件写入）
+    # 写入日志文件（INFO 及以上；MOTRIX_EDGE_LOG_FILE=0 关闭文件写入）
     if msg_level_value >= 20 and file_log_enabled():
         log_file_path = _get_log_file()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]

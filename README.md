@@ -93,10 +93,20 @@ uv run ruff check .
 npm run format    # ruff format + prettier
 ```
 
-运行文件使用一个根目录：`MOTRIX_EDGE_DIR`，缺省为 `<cwd>/motrix-edge`；现场配置放
-`<root>/config`，日志放 `<root>/logs`。robot-pipeline 对应使用
-`MOTRIX_ROBOT_PIPELINE_DIR`，缺省为 `<cwd>/motrix-robot-pipeline`。容器部署应传入容器内路径并
-挂载对应目录。
+### 本机变量（`.env`）
+
+复制样例并按本机路径修改：
+
+```bash
+cp .env.example .env
+```
+
+-   Compose 自动读取项目目录的 `.env`：`docker compose up -d`。
+-   裸跑时显式加载：`uv run --env-file .env motrix-edge run`。
+
+运行根分别由 `MOTRIX_EDGE_DIR` 和 `MOTRIX_ROBOT_PIPELINE_DIR` 指定；配置在 `<root>/config`，
+日志在 `<root>/logs`。Compose 使用单独的 `*_IN_CONTAINER` 值，避免把宿主绝对路径传入容器。
+完整变量见 [`.env.example`](.env.example)。
 
 机器人承载端（robot-pipeline）为独立子项目，需单独 `uv sync`，详见
 [robot-pipeline/README.md](robot-pipeline/README.md)。

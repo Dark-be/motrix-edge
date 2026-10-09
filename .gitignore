@@ -38,5 +38,8 @@ data/
 /motrix-edge/
 /robot-pipeline/motrix-robot-pipeline/
 
+# Local environment (copy from .env.example)
+/.env
+
 # vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
 src/lerobot/
