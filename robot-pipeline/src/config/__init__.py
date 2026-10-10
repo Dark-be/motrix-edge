@@ -235,7 +235,7 @@ def resolve_config_file(name: str) -> Path:
     """配置文件 / 数据文件的真实路径：``<根>/config/<name>`` 存在则用它，否则用包内示例路径。
 
     用于非 yml 的数据文件（如 ``gravity/piper_6dof.json`` 重力参数；**不播种**——没有本地副本时
-    走包内占位参数，缺文件由调用方决定怎么处理）。
+    走包内示例，缺文件由调用方决定怎么处理）。
     """
     local = config_path(name)
     if local.exists():

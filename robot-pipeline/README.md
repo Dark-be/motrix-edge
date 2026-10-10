@@ -449,7 +449,7 @@ python scripts/verify_cartesian.py --port left           # 只读对照 + IK 往
 python scripts/verify_cartesian.py --port left --cycles 3 --role follower
 ```
 
-## 重力补偿（可选，默认占位 = 行为不变）
+## 重力补偿（可选；未标定 / 降级时行为同未补偿）
 
 MIT 的 `t_ff` 缺省是 0（不补重力），所以关节会停在 `τ_g / k_p` 的平衡点：低刚度或带负载时
 「设定什么角度就是什么角度」并不成立。重载 / 想做柔顺时，可离线标定出 `τ̂_g(q)` 并前馈：
@@ -469,7 +469,7 @@ MIT 的 `t_ff` 缺省是 0（不补重力），所以关节会停在 `τ_g / k_p
 ```yaml
 robot:
     gravity:
-        enabled: true # 缺省 true + 占位参数（全 0）→ t_ff 恒为 0，行为与未补偿完全一致
+        enabled: true # 缺省 true；参数为占位（全 0）或前馈降级时 t_ff 恒为 0，行为与未补偿完全一致
         alpha: 1.0 # 前馈比例（0 = 不补偿）
         t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，只能收紧
         params: gravity/piper_6dof.json # 参数文件（相对配置目录）
