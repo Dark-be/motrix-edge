@@ -39,7 +39,7 @@ robot:
     enabled: true
     alpha: 1.0 # 前馈比例（0 = 不补偿）；首跑建议逐档验收
     t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，这里只能收紧
-    params: gravity/piper_6dof.json # 缺省参数（标定前 = 占位全 0）
+    params: gravity/piper_6dof.json # 缺省参数（随包自带已是标定版；占位全 0 = 不补偿）
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:

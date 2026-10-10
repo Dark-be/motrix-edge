@@ -153,7 +153,7 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
     真机联调先对数值、机器人不动；是否 dry-run 可从 `settle.dry_run` 看出。
 -   **到位等待**：写原语（`move_delta` / `rotate_delta` / `set_gripper` / `recover_joint_posture`）
     默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞。**只有部署容差写在 `edge.yml`**（`server.rpent.settle`
-    的 5cm / 0.4rad ≈ 23°，按 MIT 静态误差有意放宽），其余键（`enabled` / `timeout_s` /
+    的 2cm / 0.2rad ≈ 11.5°，按重力前馈后的残余静态误差量级收敛），其余键（`enabled` / `timeout_s` /
     `max_timeout_s` / `stall_s` / `stall_eps` / `poll_s` / `target_wait_s`）**缺键即取
     `rpent/settle.py::SettleConfig` 的兜底**（5s / 90s / 1s / 1e-4 / 0.02s / 1s）——不必写进 yml。
     回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /
