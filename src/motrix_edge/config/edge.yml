@@ -25,12 +25,13 @@ server:
   #   lease_id（固定租约；缺省 = 当前活跃租约）/ step_hz（缺省 = 机器人上报的 control_hz）/
   #   action_layout（外部动作块布局，如 rpent/dual_franka）/ dry_run（只转换不下发）/
   #   image_source（native = 原图 | preview = 320x240 缓存）/ settle 的其余键（超时 / 停滞 / 轮询…）。
-  # 下面只留**部署值**：按 MIT 实际稳态误差（t_ff = 0）标定的到位容差——容差小于稳态误差时
-  # reached 永远不成立（每个写原语都走满 stall_s / timeout_s）；标定与收紧见上述文档。
+  # 下面只留**部署值**：重力前馈（robot.gravity，参数已标定）接通后残余静态误差降到摩擦量级，
+  # 到位容差相应收紧——容差小于残余误差时 reached 永远不成立（每个写原语都走满 stall_s /
+  # timeout_s）；现场按回执 final_err_m / final_err_rad 的平台值再微调，标定见上述文档。
   rpent:
     settle:
-      pos_tol: 0.05 # 位置容差（米）：与姿态**分别**判定，不把米和弧度混进一个阈值
-      rot_tol: 0.4 # 姿态 / 关节容差（弧度）：≈23°，盖住 MIT 静态误差
+      pos_tol: 0.02 # 位置容差（米）＝2cm：与姿态**分别**判定，不把米和弧度混进一个阈值
+      rot_tol: 0.2 # 姿态 / 关节容差（弧度）≈11.5°：重力前馈后的残余静态误差量级
     # 末端（工具）系三轴 ↔ 法兰哪根轴：**装配事实**，随 env.get_env_meta 回显给 agent。
     # 缺省（dual piper 真机实测）：forward=+z（工具伸出方向）/ left=+y / up=-x（法兰 +x 向下）。
     # 换机型 / 换支架后必须重验：`move_delta(delta_xyz=[0, 0, 0.02])` 只动 2 cm，看实际朝哪走。
