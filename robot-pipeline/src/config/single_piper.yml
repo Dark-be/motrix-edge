@@ -23,7 +23,7 @@ robot:
   leader_firmware: v188 # Leader 主臂固件版本（default / v188 / v189；按实际固件调整）
   follower_firmware: v188 # Follower 从臂固件版本
   # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
-  # 参数未标定前指向占位文件（全 0）→ t_ff 恒为 0，行为与未补偿**完全一致**；
+  # 未标定（占位全 0）或前馈降级时 t_ff = 0，行为与未补偿**完全一致**；
   # 标定完用 scripts/fit_gravity.py --install 覆盖该文件即自动生效（不用改这里）。
   gravity:
     enabled: true # 只装在执行臂（Follower）；主臂只读，不装载

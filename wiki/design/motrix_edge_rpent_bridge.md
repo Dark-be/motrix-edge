@@ -335,17 +335,18 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
 直接当成 PNG 基名，故相机名不能含 `.` 或 `/`；`agent_observation.inline_cameras` 必须与落盘基名完全
 一致（不能带 `.png` 或路径），否则 `dump_state` 找不到图。
 
-**MIT 力矩控制的容差标定**（真机必读）：底层 `set_joint` 只给 MIT 的 `p_des`，`kp` / `kd` / `t_ff`
-全用缺省值（`t_ff = 0` 即**无重力前馈**），控制器又只有 P/D → **存在稳态误差**，「设定什么关节就是
-什么关节」并不成立。故 `settle` 的容差必须按现场实测标定，否则 `reached` 永远不成立、每个写原语都会
-走满 `stall_s` / `timeout_s`（agent 侧看到「全是 stalled / timeout」）：
+**MIT 力矩控制的容差标定**（真机必读）：底层 `set_joint` 只给 MIT 的 `p_des`，`kp` / `kd` 用缺省值，
+`t_ff` 缺省为 `0`（装载 `robot.gravity` 且参数已标定后为 `α·τ̂_g(q)`），控制器又只有 P/D → 未补偿时
+**存在稳态误差**（关节停在 `τ_g / kp` 附近），「设定什么关节就是什么关节」并不成立。故 `settle` 的
+容差必须按现场实测标定，否则 `reached` 永远不成立、每个写原语都会走满 `stall_s` / `timeout_s`
+（agent 侧看到「全是 stalled / timeout」）：
 
 -   **标定**：下发一个目标、等它停稳，看回执 `final_err_m` / `final_err_rad`（或 `final_err`）的平台值
     ——这与机器人型号 / 当前姿态 / 负载有关，不要照抄别人的数值；
--   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 5 cm / 姿态 0.4 rad ≈ 23°）是
-    **有意放大**的：先把 MIT 静态误差盖住，让 `reached` 判得出来（否则每个写原语都走满
-    `stall_s` / `timeout_s`），等补上重力 / 力矩前馈或按实测收敛后再一起收紧。**其余键不必写进
-    yml**：`enabled`（true）/ `timeout_s`（5s）/ `max_timeout_s`（90s）/ `stall_s`（1s）/
+-   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 2 cm / 姿态 0.2 rad ≈ 11.5°）= 重力
+    前馈**已标定接通**后的残余静态误差量级（此前为盖住未补偿的 `τ_g / kp` 曾有意放大到
+    5 cm / 0.4 rad ≈ 23°）；现场仍应按回执 `final_err_m` / `final_err_rad` 的平台值微调，
+    宁可先松后紧。**其余键不必写进 yml**：`enabled`（true）/ `timeout_s`（5s）/ `max_timeout_s`（90s）/ `stall_s`（1s）/
     `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）缺键即取 `rpent/settle.py` 的兜底；
 -   **位置与姿态分别比容差**（`pos_tol` 比米、`rot_tol` 比弧度），不把两种量纲混进一个阈值；
 -   `stalled` 也**可能是「已到稳态误差平台」而不是受阻**——两者从位置观测上不可区分，planner 应结合

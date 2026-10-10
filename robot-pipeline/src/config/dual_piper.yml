@@ -34,13 +34,13 @@ robot:
     enabled: true # 缺省 true；false = 完全不开深度流
     cameras: [] # 空 / 缺省 = 该机型所有具备深度的相机（这里 = 三路 RealSense）
   # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
-  # 只装在执行臂（left / right）；参数未标定前是占位文件（全 0）→ t_ff 恒为 0。
+  # 只装在执行臂（left / right）；未标定（参数为占位全 0）或前馈降级时 t_ff = 0、行为同未补偿。
   # **双臂不能共用一套参数**（装配与现场误差不同）：左臂标定完写进 arms.left.params。
   gravity:
     enabled: true
     alpha: 1.0 # 前馈比例（0 = 不补偿）；首跑建议逐档验收
     t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，这里只能收紧
-    params: gravity/piper_6dof.json # 缺省参数（标定前 = 占位全 0）
+    params: gravity/piper_6dof.json # 缺省参数（随包自带已是标定版；占位全 0 = 不补偿）
     arms: # 每臂覆盖（键 = 控制器名 left / right）
       left:
         params: gravity/piper_6dof.json # 左臂参数：标定后换成 gravity/piper_left.json

@@ -1120,7 +1120,7 @@ def test_env_meta_exposes_lease_and_settle_contract():
     }
     assert meta["settle"] == {
         "enabled": True,
-        "pos_tol_m": 0.01,  # 按 MIT 实际稳态误差标定（只有 P/D、无重力前馈）
+        "pos_tol_m": 0.01,  # 兜底值（配置未给 server.rpent.settle 时生效；部署值见 edge.yml）
         "rot_tol_rad": 0.05,
         "timeout_s": 5.0,
         "max_timeout_s": 90.0,  # 逐次覆盖的上限（客户端 HTTP 超时 120s）
@@ -1244,11 +1244,11 @@ def test_settle_receipt_reports_per_unit_errors_for_joint_space():
 def test_default_tolerances_absorb_mit_steady_state_error():
     """包内**兜底**容差（位置 1cm / 姿态 0.05rad）能吸收 MIT 的静态误差：0.03 rad 算到位。
 
-    部署值在 ``edge.yml``（当前 5cm / 0.4rad，有意更宽以盖住静态误差）；本用例没给
+    部署值在 ``edge.yml``（当前 2cm / 0.2rad，按重力前馈后的残余静态误差量级收敛）；本用例没给
     ``server.rpent.settle``，走的就是 ``SettleConfig`` 的兜底值。
 
-    底层只有 P/D、无重力前馈，“设定什么关节就是什么关节”不成立——容差小于稳态误差时
-    ``reached`` 永远不成立，每个写原语都会走满 ``stall_s`` / ``timeout_s``（agent 看到「全 stalled」）。
+    底层只有 P/D，未补偿（无前馈 / 参数未标定）时“设定什么关节就是什么关节”不成立——容差小于
+    残余误差时 ``reached`` 永远不成立，每个写原语都会走满 ``stall_s`` / ``timeout_s``（agent 看到「全 stalled」）。
     """
     adapter = FakeAdapter()
     node = FakeNode(adapter, make_obs(qpos=default_qpos(), pose=default_pose()))
