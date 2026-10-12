@@ -30,7 +30,7 @@
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
 | POST | ``/v1/execute``          | ``{action, layout?, arms?}`` | ``{status}``                                   |
 | POST | ``/v1/rollout``          | ``{action, layout?, arms?}`` | ``{status}``                                   |
-| POST | ``/v1/teleop``           | ``{enabled, mode?}``   | ``{status}``                                   |
+| POST | ``/v1/teleop``           | ``{enabled, mode?, follow_space?, follow_axes?}`` | ``{status}``          |
 | POST | ``/v1/tcp``              | ``{enabled, offset?}`` | ``{status}``                                   |
 | POST | ``/v1/gravity``          | ``{enabled, alpha?}``  | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
@@ -59,6 +59,8 @@
   位姿为锚点，只把主臂**增量**叠加到从臂 target（从臂不突变）。只发 ``{enabled}`` 的调用方
   行为不变；robot-pipeline 侧语义见
   [robot-pipeline 遥操作](../../../wiki/design/robot_pipeline_teleop.md)。
+- ``/v1/teleop`` 的可选 ``follow_space`` 覆盖本次跟随空间；``follow_axes`` 是本次 pose 跟随轴
+  白名单，未列轴锁在启用拍从臂锚点。缺省沿用机器人 YAML，joint 跟随传轴字段会返回 422。
 - ``/v1/cameras``：相机**静态元数据**（尺寸 / **彩色内参** / 深度比例）——深度图已对齐到彩色图，
   故反投影只需要这一套内参；edge 侧惰性查询一次并缓存，用于 ``GET /v1/depth``。
   相机无深度能力时其 ``depth`` 段为 ``null``。
@@ -109,6 +111,8 @@ FIELD_ACTION_LAYOUTS = "action_layouts"  # robot：本机器人支持的 layout�
 FIELD_STATE_ARMS = "state_arms"  # robot：物理臂序（arms 缺省时的块序）
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
+FIELD_TELEOP_SPACE = "follow_space"  # teleop：本次跟随空间覆盖（joint | pose）
+FIELD_TELEOP_FOLLOW_AXES = "follow_axes"  # teleop：本次 pose 跟随的轴白名单；未列轴锁在启用拍锚点
 FIELD_ENABLED = "enabled"  # tcp / gravity：是否启用（与 teleop 同字面量，刻意保持同名）
 FIELD_OFFSET = "offset"  # tcp：TCP 在法兰系下的位置（米，3 个数；缺省 = 用配置 robot.tcp.offset）
 FIELD_ALPHA = "alpha"  # gravity：前馈比例覆盖（缺省 = 用配置；0 = 保留装载但不补偿）
@@ -134,6 +138,8 @@ FIELD_OBSERVATION_KEYS = "observation_keys"  # robot：观测键布局（含 obs
 FIELD_POSE_FRAME = "pose_frame"  # health：位姿（读 + 写）所在坐标系名（flange | tcp）——**运行位**
 FIELD_TCP_OFFSET = "tcp_offset"  # health：TCP 在法兰系下的位置（米，逐臂；非 tcp 时为 null）
 FIELD_GRAVITY = "gravity"  # health：重力前馈状态（{control_mode, arms:{...}}；与采集 control 段同源）
+FIELD_TELEOP_FOLLOW_SPACE = "teleop_follow_space"  # health：teleop 跟随空间（joint | pose）
+FIELD_TELEOP_ACTIVE_AXES = "teleop_follow_axes"  # health：pose teleop 当前/缺省跟随轴
 FIELD_CONTROLLERS = "controllers"  # robot：控制器列表
 FIELD_SENSORS = "sensors"  # robot：传感器列表
 FIELD_CAPABILITIES = "capabilities"  # robot：能力 dict（capture / execute / streaming）
@@ -175,6 +181,7 @@ VALUE_TELEOP_MODE_ABSOLUTE = "absolute"  # 主臂绝对位姿直连从臂 target
 VALUE_TELEOP_MODE_DELTA = "delta"  # 人工接管：锚点增量（target = slave_ref + 主臂增量）
 TELEOP_MODES = (VALUE_TELEOP_MODE_ABSOLUTE, VALUE_TELEOP_MODE_DELTA)
 DEFAULT_TELEOP_MODE = VALUE_TELEOP_MODE_ABSOLUTE  # 不传 mode 时保持旧行为
+TELEOP_POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
 # ---- 下发布局（layout）：段名用分隔符连接（书写顺序 = 块内顺序；两侧契约共用）----
 # 段类型（kind）= 动作空间名；约束：**至多一个值段**（joint / pose / pose_delta）+ 可选 gripper。
@@ -231,7 +238,11 @@ __all__ = [
     "FIELD_SUPPORTED_ADAPTERS",
     "FIELD_TCP_OFFSET",
     "FIELD_TELEOP_ENABLED",
+    "FIELD_TELEOP_FOLLOW_AXES",
+    "FIELD_TELEOP_FOLLOW_SPACE",
+    "FIELD_TELEOP_ACTIVE_AXES",
     "FIELD_TELEOP_MODE",
+    "FIELD_TELEOP_SPACE",
     "FIELD_TYPE",
     "PATH_CAPTURE_END",
     "PATH_CAPTURE_START",
@@ -247,6 +258,7 @@ __all__ = [
     "PATH_TCP",
     "PATH_TELEOP",
     "TELEOP_MODES",
+    "TELEOP_POSE_AXES",
     "VALUE_ACTION_SPACE_GRIPPER",
     "VALUE_ACTION_SPACE_JOINT",
     "VALUE_ACTION_SPACE_POSE",

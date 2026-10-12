@@ -487,6 +487,8 @@ class _FakeExecAdapter:
         self.execute_layouts: list[str | None] = []
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
+        self.teleop_follow_axes: list[list[str] | None] = []
+        self.teleop_follow_spaces: list[str | None] = []
         self.switch_calls: list[tuple[str, bool, object]] = []  # robot tcp / robot gravity
 
     def reset(self):
@@ -496,8 +498,10 @@ class _FakeExecAdapter:
         self.executed.append(action)
         self.execute_layouts.append(None if layout is None else str(layout))
 
-    def set_teleop(self, enabled: bool, mode: str | None = None):
+    def set_teleop(self, enabled: bool, mode: str | None = None, follow_axes=None, follow_space=None):
         self.teleop_calls.append((bool(enabled), mode))
+        self.teleop_follow_axes.append(follow_axes)
+        self.teleop_follow_spaces.append(follow_space)
 
     def set_tcp(self, enabled: bool, offset=None):
         self.switch_calls.append(("tcp", bool(enabled), offset))
@@ -709,6 +713,53 @@ def test_robot_teleop_passes_mode():
     assert adapter.teleop_calls == [(True, "delta")]
     assert replies[0].status == "ok"
     assert replies[0].data["mode"] == "delta"
+
+
+def test_robot_teleop_passes_pose_follow_axes():
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    axes = ["x", "y", "z", "yaw"]
+    node._dispatch(
+        Command(
+            CMD_ROBOT_TELEOP,
+            params={"enabled": True, "mode": "absolute", "follow_space": "pose", "follow_axes": axes},
+            reply_to=replies.append,
+        )
+    )
+    assert adapter.teleop_follow_axes == [axes]
+    assert adapter.teleop_follow_spaces == ["pose"]
+    assert replies[0].data["follow_space"] == "pose"
+    assert replies[0].data["follow_axes"] == axes
+
+
+def test_robot_teleop_rejects_invalid_follow_axes():
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_TELEOP,
+            params={"enabled": True, "follow_axes": ["x", "spin"]},
+            reply_to=replies.append,
+        )
+    )
+    assert replies[0].status == "rejected"
+    assert "follow_axes" in replies[0].error
+    assert adapter.teleop_calls == []
+
+
+def test_robot_teleop_rejects_axes_for_joint_space():
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_TELEOP,
+            params={"enabled": True, "follow_space": "joint", "follow_axes": ["x"]},
+            reply_to=replies.append,
+        )
+    )
+    assert replies[0].status == "rejected"
+    assert "only valid" in replies[0].error
+    assert adapter.teleop_calls == []
 
 
 def test_robot_teach_and_takeover_aliases_fix_the_mode():

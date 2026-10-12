@@ -128,7 +128,7 @@ def test_tcp_offset_flag_matches_shipped_defaults():
 
 
 def test_teleop_block_shape_and_joint_offsets():
-    """``robot.teleop.joint_offset``（可选，见 wiki/design/robot_pipeline_teleop.md）形状校验。
+    """``robot.teleop``（可选，见 wiki/design/robot_pipeline_teleop.md）形状校验。
 
     偏置长度 / 数值写错在机器人构造期报错（``BaseRobot._resolve_teleop_joint_offset``）；这里钉
     形状与臂名（与 ``_TCP_ARMS`` 同一份机器人类声明），避免配置写坏时 CI 全绿。
@@ -137,7 +137,18 @@ def test_teleop_block_shape_and_joint_offsets():
         block = _load(path.name)["robot"].get("teleop")
         if block is None:
             continue
-        assert set(block) <= {"joint_offset"}, f"{path.name} 的 robot.teleop 有未知键：{set(block)}"
+        assert set(block) <= {"joint_offset", "follow_space", "follow_axes"}, (
+            f"{path.name} 的 robot.teleop 有未知键：{set(block)}"
+        )
+        follow_space = block.get("follow_space", "joint")
+        assert follow_space in {"joint", "pose"}, f"{path.name} 的 follow_space 非法：{follow_space!r}"
+        follow_axes = block.get("follow_axes")
+        if follow_axes is not None:
+            assert follow_space == "pose", f"{path.name} 只有 pose 跟随可配置 follow_axes"
+            assert follow_axes and len(follow_axes) == len(set(follow_axes)), f"{path.name} 的 follow_axes 非空且不重复"
+            assert set(follow_axes) <= {"x", "y", "z", "roll", "pitch", "yaw"}, (
+                f"{path.name} 的 follow_axes 非法：{follow_axes!r}"
+            )
         offset = block.get("joint_offset")
         if offset is None:
             continue

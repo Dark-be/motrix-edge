@@ -155,7 +155,7 @@ class _FakeAdapter:
         self.executed.append(action)
         self.execute_layouts.append(None if layout is None else str(layout))
 
-    def set_teleop(self, enabled, mode=None):
+    def set_teleop(self, enabled, mode=None, follow_axes=None, follow_space=None):
         self.teleop_values.append(bool(enabled))
         self.teleop_calls.append((bool(enabled), mode))
 

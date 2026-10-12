@@ -32,7 +32,7 @@ env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程�
     POST /v1/reset         复位到 home（非阻塞）
     POST /v1/execute       raw 动作 {action}
     POST /v1/rollout       推理动作 {action}（**人工接管中 → 409**）
-    POST /v1/teleop        遥操作 {enabled: bool, mode?: absolute|delta}
+    POST /v1/teleop        遥操作 {enabled, mode?, follow_space?, follow_axes?}
     POST /v1/safe_stop     急停
     POST /v1/capture/start 开始一轮采集（episode 开始）
     POST /v1/capture/end   结束一轮采集（episode 结束）
@@ -101,6 +101,8 @@ from motrix_edge.adapter.http_contract import (
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
     FIELD_TCP_OFFSET,
+    FIELD_TELEOP_ACTIVE_AXES,
+    FIELD_TELEOP_FOLLOW_SPACE,
     FIELD_TYPE,
     FIELD_WIDTH,
     INTRINSICS_KEYS,
@@ -266,10 +268,20 @@ class ActionRequest(BaseModel):
 
 
 class TeleopRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(..., description="是否启用遥操作（true=遥操作 / false=程控）")
     mode: str = Field(
         default=DEFAULT_TELEOP_MODE,
         description="遥操作映射模式：absolute=主臂绝对位姿直连 / delta=人工接管（锚点增量）",
+    )
+    follow_space: str | None = Field(
+        default=None,
+        description="本次 teleop 的跟随空间覆盖：joint 或 pose；缺省沿用机器人配置",
+    )
+    follow_axes: list[str] | None = Field(
+        default=None,
+        description="本次 pose teleop 的跟随轴白名单；未列出的轴锁在启用拍的从臂锚点",
     )
 
 
@@ -514,6 +526,8 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             FIELD_POSE_FRAME: h.get("pose_frame"),
             FIELD_TCP_OFFSET: h.get("tcp_offset"),
             FIELD_GRAVITY: h.get("gravity"),
+            FIELD_TELEOP_FOLLOW_SPACE: h.get("teleop_follow_space"),
+            FIELD_TELEOP_ACTIVE_AXES: h.get("teleop_follow_axes"),
         }
 
     # ---------------------------------------------------------------- 相机元数据（静态）
@@ -594,7 +608,10 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         _require_ready()
         if req.mode not in TELEOP_MODES:
             raise HTTPException(status_code=422, detail=f"unknown teleop mode {req.mode!r} (expect {TELEOP_MODES})")
-        env.robot_set_teleop(req.enabled, req.mode)
+        try:
+            env.robot_set_teleop(req.enabled, req.mode, req.follow_axes, req.follow_space)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_TCP)

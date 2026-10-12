@@ -69,6 +69,8 @@ def adapter_state(node) -> dict:
         "measured_hz": getattr(health, "measured_hz", None) if health is not None else None,
         "teleop": teleop,
         "teleop_mode": getattr(adapter, "teleop_mode", None) if teleop else None,
+        "teleop_follow_space": getattr(health, "teleop_follow_space", None) if health is not None else None,
+        "teleop_follow_axes": getattr(health, "teleop_follow_axes", None) if health is not None else None,
         "pose_frame": getattr(health, "pose_frame", None) if health is not None else None,
         "tcp_offset": getattr(health, "tcp_offset", None) if health is not None else None,
         "gravity": getattr(health, "gravity", None) if health is not None else None,

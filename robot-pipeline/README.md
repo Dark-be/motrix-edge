@@ -501,7 +501,7 @@ robot:
     左 → 左、右 → 右。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
-跟随（`robot.step_rad`）；遥操作默认关闭（adapter 通讯控制中暂时均为 false）。`mode` 选映射模式：
+跟随（`robot.step_rad`）；遥操作默认关闭。HTTP 的 `mode` 仍只选择映射模式：
 
 -   `absolute`（缺省）：主臂**绝对**位姿直连从臂 target——主从同构、位姿已对齐的示教采集；
 -   `delta`（**人工接管**）：`target = slave_ref + (master_now − master_ref)`——锚点在接管后
@@ -511,6 +511,19 @@ robot:
 
 主从零位差用 `robot.teleop.joint_offset`（逐关节 rad 的常量偏置）补：`absolute` 下直接体现，
 `delta` 下由锚点抵消、不进入增量。属现场值，按机器档案覆盖。
+
+跟随空间与位姿轴锁定只在 robot-pipeline 配置，不改变 Edge 的 `rollout` / `execute`：
+
+```yaml
+robot:
+    teleop:
+        follow_space: pose # joint（缺省）| pose
+        follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在 teleop 首拍的从臂位姿
+```
+
+`pose` 跟随每拍执行「主臂 FK → absolute/delta + 轴白名单 → IK」，得到的关节目标仍经
+`step_rad` 与 `set_joint()` 下发；关闭 teleop 后轴锁定立即失效。只有声明 `pose` 能力且实现同源
+FK / IK 的机器人能启用该配置，配置写错会在启动时失败。
 
 两种模式的完整语义、锚点采样时机与边界见
 [robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。

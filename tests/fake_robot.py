@@ -202,7 +202,7 @@ class FakeRobotAdapter(RobotAdapter):
         elif space == ACTION_SPACE_POSE:
             self._pose = values.copy()
 
-    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+    def set_teleop(self, enabled: bool, mode: str | None = None, follow_axes=None, follow_space=None) -> None:
         self.teleop_calls.append((bool(enabled), mode))
 
     def set_tcp(self, enabled: bool, offset=None) -> None:
