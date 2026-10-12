@@ -66,8 +66,12 @@ kp`，0.05–0.25 rad 量级）。以实测为基准时每一条增量都把当�
     即使能读到目标位姿再算绝对目标，也存在「读 → 算 → 写」窗口（遥操作接管 / CLI 直控 /
     另一个会话改目标）——窗口内目标一变就被旧基准覆盖。差值语义归机器人，这个窗口就不存在。
 -   **rpy 相加**：与 `pose` 同坐标系 / 同单位，$rpy$ 在**同一 chart** 上相加并 wrap 到
-    $(-\pi, \pi]$——小步长（VLA / RPent 的 delta 原语）下与旋转复合等价，故 `move_delta`
-    （只给 $Δxyz$）与 `rotate_delta`（只给 $Δrpy$）可按轴独立下发。
+    $(-\pi, \pi]$——故 `move_delta`（只给 $Δxyz$）与 `rotate_delta`（只给 $Δrpy$）可按轴独立下发。
+    ⚠️ 但 chart 相加**不等于**旋转复合：目标 `pitch` 不为 0 时两者差得很多（实测 `pitch=45°`
+    绕末端 $z$ 转 20° 差 **10.7°**，`pitch=89°` 差 **28°**；2° 的小步也有 1.1° 偏差）。因此上位按
+    **末端系**给增量时必须换算：平移 `d_base = R_cur · d_tool`（精确），旋转下发的是
+    **chart 增量** `wrap(rpy(R_cur · ΔR_tool) - rpy_cur)`（相加后与矩阵复合精确一致）——见
+    [统一坐标系与外参产物](./robot_pipeline_frames.md)。
 -   **基准可观**：目标位姿由机器人常驻发布为 `observations/pose_target`（= `FK(关节段目标)`，见
     [动作空间与观测契约](./robot_pipeline_action_spaces.md)）——上位判到位（`settle`）拿它当参考，
     而不是自己攒基准。

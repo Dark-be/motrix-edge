@@ -20,7 +20,7 @@
 ## TODO
 
 -   [x] `BaseRobot` 拆出线程入口：`sample_qpos()`（控制线程，写 `motion_state` 快照）、
-        `capture_images()` 与 `build_observation()`（观测线程）；`get_observation()` 保留给单线程脚本。
+        `capture_frames()` 与 `build_observation()`（观测线程）；`get_observation()` 保留给单线程脚本。
 -   [x] `BaseEnv` 拆两条循环：`_control_loop` / `step_control()`（HZ）与 `_observe_loop` /
         `step_observe()`（OBS_HZ），各自 sleep 补偿。
 -   [x] 指令分两条队列：运动指令 → `commands`（控制线程消费），采集指令 → `capture_commands`

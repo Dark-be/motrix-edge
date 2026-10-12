@@ -22,7 +22,14 @@
 推流到前端，这里只返回摄像头名列表。
 """
 
-from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS, image_names_of
+from motrix_edge.adapter.base import (
+    KEY_ACTION,
+    KEY_POSE,
+    KEY_POSE_TARGET,
+    KEY_QPOS,
+    depth_names_of,
+    image_names_of,
+)
 from motrix_edge.errors import ErrorCode, ServiceError
 from motrix_edge.lease import LeaseError, LeaseManager
 from motrix_edge.server.state import adapter_ref
@@ -57,6 +64,7 @@ class PreviewService:
         〚pose_target〛= **目标**位姿（每臂 ``xyz + rpy``，米 / 弧度；机器人提供时才有）——
         「目标 − 实测」即当前稳态误差；它们**与动作空间无关**（下发什么都不会改）。
         ``arms`` = adapter 的启用臂名（前端据此分行，不自带布局知识）。
+        ``depth`` = 当前**有深度图**的相机名（机器人开了深度才有；查询像素深度见``/v1/depth``）。
         """
         try:
             self._leases.require(lease_id)
@@ -80,6 +88,7 @@ class PreviewService:
                 "pose_target": self._to_float_list(latest.get(KEY_POSE_TARGET)),
                 "action": self._to_float_list(latest.get(KEY_ACTION)),
                 "images": image_names_of(latest),
+                "depth": depth_names_of(latest),
                 "arms": self._arms(node),
             },
         }

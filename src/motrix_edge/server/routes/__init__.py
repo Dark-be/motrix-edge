@@ -25,6 +25,7 @@ from fastapi import APIRouter
 from motrix_edge.server.deps import Services
 from motrix_edge.server.routes.captures import build_router as build_captures_router
 from motrix_edge.server.routes.commands import build_router as build_commands_router
+from motrix_edge.server.routes.depth import build_router as build_depth_router
 from motrix_edge.server.routes.health import build_router as build_health_router
 from motrix_edge.server.routes.infers import build_router as build_infers_router
 from motrix_edge.server.routes.leases import build_router as build_leases_router
@@ -41,6 +42,7 @@ def build_routers(services: Services) -> list[APIRouter]:
         build_commands_router(services),  # /v1/commands
         build_uploads_router(services),  # /v1/uploads/*
         build_captures_router(services),  # /v1/captures/* + /v1/preview
+        build_depth_router(services),  # /v1/depth
         build_infers_router(services),  # /v1/infers/*
         build_webrtc_router(services),  # /v1/webrtc/offer
         build_rpent_router(services),  # /call + /v1/rpent
