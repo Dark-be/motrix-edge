@@ -23,7 +23,7 @@
 
 import shutil
 
-from motrix_edge.command import policy_config_status
+from motrix_edge.command import get_rtc_params, policy_config_status
 from motrix_edge.node import NodeState
 from motrix_edge.server.state import (
     adapter_state,
@@ -162,7 +162,7 @@ def infer_snapshot(node, leases) -> dict:
         # 持续推理是否正在运行（infer rollout continuous ↔ infer rollout stop）
         "continuous": bool(getattr(session, "continuous", False)) if session is not None else False,
         "capture_status": capture_agent_status(node),
-        "rtc": _rtc_status(session),
+        "rtc": _rtc_status(node, session),
         "policy_config": _policy_config_status(node, session),
         "lease_id": leases.status()["lease_id"],
     }
@@ -175,10 +175,21 @@ def _policy_ref(session):
     return getattr(getattr(session, "policy", None), "name", None)
 
 
-def _rtc_status(session) -> dict | None:
-    """RTC 运行状态（读会话的 RTCManager；无会话 → None）。"""
+def _rtc_status(node, session) -> dict | None:
+    """RTC 状态：有推理会话 → 运行状态（会话的 RTCManager）；无会话 → **配置级**参数快照。
+
+    无会话时给的是 ``policy.rtc``（``infer rtc`` / ``infer rtc set`` 读写的同一份，**任何状态
+    都接受**），只有 ``enabled`` / ``params``——没有步号 / 预取计数等运行字段（那些只存在于
+    会话内）；仅供前端在**未进入会话**时展示当前生效的 H / P / E / S（编辑仍限推理会话内）。
+    无节点（未注入）→ None。
+    """
     rtc_status = getattr(session, "rtc_status", None)
-    return rtc_status() if callable(rtc_status) else None
+    if callable(rtc_status):
+        return rtc_status()
+    if node is None:
+        return None
+    params = get_rtc_params(node.base_cfg)
+    return {"enabled": bool(params.get("enabled", True)), "params": params}
 
 
 def _policy_config_status(node, session, policy_type: str | None = None) -> dict:

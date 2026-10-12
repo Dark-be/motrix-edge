@@ -51,6 +51,7 @@ from motrix_edge.command import (
     CommandDispatcher,
     CommandError,
     CommandResult,
+    get_rtc_params,
     handle_policy_config,
     ok_result,
     parse_bool,
@@ -2038,6 +2039,26 @@ def test_infers_sync_syncs_capture_meta():
     assert client.post("/v1/infers/sync", json={"meta": {}}).status_code == 403
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
+
+
+def test_infers_rtc_status_without_session_reports_configured_params():
+    """无推理会话时 status 的 rtc = **配置级** ``policy.rtc`` 快照（enabled / params；无运行字段）。
+
+     未进入会话也要能看到当前生效的 H / P / E / S（与 ``infer rtc`` 回读同一份，任何状态可用）；
+    步号 / 预取计数等运行字段只在会话内上报（不在这里编造默认值）。
+    """
+    node = FakeNode()
+    client = make_infers_client(node)
+    snap = client.get("/v1/infers").json()
+    assert snap["rtc"]["params"] == get_rtc_params(node.base_cfg)
+    assert snap["rtc"]["enabled"] is True
+    for key in ("index", "remaining", "fetches", "last_chunk"):
+        assert key not in snap["rtc"]
+    # 配置级写入（``infer rtc set`` 写的就是这一份，任何状态可用）后快照跟随
+    node.base_cfg["policy"] = {"rtc": {"suffix_len": 7, "enabled": False}}
+    snap = client.get("/v1/infers").json()
+    assert snap["rtc"]["params"]["suffix_len"] == 7
+    assert snap["rtc"]["enabled"] is False
 
 
 def test_infers_rtc_configure_and_status():
