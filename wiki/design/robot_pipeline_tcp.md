@@ -90,9 +90,9 @@ robot:
 换算只用 `robot/kinematics/transforms.py` 已有的 `rpy_to_matrix` / `matrix_to_rpy` / `make_transform`
 （纯 numpy、无硬件依赖，可离线单测）。
 
-## 上报与 Edge 侧
+## 运行期开关与上报
 
-**机器人 → Edge**（`/v1/discover` 的 `robot` 块；字段名单点在 `src/motrix_edge/adapter/http_contract.py`）：
+**机器人 → Edge**（`/v1/health` 的**运行位**字段；字段名单点在 `src/motrix_edge/adapter/http_contract.py`）：
 
 | 字段         | 取值                 | 说明                                                    |
 | ------------ | -------------------- | ------------------------------------------------------- |
@@ -101,12 +101,26 @@ robot:
 
 字段名刻意用 `tcp_offset` 而不是 `tcp`（避免与传输层 TCP 混淆）。
 
-**Edge 侧**
+**开关**：`POST /v1/tcp`（`{enabled, offset?}`，Edge 侧命令 `robot tcp`）——`offset`（3 个数，米）是
+**运行期值**，覆盖配置的公共偏移但不写回 yml（重启回落配置；要长期生效写进 `robot.tcp`）。
 
--   真实适配器**惰性拉一次**机器人自描述（`POST /v1/discover`，成功才缓存），通过 `pose_frame()` /
-    `tcp_offset_by_arm()` 把帧名与偏移如实转述——**未上报（旧机器人进程）→ 回退适配器自己声明的
-    `POSE_FRAME` 类常量**（既有行为不变，也不动 `DiscoveredRobot` / 构造器签名）。`env.get_env_meta`
-    的 `pose_frame` / `tcp_offset` 因此如实——「数值 + 帧名一起给」，与
+-   机器人侧：**直接同步切换**（HTTP 线程调 `BaseRobot.set_tcp()`）——先校验（与构造期同一套
+    `resolve_tcp`）再改运行位：偏移非法 → **422** 且运行位不变（失败即零副作用）；不做单独的
+    预检接口。只改两个字段（`tcp_offsets` / `pose_frame`，同一行赋值，控制线程看不到中间态），
+    **不跑控制拍、也不动任何目标**。
+-   只改**语义**（`pose` / `pose_delta` 与两个位姿观测键的原点），**不动机目标**：在飞目标对应的
+    物理位姿不变，机械臂不会跳。
+-   Edge 侧：`robot tcp <true|false> [offset=[x,y,z]]`，**离开会话才能切**——位姿系决定
+    `observations/pose` 的原点与 `env_meta` 的口径，同一 episode 内前后不一致的数据没法用
+    （`robot teleop` 人工接管不受此限，它是会话中的正常操作）。
+
+**Edge 侧读回（不留影子）**
+
+-   `pose_frame()` / `tcp_offset_by_arm()` 一律从 `health()`（`GET /v1/health`，节点本来就每 2s
+    探活一次）读回，**不单独发请求、也不缓存开关状态**：切换后的真值同样走 health，`POST /v1/tcp`
+    只负责下发命令。失联 → **保留上一次已知值**（宁可稍旧，也不退回「按法兰理解」，那会静默差一个
+    常量）；从未成功过（旧机器人进程 / 进程不可达）→ 回退适配器声明的 `POSE_FRAME` 类常量。
+-   `env.get_env_meta` 的 `pose_frame` / `tcp_offset` 因此如实——「数值 + 帧名一起给」，与
     [统一坐标系与外参](./robot_pipeline_frames.md) 同一口径。
 -   `DepthService._coordinates()`（`server/depth.py`）合成腕相机外参前，把观测位姿从 TCP 原点还原成
     法兰：`T_base_flange = T_base_tcp · T_flange_tcp⁻¹`（偏移为零 / 非 TCP 时是恒等）。深度查询本身、

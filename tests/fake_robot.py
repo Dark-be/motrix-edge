@@ -82,6 +82,7 @@ class FakeRobotAdapter(RobotAdapter):
         self.rollout_layouts: list = []  # rollout 收到的布局（None = 未指定，按关节空间）
         self.execute_layouts: list = []  # execute 收到的布局（None = 未指定，按关节空间）
         self.teleop_calls: list[tuple[bool, str | None]] = []  # set_teleop 记录（enabled, mode）
+        self.switch_calls: list[tuple[str, bool, object]] = []  # set_tcp / set_gravity 记录
         self.capture_episodes: list[str] = []  # start_capture / end_capture 记录（供测试断言）
         self.capture_running = False  # 进程是否在采集（录制中）
         self.capture_meta: dict = {}  # 同步的采集元信息（保存数据时附加；供测试断言）
@@ -203,6 +204,14 @@ class FakeRobotAdapter(RobotAdapter):
 
     def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
         self.teleop_calls.append((bool(enabled), mode))
+
+    def set_tcp(self, enabled: bool, offset=None) -> None:
+        """运行位开关（位姿系）：真机器人转发 SDK 进程，这里只记录（供测试断言）。"""
+        self.switch_calls.append(("tcp", bool(enabled), offset))
+
+    def set_gravity(self, enabled: bool, alpha: float | None = None) -> None:
+        """运行位开关（重力前馈）：真机器人转发 SDK 进程，这里只记录。"""
+        self.switch_calls.append(("gravity", bool(enabled), alpha))
 
     def start_capture(self) -> None:
         self.capture_episodes.append("start")

@@ -51,6 +51,7 @@ class _FakeCollector:
         self.meta = dict(self.cfg.get("meta") or {})
         self.save_dir = Path(self.cfg.get("save_dir") or ".")
         self.calls: list[str] = []
+        self.control_layout: dict = {}  # set_control_layout 注入的采集元信息（control_mode）
 
     def start(self):
         self.calls.append("start")
@@ -64,21 +65,46 @@ class _FakeCollector:
     def set_meta(self, meta):
         self.meta.update(meta or {})
 
+    def set_control_layout(self, layout):
+        self.control_layout = dict(layout or {})
+
 
 class _FakeRobot:
-    """帧头跳过之外只用到：名字 / 布局回调 + 本次要验的两个判定。"""
+    """帧头跳过之外只用到：名字 / 布局回调 + 本次要验的判定（布局校验 + 运行位开关）。"""
 
     name = "fake_robot"
     ADAPTER_TYPE = "test_robot"
 
     def __init__(self):
         self.teleop_enabled = False
+        self.pose_frame = "flange"  # 位姿系（set_tcp 后变 "tcp"）
+        self.gravity_enabled = False  # 重力前馈运行位（set_gravity 后生效）
+        self.gravity_supported = False  # 机型是否支持重力前馈（模拟「无控制器支持」）
+        self.gravity_calls: list[tuple[bool, float | None]] = []
+        self.tcp_calls: list[tuple[bool, object]] = []
 
     def state_layout(self):
         return {"state_space": "joint"}
 
     def control_layout(self):
-        return {"mode": "mit"}
+        return {"mode": "mit+gravity" if self.gravity_enabled else "mit"}
+
+    def set_tcp(self, enabled, offset=None):
+        """同步切换（与真实 ``BaseRobot.set_tcp`` 同形）：先校验（只认 3 个有限数）再动运行位。"""
+        if offset is not None:
+            values = np.asarray(offset, dtype=np.float64).reshape(-1)
+            if values.shape[0] != 3 or not np.all(np.isfinite(values)):
+                raise ValueError("tcp offset must be 3 finite numbers")
+        self.pose_frame = "tcp" if enabled else "flange"
+        self.tcp_calls.append((bool(enabled), offset))
+
+    def set_gravity(self, enabled, alpha=None):
+        """同步切换（与真实 ``BaseRobot.set_gravity`` 同形）：不支持 → ``ValueError``。"""
+        if not self.gravity_supported:
+            raise ValueError("fake_robot: no controller supports gravity compensation")
+        self.gravity_enabled = bool(enabled)
+        self.gravity_calls.append((bool(enabled), alpha))
+        return ["left_arm"]
 
     def plan_layout(self, action, layout=None, arms=None):
         """替身版校验：只认「右臂 + joint+gripper + 7 维」（与真实 ``BaseRobot.plan_layout`` 同形）。"""
@@ -141,6 +167,43 @@ def test_validation_error_precedes_teleop_refusal(env_module):
     with pytest.raises(ValueError, match="action dim"):
         env.robot_rollout([0.0] * 6, layout="joint+gripper", arms=["right"])
     assert env.commands.empty()  # 未入队
+
+
+def test_robot_set_tcp_and_gravity_switch(env_module):
+    """运行位开关（tcp / gravity）都**直接同步切换**：不入队，失败立即抛（server 回 422）。
+
+    不入队是为了把「偏移非法 / 机型不支持」直接回给调用方——经队列执行的话回执早就发完了。
+    """
+    env, robot = _env(env_module)
+    env.robot_set_tcp(True, [0.0, 0.0, 0.1])
+    with pytest.raises(ValueError, match="3 finite numbers"):
+        env.robot_set_tcp(True, [0.0, 0.1])
+    assert robot.tcp_calls == [(True, [0.0, 0.0, 0.1])]  # 非法那条未生效
+    assert robot.pose_frame == "tcp"  # 同步已生效
+    assert env.commands.empty()  # tcp 也不入队
+
+    with pytest.raises(ValueError, match="no controller supports"):
+        env.robot_set_gravity(True, 0.5)  # 不支持 → 立即抛（server 回 422）
+    assert robot.gravity_calls == []
+    robot.gravity_supported = True
+    env.robot_set_gravity(True, 0.5)
+    assert robot.gravity_calls == [(True, 0.5)]  # 同步已生效
+    assert env.commands.empty()
+
+
+def test_gravity_switch_reinjects_control_layout(env_module):
+    """重力开关生效后**立刻重注入**控制模式：否则后续 episode 的 ``control_mode`` 漏报。
+
+    ``control_mode`` 是采集 JSON 的元信息（下游据此判断这段数据带不带重力前馈），只在
+    ``connect()`` 注入一次的话，运行期开关后写出的数据会一直报旧模式。
+    """
+    env, robot = _env(env_module)
+    assert env._collector.control_layout == {"mode": "mit"}  # 构造期基线（无前馈）
+    robot.gravity_supported = True
+    env.robot_set_gravity(True, 0.5)
+
+    assert robot.gravity_calls == [(True, 0.5)]
+    assert env._collector.control_layout == {"mode": "mit+gravity"}
 
 
 def test_teleop_refuses_layout_rollout(env_module):

@@ -3,8 +3,8 @@
 ## 摘要
 
 按 [robot-pipeline 末端 TCP 位姿（帧开关）](../design/robot_pipeline_tcp.md) 落地：机器人侧帧换算 +
-`robot.tcp` 配置、机器人 → Edge 的帧名 / 偏移上报、Edge 侧发现驱动与深度反投影补回法兰，外加测试与
-文档同步。开关缺省关闭，关闭时行为与现状一致。
+`robot.tcp` 配置、**运行期开关**（`robot tcp` / `robot gravity`，离开会话才能切）、Edge 侧**从
+`/v1/health` 读回运行位**与深度反投影补回法兰，外加测试与文档同步。开关缺省关闭，关闭时行为与现状一致。
 
 ## TODO
 
@@ -23,12 +23,13 @@
 
 ### B. 契约与 Edge
 
--   [x] `src/motrix_edge/adapter/http_contract.py`：新增 `FIELD_POSE_FRAME` / `FIELD_TCP_OFFSET`（契约单点）
--   [x] `robot-pipeline/src/server/contract_server.py`：discover 的 `robot` 块补这两个字段（取机器人
-        `pose_frame` / `tcp_offsets`；不提供位姿 → `null`）
--   [x] `src/motrix_edge/adapter/http_shm_adapter.py`：**惰性拉取**机器人自描述（`POST /v1/discover`，
-        成功才缓存）· 暴露 `pose_frame()` / `tcp_offset_by_arm()`，未上报 → 回退类常量 `flange`
-        （不动 `DiscoveredRobot` / 构造器签名，旧进程与第三方适配器零影响）
+-   [x] `src/motrix_edge/adapter/http_contract.py`：新增 `FIELD_POSE_FRAME` / `FIELD_TCP_OFFSET` /
+        `FIELD_GRAVITY` 与 `PATH_TCP` / `PATH_GRAVITY`（契约单点）
+-   [x] `robot-pipeline/src/server/contract_server.py`：`/v1/tcp` / `/v1/gravity` 端点（`ValueError` →
+        422）+ health 的运行位段（`pose_frame` / `tcp_offset` / `gravity`；discover 不再带这两个字段）
+-   [x] `src/motrix_edge/adapter/http_shm_adapter.py`：运行位**从 `health()` 读回**（节点本来就每 2s
+        探活一次，读回就是随时新鲜的；删除自描述请求 `_declare()` 与 `DECLARATION_TTL_S`）· 暴露
+        `pose_frame()` / `tcp_offset_by_arm()`，失联保留上次已知值、从未成功过 → 回退类常量 `flange`
 -   [x] `src/motrix_edge/server/depth.py`：腕相机外参合成前还原法兰
         （`T_base_flange = T_base_tcp · T_flange_tcp⁻¹`；该臂没有偏移可查 → 不给 `xyz_world`）
 -   [x] `src/motrix_edge/server/rpent/node_view.py` + `service.py`：`get_env_meta` 增 `tcp_offset`
@@ -43,26 +44,51 @@
         无臂名回退）；沿用 `tests/test_piper_kinematics.py` 的「插入 robot-pipeline/src 后导入纯 numpy
         模块」手法
 -   [x] `tests/test_robot_pipeline_configs.py`：用**同一个解析器**把出厂配置过一遍 + 出厂默认关闭
--   [x] `tests/test_dual_piper_adapter.py`：`pose_frame()` 上报优先 / 未上报回退 / 偏移非法不采纳 /
-        自描述只问一次
+-   [x] `tests/test_dual_piper_adapter.py`：`pose_frame()` 从 health 读回（不单独发请求）/ 未上报
+        回退类常量 / 偏移非法不采纳 / 失联保留上次已知值 / `set_tcp`·`set_gravity` 请求体 + 4xx →
+        `ValueError`
 -   [x] `tests/test_server.py`：TCP 偏移下腕相机反投影的 `xyz_world` 与开 TCP 前一致
 -   [x] `tests/test_rpent.py`：`env.get_env_meta` 的 `pose_frame` / `tcp_offset` 同源上报
--   [x] 全量 `pytest`（804 passed / 1 skipped）+ `ruff check` + `prettier`
+-   [x] 全量 `pytest`（818 passed / 1 skipped）+ `ruff check` + `prettier`
 
-### D. 文档同步
+### D. 运行期开关（`robot tcp` / `robot gravity`）
+
+-   [x] 机器人：`set_tcp()` / `set_gravity()` 都**直接同步切换**（HTTP 线程执行、不入队，否则
+        「偏移非法 / 机型不支持」回不到调用方）；先校验后动状态——`ValueError` → 422，失败零副作用；
+        gravity 切换后立即重注入 `control_layout()`（否则后续 episode 的 `control_mode` 漏报）
+-   [x] Edge 侧会话限制：`robot tcp` / `robot gravity` **只在没进入会话时可切**（会话中 409；
+        `robot teleop` 不受限——人工接管是会话中的正常操作）
+-   [x] Edge 适配器：`set_tcp()` / `set_gravity()` 转发 + **回执检查**（4xx → `ValueError`，不静默
+        当成功）；`health()` 带回运行位
+-   [x] Edge 命令层：`robot tcp <true|false> [offset=[x,y,z]]` / `robot gravity <true|false> [alpha=<a>]`
+        （`command/params.py` 解析 + `naming.py` 常量 + 会话限制 `SWITCH_COMMANDS`；**`robot teleop`
+        不受限**——人工接管是会话中的正常操作）
+-   [x] `/v1/status`（capture / infer 快照的 `adapter` 段）暴露 `pose_frame` / `tcp_offset` / `gravity`
+-   [x] 测试：机器人侧 `set_tcp` / `set_gravity`（成功 / 非法或不支持 / 零副作用）、env 层「两者都不
+        入队（直接生效）」+ 重注入控制模式、node 层「会话中拒绝（409）· 空闲放行」、会话层拒绝
+        （capture 路径）、适配器 `_post_switch` 4xx
+
+### E. 文档同步
 
 -   [x] `wiki/design/robot_pipeline_action_spaces.md`：`pose` 行与观测行标「位姿系 = `POSE_FRAME`」
         （法兰或 TCP，指向 TCP 设计文档）
 -   [x] `wiki/design/robot_pipeline_cartesian.md`：契约表「坐标系」指向 TCP 设计文档
--   [x] `wiki/design/motrix_edge_adapter.md`：`POSE_FRAME` 段补「由机器人上报优先、未上报回退类常量」
+-   [x] `wiki/design/motrix_edge_adapter.md`：`POSE_FRAME` 段补「**从 `/v1/health` 读回**（运行期可
+        切）、失联保留上次已知值、从未成功过回退类常量」+ 契约表补 `/v1/tcp` / `/v1/gravity`
 -   [x] `wiki/design/robot_pipeline_frames.md`：`probe_tip` 与 `tcp_offset` 的关系（同一类量，应一致）
+-   [x] `wiki/design/robot_pipeline_tcp.md`：「运行期开关与上报」（health 读回 + 会话限制）
+-   [x] `wiki/design/motrix_edge_command_bus.md`：命令表补两条 + 会话限制说明
+-   [x] `wiki/design/robot_pipeline_impedance.md`：「可观测」段补 `/v1/health` 的 `gravity` + 运行期开关
 -   [x] `wiki/design/index.md` / `wiki/plan/index.md` 登记
--   [x] `src/motrix_edge/adapter/http_contract.py` 的 `/v1/discover` 段落说明这两个字段
+-   [x] `src/motrix_edge/adapter/http_contract.py` 的 `/v1/health` 段落说明运行位三字段
 
-### E. 验收
+### F. 验收
 
--   [x] 离线：全量 pytest（804 passed / 1 skipped）
+-   [x] 离线：全量 pytest（818 passed / 1 skipped）
 -   [ ] 真机（运动学未被污染）：`scripts/verify_cartesian.py --port left` 仍为 mm / mrad 级
--   [ ] 真机（TCP 生效）：开 `robot.tcp` 后发 5 cm 位姿增量，量**尖端**位移 = 5 cm（尺 / 探针）
+-   [ ] 真机（TCP 生效）：`robot tcp true offset=[0,0,<L>]` 后发 5 cm 位姿增量，量**尖端**位移 = 5 cm
+        （尺 / 探针）
+-   [ ] 真机（重力开关）：`robot gravity true` → health 的 `gravity.control_mode` 变 `mit+gravity`，
+        `t_ff` 不为 0；对无重力前馈的机型 → 回执 `rejected`（422 not supported）
 -   [ ] 真机（深度不变）：腕相机 `GET /v1/depth` 的 `xyz_world` 在 TCP 开关前后一致
--   [ ] 计划完整落地后删除本文档并更新 `wiki/plan/index.md`（真机三项待现场）
+-   [ ] 计划完整落地后删除本文档并更新 `wiki/plan/index.md`（真机项待现场）

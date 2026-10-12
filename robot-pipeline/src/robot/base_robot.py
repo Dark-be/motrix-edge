@@ -653,6 +653,81 @@ class BaseRobot:
         offsets = [self.tcp_offset_of(arm) for arm in self.ARM_NAMES]
         return tcp.from_tcp(pose, offsets, per_arm=self.POSE_DIM_PER_ARM)
 
+    def _tcp_section(self, enabled: bool, offset=None) -> dict:
+        """运行期切换用的配置段：yml 的 ``robot.tcp`` + 运行期覆盖（``enabled`` / ``offset``）。
+
+        ``offset`` 是**运行期值**（不写回 yml）：重启后回落配置——「现场量完就用」不必改文件，
+        但要长期生效仍需写进 ``robot.tcp``。
+        """
+        section = dict(self.robot_config.get(tcp.SECTION) or {})
+        if offset is not None:
+            section["offset"] = list(offset)
+        section["enabled"] = bool(enabled)
+        return section
+
+    def set_tcp(self, enabled: bool, offset=None) -> None:
+        """运行期切换位姿系（可开关 / 改偏移）：非法配置 → ``ValueError``（零副作用）。
+
+        只改**语义**（``pose`` / ``pose_delta`` 与两个位姿观测键的原点），**不动机目标**：在飞
+        目标对应的物理位姿不变，机械臂不会跳；后果只是「同一串数值现在换了个原点」。与
+        ``robot.teleop`` 不同，切换需**离开会话**（同一 episode 内语义不能前后不一致）。
+
+        **同步应用**（与 ``set_gravity()`` 同一口径）：先校验再动状态，偏移非法（非 3 个数 /
+        非有限 / 未知键）→ ``ValueError``（robot server 回 422）且运行位不变；不做单独的预检接口。
+        """
+        offsets = tcp.resolve_tcp(self._tcp_section(enabled, offset), tuple(getattr(self, "ARM_NAMES", ()) or ()))
+        # 两字段一次赋值（同一行内先算后写）：控制线程最多看到「旧的偏移 + 新的帧名」之外的中间态
+        self.tcp_offsets, self.pose_frame = offsets, (tcp.FRAME_TCP if offsets else tcp.FRAME_FLANGE)
+        debug_print(
+            self.name,
+            f"位姿系已切换为 {self.pose_frame}"
+            + (
+                f"（offset={ {arm: [round(float(v), 4) for v in off] for arm, off in offsets.items()} }）"
+                if offsets
+                else ""
+            ),
+            "INFO",
+        )
+
+    def tcp_status(self) -> dict:
+        """TCP 运行位（→ ``/v1/health``）：位姿系名 + 逐臂偏移（未开启 → ``tcp_offset`` 为 None）。"""
+        return {
+            "pose_frame": self.pose_frame,
+            "tcp_offset": None
+            if not self.tcp_offsets
+            else {str(arm): [float(value) for value in tuple(offset)[:3]] for arm, offset in self.tcp_offsets.items()},
+        }
+
+    def set_gravity(self, enabled: bool, alpha: float | None = None) -> list[str]:
+        """运行期开关重力前馈（**只装在执行臂**）：返回实际生效的控制器键。
+
+        ``enabled=False`` → 卸载模型（``t_ff`` 下一拍起回到 0 = 纯位置环）；``alpha`` 给定时覆盖
+        配置的比例（``0`` = 保留装载但不补偿）。参数 / 限幅仍来自 ``robot.gravity``（**不动**标定
+        产物）。
+
+        **不支持就说「不支持」**：找不到任何可装载的执行控制器（机型无重力前馈 / 控制器未实现）
+        → ``ValueError``（robot server 回 422，回执 ``rejected``），且在校验通过前**不动任何状态**
+        （失败即零副作用）。**不做单独的预检接口**：本方法就是那个判断，调用方拿到异常即等价于
+        「not supported」。
+        """
+        if alpha is not None and not np.isfinite(float(alpha)):
+            raise ValueError(f"{self.name}: invalid alpha {alpha!r}")
+        controllers = getattr(self, "controllers", {}) or {}
+        applied = [
+            str(key)
+            for key in (getattr(self, "ARM_CONTROLLERS", {}) or {}).values()
+            if callable(getattr(controllers.get(key), "enable_gravity_compensation", None))
+        ]
+        if not applied:
+            raise ValueError(f"{self.name}: no controller supports gravity compensation")
+        section = dict(self.robot_config.get("gravity") or {})
+        section["enabled"] = bool(enabled)
+        if alpha is not None:
+            section["alpha"] = float(alpha)
+        for key in applied:
+            controllers[key].enable_gravity_compensation(section)
+        return applied
+
     # ---- 位姿类动作的公共实现（``pose`` / ``pose_delta``；子类提供 FK / IK 接入）----
     def _absolute_pose_target(self, space: str, values: np.ndarray) -> np.ndarray:
         """位姿类动作 → **绝对目标位姿**（每臂 ``xyz + rpy``，扁平 ``POSE`` 维）。

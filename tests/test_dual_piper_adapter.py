@@ -36,11 +36,13 @@ from motrix_edge.adapter.http_contract import (
     PATH_CAMERAS,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
-    PATH_DISCOVER,
     PATH_EXECUTE,
+    PATH_GRAVITY,
+    PATH_HEALTH,
     PATH_RESET,
     PATH_ROLLOUT,
     PATH_SAFE_STOP,
+    PATH_TCP,
     PATH_TELEOP,
 )
 
@@ -74,19 +76,26 @@ class _Response:
 
 
 class _FakeHttp:
-    def __init__(self, get_body=None, post_body=None):
+    def __init__(self, get_body=None, post_body=None, post_status=None):
         self.posts = []
         self.gets = []  # GET 调用记录（断言元数据只查一次）
         self.get_body = get_body or {}
-        self.post_body = post_body or {}  # POST 响应（如 ``/v1/discover`` 的自描述块）
+        self.post_body = post_body or {}  # POST 响应（如 ``/v1/capture_*`` 的回包）
+        self.post_status = post_status or {}  # POST 状态码（缺省 200；验证开关回执检查）
+        self.raise_post = False  # 模拟进程不可达
+        self.raise_get = False  # 模拟进程不可达（失联时保留上次已知的运行位）
         self.closed = False
 
     def post(self, url, json=None):
         self.posts.append((url, json))
-        return _Response(self.post_body.get(url, {}))
+        if self.raise_post:
+            raise RuntimeError("robot process unreachable")
+        return _Response(self.post_body.get(url, {}), self.post_status.get(url, 200))
 
     def get(self, url):
         self.gets.append(url)
+        if self.raise_get:
+            raise RuntimeError("robot process unreachable")
         return _Response(self.get_body.get(url, {}))
 
     def close(self):
@@ -470,15 +479,14 @@ def test_observe_rejects_camera_count_mismatch(monkeypatch):
         DualPiperAdapter().observe()
 
 
-def test_pose_frame_follows_robot_declaration():
-    """位姿系（``POSE_FRAME``）以**机器人上报**为准：开着 ``robot.tcp`` → ``tcp``。"""
+def test_pose_frame_follows_robot_health():
+    """位姿系（``POSE_FRAME``）以**机器人心跳上报**为准：开着 ``robot.tcp`` → ``tcp``。"""
     http = _FakeHttp(
-        post_body={
-            PATH_DISCOVER: {
-                "robot": {
-                    "pose_frame": "tcp",
-                    "tcp_offset": {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.08]},
-                }
+        get_body={
+            PATH_HEALTH: {
+                "ok": True,
+                "pose_frame": "tcp",
+                "tcp_offset": {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.08]},
             }
         }
     )
@@ -487,9 +495,9 @@ def test_pose_frame_follows_robot_declaration():
     offsets = adapter.tcp_offset_by_arm()
     assert offsets["left"] == pytest.approx([0.0, 0.0, 0.1])
     assert offsets["right"] == pytest.approx([0.0, 0.0, 0.08])
-    # 自描述惰性查一次（与 /v1/cameras 同一套「成功才缓存」口径）
-    adapter.pose_frame()
-    assert [url for url, _ in http.posts] == [PATH_DISCOVER]
+    # 运行位**不单独发请求**（旧的 /v1/discover 自描述已删）：与心跳同源，不会一个旧一个新
+    assert http.posts == []
+    assert http.gets == [PATH_HEALTH]
 
 
 def test_pose_frame_falls_back_to_class_constant():
@@ -501,9 +509,58 @@ def test_pose_frame_falls_back_to_class_constant():
 
 def test_tcp_offset_rejects_malformed_payload():
     """偏移格式非法 → 整体不采纳（宁可不换算，不拿半个偏移去算世界坐标）。"""
-    http = _FakeHttp(post_body={PATH_DISCOVER: {"robot": {"pose_frame": "tcp", "tcp_offset": {"left": [0.0, 0.0]}}}})
+    http = _FakeHttp(get_body={PATH_HEALTH: {"ok": True, "pose_frame": "tcp", "tcp_offset": {"left": [0.0, 0.0]}}})
     adapter = _adapter(http)
     assert adapter.tcp_offset_by_arm() == {}
+
+
+def test_runtime_bits_keep_last_known_when_unreachable():
+    """运行位随心跳刷新；失联 → **保留上次已知值**（不退回「按法兰理解」）。
+
+    位姿系参与 Edge 坐标系换算，宁可稍旧也不能静默换系；机器人重启后的开关状态由下一次心跳纠正。
+    """
+    http = _FakeHttp(get_body={PATH_HEALTH: {"ok": True, "pose_frame": "tcp", "tcp_offset": {"left": [0.0, 0.0, 0.1]}}})
+    adapter = _adapter(http)
+    assert adapter.pose_frame() == "tcp"
+    http.raise_get = True  # 进程不可达
+    adapter.health()
+    assert adapter.pose_frame() == "tcp"
+    assert set(adapter.tcp_offset_by_arm()) == {"left"}
+
+
+def test_set_tcp_and_set_gravity_post_expected_bodies():
+    """运行期开关只下发命令（``/v1/tcp`` / ``/v1/gravity``）：**真值靠 health 读回**。"""
+    http = _FakeHttp()
+    adapter = _adapter(http)
+    adapter.set_tcp(True, [0.0, 0.0, 0.1])
+    adapter.set_tcp(False)
+    adapter.set_gravity(True, 0.5)
+    adapter.set_gravity(False)
+    assert http.posts == [
+        (PATH_TCP, {"enabled": True, "offset": [0.0, 0.0, 0.1]}),
+        (PATH_TCP, {"enabled": False}),
+        (PATH_GRAVITY, {"enabled": True, "alpha": 0.5}),
+        (PATH_GRAVITY, {"enabled": False}),
+    ]
+
+
+def test_switch_rejection_surfaces_as_value_error():
+    """开关回执 4xx（如无重力支持的机型）→ ``ValueError``（回执 rejected）。
+
+    静默成功比不切更危险：现场会以为切了、实际 ``t_ff`` 恒为 0 / 位姿系没变。
+    """
+    http = _FakeHttp(
+        post_status={PATH_GRAVITY: 422, PATH_TCP: 422},
+        post_body={PATH_GRAVITY: {"detail": "no controller supports gravity compensation"}},
+    )
+    adapter = _adapter(http)
+    with pytest.raises(ValueError, match="refused gravity switch: HTTP 422"):
+        adapter.set_gravity(True)
+    with pytest.raises(ValueError, match="refused tcp switch: HTTP 422"):
+        adapter.set_tcp(True)
+    assert "no controller supports gravity compensation" in str(
+        pytest.raises(ValueError, adapter.set_gravity, True).value
+    )
 
 
 def test_release_closes_local_resources():

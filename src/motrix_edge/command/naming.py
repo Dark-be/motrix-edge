@@ -43,6 +43,12 @@ CMD_ROBOT_TEACH = "robot teach"  # 示教遥操作（= robot teleop <enabled> ab
 CMD_ROBOT_TAKEOVER = "robot takeover"  # 人工接管（= robot teleop <enabled> delta：锚点增量，接管瞬间不突变）
 # 遥操作命令组：同一实现（``config_commands.apply_teleop``），模式由命令名（别名）或 ``mode`` 参数决定
 TELEOP_COMMANDS = (CMD_ROBOT_TELEOP, CMD_ROBOT_TEACH, CMD_ROBOT_TAKEOVER)
+CMD_ROBOT_TCP = "robot tcp"  # 运行期切换位姿系（位置参数 enabled；可选 offset = [x,y,z] 米）
+CMD_ROBOT_GRAVITY = "robot gravity"  # 运行期开关重力前馈（位置参数 enabled；可选 alpha）
+# 运行位开关命令组：同一实现（``config_commands.apply_switch``）——两条都**离开会话才能切**
+# （tcp 换 ``observations/pose`` 的原点、gravity 改 ``control_mode``）：与 robot teleop 不同，
+# 人工接管是**会话中**的正常操作，不受此限。
+SWITCH_COMMANDS = (CMD_ROBOT_TCP, CMD_ROBOT_GRAVITY)
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）

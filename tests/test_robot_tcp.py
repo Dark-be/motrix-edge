@@ -191,3 +191,85 @@ def test_enabled_but_no_arms_declared_stays_flange(base_robot):
     robot = _NoArm({"init_joint": [0.0] * 6, "tcp": {"enabled": True, "offset": [0.0, 0.0, 0.1]}})
     assert robot.tcp_offsets == {}
     assert robot.pose_frame == "flange"
+
+
+# ---- 运行期切换（``robot tcp`` → POST /v1/tcp；``robot gravity`` → POST /v1/gravity）----------
+
+
+def test_set_tcp_rejects_bad_config_without_touching_runtime_state(base_robot):
+    """非法配置 → ``ValueError`` 且**运行位不变**（先校验后动状态：失败即零副作用）。
+
+    与 ``set_gravity`` 同一口径：不做单独的预检接口，调用方（robot server）拿到异常即回 422。
+    """
+    robot = _robot(base_robot)
+    with pytest.raises(ValueError, match="3 个数"):
+        robot.set_tcp(True, [0.0, 0.1])
+    with pytest.raises(ValueError, match="非有限数"):
+        robot.set_tcp(True, [0.0, 0.0, float("nan")])
+    assert (robot.pose_frame, robot.tcp_offsets) == ("flange", {})  # 未动运行位
+
+
+def test_set_tcp_switches_frame_and_offset_at_runtime(base_robot):
+    """运行期开关：``set_tcp`` 改帧名与偏移（读 / 写钩子跟着变），关掉即回恒等。"""
+    robot = _robot(base_robot)
+    pose = np.zeros(12)
+    robot.set_tcp(True, [0.0, 0.0, 0.1])
+    assert robot.pose_frame == "tcp"
+    assert robot.tcp_status() == {
+        "pose_frame": "tcp",
+        "tcp_offset": {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.1]},
+    }
+    assert robot.pose_to_tcp(pose)[:3] == pytest.approx([0.0, 0.0, 0.1])
+    robot.set_tcp(False)  # 关闭：偏移不再生效（配置里的 offset 留着也不影响）
+    assert robot.pose_frame == "flange"
+    assert robot.tcp_status() == {"pose_frame": "flange", "tcp_offset": None}
+    assert robot.pose_to_tcp(pose) == pytest.approx(pose)
+    assert robot.tcp_to_flange(pose) == pytest.approx(pose)
+
+
+def test_set_tcp_falls_back_to_configured_offset(base_robot):
+    """不带 ``offset`` 的切换沿用配置里的偏移（``offset`` 是**运行期覆盖**，不写回 yml）。"""
+    robot = _robot(base_robot, {"enabled": False, "offset": [0.0, 0.0, 0.1]})
+    assert robot.pose_frame == "flange"
+    robot.set_tcp(True)
+    assert robot.pose_frame == "tcp"
+    assert robot.tcp_offset_of("left") == pytest.approx([0.0, 0.0, 0.1])
+
+
+def test_set_gravity_reports_unsupported_robot(base_robot):
+    """机型 / 控制器不支持重力前馈 → ``ValueError``（不回 ok，也不静默当作成功）。"""
+    robot = _robot(base_robot)
+    with pytest.raises(ValueError, match="no controller supports"):
+        robot.set_gravity(True, 0.5)
+    with pytest.raises(ValueError, match="no controller supports"):
+        robot.set_gravity(False)  # 卸载也对：不支持就不该假装成功
+    with pytest.raises(ValueError, match="invalid alpha"):
+        robot.set_gravity(True, float("nan"))
+
+
+def test_set_gravity_installs_and_unloads_on_each_executing_arm(base_robot):
+    """支持时逐执行臂装载 / 卸载，``alpha`` 运行期覆盖随段下发；返回实际生效的控制器键。"""
+
+    class _Controller:
+        def __init__(self):
+            self.calls = []
+
+        def enable_gravity_compensation(self, section):
+            self.calls.append(dict(section))
+
+    class _Stub(base_robot.BaseRobot):
+        NAME = "stub"
+        ARM_NAMES = _ARMS
+        QPOS = 12
+        POSE = 12
+        POSE_DIM_PER_ARM = 6
+        GRIPPER = 2
+        ARM_CONTROLLERS = {"left": "arm_left", "right": "arm_right"}
+
+    robot = _Stub({"init_joint": [0.0] * 12, "gravity": {"enabled": False, "alpha": 0.8}})
+    left, right = _Controller(), _Controller()
+    robot.controllers = {"arm_left": left, "arm_right": right}
+    assert robot.set_gravity(True, 0.5) == ["arm_left", "arm_right"]
+    assert left.calls == [{"enabled": True, "alpha": 0.5}]
+    robot.set_gravity(False)  # 不带 alpha → 沿用配置里的 0.8
+    assert right.calls[-1] == {"enabled": False, "alpha": 0.8}

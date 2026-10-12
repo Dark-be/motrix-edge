@@ -178,6 +178,33 @@ def test_capture_robot_teleop_during_observe(tmp_path):
     session.session_finish()
 
 
+def test_capture_switch_commands_rejected_during_session(tmp_path):
+    """会话中 robot tcp / robot gravity → 拒绝（**离开会话才能切**），不下发 adapter。
+
+    同一会话内的观测语义（位姿系）与数据元信息（control_mode）不能前后不一致；对照
+    ``test_capture_robot_teleop_during_observe``——人工接管是会话中的正常操作，不受此限。
+    """
+    adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+    replies = []
+    tcp = _REGISTRY.parse_argv(["robot", "tcp", "true"])
+    tcp.reply_to = replies.append
+    gravity = _REGISTRY.parse_argv(["robot", "gravity", "true"])
+    gravity.reply_to = replies.append
+    session = CaptureSession(
+        make_config(tmp_path),
+        command_source=make_signals(tcp, gravity, "session quit"),
+        frame_manager=FrameManager(),
+        adapter=adapter,
+    )
+    session.session_start()
+    assert session.run() == RunResult.FINISHED
+    assert [r.status for r in replies] == ["rejected", "rejected"]
+    assert [r.code for r in replies] == [ErrorCode.CONFLICT] * 2
+    assert all("quit the session first" in r.error for r in replies)
+    assert adapter.switch_calls == []
+    session.session_finish()
+
+
 def test_capture_episode_start_end_during_observe(tmp_path):
     """观测期间 capture episode start / end：adapter.start_capture / end_capture。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})

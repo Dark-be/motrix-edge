@@ -20,6 +20,7 @@
 """
 
 import json
+import math
 
 from motrix_edge.adapter.http_contract import (
     ACTION_SPACES,
@@ -77,6 +78,42 @@ def reject_legacy_action_space(params) -> None:
     """
     if params and "action_space" in params:
         raise ValueError("action_space is renamed to layout")
+
+
+def parse_offset(raw) -> list[float] | None:
+    """解析 ``robot tcp`` 的可选参数 ``offset``：TCP 在**法兰系**下的位置（米，3 个数）。
+
+    缺失 / 空 → ``None``（用配置里的 ``robot.tcp.offset``）；分隔容忍与 ``parse_qpos`` 同套
+    （方括号 / 空白 / 中英文逗号 / 分号 / 顿号）；不是 3 个数 / 非法 → ``ValueError``。
+    """
+    if raw is None or str(raw).strip() == "":
+        return None
+    text = str(raw).strip().strip("[]()").strip()
+    for sep in (",", "，", ";", "；", "、", "|"):
+        text = text.replace(sep, " ")
+    try:
+        values = [float(tok) for tok in text.split()]
+    except ValueError:
+        raise ValueError(f"invalid offset: {raw!r}") from None
+    if len(values) != 3:
+        raise ValueError(f"offset must be 3 numbers (meters), got {len(values)}")
+    return values
+
+
+def parse_alpha(raw) -> float | None:
+    """解析 ``robot gravity`` 的可选参数 ``alpha``（重力前馈比例；0 = 保留装载但不补偿）。
+
+    缺失 / 空 → ``None``（用配置里的 ``robot.gravity.alpha``）；非法 / 非有限数 → ``ValueError``。
+    """
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid alpha: {raw!r}") from None
+    if not math.isfinite(value):
+        raise ValueError(f"invalid alpha: {raw!r}")
+    return value
 
 
 def parse_bool(raw) -> bool:

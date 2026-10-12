@@ -141,7 +141,13 @@ $$\hat\tau_g(q) = Y(q)\,\hat\pi,\qquad Y(q)\in\mathbb{R}^{6\times n_\pi}$$
     **本拍 `t_ff = 0`**（退回纯位置环）+ 告警一条（同一原因只打一条，30 Hz 不刷屏），控制不中断。
     占位参数（全 0）是**短路**：连读数都不取，零开销。
 -   **可观测**：`PiperController.gravity_status()` 给出是否生效 / α / 限幅 / 占位、降级与限幅计数、
-    当前原因、最近一拍 `t_ff`（`last_torque_ff` 也在控制器上）；健康检查接入 `/v1/health` 属后续小改。
+    当前原因、最近一拍 `t_ff`（`last_torque_ff` 也在控制器上）；运行位另经 `/v1/health` 的
+    `gravity` 段（= `control_layout()`，与采集 JSON 的 `control` 段同源）随时读回。
+-   **运行期开关**：`POST /v1/gravity`（`{enabled, alpha?}`，Edge 侧命令 `robot gravity`）——
+    `enabled=false` 卸载模型（下一拍起纯位置环）、`alpha` 覆盖配置比例（0 = 保留装载但不补偿）。
+    **直接同步切换**（不经控制线程队列）：找不到可装载的执行控制器就回 **422「not supported」**，
+    而不是「回执 ok 但 `t_ff` 恒为 0」；校验不过不动任何状态（零副作用）。切换后 env 立即重注入
+    `control_layout()`（否则后续 episode 的 `control_mode` 漏报）。**离开会话才能切**。
 -   **渐进上线**：`α` 从 0.2 起逐档提到 1.0，每档在同一姿态对比 `k_p·|q_des − q_ss|`——现场用
     `verify_gravity.py --hold --alpha <α>`（α=0 与 α=1 各跑一次，同一姿态可比）。
 
