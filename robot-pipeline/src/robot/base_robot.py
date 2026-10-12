@@ -27,10 +27,10 @@
   校验见 ``parse_layout()`` / ``plan_layout()``，写入见 ``apply_layout()``（唯一写目标处）。
 - **线程模型**：控制线程每拍 ``step()`` + ``sample_qpos()`` 缓存状态；观测线程每拍
   ``build_observation()``（缓存状态 + 本拍相机帧）；单线程脚本用 ``get_observation()``。
-- **遥操作**（``teleop_enabled``）：``absolute`` 用主臂绝对读数直连从臂 target；``delta``
-  用锚点增量（``target = slave_ref + (master_now − master_ref)``，锚点接管后首拍采样）。
-  遥操作期间 ``rollout()`` 一律被拒，``execute()`` / ``reset()`` / ``safe_stop()`` 可抢回。
-  主臂读数的常量偏置（``robot.teleop.joint_offset``，现场装配差异）由基类在取锚点前叠加。
+- **遥操作**（``teleop_enabled``）：``robot.teleop.follow_space`` 选择关节直连或位姿 FK→IK，
+  ``follow_axes`` 可把未跟随的位姿轴锁在从臂首拍锚点；``absolute`` / ``delta`` 决定绝对或
+  锚点增量映射。遥操作期间 ``rollout()`` 一律被拒，``execute()`` / ``reset()`` /
+  ``safe_stop()`` 可抢回。主臂常量偏置由基类在 FK / 取锚点前叠加。
 
 设计背景见 ``wiki/design/robot_pipeline_*.md``。
 """
@@ -109,6 +109,10 @@ class BaseRobot:
     TELEOP_MODE_ABSOLUTE = "absolute"  # 主臂绝对读数直连从臂 target
     TELEOP_MODE_DELTA = "delta"  # 锚点增量：target = slave_ref + (master_now − master_ref)
     TELEOP_MODES = (TELEOP_MODE_ABSOLUTE, TELEOP_MODE_DELTA)
+    TELEOP_FOLLOW_JOINT = ACTION_SPACE_JOINT
+    TELEOP_FOLLOW_POSE = ACTION_SPACE_POSE
+    TELEOP_FOLLOW_SPACES = (TELEOP_FOLLOW_JOINT, TELEOP_FOLLOW_POSE)
+    TELEOP_POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
     def __init__(self, robot_config: dict | None = None):
         self.robot_config = dict(robot_config or {})
@@ -124,7 +128,10 @@ class BaseRobot:
         self.init_joint = self._init_vector("init_joint", self.QPOS, required=True)
         self.init_gripper = self._init_vector("init_gripper", self.GRIPPER, required=False, fill=1.0)
 
-        # 主臂读数常量偏置（robot.teleop.joint_offset，缺省全 0）：装配差异属于现场值
+        # 遥操作跟随空间 / 位姿轴白名单 + 主臂读数常量偏置（均为 robot-pipeline 内部配置）
+        self.teleop_follow_space, self.teleop_follow_axes = self._resolve_teleop_follow()
+        self._configured_teleop_follow_space = self.teleop_follow_space
+        self._configured_teleop_follow_axes = self.teleop_follow_axes
         self.teleop_joint_offset = self._resolve_teleop_joint_offset()
 
         # 遥操作：开关 + 映射模式 + 增量锚点（锚点在接管后首拍采样，见 _capture_teleop_anchor）
@@ -132,11 +139,15 @@ class BaseRobot:
         self.teleop_mode = self.TELEOP_MODE_ABSOLUTE
         self.teleop_master_ref: np.ndarray | None = None  # 主臂关节锚点（delta 模式）
         self.teleop_slave_ref: np.ndarray | None = None  # 从臂关节锚点（delta 模式）
+        self.teleop_master_pose_ref: np.ndarray | None = None  # 主臂位姿锚点（pose 跟随）
+        self.teleop_slave_pose_ref: np.ndarray | None = None  # 从臂位姿锚点（pose 跟随 / 锁轴参考）
         self.teleop_master_gripper_ref: np.ndarray | None = None  # 主臂夹爪锚点（delta 模式）
         self.teleop_slave_gripper_ref: np.ndarray | None = None  # 从臂夹爪锚点（delta 模式）
         # 主臂读数不可用时的累计计数 + 限流告警（同一原因只告警一条）
         self.teleop_read_failures = 0
         self._teleop_read_error: str | None = None  # 最近一次原因
+        self.teleop_mapping_failures = 0
+        self._teleop_mapping_error: str | None = None  # 最近一次 FK / IK / 位姿合成失败原因
         # 最近一次成功的主臂读数（关节 / 夹爪）；开关遥操作时随锚点一起清空
         self.teleop_master_now: np.ndarray | None = None
         self.teleop_master_gripper_now: np.ndarray | None = None
@@ -164,18 +175,54 @@ class BaseRobot:
     PORT_KINDS: dict[str, str] = {}
     CAMERA_KINDS: dict[str, str] = {}
 
-    # ---- 遥操作主臂常量偏置（robot.teleop.joint_offset）----
+    # ---- 遥操作配置（robot.teleop：跟随空间 / 位姿轴 / 主臂常量偏置）----
+    def _resolve_teleop_follow(self) -> tuple[str, tuple[str, ...]]:
+        """解析 ``follow_space`` / ``follow_axes``；缺省为既有的 joint 跟随。
+
+        ``follow_axes`` 只对 pose 跟随有效，采用白名单语义：未列出的轴锁在 teleop 首拍的从臂
+        位姿锚点。配置错误在构造期响亮失败，避免真机以错误语义启动。
+        """
+        section = self.robot_config.get("teleop") or {}
+        allowed = {"joint_offset", "follow_space", "follow_axes"}
+        unknown = [key for key in section if key not in allowed]
+        if unknown:
+            debug_print(self.name, f"robot.teleop 未知键 {unknown}（可用：{sorted(allowed)}），已忽略", "WARNING")
+        follow_space = str(section.get("follow_space", self.TELEOP_FOLLOW_JOINT)).strip()
+        if follow_space not in self.TELEOP_FOLLOW_SPACES:
+            raise ValueError(
+                f"{self.name}: robot.teleop.follow_space {follow_space!r} invalid (expect {self.TELEOP_FOLLOW_SPACES})"
+            )
+        raw_axes = section.get("follow_axes")
+        if follow_space == self.TELEOP_FOLLOW_JOINT:
+            if raw_axes is not None:
+                raise ValueError(f"{self.name}: robot.teleop.follow_axes is only valid for follow_space='pose'")
+            return follow_space, ()
+        if self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.POSE <= 0:
+            raise ValueError(f"{self.name}: robot.teleop.follow_space='pose' needs pose action capability")
+        expected_pose = self.POSE_DIM_PER_ARM * len(self.ARM_NAMES)
+        if self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES) or self.POSE != expected_pose:
+            raise ValueError(
+                f"{self.name}: pose teleop needs {len(self.TELEOP_POSE_AXES)} pose dims per arm"
+                f" and POSE={expected_pose} (got per_arm={self.POSE_DIM_PER_ARM}, POSE={self.POSE})"
+            )
+        if raw_axes is not None and not isinstance(raw_axes, (list, tuple)):
+            raise ValueError(f"{self.name}: robot.teleop.follow_axes must be a list (got {raw_axes!r})")
+        axes = self.TELEOP_POSE_AXES if raw_axes is None else tuple(str(axis).strip() for axis in raw_axes)
+        if not axes or len(set(axes)) != len(axes) or any(axis not in self.TELEOP_POSE_AXES for axis in axes):
+            raise ValueError(
+                f"{self.name}: robot.teleop.follow_axes must be a nonempty unique subset of"
+                f" {self.TELEOP_POSE_AXES} (got {raw_axes!r})"
+            )
+        return follow_space, tuple(axes)
+
     def _resolve_teleop_joint_offset(self) -> np.ndarray:
         """解析 ``robot.teleop.joint_offset`` → 扁平 ``QPOS`` 维偏置（缺省全 0）。
 
         取值为逐关节的 rad 偏置：一个长度 = 每臂关节数的列表（各臂共用），或
         ``{<臂名>: [每关节偏置]}``（逐臂，臂名取 ``state_arms()``）。长度不符 / 含非有限值 /
-        未知臂名 → ``ValueError``；未知键打 WARNING。
+        未知臂名 → ``ValueError``。
         """
         section = self.robot_config.get("teleop") or {}
-        unknown = [key for key in section if key != "joint_offset"]
-        if unknown:
-            debug_print(self.name, f"robot.teleop 未知键 {unknown}（可用：['joint_offset']），已忽略", "WARNING")
         raw = section.get("joint_offset")
         if raw is None:
             return np.zeros(self.QPOS)
@@ -727,22 +774,59 @@ class BaseRobot:
         return self.target_action
 
     # ---- 遥操作（模式 / 锚点）----
-    def enable_teleop(self, mode: str = TELEOP_MODE_ABSOLUTE) -> bool:
+    def resolve_teleop_follow(self, follow_space=None, follow_axes=None) -> tuple[str, tuple[str, ...]]:
+        """校验本次 teleop 的跟随空间与 pose 轴；``None`` 沿用启动配置。"""
+        space = self._configured_teleop_follow_space if follow_space is None else str(follow_space).strip()
+        if space not in self.TELEOP_FOLLOW_SPACES:
+            raise ValueError(f"{self.name}: follow_space must be one of {self.TELEOP_FOLLOW_SPACES} (got {space!r})")
+        if space == self.TELEOP_FOLLOW_JOINT:
+            if follow_axes is not None:
+                raise ValueError(f"{self.name}: follow_axes is only valid for pose teleop")
+            return space, ()
+        if self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.POSE <= 0:
+            raise ValueError(f"{self.name}: follow_space='pose' needs pose action capability")
+        expected_pose = self.POSE_DIM_PER_ARM * len(self.ARM_NAMES)
+        if self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES) or self.POSE != expected_pose:
+            raise ValueError(
+                f"{self.name}: pose teleop needs {len(self.TELEOP_POSE_AXES)} pose dims per arm"
+                f" and POSE={expected_pose} (got per_arm={self.POSE_DIM_PER_ARM}, POSE={self.POSE})"
+            )
+        if follow_axes is None:
+            axes = (
+                self._configured_teleop_follow_axes
+                if self._configured_teleop_follow_space == self.TELEOP_FOLLOW_POSE
+                else self.TELEOP_POSE_AXES
+            )
+            return space, axes
+        if not isinstance(follow_axes, (list, tuple)):
+            raise ValueError(f"{self.name}: follow_axes must be a list (got {follow_axes!r})")
+        axes = tuple(str(axis).strip() for axis in follow_axes)
+        if not axes or len(set(axes)) != len(axes) or any(axis not in self.TELEOP_POSE_AXES for axis in axes):
+            raise ValueError(
+                f"{self.name}: follow_axes must be a nonempty unique subset of"
+                f" {self.TELEOP_POSE_AXES} (got {follow_axes!r})"
+            )
+        return space, axes
+
+    def enable_teleop(self, mode: str = TELEOP_MODE_ABSOLUTE, follow_axes=None, follow_space=None) -> bool:
         """启用遥操作（``mode`` 决定主臂读数 → 从臂 target 的映射）。
 
-        - ``absolute``（缺省）：主臂绝对读数直连从臂 target。
-        - ``delta``（人工接管）：``target = slave_ref + (master_now − master_ref)``；锚点在启用后
-          的下一拍 ``step()`` 采样（该拍增量恒 0，从臂不突变），关节与夹爪同一套增量语义。
+        ``robot.teleop.follow_space`` 决定关节映射或 pose FK→IK；``mode`` 决定 absolute / delta。
+        pose 的未跟随轴锁在启用后首拍的从臂位姿锚点。HTTP / Edge 契约仍只有既有 ``mode``。
 
         返回是否切换成功（模式名非法 → False，保持原模式与 target 不变）。
         """
         if mode not in self.TELEOP_MODES:
             debug_print(self.name, f"Unknown teleop mode {mode!r} (expect {self.TELEOP_MODES})", "ERROR")
             return False
+        space, axes = self.resolve_teleop_follow(follow_space, follow_axes)
         self.teleop_mode = mode
+        self.teleop_follow_space = space
+        self.teleop_follow_axes = axes
         self._clear_teleop_anchor()
         self.teleop_enabled = True
-        debug_print(self.name, f"Teleop enabled (mode={mode})", "INFO")
+        axes = f", axes={list(self.teleop_follow_axes)}" if self.teleop_follow_space == self.TELEOP_FOLLOW_POSE else ""
+        debug_print(self.name, f"Teleop enabled (space={self.teleop_follow_space}, mode={mode}{axes})", "INFO")
         return True
 
     def disable_teleop(self):
@@ -791,31 +875,90 @@ class BaseRobot:
         return np.asarray(self.init_gripper, dtype=np.float64)
 
     def _capture_teleop_anchor(self, master_joints: np.ndarray, master_gripper: np.ndarray):
-        """采样增量接管锚点：主臂读数（关节 + 夹爪）+ 从臂当前值（同一拍，即接管瞬间）。
+        """采样遥操作锚点：主 / 从关节、夹爪，以及 pose 跟随需要的两侧位姿。
 
-        此后 ``target = slave_ref + (master_now − master_ref)``，增量恒从 0 开始。
+        所有值先计算 / 校验再一次写入；FK 失败不会留下半套锚点。joint+absolute 不需要锚点，
+        其余组合均在首次有效读数拍调用。
         """
-        self.teleop_master_ref = np.asarray(master_joints, dtype=np.float64)
-        self.teleop_slave_ref = self.current_action()
-        self.teleop_master_gripper_ref = np.asarray(master_gripper, dtype=np.float64)
-        self.teleop_slave_gripper_ref = self.current_gripper()
-        debug_print(self.name, "Teleop anchor captured (delta mode).", "INFO")
+        master_ref = np.asarray(master_joints, dtype=np.float64).reshape(-1).copy()
+        slave_ref = self.current_action()
+        master_gripper_ref = np.asarray(master_gripper, dtype=np.float64).reshape(-1).copy()
+        slave_gripper_ref = self.current_gripper()
+        master_pose_ref = slave_pose_ref = None
+        if self.teleop_follow_space == self.TELEOP_FOLLOW_POSE:
+            master_pose_ref = self._valid_teleop_pose(self._pose_of_joints(master_ref), "master")
+            slave_pose_ref = self._valid_teleop_pose(self._pose_of_joints(slave_ref), "slave")
+        self.teleop_master_ref = master_ref
+        self.teleop_slave_ref = slave_ref
+        self.teleop_master_pose_ref = master_pose_ref
+        self.teleop_slave_pose_ref = slave_pose_ref
+        self.teleop_master_gripper_ref = master_gripper_ref
+        self.teleop_slave_gripper_ref = slave_gripper_ref
+        debug_print(
+            self.name,
+            f"Teleop anchor captured (space={self.teleop_follow_space}, mode={self.teleop_mode}).",
+            "INFO",
+        )
+
+    def _valid_teleop_pose(self, pose, side: str) -> np.ndarray:
+        """校验 teleop FK 结果为完整、有限的 ``POSE`` 维向量。"""
+        values = np.asarray(pose, dtype=np.float64).reshape(-1)
+        if values.shape[0] != self.POSE or not np.all(np.isfinite(values)):
+            raise CartesianActionError(
+                f"{self.name}: teleop {side} pose invalid (dim={values.shape[0]}, expected={self.POSE})"
+            )
+        return values.copy()
+
+    def _pose_teleop_target(self, master_joints: np.ndarray) -> np.ndarray:
+        """按映射模式与轴白名单合成目标位姿并 IK，返回关节段目标。
+
+        未跟随轴保留从臂首拍位姿；姿态增量与结果按现有 RPY chart wrap。IK seed 使用上一关节
+        目标，使连续 teleop 拍优先落在同一解支。
+        """
+        if self.teleop_master_pose_ref is None or self.teleop_slave_pose_ref is None:
+            raise CartesianActionError(f"{self.name}: pose teleop anchor is unavailable")
+        master_pose = self._valid_teleop_pose(self._pose_of_joints(master_joints), "master")
+        target = self.teleop_slave_pose_ref.copy()
+        followed = set(self.teleop_follow_axes)
+        per_arm = self.POSE_DIM_PER_ARM
+        for arm_index in range(len(self.ARM_NAMES)):
+            start = arm_index * per_arm
+            for axis_index, axis in enumerate(self.TELEOP_POSE_AXES):
+                if axis not in followed:
+                    continue
+                index = start + axis_index
+                if self.teleop_mode == self.TELEOP_MODE_DELTA:
+                    delta = master_pose[index] - self.teleop_master_pose_ref[index]
+                    if axis_index >= 3:
+                        delta = float(wrap_angles([delta])[0])
+                    target[index] = self.teleop_slave_pose_ref[index] + delta
+                else:
+                    target[index] = master_pose[index]
+            target[start + 3 : start + per_arm] = wrap_angles(target[start + 3 : start + per_arm])
+        solved = np.asarray(self._solve_pose(target, self._target_joints()), dtype=np.float64).reshape(-1)
+        if solved.shape[0] != self.QPOS or not np.all(np.isfinite(solved)):
+            raise CartesianActionError(
+                f"{self.name}: pose teleop IK returned invalid joints (dim={solved.shape[0]}, expected={self.QPOS})"
+            )
+        return solved
 
     def _clear_teleop_anchor(self):
         """清空增量锚点与最近主臂读数（开启 / 关闭遥操作时调用；锚点在接管期间固定不变）。"""
         self.teleop_master_ref = None
         self.teleop_slave_ref = None
+        self.teleop_master_pose_ref = None
+        self.teleop_slave_pose_ref = None
         self.teleop_master_gripper_ref = None
         self.teleop_slave_gripper_ref = None
         self.teleop_master_now = None
         self.teleop_master_gripper_now = None
+        self._teleop_mapping_error = None
 
     def _refresh_teleop_target(self):
         """本拍遥操作 target 刷新（``step()`` 调用；未开启 / 读不到 / 读取异常 → 保持原 target）。
 
-        ``absolute`` 直连主臂读数；``delta`` 走锚点增量——锚点尚未采样时本拍先采样（增量恒 0，
-        从臂不突变）。主臂读不到（``None``）或读取异常都只是本拍不刷新：计数 + 限流告警
-        （``_note_teleop_read_failure()``），不置 ``last_error``。
+        joint 跟随沿用既有 absolute / delta；pose 跟随先 FK，再按轴白名单合成位姿并 IK。锚点尚未
+        采样时本拍先原子采样。主臂读不到或位姿映射失败都只让本拍保持原目标，不置 ``last_error``。
 
         常量偏置（``teleop_joint_offset``）在取锚点前叠加，故 ``absolute`` 下可见、``delta`` 下被
         锚点抵消。
@@ -838,14 +981,40 @@ class BaseRobot:
         # 最近一次成功读数：采集侧「帧头跳过」用它判断主臂是否已有效移动
         self.teleop_master_now = master
         self.teleop_master_gripper_now = master_gripper
+        needs_anchor = self.teleop_mode == self.TELEOP_MODE_DELTA or self.teleop_follow_space == self.TELEOP_FOLLOW_POSE
+        if needs_anchor and self.teleop_master_ref is None:
+            try:
+                self._capture_teleop_anchor(master, master_gripper)
+            except Exception as exc:  # noqa: BLE001 FK / 锚点失败：整拍保持，下一拍重试
+                self._note_teleop_mapping_failure(exc)
+                return
+        try:
+            if self.teleop_follow_space == self.TELEOP_FOLLOW_POSE:
+                self.set_target_action(self._pose_teleop_target(master))
+            elif self.teleop_mode == self.TELEOP_MODE_DELTA:
+                self.set_target_action_delta(master - self.teleop_master_ref)
+            else:
+                self.set_target_action(master)
+        except Exception as exc:  # noqa: BLE001 IK / 位姿合成失败：保持上一目标，下一拍重试
+            self._note_teleop_mapping_failure(exc)
+            return
+        self._teleop_mapping_error = None
         if self.teleop_mode != self.TELEOP_MODE_DELTA:
-            self.set_target_action(master)
             self.set_target_gripper(master_gripper)
             return
-        if self.teleop_master_ref is None:
-            self._capture_teleop_anchor(master, master_gripper)
-        self.set_target_action_delta(master - self.teleop_master_ref)
         self.set_target_gripper_delta(master_gripper - self.teleop_master_gripper_ref)
+
+    def _note_teleop_mapping_failure(self, reason) -> None:
+        """FK / IK / 位姿合成失败：累计 + 同原因限流告警，不改变目标与 health。"""
+        self.teleop_mapping_failures += 1
+        text = str(reason)
+        if text != self._teleop_mapping_error:
+            self._teleop_mapping_error = text
+            debug_print(
+                self.name,
+                f"teleop pose mapping unavailable: {text}（本拍保持原 target，下一拍重试）",
+                "WARNING",
+            )
 
     def _note_teleop_read_failure(self, reason) -> None:
         """主臂读数不可用（``None`` / 异常）：累计计数 + 同一原因只告警一条。
@@ -1056,6 +1225,14 @@ class BaseRobot:
         结果都靠它。不提供位姿的机器人返回 ``None``。
         """
         return None
+
+    def _pose_of_joints(self, joints: np.ndarray) -> np.ndarray:
+        """关节向量 → 位姿向量的 teleop/FK 钩子；支持 pose 的机器人子类覆盖。"""
+        raise CartesianActionError(f"{self.name}: joint-to-pose conversion is not supported")
+
+    def _solve_pose(self, pose: np.ndarray, seed: np.ndarray) -> np.ndarray:
+        """位姿向量 → 关节向量的 teleop/IK 钩子；支持 pose 的机器人子类覆盖。"""
+        raise CartesianActionError(f"{self.name}: pose-to-joint conversion is not supported")
 
     def get_observation_gripper(self) -> np.ndarray:
         """当前帧夹爪（扁平 ``GRIPPER`` 维 = 每臂 1，分段排布）——子类实现。

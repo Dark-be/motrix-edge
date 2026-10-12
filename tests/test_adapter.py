@@ -50,7 +50,9 @@ from motrix_edge.adapter.http_contract import (
     FIELD_ARMS,
     FIELD_LAYOUT,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_FOLLOW_AXES,
     FIELD_TELEOP_MODE,
+    FIELD_TELEOP_SPACE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_EXECUTE,
@@ -347,6 +349,17 @@ def test_set_teleop_forwards_to_sdk():
     adapter.set_teleop(True, "delta")  # 人工接管（增量）
     assert adapter.teleop_mode == "delta"
     assert adapter._http.posts[-1] == (PATH_TELEOP, {FIELD_TELEOP_ENABLED: True, FIELD_TELEOP_MODE: "delta"})
+
+    adapter.set_teleop(True, "absolute", ["x", "y", "z", "yaw"], "pose")
+    assert adapter._http.posts[-1] == (
+        PATH_TELEOP,
+        {
+            FIELD_TELEOP_ENABLED: True,
+            FIELD_TELEOP_MODE: "absolute",
+            FIELD_TELEOP_SPACE: "pose",
+            FIELD_TELEOP_FOLLOW_AXES: ["x", "y", "z", "yaw"],
+        },
+    )
 
     adapter.set_teleop(False)
     assert adapter.teleop_enabled is False

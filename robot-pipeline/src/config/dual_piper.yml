@@ -57,6 +57,10 @@ robot:
     arms: {} # 逐臂覆盖（键 = 控制器名 left / right），如 right: {offset: [0, 0, 0.08]}
   # 遥操作（见 wiki/design/robot_pipeline_teleop.md）
   teleop:
+    # 跟随空间：joint（缺省，既有行为）| pose（主臂 FK → 位姿映射 → IK → MIT）。
+    # pose 时可配置 follow_axes 白名单；未列轴锁在启用 teleop 首拍的从臂位姿，例如锁 roll：
+    # follow_axes: [x, y, z, pitch, yaw]
+    follow_space: joint
     # 主臂读数的**常量偏置**（rad，逐关节 = 主从零位差；装配差异属于现场值，按机器档案覆盖）：
     # absolute（示教）下直接体现；delta（人工接管）下由锚点自动抵消，不进入增量。
     # 每臂一份（键 = 臂名 left / right）；也可给一个长度 = 每臂关节数的列表，全臂共用同一组偏置。

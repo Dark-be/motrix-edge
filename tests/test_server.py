@@ -57,6 +57,8 @@ from motrix_edge.command import (
     parse_bool,
     parse_meta,
     parse_rollout_mode,
+    parse_teleop_follow_axes,
+    parse_teleop_follow_space,
     parse_teleop_mode,
     policy_config_status,
     set_policy_config,
@@ -285,17 +287,17 @@ class FakeRobot:
         self.enabled_arms = ["left", "right"]  # 运行时启用臂（preview 按臂标注 EEF / 会话 bind_adapter）
         self.teleop_enabled = False  # 遥操作运行位（capture / infer status 展示）
         self.teleop_mode = None  # 人工接管模式（absolute / delta）
-        self.teleop_calls: list[tuple[bool, str | None]] = []  # 收到的 set_teleop（断言实际下发）
+        self.teleop_calls: list[tuple[bool, str | None, str | None, list[str] | None]] = []
         # 统一坐标系外参（镜像 ``GET /v1/cameras`` 的 ``frames`` 段）：None = 未标定
         self.frames_payload: dict | None = None
         # TCP 偏移（法兰系，米，逐臂）：镜像 ``tcp_offset_by_arm()``；空 = 非 TCP 位姿系
         self.tcp_offsets_payload: dict[str, list[float]] = {}
 
-    def set_teleop(self, enabled, mode=None):
+    def set_teleop(self, enabled, mode=None, follow_axes=None, follow_space=None):
         """遥操作 / 人工接管开关（镜像适配器契约：记录调用 + 更新运行位）。"""
         self.teleop_enabled = bool(enabled)
         self.teleop_mode = mode if enabled else None
-        self.teleop_calls.append((self.teleop_enabled, self.teleop_mode))
+        self.teleop_calls.append((self.teleop_enabled, self.teleop_mode, follow_space, follow_axes))
 
     def reset(self):
         """机器人复位（adapter.reset：非阻塞，只重设目标）。"""
@@ -586,13 +588,28 @@ class FakeNode:
                     try:
                         enabled = parse_bool((cmd.params or {}).get("enabled"))
                         mode = parse_teleop_mode((cmd.params or {}).get("mode"))
+                        follow_space = (
+                            parse_teleop_follow_space((cmd.params or {}).get("follow_space")) if enabled else None
+                        )
+                        follow_axes = (
+                            parse_teleop_follow_axes((cmd.params or {}).get("follow_axes")) if enabled else None
+                        )
                     except ValueError as exc:
                         self._reply(
                             cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
                         )
                     else:
-                        self.adapter.set_teleop(enabled, mode)
-                        self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode))
+                        self.adapter.set_teleop(enabled, mode, follow_axes, follow_space)
+                        self._reply(
+                            cmd,
+                            ok_result(
+                                node_state=self.state,
+                                teleop=enabled,
+                                mode=mode,
+                                follow_space=follow_space,
+                                follow_axes=follow_axes,
+                            ),
+                        )
                 else:  # 未识别命令：兜底 rejected 409（镜像真实 EdgeNode._dispatch 的兜底回执）
                     self._reply(
                         cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
@@ -1179,7 +1196,12 @@ def test_commands_robot_teleop_returns_receipt():
             "command_id": "c1",
             "lease_id": lease,
             "capability": "robot/teleop",
-            "params": {"enabled": "true", "mode": "delta"},
+            "params": {
+                "enabled": "true",
+                "mode": "delta",
+                "follow_space": "pose",
+                "follow_axes": ["x", "y", "z", "yaw"],
+            },
         },
     )
     assert r.status_code == 200
@@ -1189,7 +1211,9 @@ def test_commands_robot_teleop_returns_receipt():
     assert body["deprecated"] is False
     assert body["data"]["teleop"] is True  # 回执回显实际生效的开关
     assert body["data"]["mode"] == "delta"  # 人工接管（增量）模式
-    assert node.teleop_calls == [(True, "delta")]  # 命令已进总线并被 fake node 消费
+    assert body["data"]["follow_space"] == "pose"
+    assert body["data"]["follow_axes"] == ["x", "y", "z", "yaw"]
+    assert node.teleop_calls == [(True, "delta", "pose", ["x", "y", "z", "yaw"])]
     # 非法 mode：命令处理器回执 rejected（HTTP 200 + status=rejected + error），不是静默 accepted
     bad = client.post(
         "/v1/commands",
@@ -1217,7 +1241,7 @@ def test_commands_robot_teleop_returns_receipt():
     assert off.status_code == 200
     assert off.json()["status"] == "ok"
     assert off.json()["data"]["teleop"] is False
-    assert node.teleop_calls[-1] == (False, None)  # 已真正下发关闭
+    assert node.teleop_calls[-1] == (False, None, None, None)  # 已真正下发关闭
     # 数字 0 / 1 同样接受（`enabled: 0`）
     zero = client.post(
         "/v1/commands",

@@ -25,6 +25,7 @@ import math
 from motrix_edge.adapter.http_contract import (
     ACTION_SPACES,
     TELEOP_MODES,
+    TELEOP_POSE_AXES,
     VALUE_LAYOUT_JOINT,
     VALUE_TELEOP_MODE_ABSOLUTE,
     VALUE_TELEOP_MODE_DELTA,
@@ -153,6 +154,31 @@ def parse_teleop_mode(raw) -> str | None:
     if text not in TELEOP_MODES:
         raise ValueError(f"invalid teleop mode: {raw!r} (expect {'|'.join(TELEOP_MODES)})")
     return text
+
+
+def parse_teleop_follow_axes(raw) -> list[str] | None:
+    """解析本次 pose teleop 的轴白名单；缺失沿用机器人配置。
+
+    Web Console 直接发送 JSON 字符串数组。CLI 也可传逗号分隔字符串，便于
+    ``robot teleop true absolute follow_axes=x,y,z,yaw`` 调试。
+    """
+    if raw is None or raw == "":
+        return None
+    values = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    axes = [str(axis).strip() for axis in values if str(axis).strip()]
+    if not axes or len(set(axes)) != len(axes) or any(axis not in TELEOP_POSE_AXES for axis in axes):
+        raise ValueError(f"invalid teleop follow_axes: {raw!r} (expect nonempty subset of {TELEOP_POSE_AXES})")
+    return axes
+
+
+def parse_teleop_follow_space(raw) -> str | None:
+    """解析本次 teleop 的 joint / pose 跟随空间；缺失沿用机器人配置。"""
+    if raw is None or raw == "":
+        return None
+    value = str(raw).strip()
+    if value not in {"joint", "pose"}:
+        raise ValueError(f"invalid teleop follow_space: {raw!r} (expect 'joint' or 'pose')")
+    return value
 
 
 # 遥操作命令的语义别名：模式由**命令名**唯一决定（这些命令不接受 ``mode`` 参数）

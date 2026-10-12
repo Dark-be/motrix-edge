@@ -2,11 +2,13 @@
 
 ## 摘要
 
-robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关节直连从臂 target，用于示教采集，
-对外命令 `robot teach`）与**增量接管**（推理即将失败时人工接管：以接管瞬间的主 / 从位姿为锚点，
-只把主臂**相对锚点的增量**叠加到从臂 target，对外命令 `robot takeover`）。两者共用同一条链路——读主臂 → 写 `target_action` → `step_rad`
-限速逼近——差异全部收敛在 `BaseRobot` 的映射函数里，机器人子类只实现「读主臂读数」这一个
-钩子 `_get_teleop_target()`。
+robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joint` / `pose`）、**映射模式**
+（`absolute` / `delta`）和位姿跟随时的**轴白名单**（`follow_axes`）。关节跟随保留既有行为；位姿跟随
+把主臂关节先正解为 `xyz + rpy`，按映射模式与轴白名单合成从臂目标，再逆解成关节目标。两者最终
+共用一条链路——写 `target_action` → `step_rad` 限速逼近 → MIT 下发。
+
+该能力只属于 robot-pipeline 的 teleop 映射：Edge 的 `rollout` / `execute`、动作 `layout` 与观测
+契约均不改变。配置缺省 `follow_space: joint`，升级不改变既有真机行为。
 
 ## 目标与约束
 
@@ -19,6 +21,9 @@ robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关�
 -   **不新增 edge 侧同义契约**：`mode` 字段与取值单点定义在
     `motrix_edge.adapter.http_contract`，robot server 复用；robot 层（`robot/`）保持契约无关。
 -   **遥操作期间推理让位**：只要遥操作开着（**不分模式**：遥操作即人工接管），`rollout` 就被拒。
+-   **锁定只作用于遥操作**：`follow_axes` 不进入 `execute` / `rollout`，关闭 teleop 后立即失效。
+-   **底层通路不分叉**：位姿跟随只在 robot 层做 FK / 目标合成 / IK，控制器仍只接收关节目标；
+    Piper 执行臂继续走 `set_joint()` → `move_mit()`。
 
 ## 模式与映射
 
@@ -54,6 +59,39 @@ robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关�
     （逐关节 rad，逐臂一份或全臂共用；缺省全 0——主从零位差属现场值，子类不再写死）。
     偏置在锚点式下自动抵消、不进入增量，因此只有 `absolute`（示教）下可见。
 
+### 跟随空间与位姿轴锁定
+
+`robot.teleop` 在机器人配置中声明跟随空间与缺省轴白名单：
+
+```yaml
+robot:
+    teleop:
+        follow_space: pose
+        follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在启用 teleop 时的从臂锚点
+```
+
+| `follow_space`  | 主臂输入到从臂目标的处理             | `follow_axes`                                        |
+| --------------- | ------------------------------------ | ---------------------------------------------------- |
+| `joint`（缺省） | 主臂关节直接做 absolute / delta 映射 | 不允许配置                                           |
+| `pose`          | 主臂关节 FK → 位姿映射 → IK          | 非空、无重复的 `x/y/z/roll/pitch/yaw` 子集；缺省全部 |
+
+Console 可在 teleop 关闭时选择 `joint` / `pose`，并在**每次开启**时通过 `follow_space` 下发；pose
+模式还可通过 `follow_axes` 覆盖轴白名单，未列轴即为界面里勾选的“锁定轴”。运行时覆盖只对本次
+启用有效；旧调用方不传时仍使用 YAML 缺省。空间或锁轴变化必须先关闭 teleop，再重新开启并采集
+新锚点，不允许运行中静默改变约束。joint 跟随收到 `follow_axes` 会明确拒绝；不具备 pose 动作与
+FK/IK 能力的机型收到 `follow_space: pose` 也会明确拒绝。
+
+位姿跟随的锚点在启用后的首次有效主臂读数拍原子采集：`master_pose_ref = FK(master_now)`，
+`slave_pose_ref = FK(slave_current_action)`。未跟随轴始终取 `slave_pose_ref`；跟随轴按模式计算：
+
+-   `absolute`：取 `master_pose_now` 对应分量；
+-   `delta`：取 `slave_pose_ref + (master_pose_now - master_pose_ref)`，姿态差与结果均 wrap 到
+    $(-\pi, \pi]$。
+
+每拍以现有关节目标为 seed 做一次 IK；解算失败或位姿非有限时，本拍保持上一目标、累计失败计数并按
+同一原因限流告警，不影响 health。这里锁定的是既有 `POSE_FRAME`（法兰 / TCP）中的 RPY chart 分量，
+接近 pitch = ±90° 时仍受欧拉角奇异性约束；它是**目标运动学约束**，不是外力下的无限刚度。
+
 ## 增量锚点
 
 **为什么是锚点而不是逐拍积分**：`target += (master_now − master_prev)` 会累积漂移，且主从
@@ -78,14 +116,17 @@ robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关�
 ## 指令链路
 
 ```
-console / Edge adapter  ──POST /v1/teleop {enabled, mode?}──▶  contract_server
+console / Edge adapter  ──POST /v1/teleop {enabled, mode?, follow_space?, follow_axes?}──▶  contract_server
         ▼（只入队）
-env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.enable_teleop(mode)
+env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.enable_teleop(mode, follow_axes, follow_space)
                                                        └─▶ 下一拍 step()：采锚点 → 写 target
 ```
 
 -   `/v1/teleop` 请求体在 `enabled` 之外增加可选 `mode`（`absolute` / `delta`，缺省
     `absolute`）：**向后兼容**——只发 `{enabled: true}` 的旧调用方行为不变。
+-   `follow_space` 是可选的 `joint` / `pose` 本次启用覆盖；`follow_axes` 是可选的非空 pose 轴
+    白名单。两者缺省沿用 YAML。机器人 health 回传
+    `teleop_follow_space` / `teleop_follow_axes`，Edge 状态透传给 Console 决定是否显示锁轴复选框。
 -   `mode` 非法 → HTTP 422（server 侧校验，robot 层再兜一层，非法模式保持原模式与 target）。
 -   `enabled: false` 时忽略 `mode`。
 

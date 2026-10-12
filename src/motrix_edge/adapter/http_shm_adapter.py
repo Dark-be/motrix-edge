@@ -77,8 +77,12 @@ from motrix_edge.adapter.http_contract import (
     FIELD_POSE_FRAME,
     FIELD_RUNNING,
     FIELD_TCP_OFFSET,
+    FIELD_TELEOP_ACTIVE_AXES,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_FOLLOW_AXES,
+    FIELD_TELEOP_FOLLOW_SPACE,
     FIELD_TELEOP_MODE,
+    FIELD_TELEOP_SPACE,
     PATH_CAMERAS,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
@@ -255,6 +259,12 @@ class HttpShmAdapter(RobotAdapter):
             pose_frame=str(data.get(FIELD_POSE_FRAME) or "") or None,
             tcp_offset=_parse_tcp_offset(data.get(FIELD_TCP_OFFSET)),
             gravity=data.get(FIELD_GRAVITY) or None,
+            teleop_follow_space=str(data.get(FIELD_TELEOP_FOLLOW_SPACE) or "") or None,
+            teleop_follow_axes=(
+                [str(axis) for axis in data.get(FIELD_TELEOP_ACTIVE_AXES)]
+                if isinstance(data.get(FIELD_TELEOP_ACTIVE_AXES), list)
+                else None
+            ),
         )
         if ok or self._health is None:
             self._health = status
@@ -331,19 +341,35 @@ class HttpShmAdapter(RobotAdapter):
         debug_print(self.name, f"gravity set to {bool(enabled)} alpha={alpha}", "INFO")
         self._post_switch(PATH_GRAVITY, body, "gravity switch")
 
-    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+    def set_teleop(
+        self,
+        enabled: bool,
+        mode: str | None = None,
+        follow_axes: list[str] | tuple[str, ...] | None = None,
+        follow_space: str | None = None,
+    ) -> None:
         """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
 
         ``mode``（``absolute`` / ``delta``）: 仅开启时有意义，缺省不发送该字段（进程侧回退
         ``absolute``，与只发 ``enabled`` 的旧调用方等价）。
         """
-        self.teleop_enabled = bool(enabled)
-        self.teleop_mode = mode if self.teleop_enabled else None
-        body: dict = {FIELD_TELEOP_ENABLED: self.teleop_enabled}
-        if self.teleop_mode:
-            body[FIELD_TELEOP_MODE] = self.teleop_mode
-        debug_print(self.name, f"teleop set to {self.teleop_enabled} (mode={self.teleop_mode})", "INFO")
-        self._client().post(PATH_TELEOP, json=body)
+        next_enabled = bool(enabled)
+        next_mode = mode if next_enabled else None
+        body: dict = {FIELD_TELEOP_ENABLED: next_enabled}
+        if next_mode:
+            body[FIELD_TELEOP_MODE] = next_mode
+        if next_enabled and follow_space is not None:
+            body[FIELD_TELEOP_SPACE] = str(follow_space)
+        if next_enabled and follow_axes is not None:
+            body[FIELD_TELEOP_FOLLOW_AXES] = [str(axis) for axis in follow_axes]
+        debug_print(
+            self.name,
+            f"teleop set to {next_enabled} (mode={next_mode}, follow_space={follow_space}, follow_axes={follow_axes})",
+            "INFO",
+        )
+        self._post_switch(PATH_TELEOP, body, "teleop switch")
+        self.teleop_enabled = next_enabled
+        self.teleop_mode = next_mode
 
     def rollout(
         self,

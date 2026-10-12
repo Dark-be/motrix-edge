@@ -105,6 +105,8 @@ from .params import (
     parse_offset,
     parse_qpos,
     parse_rollout_mode,
+    parse_teleop_follow_axes,
+    parse_teleop_follow_space,
     parse_teleop_mode,
     reject_legacy_action_space,
     teleop_mode_for,

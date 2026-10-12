@@ -120,10 +120,10 @@ class HealthStatus:
     ``control_hz`` = 机器人名义控制频率（env 控制线程 ``HZ``）；``measured_hz`` = 实测
     控制线程帧率（robot server 最近窗口统计）；未知时为 None。
 
-    ``pose_frame`` / ``tcp_offset`` / ``gravity`` = **运行位**（机器人的位姿系 / TCP 偏移 / 重力
-    前馈状态）：它们运行期可切（``/v1/tcp`` / ``/v1/gravity``），故随**每次 health** 一起回来
-    ——Edge 周期拉 health（默认 2s）就等于「随时刷新的读回」，不需要另做缓存与过期。
-    未上报（旧机器人进程）→ 均 None，调用方回退自己声明的类常量。
+    ``pose_frame`` / ``tcp_offset`` / ``gravity`` / ``teleop_follow_*`` = **运行位**（机器人的位姿系、
+    TCP 偏移、重力前馈与遥操作映射）：它们运行期可切，故随**每次 health** 一起回来——Edge
+    周期拉 health（默认 2s）就等于「随时刷新的读回」，不需要另做缓存与过期。未上报（旧机器人
+    进程）→ 均 None，调用方回退自己声明的类常量。
     """
 
     ok: bool
@@ -133,6 +133,8 @@ class HealthStatus:
     pose_frame: str | None = None  # 位姿（读 + 写）所在坐标系名（flange | tcp）
     tcp_offset: dict | None = None  # TCP 在法兰系下的位置（米，逐臂；非 tcp 时 None）
     gravity: dict | None = None  # 重力前馈状态（control_mode + 逐臂 active/alpha/params）
+    teleop_follow_space: str | None = None  # joint | pose
+    teleop_follow_axes: list[str] | None = None  # pose 跟随轴白名单；未列轴锁定
 
 
 @dataclass
@@ -638,13 +640,21 @@ class RobotAdapter(ABC):
         raise NotImplementedError
 
     # ---- teleop（遥操作 / 人工接管）-------------------------------------------
-    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+    def set_teleop(
+        self,
+        enabled: bool,
+        mode: str | None = None,
+        follow_axes: list[str] | tuple[str, ...] | None = None,
+        follow_space: str | None = None,
+    ) -> None:
         """设置遥操作（``True``=遥操作 / ``False``=程控 / 推理控制）。
 
         ``mode`` 为遥操作映射模式（``absolute`` 缺省 / ``delta`` = **人工接管**：以接管瞬间
-        的主 / 从位姿为锚点、只叠加主臂增量），**仅在 ``enabled=True`` 时有意义**；``None``
-        表示沿用进程侧缺省（等价 ``absolute``）。遥操作开启即视为人工接管，进程侧会拒绝
-        ``rollout``（见 `wiki/design/robot_pipeline_teleop.md`）。
+        的主 / 从位姿为锚点、只叠加主臂增量）；``follow_space`` 是本次 joint / pose 选择，
+        ``follow_axes`` 是 pose 轴白名单，未列轴锁在启用拍的从臂锚点。这些参数仅在
+        ``enabled=True`` 时有意义；``None`` 表示沿用进程侧缺省。遥操作开启即视为人工接管，
+        进程侧会拒绝 ``rollout``（见
+        `wiki/design/robot_pipeline_teleop.md`）。
 
         默认 no-op（**不支持遥操作的适配器不记录状态**，保持 ``teleop_enabled=False``）；
         支持遥操作的子类按需覆盖（如经 HTTP 转发机器人进程 /v1/teleop），并在生效后同步

@@ -579,11 +579,20 @@ class EdgeNode:
             return True
         if cmd.name in TELEOP_COMMANDS:  # robot teleop / robot teach / robot takeover
             try:
-                enabled, mode = apply_teleop(self.adapter, cmd)
+                enabled, mode, follow_space, follow_axes = apply_teleop(self.adapter, cmd)
             except ValueError as exc:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
-            self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode))
+            self._reply(
+                cmd,
+                ok_result(
+                    node_state=self.state,
+                    teleop=enabled,
+                    mode=mode,
+                    follow_space=follow_space,
+                    follow_axes=follow_axes,
+                ),
+            )
             return True
         if cmd.name in SWITCH_COMMANDS:  # robot tcp / robot gravity：运行位开关
             # **会话中一律拒绝**（tcp 换 observations/pose 的原点、gravity 改 control_mode；

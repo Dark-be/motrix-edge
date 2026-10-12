@@ -425,11 +425,20 @@ class BaseSession:
         回执 rejected 并返回 ``(False, None)``。
         """
         try:
-            enabled, mode = apply_teleop(self.adapter, cmd)
+            enabled, mode, follow_space, follow_axes = apply_teleop(self.adapter, cmd)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return False, None
-        self._reply(cmd, ok_result(state="ready", teleop=enabled, mode=mode))
+        self._reply(
+            cmd,
+            ok_result(
+                state="ready",
+                teleop=enabled,
+                mode=mode,
+                follow_space=follow_space,
+                follow_axes=follow_axes,
+            ),
+        )
         return enabled, mode
 
     def _bind_policy_adapter(self):

@@ -43,6 +43,15 @@ env / contract server 透传；遥操作期间推理让位（`/v1/rollout` 409�
         （容器，358 passed）+ `/v1` 冒烟（接管中 rollout 409 且 target 不被改写、execute 抢回后 rollout 恢复、
         非法 mode 422）+ 前端 `tsc --noEmit` / `npm run build`。
 
+## 阶段三：运行时选择跟随空间
+
+-   [x] 契约增加可选 `follow_space`，从 Edge 命令贯通到 robot-pipeline 控制线程。
+-   [x] `BaseRobot` 对每次启用解析 joint/pose 与 pose 轴白名单，缺省保持 YAML 行为；不支持 pose
+        的机型明确拒绝。
+-   [x] Console 在 teleop 关闭时提供 joint/pose 选择，启用时冻结并随命令下发；pose 下继续提供
+        锁轴复选框。
+-   [x] 补齐契约、映射与前端构建测试，并更新设计文档。
+
 ## 待启动（需先决策）
 
 -   [ ] 交回模型的平滑：`teleop=false` 后首拍 `rollout` 的 target 与人工位姿的差如何处理
