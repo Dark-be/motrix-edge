@@ -28,6 +28,8 @@
 -   [robot-pipeline 位姿动作（求解器）](./robot_pipeline_cartesian.md)
 -   [robot-pipeline 动作空间与观测契约（joint / pose / gripper）](./robot_pipeline_action_spaces.md)
 -   [robot-pipeline 下发契约收敛（layout + arms）](./robot_pipeline_action_layouts.md)
+-   [robot-pipeline 深度观测（depth）](./robot_pipeline_depth.md)
+-   [robot-pipeline 统一坐标系与外参（frames）](./robot_pipeline_frames.md)
 -   [robot-pipeline 遥操作（绝对映射 / 增量接管）](./robot_pipeline_teleop.md)
 -   [robot-pipeline 重力补偿与阻抗控制](./robot_pipeline_impedance.md)
 

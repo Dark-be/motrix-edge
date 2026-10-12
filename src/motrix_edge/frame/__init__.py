@@ -14,8 +14,10 @@
 
 """frame 子包 —— Edge 侧观测帧缓存管理（FrameManager）。
 
-单点管理「最新观测帧」（观测图像 jpeg + qpos，线程安全）：session 每帧写入，preview /
-WebRTC 推流读取。观测图像在 Edge 侧降采样为 ``DEFAULT_IMAGE_SIZE`` JPEG，方便内网传输。
+单点管理「最新观测帧」（观测图像 jpeg + 状态 / 目标向量 + 位姿 + 深度图，线程安全）：session /
+观测循环每帧写入，preview / ``/v1/depth`` / WebRTC 推流读取。观测图像在 Edge 侧降采样为
+``DEFAULT_IMAGE_SIZE`` JPEG，方便内网传输；**深度图原样透传**（``uint16`` 不可降采样——一旦缩放
+像素与彩色图的对应关系就没了，见 ``/v1/depth`` 的源分辨率语义）。
 """
 
 import threading
@@ -34,7 +36,9 @@ _PREVIEW_JPEG_QUALITY = 80
 def cache_observation(obs: dict, image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE) -> dict:
     """整理 adapter 观测为 Edge 侧缓存帧：摄像头帧降采样为 ``image_size`` JPEG。
 
-    obs 由 ``adapter.observe()`` 返回（图像为 JPEG，如 640x480）；qpos / action 原样透传。
+    obs 由 ``adapter.observe()`` 返回（图像为 JPEG，如 640x480）；其余值（qpos / action /
+    pose / **深度图**）原样透传——深度是 ``uint16`` 数组，不进 JPEG 也不降采样（降采样会
+    破坏「像素 ↔ 深度」的对应关系，而去掉像素对应关系的深度图没有用）。
     """
     cached: dict = {}
     for key, value in obs.items():
