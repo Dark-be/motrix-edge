@@ -25,5 +25,6 @@
 -   [robot-pipeline 重力补偿与阻抗控制实施计划](./robot_pipeline_impedance_plan.md)
 -   [robot-pipeline 深度观测实施计划](./robot_pipeline_depth_plan.md)
 -   [robot-pipeline 统一坐标系与外参实施计划](./robot_pipeline_frames_plan.md)
+-   [robot-pipeline 末端 TCP 位姿实施计划](./robot_pipeline_tcp_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->

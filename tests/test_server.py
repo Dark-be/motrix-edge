@@ -288,6 +288,8 @@ class FakeRobot:
         self.teleop_calls: list[tuple[bool, str | None]] = []  # 收到的 set_teleop（断言实际下发）
         # 统一坐标系外参（镜像 ``GET /v1/cameras`` 的 ``frames`` 段）：None = 未标定
         self.frames_payload: dict | None = None
+        # TCP 偏移（法兰系，米，逐臂）：镜像 ``tcp_offset_by_arm()``；空 = 非 TCP 位姿系
+        self.tcp_offsets_payload: dict[str, list[float]] = {}
 
     def set_teleop(self, enabled, mode=None):
         """遥操作 / 人工接管开关（镜像适配器契约：记录调用 + 更新运行位）。"""
@@ -328,6 +330,10 @@ class FakeRobot:
     def frame_set(self):
         """标定外参（镜像 adapter 的 ``frame_set()``）：未标定 → ``None``。"""
         return None if not self.frames_payload else FrameSet.from_payload(self.frames_payload)
+
+    def tcp_offset_by_arm(self):
+        """TCP 偏移（镜像 adapter 契约）：未开启 ``robot.tcp`` → 空 dict。"""
+        return {arm: np.asarray(values, dtype=float) for arm, values in self.tcp_offsets_payload.items()}
 
     def pose_by_arm(self, pose):
         """位姿向量 → 按臂名的 6 维块（镜像 adapter 契约：本替身两臂 × 每臂 6 维）。"""
@@ -900,6 +906,32 @@ def test_depth_wrist_camera_composes_same_frame_pose():
     node.frame_manager.update({**poses, "observations/pose": moved})
     second = client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": lease}).json()
     assert not np.allclose(first, second["xyz_world"])
+
+
+def test_depth_wrist_camera_restores_flange_when_tcp_is_enabled():
+    """开启 ``robot.tcp`` 时：``observations/pose`` 是 **TCP 原点**，深度服务须先还原法兰再合成外参。
+
+    断言「同一物理配置下 ``xyz_world`` 不变」：法兰位姿 ``[0, 0, 0]``（rpy = 0）与它的 TCP 位姿
+    ``[0, 0, 0.1]``（偏移 [0, 0, 0.1]）必须给出同一个世界点——否则腕相机的世界坐标会整体偏一个
+    TCP 偏移（``FrameSet`` 的腕相机段用的是 ``T_flange_cam``）。见 wiki/design/robot_pipeline_tcp.md。
+    """
+    node = FakeNode()
+    node.adapter.frames_payload = _frames_payload(wrist_camera="cam_head")
+    client = make_depth_client(node)
+    lease = install_lease(client)
+
+    def world_for(pose: np.ndarray) -> list[float] | None:
+        node.frame_manager.update({"observations/depth/cam_head": _depth_frame(), "observations/pose": pose})
+        body = client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": lease}).json()
+        return body["xyz_world"]
+
+    flange = world_for(np.zeros(12, dtype=float))
+    assert flange is not None
+    node.adapter.tcp_offsets_payload = {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.1]}
+    tcp_pose = np.zeros(12, dtype=float)
+    tcp_pose[2] = 0.1  # 左臂：法兰 +z（工具方向）上 0.1 m，rpy 仍为 0
+    tcp_pose[8] = 0.1  # 右臂同理
+    assert world_for(tcp_pose) == pytest.approx(flange, abs=1e-9)
 
 
 def wait_node_state(node, state, timeout=2.0):

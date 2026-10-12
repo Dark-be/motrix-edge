@@ -36,6 +36,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_CAMERAS,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
+    PATH_DISCOVER,
     PATH_EXECUTE,
     PATH_RESET,
     PATH_ROLLOUT,
@@ -73,15 +74,16 @@ class _Response:
 
 
 class _FakeHttp:
-    def __init__(self, get_body=None):
+    def __init__(self, get_body=None, post_body=None):
         self.posts = []
         self.gets = []  # GET 调用记录（断言元数据只查一次）
         self.get_body = get_body or {}
+        self.post_body = post_body or {}  # POST 响应（如 ``/v1/discover`` 的自描述块）
         self.closed = False
 
     def post(self, url, json=None):
         self.posts.append((url, json))
-        return _Response()
+        return _Response(self.post_body.get(url, {}))
 
     def get(self, url):
         self.gets.append(url)
@@ -466,6 +468,42 @@ def test_observe_rejects_camera_count_mismatch(monkeypatch):
     monkeypatch.setattr("motrix_edge.adapter.http_shm_adapter.ObsShmReader", _Reader)
     with pytest.raises(ValueError):
         DualPiperAdapter().observe()
+
+
+def test_pose_frame_follows_robot_declaration():
+    """位姿系（``POSE_FRAME``）以**机器人上报**为准：开着 ``robot.tcp`` → ``tcp``。"""
+    http = _FakeHttp(
+        post_body={
+            PATH_DISCOVER: {
+                "robot": {
+                    "pose_frame": "tcp",
+                    "tcp_offset": {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.08]},
+                }
+            }
+        }
+    )
+    adapter = _adapter(http)
+    assert adapter.pose_frame() == "tcp"
+    offsets = adapter.tcp_offset_by_arm()
+    assert offsets["left"] == pytest.approx([0.0, 0.0, 0.1])
+    assert offsets["right"] == pytest.approx([0.0, 0.0, 0.08])
+    # 自描述惰性查一次（与 /v1/cameras 同一套「成功才缓存」口径）
+    adapter.pose_frame()
+    assert [url for url, _ in http.posts] == [PATH_DISCOVER]
+
+
+def test_pose_frame_falls_back_to_class_constant():
+    """未上报（旧机器人进程 / 进程不可达）→ 回退类常量 ``flange``，偏移视为无。"""
+    adapter = _adapter(_FakeHttp())
+    assert adapter.pose_frame() == "flange"
+    assert adapter.tcp_offset_by_arm() == {}
+
+
+def test_tcp_offset_rejects_malformed_payload():
+    """偏移格式非法 → 整体不采纳（宁可不换算，不拿半个偏移去算世界坐标）。"""
+    http = _FakeHttp(post_body={PATH_DISCOVER: {"robot": {"pose_frame": "tcp", "tcp_offset": {"left": [0.0, 0.0]}}}})
+    adapter = _adapter(http)
+    assert adapter.tcp_offset_by_arm() == {}
 
 
 def test_release_closes_local_resources():

@@ -39,6 +39,10 @@
 
 - ``/v1/discover``：机器人进程**自描述探活**（不初始化）——声明身份与它支持被哪些
   adapter 类型操作（``supported_adapters``），edge 据此把 adapter 标记为可用并选择。
+  其中 ``pose_frame``（``flange`` / ``tcp``）与 ``tcp_offset``（TCP 在法兰系下的位置，米，逐臂）
+  声明**位姿读写的坐标系**：位姿观测与位姿动作必须同系，机器人可配（``robot.tcp``，见
+  [末端 TCP](../../../wiki/design/robot_pipeline_tcp.md)）；未上报（旧进程）→ 适配器回退
+  ``POSE_FRAME`` 类常量。
 - ``/v1/capture/status`` 响应字段：``running``（进程是否正在采集）/ ``meta``（``capture sync``
   同步的元信息全集）/ ``data_dir``——**合并**了原 ``/v1/data_status``（已删除，避免两处
   状态不一致）；数据文件列表不在本端点：数据的扫描 / 选择 / 打包见
@@ -118,6 +122,8 @@ FIELD_ROBOT_MODEL_VERSION = "robot_model_version"  # robot：机器人型号版�
 FIELD_ACTION_DIM = "action_dim"  # robot：joint 空间维度（兼容字段）
 FIELD_ACTION_DIMS = "action_dims"  # robot：各动作空间维度（{joint: 12, pose: 12, pose_delta: 12, gripper: 2}）
 FIELD_OBSERVATION_KEYS = "observation_keys"  # robot：观测键布局（含 observations/images/<cam>）
+FIELD_POSE_FRAME = "pose_frame"  # robot：位姿（读 + 写）所在坐标系名（flange | tcp）
+FIELD_TCP_OFFSET = "tcp_offset"  # robot：TCP 在法兰系下的位置（米，逐臂；非 tcp 时为 null）
 FIELD_CONTROLLERS = "controllers"  # robot：控制器列表
 FIELD_SENSORS = "sensors"  # robot：传感器列表
 FIELD_CAPABILITIES = "capabilities"  # robot：能力 dict（capture / execute / streaming）
@@ -199,6 +205,7 @@ __all__ = [
     "FIELD_NAME",
     "FIELD_OBSERVATION_KEYS",
     "FIELD_OK",
+    "FIELD_POSE_FRAME",
     "FIELD_ROBOT",
     "FIELD_ROBOT_MODEL_ID",
     "FIELD_ROBOT_MODEL_VERSION",
@@ -208,6 +215,7 @@ __all__ = [
     "FIELD_STATE_ARMS",
     "FIELD_STATUS",
     "FIELD_SUPPORTED_ADAPTERS",
+    "FIELD_TCP_OFFSET",
     "FIELD_TELEOP_ENABLED",
     "FIELD_TELEOP_MODE",
     "FIELD_TYPE",

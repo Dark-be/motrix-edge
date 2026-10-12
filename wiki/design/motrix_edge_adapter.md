@@ -113,7 +113,9 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 -   **形状 / 单位**：每臂 `xyz(3) + rpy(3)` = 6 维、米 / 弧度（`pose_convention: xyz_rpy`）。
     SDK 若有 `0.001 mm` / `0.001°` 之类整数标度，由**机器人进程**换算后再写入位姿区。
 -   **坐标系**：`POSE_FRAME`（如 `flange` / `tcp` / `fk`）声明"这是哪个系"。位姿观测与位姿
-    动作**必须同一个系**——`move_delta` 这类「当前位姿 + 增量」差一个常量偏移就会打偏。
+    动作**必须同一个系**——`move_delta` 这类「当前位姿 + 增量」差一个常量偏移就会打偏。机器人可配
+    这个系（`robot.tcp`，见 [末端 TCP](./robot_pipeline_tcp.md)），因此**真实适配器的 `POSE_FRAME`
+    由机器人上报优先**（`/v1/discover` 的 `pose_frame` / `tcp_offset`），未上报才回退类常量。
 -   **能力以声明为准**：`effective_pose_dim_per_arm()` 取适配器声明的 `pose` 每臂维数（未声明
     `pose` 空间 → 0）；位姿键也只在声明时才进 `capabilities.observation_keys`，上游（agent / 策略）
     能提前拒绝而不是拿到空位姿再猜。读侧另有一道**实际长度**校验（见下条）。

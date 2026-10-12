@@ -164,7 +164,7 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
 3.  在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册；在 `src/config/*.yml` 配置
     `robot.type` 即按此自动匹配。
 
-机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_joint` / `cartesian`）。
+机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_joint` / `cartesian` / `tcp`）。
 **硬件接线参数**也在此段描述（现场接线不同时只改这里，无需改代码）：
 
 ```yaml
@@ -186,6 +186,24 @@ robot:
 的腕相机是 V4L2 设备节点。
 
 这些值**每台机器不同** → 写进**实际配置目录** `<根>/config/`（包内 yml 只是零现场值的示例），有两种落点（见下节）。
+
+### 末端 TCP（可选）
+
+位姿（`pose` / `pose_delta` 动作与 `observations/pose` / `pose_target` 观测）的原点可以配成**工具末端**
+（腕相机 / 探针 / 吸盘支架的实装长度），而不是法兰：
+
+```yaml
+robot:
+    tcp:
+        enabled: true # false（缺省）= 法兰原点
+        offset: [0, 0, 0.1] # TCP 在**法兰系**下的位置（米；法兰 +z 就是工具伸出方向）
+        arms: { right: { offset: [0, 0, 0.08] } } # 两臂末端不等长时逐臂覆盖
+```
+
+-   开启后「往前 5 cm」让**尖端**走 5 cm（`look_at` / `move_delta` 同样作用在尖端）；
+-   **只允许纯平移**（带旋转的 TCP 会让工具三轴与 `look_at` 的指向轴同时失真）→ 写了 `rpy` 直接报错；
+-   位姿系随 `/v1/discover` 上报（`pose_frame` / `tcp_offset`）：Edge 据此还原法兰（腕相机深度反投影）
+    并如实告诉调用方；设计与边界见 `wiki/design/robot_pipeline_tcp.md`。
 
 ## 机器档案（每台机器一份，现场值不进仓库）
 

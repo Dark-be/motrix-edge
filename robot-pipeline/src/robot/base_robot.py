@@ -74,7 +74,7 @@ import numpy as np
 from utils.data_handler import debug_print
 
 from motrix_edge.adapter.http_contract import FIELD_ARM, FIELD_MOUNT, VALUE_MOUNT_FIXED, VALUE_MOUNT_WRIST
-from robot.kinematics import wrap_angles
+from robot.kinematics import tcp, wrap_angles
 
 
 class CartesianActionError(ValueError):
@@ -211,6 +211,22 @@ class BaseRobot:
         # 深度观测：**生效**的深度相机（顺序 = IMAGE_NAMES 子序；空 = 不开深度）——由配置
         # ``robot.depth`` 决定；取帧（``connect()``）与发布（``capture_frames()``）都用它。
         self.depth_cameras = self._resolve_depth_cameras()
+
+        # 末端 TCP（``robot.tcp``，可选；见 wiki/design/robot_pipeline_tcp.md）：位姿（**读 + 写**）
+        # 的原点从法兰切到工具末端。关闭 / 缺段 → 空 dict，帧名恒为 ``flange``（行为与不开这个
+        # 开关时逐字节一致）；开启后 ``pose_frame`` = ``tcp``，随 discover 上报给 Edge。
+        tcp_section = self.robot_config.get(tcp.SECTION)
+        self.tcp_offsets = tcp.resolve_tcp(tcp_section, tuple(getattr(self, "ARM_NAMES", ()) or ()))
+        self.pose_frame = tcp.FRAME_TCP if self.tcp_offsets else tcp.FRAME_FLANGE
+        if bool((tcp_section or {}).get("enabled", False)) and not (
+            self.tcp_offsets and int(getattr(self, "POSE", 0) or 0) > 0
+        ):
+            # 配置开着却落不了地（不提供位姿 / 未声明臂名）：说一声，别让现场以为「开了」
+            debug_print(
+                self.name,
+                f"robot.{tcp.SECTION} 已开启但不生效（本机型不提供位姿 / 未声明臂名），已忽略",
+                "WARNING",
+            )
 
     # ---- 硬件设备类型（机器档案探测用：``scripts/setup_robot.sh`` 据此决定「这类设备怎么找」）----
     # 键 = ``PORT_ROLES`` / ``IMAGE_NAMES``；值 = ``config.probe`` 的 kind（can / serial /
@@ -609,6 +625,33 @@ class BaseRobot:
         if values.shape[0] != self.QPOS:
             raise ValueError(f"{self.name}: joint action dim {values.shape[0]} != QPOS {self.QPOS}")
         return values
+
+    # ---- 末端 TCP 帧换算（位姿读 / 写各自的唯一进出口；见 wiki/design/robot_pipeline_tcp.md）--
+    def tcp_offset_of(self, arm: str) -> np.ndarray | None:
+        """该臂的 TCP 偏移（法兰系，米）；未开启 TCP / 该臂未配置 → ``None``（= 恒等）。"""
+        return self.tcp_offsets.get(str(arm))
+
+    def pose_to_tcp(self, pose: np.ndarray) -> np.ndarray:
+        """**法兰系**扁平位姿 → TCP 系（**读**路径的唯一收口：实测位姿与目标位姿共用）。
+
+        未开启 ``robot.tcp`` → 原值返回（零数值扰动）；子类的 ``_pose_of_joints()`` 末尾调它，
+        于是 ``observations/pose`` 与 ``observations/pose_target`` 始终同系（可直接比较）。
+        """
+        if not self.tcp_offsets:
+            return np.asarray(pose, dtype=np.float64).reshape(-1).copy()
+        offsets = [self.tcp_offset_of(arm) for arm in self.ARM_NAMES]
+        return tcp.to_tcp(pose, offsets, per_arm=self.POSE_DIM_PER_ARM)
+
+    def tcp_to_flange(self, pose: np.ndarray) -> np.ndarray:
+        """TCP 系扁平位姿 → **法兰系**（**写**路径的唯一收口：逐臂解算前还原）。
+
+        未开启 ``robot.tcp`` → 原值返回；子类的 ``_solve_pose()`` 在喂 ``pose_to_joint()`` 之前调它
+        ——IK / 限位因此永远只看法兰（运动学与控制器保持纯法兰，标定对照脚本不受影响）。
+        """
+        if not self.tcp_offsets:
+            return np.asarray(pose, dtype=np.float64).reshape(-1).copy()
+        offsets = [self.tcp_offset_of(arm) for arm in self.ARM_NAMES]
+        return tcp.from_tcp(pose, offsets, per_arm=self.POSE_DIM_PER_ARM)
 
     # ---- 位姿类动作的公共实现（``pose`` / ``pose_delta``；子类提供 FK / IK 接入）----
     def _absolute_pose_target(self, space: str, values: np.ndarray) -> np.ndarray:

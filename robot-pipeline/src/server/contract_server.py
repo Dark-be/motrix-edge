@@ -90,6 +90,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
     FIELD_OK,
+    FIELD_POSE_FRAME,
     FIELD_ROBOT,
     FIELD_ROBOT_MODEL_ID,
     FIELD_ROBOT_MODEL_VERSION,
@@ -98,6 +99,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_STATE_ARMS,
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
+    FIELD_TCP_OFFSET,
     FIELD_TYPE,
     FIELD_WIDTH,
     INTRINSICS_KEYS,
@@ -175,6 +177,29 @@ def _robot_state_dim(robot) -> int:
 def _robot_pose_dim(robot) -> int:
     """位姿区宽度（每臂 xyz + rpy）；0 = 本机不提供位姿（不占位姿区）。"""
     return int(getattr(robot, "POSE", 0) or 0)
+
+
+def _robot_pose_frame(robot) -> str | None:
+    """位姿（读 + 写）所在坐标系名（``BaseRobot.pose_frame``：``flange`` / ``tcp``）。
+
+    本机不提供位姿（``POSE = 0``）/ 未实现该声明 → ``None``（= **未上报**）；Edge 侧据此回退适配器
+    自己声明的 ``POSE_FRAME`` 类常量（旧机器人进程也能跑）。见 ``wiki/design/robot_pipeline_tcp.md``。
+    """
+    if _robot_pose_dim(robot) <= 0:
+        return None
+    return getattr(robot, "pose_frame", None) or None
+
+
+def _robot_tcp_offset(robot) -> dict[str, list[float]] | None:
+    """TCP 在**法兰系**下的位置（米，逐臂）；位姿系不是 TCP / 机器人未实现 → ``None``。
+
+    Edge 用它把读到的位姿还原回法兰（腕相机深度反投影要用 ``T_base_flange``，见
+    ``server/depth.py``）。
+    """
+    offsets = getattr(robot, "tcp_offsets", None) or {}
+    if not offsets:
+        return None
+    return {str(arm): [float(value) for value in tuple(offset)[:3]] for arm, offset in offsets.items()}
 
 
 def _robot_image_names(robot) -> list[str]:
@@ -458,6 +483,10 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 FIELD_ACTION_DIMS: _robot_action_dims(robot),
                 FIELD_ACTION_LAYOUTS: _robot_action_layouts(robot),
                 FIELD_STATE_ARMS: _robot_state_arms(robot),
+                # 位姿约定：读（``observations/pose`` / ``pose_target``）与写（``pose`` 动作）同系，
+                # 系名 + TCP 偏移一起给（调用方不必猜；见 wiki/design/robot_pipeline_tcp.md）
+                FIELD_POSE_FRAME: _robot_pose_frame(robot),
+                FIELD_TCP_OFFSET: _robot_tcp_offset(robot),
                 # 观测键 = standard_obs **实际产出**的键（状态向量 qpos + 目标向量 action + 位姿），
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
                 FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION]

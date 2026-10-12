@@ -70,7 +70,10 @@ from motrix_edge.adapter.http_contract import (
     FIELD_META,
     FIELD_NAME,
     FIELD_OK,
+    FIELD_POSE_FRAME,
+    FIELD_ROBOT,
     FIELD_RUNNING,
+    FIELD_TCP_OFFSET,
     FIELD_TELEOP_ENABLED,
     FIELD_TELEOP_MODE,
     PATH_CAMERAS,
@@ -78,6 +81,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
     PATH_CAPTURE_SYNC,
+    PATH_DISCOVER,
     PATH_EXECUTE,
     PATH_HEALTH,
     PATH_RESET,
@@ -141,6 +145,10 @@ class HttpShmAdapter(RobotAdapter):
         self._camera_meta_problem: str | None = None  # 元数据不可用原因（同原因只记一条）
         self._frames: FrameSet | None = None  # 统一坐标系外参产物（未标定 → None）
         self._frames_problem: str | None = None  # 产物不可用原因（同原因只记一条）
+        # 机器人自描述块（``POST /v1/discover``）：位姿系 / TCP 偏移从这里取（惰性 + 缓存；见
+        # ``pose_frame()`` / ``tcp_offset_by_arm()``）——未上报（旧进程）→ 回退类常量
+        self._declaration: dict | None = None  # 机器人自描述块（成功才缓存）
+        self._declaration_problem: str | None = None  # 自描述不可用原因（同原因只记一条）
         self._depth_mismatch_logged: str | None = None  # 深度路数 / 形状不符原因（同原因只记一条）
 
         # 本地记录（便于调试与无硬件测试）
@@ -391,6 +399,57 @@ class HttpShmAdapter(RobotAdapter):
             if name:
                 infos[name] = dict(item)
         return infos, self._parse_frames(body.get(FIELD_FRAMES))
+
+    def pose_frame(self) -> str:
+        """位姿（读 + 写）所在坐标系名：机器人**上报**优先，未上报 → 类常量 ``POSE_FRAME``。
+
+        位姿观测与位姿动作必须同系（``env.get_env_meta.pose_frame`` 就是它）：机器人开着 ``robot.tcp``
+        时上报 ``tcp``，本层如实转述（不自己推），否则调用方的 ``move_delta`` 会差一个常量。
+        旧机器人进程不报该字段 / 进程不可达 → 回退适配器自己声明的类常量。
+        """
+        declared = str(self._declare().get(FIELD_POSE_FRAME) or "").strip()
+        return declared or str(self.POSE_FRAME)
+
+    def tcp_offset_by_arm(self) -> dict[str, np.ndarray]:
+        """TCP 在**法兰系**下的位置（米，逐臂）；未上报 / 非 TCP 位姿系 → 空 dict。
+
+        只有机器人的位姿系是 ``tcp`` 时才有值。消费方（``server/depth.py`` 的腕相机外参合成）
+        用它把读到的位姿**还原回法兰**：``T_base_flange = T_base_tcp · T_flange_tcp⁻¹``。
+        值非法（不是 3 个有限数）→ 整体不采纳 + 一条 WARNING（宁可不换算，不拿半个偏移去算）。
+        """
+        raw = self._declare().get(FIELD_TCP_OFFSET) or {}
+        if not isinstance(raw, dict):
+            return {}
+        offsets: dict[str, np.ndarray] = {}
+        for arm, values in raw.items():
+            array = np.asarray(values, dtype=np.float64).reshape(-1)
+            if array.shape[0] != 3 or not np.all(np.isfinite(array)):
+                debug_print(self.name, f"tcp_offset 非法（arm={arm}）：{values}，已忽略", "WARNING")
+                return {}
+            offsets[str(arm)] = array.copy()
+        return offsets
+
+    def _declare(self) -> dict:
+        """机器人自描述块（``POST /v1/discover``）：惰性查询 + **成功才缓存**（失败留给下一次）。
+
+        只在第一次问位姿系 / TCP 偏移时发一次（与 ``camera_infos()`` 同一套「可关」口径）；
+        进程未就绪 / 旧进程没有这两个字段 → 空 dict（帧名回退类常量、偏移视为无）。
+        """
+        if self._declaration is not None:
+            return self._declaration
+        try:
+            resp = self._client().post(PATH_DISCOVER)
+            resp.raise_for_status()
+            robot = resp.json().get(FIELD_ROBOT) or {}
+        except Exception as exc:  # noqa: BLE001 进程未就绪 / 端点不可达
+            problem = str(exc) or exc.__class__.__name__
+            if problem != self._declaration_problem:
+                self._declaration_problem = problem
+                debug_print(self.name, f"robot declaration unavailable ({problem})", "WARNING")
+            return {}
+        self._declaration_problem = None
+        self._declaration = dict(robot)
+        return self._declaration
 
     def _parse_frames(self, payload) -> FrameSet | None:
         """``frames`` 段 → :class:`FrameSet`（缺失 → ``None``；非法 → ``None`` + 一条 WARNING）。"""
