@@ -509,6 +509,9 @@ robot:
     夹爪同一套增量语义。模型即将失败时人工介入：先把主臂摆到与从臂相近的位姿，再
     `POST /v1/teleop {"enabled": true, "mode": "delta"}`。
 
+主从零位差用 `robot.teleop.joint_offset`（逐关节 rad 的常量偏置）补：`absolute` 下直接体现，
+`delta` 下由锚点抵消、不进入增量。属现场值，按机器档案覆盖。
+
 两种模式的完整语义、锚点采样时机与边界见
 [robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。
 

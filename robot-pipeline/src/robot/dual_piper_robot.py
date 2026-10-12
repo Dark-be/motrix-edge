@@ -12,25 +12,18 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""DualPiperRobot —— 真实双臂 Piper 机器人（master 主手 + slave 从手 + 3 相机）。
+"""DualPiperRobot —— 真实双臂 Piper 机器人（master 主手 + slave 从手 + 3 路 RealSense）。
 
-**机器人类只做两件事**：装配硬件（``connect`` / ``disconnect``）与**取数 / 转发目标**——位姿目标或
-关节角度目标都由本层逐臂交给 ``PiperController``；运动学（FK / 姿态求解 / 限位）全在控制器里，
-机器人层不碰解算细节（见 ``wiki/design/robot_pipeline_action_spaces.md``）。
+装配硬件（``connect`` / ``disconnect``）与取数 / 下发：位姿目标由本层逐臂解算成关节目标
+（``PiperController.pose_to_joint``，静态纯函数）后走关节通路；运动学（FK / IK / 限位）都在
+控制器里，位姿观测由同一模型的静态正解给出。
 
 - 布局（``QPOS`` / ``POSE`` / ``GRIPPER`` / 相机 / 共享内存名）由类常量固定，与
-  ``DualPiperAdapter`` 协定一致；
-- 遥操作：``teleop_enabled`` 默认 False（adapter 通讯控制中暂时均处于 false）；接入位见
-  ``_get_teleop_target()`` / ``_get_teleop_gripper()``（master 主手 → slave 从手）；
-- 位姿动作：``layout="pose"``（每臂 ``xyz + rpy``，长度 12）由本层解算成关节目标
-  （``PiperController.pose_to_joint``，静态纯函数），仍走 MIT 关节通路（**不经 ``move_p``**）；
-  位姿观测由同一模型的静态正解给出（与解算同源）；
-- 配置 ``robot.cartesian.ik``（求解参数）在这里解析后直接用于解算（限位无需配置：解算与下发
-  共用 ``PIPER_JOINT_LIMITS``）；配置 ``robot.tcp``（末端 TCP 偏移）把位姿读 / 写的原点从法兰
-  切到工具末端——正解末尾乘 ``T_flange_tcp``、解算前还原法兰（见
-  ``wiki/design/robot_pipeline_tcp.md``）。
+  ``DualPiperAdapter`` 一致；``robot.cartesian.ik`` 给解算参数，``robot.tcp`` 切换位姿系。
+- 遥操作接入位见 ``_get_teleop_target()`` / ``_get_teleop_gripper()``（主手 → 从手）；
+  主臂常量偏置走 ``robot.teleop.joint_offset``（基类统一叠加）。
 
-硬件 SDK（pyAgxArm / pyrealsense2 / v4l2）**仅在机器人端安装**。
+硬件 SDK（pyAgxArm / pyrealsense2 / v4l2）仅在机器人端安装。
 """
 
 import cv2
@@ -54,35 +47,26 @@ class DualPiperRobot(BaseRobot):
         "streaming": True,
     }
 
-    QPOS = 12  # joint 空间：每臂 6 关节角 × 2 臂（夹爪已独立为 gripper 空间）
-    GRIPPER = 2  # gripper 空间：每臂 1 夹爪 × 2 臂
+    QPOS = 12  # joint：每臂 6 关节角 × 2 臂
+    GRIPPER = 2  # gripper：每臂 1 夹爪
     GRIPPER_DEADZONE = 0.2  # piper 抓取死区：小于 0.2 视为闭合（0）
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
-    CAMERA_KINDS = {name: "realsense" for name in IMAGE_NAMES}  # 三路均为 RealSense（填序列号）
-    # 具备深度的相机：三路 RealSense 均有（是否**启用**由 robot.depth 配置决定）
-    DEPTH_CAMERAS: tuple[str, ...] = tuple(IMAGE_NAMES)
-    # 腕部相机 → 承载臂（装配事实）：两路腕相机随臂动 → 外参只能是 ``T_flange_cam``
-    # （见 ``wiki/design/robot_pipeline_frames.md``）；``cam_head`` 固定在头部。
+    CAMERA_KINDS = {name: "realsense" for name in IMAGE_NAMES}  # 三路均为 RealSense（配置填序列号）
+    DEPTH_CAMERAS: tuple[str, ...] = tuple(IMAGE_NAMES)  # 三路均具备深度（是否启用由 robot.depth 决定）
+    # 腕部相机 -> 承载臂（装配事实）：两路腕相机随臂动，外参只能是 T_flange_cam；cam_head 固定在头部
     WRIST_CAMERAS: dict[str, str] = {"cam_left_wrist": "left", "cam_right_wrist": "right"}
     SHM_NAME = "dual_piper_obs"
-    # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports / robot.cameras）----
-    PORT_ROLES = ("left_master", "right_master", "left", "right")  # 控制器端口（主手 / 从臂）
-    PORT_KINDS = {role: "can" for role in PORT_ROLES}  # 主手 / 从臂均为 CAN 接口名
+    # 硬件接线（值必填、只在配置里给：robot.ports / robot.cameras）
+    PORT_ROLES = ("left_master", "right_master", "left", "right")  # 主手 / 从臂端口
+    PORT_KINDS = {role: "can" for role in PORT_ROLES}  # 均为 CAN 接口名
 
-    # ---- 臂接线：左/右臂各一个 PiperController（执行）----
-    # 本类只管两件事：**取数**（get_observation_qpos / get_observation_gripper）与**下发**；位姿目标在这里
-    # 解算成关节角（:meth:`PiperController.pose_to_joint`，静态）后与 ``joint`` 目标走同一条控制通路。
     ARM_NAMES = ("left", "right")
-    ARM_CONTROLLERS = {"left": "left_arm", "right": "right_arm"}
-    JOINTS_PER_ARM = 6  # 每臂关节数（joint 空间每臂维度）
-    POSE_DIM_PER_ARM = 6  # 每臂位姿维数（xyz + rpy）
-    # 每臂 6 维 ``xyz + rpy``（米 / 弧度，法兰坐标系），双臂共 12——由控制器的静态正解算出后写进
-    # ``observations/pose``（与关节角同一拍，机器人始终提供位姿）。
-    POSE = 12
+    ARM_CONTROLLERS = {"left": "left_arm", "right": "right_arm"}  # 臂名 -> 执行控制器
+    JOINTS_PER_ARM = 6  # 每臂关节数（joint 每臂维度）
+    POSE = 12  # 每臂 6 维 xyz + rpy（米 / 弧度，法兰系），双臂共 12
 
-    # 动作空间：关节（每臂 6 关节角）/ 位姿（每臂 xyz + rpy，绝对）/ 位姿增量 /
-    # 夹爪（每臂 1）——位姿（增量）由控制器的静态求解器解算
+    # 动作空间：关节 / 位姿（绝对）/ 位姿增量 / 夹爪——位姿类由控制器静态求解器解算
     ACTION_SPACES = (
         BaseRobot.ACTION_SPACE_JOINT,
         BaseRobot.ACTION_SPACE_POSE,
@@ -92,15 +76,11 @@ class DualPiperRobot(BaseRobot):
 
     def __init__(self, robot_config: dict | None = None):
         super().__init__(robot_config)
-        # 位姿动作的求解参数（``robot.cartesian.ik``，可选）：解算在本层做，参数就放在本层
+        # 位姿解算参数（robot.cartesian.ik，可选）
         self.ik_config = dict((self.robot_config.get("cartesian") or {}).get("ik") or {})
         self.ports = self._required_devices("ports", self.PORT_ROLES)
-        self.camera_devices = self._required_devices("cameras", self.IMAGE_NAMES)  # 三路均为 RealSense
-        # ---- 控制器 / 传感器接入位（硬件 SDK 仅在机器人端；接入时实例化）----
-        # 参照原 src/robot/alicia_piper_teleop_robot.py：
-        #   left/right_master = PiperController（主手，遥操作输入）
-        #   left/right_arm    = PiperController（从手，执行）
-        #   三相机均为 RealsenseSensor（按序列号区分，序列号在配置 robot.cameras 里）
+        self.camera_devices = self._required_devices("cameras", self.IMAGE_NAMES)
+        # 主手只读（遥操作输入）；左/右臂执行；三路 RealSense 按序列号区分
         self.controllers: dict = {
             "left_arm": PiperController("left"),
             "right_arm": PiperController("right"),
@@ -108,11 +88,11 @@ class DualPiperRobot(BaseRobot):
             "right_master": PiperController("right_master"),
         }
         self.sensors: dict = {name: RealsenseSensor(name) for name in self.IMAGE_NAMES}
-        self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条，不刷屏）
+        self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条）
 
-    # ---- 取数：关节 qpos / 末端位姿（同一拍关节角正解）----------------------------------
+    # ---- 取数：关节 qpos / 末端位姿（同一拍关节角正解）----
     def _controller_for_arm(self, arm: str) -> PiperController:
-        """按 ``ARM_CONTROLLERS`` 取该臂的**执行**控制器（装配缺失 → 响亮报错）。"""
+        """按 ``ARM_CONTROLLERS`` 取该臂的执行控制器；装配缺失 → ``RuntimeError``。"""
         key = self.ARM_CONTROLLERS.get(arm)
         if key is None or key not in self.controllers:
             raise RuntimeError(f"{self.name}: controller {key!r} for arm {arm!r} is not assembled")
@@ -122,18 +102,16 @@ class DualPiperRobot(BaseRobot):
         """当前帧**关节角**（扁平 ``QPOS`` 维 = 每臂 6）——逐臂 ``get_joint``，顺序对齐 ``ARM_NAMES``。
 
         ``sample_qpos()`` 再把它与 ``get_observation_gripper()`` 交错成状态向量
-        （``observations/qpos``：每臂「值 + 夹爪」）——数采 / VLA 拿到的就是它。任一臂读不到
-        （``None``）→ ``RuntimeError``（本拍没有可信观测，不拿半个观测充数）。
+        （``observations/qpos``：每臂「值 + 夹爪」）。任一臂读不到（``None``）→ ``RuntimeError``。
         """
         return self._read_joints()
 
     def get_observation_pose(self, qpos: np.ndarray | None = None) -> np.ndarray | None:
-        """末端位姿（扁平 ``POSE`` 维：各臂 ``xyz + rpy``）——由**同一拍关节角**正解。
+        """末端位姿（扁平 ``POSE`` 维：各臂 ``xyz + rpy``）——由同一拍关节角正解。
 
-        与位姿目标的解算共用同一运动学模型，所以「读到的」与「下发的」同系可直接比对
-        （现场标定见 ``scripts/verify_cartesian.py``）。
-        关节读数缺失 / 非法 → **NaN 向量**（而非 ``None``）：下游防护会丢弃该帧位姿，比「留上一帧
-        旧值」诚实；同一原因只告警一条（30Hz 不刷屏）。
+        与位姿目标的解算共用同一运动学模型，读到的与下发的同系可直接比对（现场标定见
+        ``scripts/verify_cartesian.py``）。关节读数缺失 / 非法 → NaN 向量（下游丢弃该帧），
+        同一原因只告警一条。位姿系由 ``robot.tcp`` 决定（见基类 ``pose_to_tcp()``）。
         """
         try:
             joints = self._read_joints() if qpos is None else np.asarray(qpos, dtype=np.float64).reshape(-1)
@@ -145,17 +123,14 @@ class DualPiperRobot(BaseRobot):
                 self._pose_read_error = reason
                 debug_print(self.name, f"pose unavailable ({reason}); publishing NaN pose", "WARNING")
             return np.full(self.POSE, np.nan)
-        self._pose_read_error = None  # 恢复正常：下次失败重新告警一条
+        self._pose_read_error = None  # 恢复正常：下次失败重新告警
         return self._pose_of_joints(joints)
 
     def _pose_of_joints(self, joints: np.ndarray) -> np.ndarray:
-        """逐臂静态正解 → 扁平位姿（``POSE`` 维）；关节值非法 → NaN 向量（下游丢弃该帧）。
+        """逐臂静态正解 → 扁平位姿（``POSE`` 维）；关节值非法 → NaN 向量。
 
-        实测位姿（``get_observation_pose(qpos)``）与目标位姿（``get_target_pose()``）共用这一个
-        换算层，保证「读到的」与「下发的目标」严格同系（同一 ``PiperKinematics`` 模型）。
-
-        正解给的是**法兰系**位姿，末尾统一经 ``pose_to_tcp()`` 换到**位姿系**（``robot.tcp`` 未开启
-        时就是法兰，零扰动）——两个观测键因此始终同系，可直接比较。
+        实测位姿与目标位姿共用这一个换算层，两个观测键因此始终同系可比。正解给的是法兰系位姿，
+        末尾统一经 ``pose_to_tcp()`` 换到位姿系。
         """
         values = np.asarray(joints, dtype=np.float64).reshape(-1)
         if values.shape[0] < self.QPOS or not np.all(np.isfinite(values[: self.QPOS])):
@@ -164,15 +139,15 @@ class DualPiperRobot(BaseRobot):
         return self.pose_to_tcp(np.concatenate([PiperController.joint_to_pose(arm) for arm in arms]))
 
     def get_target_pose(self) -> np.ndarray | None:
-        """**目标位姿** = ``FK(关节段目标)``（每臂 ``xyz + rpy``，法兰系，米 / 弧度）。
+        """目标位姿 = ``FK(关节段目标)``（每臂 ``xyz + rpy``，位姿系，米 / 弧度）。
 
-        与 ``get_observation_pose()`` 同一套静态正解，只是喂进去的是 ``_target_joints()``
-        （未下发过指令 → 当前指令位置），因此与 ``observations/pose`` 同系可比、同一拍发布。
+        与 ``get_observation_pose()`` 同一套静态正解，喂进去的是 ``_target_joints()``，与
+        ``observations/pose`` 同系可比、同一拍发布。
         """
         return self._pose_of_joints(self._target_joints())
 
     def get_observation_gripper(self) -> np.ndarray:
-        """当前帧夹爪（扁平 ``GRIPPER`` 维：每臂 1）——读不到时该臂给 NaN（下游丢弃该帧）。"""
+        """当前帧夹爪（扁平 ``GRIPPER`` 维：每臂 1）；某臂读不到 → 该臂 NaN（下游丢弃该帧）。"""
         values = []
         for arm in self.ARM_NAMES:
             gripper = self._controller_for_arm(arm).get_gripper()
@@ -180,10 +155,7 @@ class DualPiperRobot(BaseRobot):
         return np.asarray(values, dtype=np.float64)
 
     def _read_joints(self) -> np.ndarray:
-        """逐臂读关节角（扁平 ``QPOS`` 维，顺序对齐 ``ARM_NAMES``）。
-
-        任一臂读不到（``None``）→ ``RuntimeError``（本拍没有可信观测，不拿半个观测充数）。
-        """
+        """逐臂读关节角（扁平 ``QPOS`` 维，顺序对齐 ``ARM_NAMES``）；任一臂读不到 → ``RuntimeError``。"""
         parts: list[np.ndarray] = []
         for arm in self.ARM_NAMES:
             joint = self._controller_for_arm(arm).get_joint()
@@ -192,9 +164,9 @@ class DualPiperRobot(BaseRobot):
             parts.append(np.asarray(joint, dtype=np.float64).reshape(-1)[: self.JOINTS_PER_ARM])
         return np.concatenate(parts)
 
-    # ---- 下发：关节段（限速跟踪）/ 夹爪段（直接跟随）----------------------------------
+    # ---- 下发：关节段（限速跟踪）/ 夹爪段（直接跟随）----
     def _apply_action(self, action: np.ndarray):
-        """把底层目标向量 ``[关节段 | 夹爪段]`` 逐臂下发（控制线程每拍；关节段限速已在 ``step()`` 完成）。
+        """把底层目标向量 ``[关节段 | 夹爪段]`` 逐臂下发（关节段限速已在 ``step()`` 完成）。
 
         夹爪小于 ``GRIPPER_DEADZONE`` 时按 0 处理（piper 抓取死区）。
         """
@@ -202,22 +174,21 @@ class DualPiperRobot(BaseRobot):
         for index, arm in enumerate(self.ARM_NAMES):
             start = index * self.JOINTS_PER_ARM
             joint = values[start : start + self.JOINTS_PER_ARM].copy()
-            grip = float(values[self.QPOS + index]) if index < self.GRIPPER else 0.0
+            grip = float(values[self.QPOS + index])
             if not np.isfinite(grip) or grip < self.GRIPPER_DEADZONE:
                 grip = 0.0
             controller = self._controller_for_arm(arm)
-            # set_joint 会按软限位就地裁切（限位与解算同一份）：传 copy 以免改到 self.action
+            # set_joint 按软限位就地裁切，传 copy 以免改到 self.action
             controller.set_joint(joint)
             controller.set_gripper(grip)
 
     def _prepare_target(self, qpos: np.ndarray, kind: str | None) -> np.ndarray:
-        """准备**关节段目标**：``joint`` 直通；``pose`` / ``pose_delta`` 逐臂解算（本层编排）。
+        """准备关节段目标：``joint`` 直通；``pose`` / ``pose_delta`` 逐臂解算。
 
-        ``pose_delta`` 先由基类 ``_absolute_pose_target()`` 叠成**绝对目标位姿**（基准 = 关节段
-        目标的**正解**位姿，不是实测位姿），再与 ``pose`` 走同一条解算路径。解算起点：``pose``
-        用当前指令位置（保持既有行为）、``pose_delta`` 用关节段目标（增量是相对目标的，起点也用
-        目标才不甩关节）；兜底 ``init_joint`` 段。解算失败 → ``CartesianActionError``
-        （robot server → 422）且**不改既有目标**。
+        ``pose_delta`` 先由基类 ``_absolute_pose_target()`` 叠成绝对目标位姿（基准 = 关节段目标的
+        正解位姿），再与 ``pose`` 走同一条解算路径。解算起点：``pose`` 用当前指令位置、
+        ``pose_delta`` 用关节段目标；兜底 ``init_joint`` 段。解算失败 → ``CartesianActionError``
+        （robot server → 422）且不改既有目标。
         """
         space = self.normalize_action_space(kind)
         values = np.asarray(qpos, dtype=np.float64).reshape(-1)
@@ -232,9 +203,8 @@ class DualPiperRobot(BaseRobot):
     def _solve_pose(self, pose: np.ndarray, seed: np.ndarray) -> np.ndarray:
         """绝对目标位姿（每臂 ``xyz + rpy``）→ 关节段目标（逐臂静态逆解，起点 ``seed``）。
 
-        ``pose`` 是**位姿系**的值（``robot.tcp`` 开启时原点在 TCP）——解算前统一经
-        ``tcp_to_flange()`` 还原成法兰，伊此 IK / 限位 / 标定对照脚本都只看法兰。
-        逆解在**控制线程**里、每条命令只做一次（不进 30Hz 控制拍）；失败只影响该条命令。
+        ``pose`` 是位姿系的值，解算前经 ``tcp_to_flange()`` 还原成法兰，IK / 限位只看该系。
+        逆解在每条命令落地时做一次（不进 30Hz 控制拍）。
         """
         flange_pose = self.tcp_to_flange(pose)
         start_joints = np.asarray(seed, dtype=np.float64).reshape(-1)
@@ -254,15 +224,13 @@ class DualPiperRobot(BaseRobot):
         return np.concatenate(joints)
 
     def connect(self):
-        """连接真实双臂 SDK：master 主手（遥操作输入）+ slave 从手（执行） + 3 路 RealSense。
+        """连接双臂 SDK：主手（只作输入）+ 从手（执行）+ 3 路 RealSense。
 
-        主手只作输入、不下发指令；slave 从手执行。端口 / 相机序列号取自配置
-        （``robot.ports`` / ``robot.cameras``，**必填**，构造时已校验）——三路均为 RealSense，
-        必须逐台按**序列号**指定。硬件 SDK 仅在机器人端安装。
+        端口 / 相机序列号取自 ``robot.ports`` / ``robot.cameras``（构造时已校验必填）。
         """
         self.controllers["left_master"].connect(port=self.ports["left_master"], role="leader")
         self.controllers["right_master"].connect(port=self.ports["right_master"], role="leader")
-        # 重力前馈只装在**执行**臂（左/右）：主手只读，不会被 set_joint 下发
+        # 重力前馈只装在执行臂（主手只读）
         gravity = self.robot_config.get("gravity")
         self.controllers["left_arm"].connect(port=self.ports["left"], gravity=gravity)
         self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
@@ -271,8 +239,7 @@ class DualPiperRobot(BaseRobot):
             self.sensors[name].connect(
                 device=self.camera_devices[name],
                 pixel_format="jpg",
-                # 深度只给**生效的深度相机**开（配置 robot.depth：缺省 = 三路全开）
-                enable_depth=name in self.depth_cameras,
+                enable_depth=name in self.depth_cameras,  # 只有生效的深度相机开深度流
             )
         debug_print(self.name, "Setup sensors done", "INFO")
         self.ready = True
@@ -289,12 +256,10 @@ class DualPiperRobot(BaseRobot):
             debug_print(self.name, f"Disconnect sensor {name} done", "INFO")
 
     def get_observation_frames(self) -> list:
-        """读取各相机**本拍**帧（顺序对齐 IMAGE_NAMES）——彩色恒有，深度仅在开启时有。
+        """读取各相机本拍帧（顺序对齐 ``IMAGE_NAMES``）——彩色恒有，深度仅在开启时有。
 
-        每相机只调一次 ``get_information()``：彩色与深度来自**同一次取帧**（深度已对齐到
-        彩色图），所以两图同拍同源；未开启深度的相机 ``depth`` 为 ``None``。
-        相机按 sensor.pixel_format 区分：jpg → color 为 JPEG bytes（此处 imdecode）；
-        raw → color 已解码为 RGB ndarray（直接使用）。
+        每相机只调一次 ``get_information()``：彩色与深度同拍同源（深度已对齐彩色图）。
+        按 ``sensor.pixel_format`` 区分：jpg → 解 JPEG；raw → 已是 RGB ndarray。
         """
         frames = []
         for name in self.IMAGE_NAMES:
@@ -315,25 +280,21 @@ class DualPiperRobot(BaseRobot):
         return frames
 
     def _get_teleop_target(self) -> np.ndarray | None:
-        """遥操作**关节段**接入位：master 主手 → slave 从手（左→左、右→右）。
+        """遥操作关节段接入位：主手 → 从手（左→左、右→右），返回扁平 ``QPOS`` 维主臂关节角。
 
-        返回扁平 ``QPOS`` 维主臂关节角；主手读取失败 / 未连接时返回 None
-        （step() 保持原 target 不刷新）。
+        只返回读数本身；常量偏置由基类按 ``robot.teleop.joint_offset`` 统一叠加。
+        读不到 / 未连接时返回 None（``step()`` 保持原 target）。
         """
         joints: list[np.ndarray] = []
         for arm in self.ARM_NAMES:
             master = self.controllers[f"{arm}_master"].get_joint()
             if master is None:
                 return None
-            joints.append(np.asarray(master, dtype=np.float64).reshape(-1)[: self.JOINTS_PER_ARM].copy())
-        parts = []
-        for joint in joints:
-            joint[1] += 0.1
-            parts.append(joint)
-        return np.concatenate(parts).astype(np.float32)
+            joints.append(np.asarray(master, dtype=np.float64).reshape(-1)[: self.JOINTS_PER_ARM])
+        return np.concatenate(joints).astype(np.float32)
 
     def _get_teleop_gripper(self) -> np.ndarray | None:
-        """遥操作**夹爪段**接入位：master 主手夹爪读数（每臂 1 维）；读不到 → None。"""
+        """遥操作夹爪段接入位：主手夹爪读数（每臂 1 维）；读不到 → None。"""
         values = []
         for arm in self.ARM_NAMES:
             gripper = self.controllers[f"{arm}_master"].get_gripper()
