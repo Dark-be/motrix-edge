@@ -166,7 +166,7 @@ class EdgeNode:
         frame_manager=None,
         probe_interval=2.0,
         alive_check_interval=2.0,
-        capture_status_interval=2.0,
+        capture_status_interval=0.2,
         observe_interval=0.05,
         capture_meta_store=None,
         lease_manager=None,
@@ -197,6 +197,8 @@ class EdgeNode:
         # 周期任务参数（_tick）：探测间隔 / 失联检查间隔 / 采集状态刷新间隔 / 观测间隔（秒）
         self.probe_interval = probe_interval
         self.alive_check_interval = alive_check_interval
+        # 采集状态刷新比 health 快得多（5 Hz）：时长 / 帧数在录制中持续增长，前端按 5 Hz 轮询，
+        # 节奏跟不上就会看到数值一跳一跳。
         self.capture_status_interval = capture_status_interval
         self.observe_interval = observe_interval
         self._last_probe = 0.0
@@ -230,6 +232,16 @@ class EdgeNode:
         轮询 /v1/captures 只读本缓存——edge 运行不依赖前端。
         """
         return self._capture_status
+
+    def invalidate_capture_status(self) -> None:
+        """作废采集状态缓存：下一个 tick（≤ ``poll_interval``）立即重查，不等当前节奏到点。
+
+        采集命令（``capture episode start|end`` / ``capture sync``）由**会话**消费，节点主循环
+        看不到；会话经 ``on_capture_status_dirty`` 回调告知本方法——否则「开始 / 停止录制」后最多
+        要等一整个刷新间隔才会在 ``GET /v1/captures`` 上看到新值（与 ``robot tcp`` 切开关后催
+        health 同一手法，见 ``_handle_adapter_command``）。
+        """
+        self._last_capture_status = 0.0
 
     def _log_state(self, state):
         """状态进入日志（NodeLifecycle.on_enter 钩子，消息在进入时求值）。
@@ -621,6 +633,8 @@ class EdgeNode:
                 adapter=self.adapter,  # 复用节点 active adapter（生命周期归节点）
                 policy_type=policy_type,
                 capture_meta_store=self.capture_meta_store,  # 同一实例（单锁）
+                # 采集命令由会话消费：录制起止后让节点立刻作废采集状态缓存（不等下个周期）
+                on_capture_status_dirty=self.invalidate_capture_status,
             )
             self.session_type = session_type
             self.session.session_start()  # 连接硬件/初始化会话（adapter 已就绪则跳过 discover）
@@ -750,8 +764,8 @@ class EdgeNode:
         elif state in (NodeState.READY, NodeState.ACTIVE):
             self._check_adapter_alive()
             self._observe()  # 持续观测（无需进入会话；显示观测统一归节点，会话不再写）
-            # 采集状态与 health 同节奏周期刷新（**不限采集会话**）：进会话前也要能看到
-            # 进程是否在采集（可能由现场直接启动的采集）、元信息与数据目录。
+            # 采集状态周期刷新（**不限采集会话**）：进会话前也要能看到进程是否在采集
+            # （可能由现场直接启动的采集）、元信息与数据目录。
             self._refresh_capture_status()
 
     def _observe(self) -> None:
@@ -907,11 +921,12 @@ class EdgeNode:
             self._enter_error(f"adapter health check failed: {exc}")
 
     def _refresh_capture_status(self) -> None:
-        """周期查询采集状态并缓存（READY / ACTIVE 期间，与 health 同节奏）。
+        """周期查询采集状态并缓存（READY / ACTIVE 期间，节奏见 ``capture_status_interval``）。
 
         ``capture_status()`` 返回运行位（进程是否正在采集）+ 采集员 / 任务名等元信息 +
         数据目录 / 列表；查询 / 缓存语义与 ``health`` 一致（edge 自行查询，不依赖前端轮询，
-        也不限于采集会话——未进会话时同样能看到进程状态）。
+        也不限于采集会话——未进会话时同样能看到进程状态；节奏比 health 快，见构造参数）。
+        录制开始 / 结束的瞬间另由 :meth:`invalidate_capture_status` 立即重查，不等下一拍。
         """
         if self.adapter is None:
             self._capture_status = None

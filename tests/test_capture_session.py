@@ -220,6 +220,32 @@ def test_capture_episode_start_end_during_observe(tmp_path):
     session.session_finish()
 
 
+def test_capture_commands_mark_status_dirty(tmp_path):
+    """采集命令落地即回调节点（episode start / end / sync 各一次）→ 节点作废采集状态缓存。
+
+    回归：这些命令由会话消费，节点主循环看不到；少了这个回调，「开始 / 停止录制」后
+    最多要等一整个刷新间隔才会在 GET /v1/captures 上看到新运行位。
+    """
+    adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+    dirty = []
+    session = CaptureSession(
+        make_config(tmp_path),
+        command_source=make_signals(
+            "capture episode start",
+            "capture episode end",
+            'capture sync --meta \'{"operator": "张三"}\'',
+            "session quit",
+        ),
+        frame_manager=FrameManager(),
+        adapter=adapter,
+        on_capture_status_dirty=lambda: dirty.append(None),
+    )
+    session.session_start()
+    assert session.run() == RunResult.FINISHED
+    assert len(dirty) == 3  # start / end / sync 各通知一次
+    session.session_finish()
+
+
 def test_capture_sync_meta_during_observe(tmp_path):
     """观测期间 capture sync --meta <json>：解析 JSON → adapter.sync_capture_meta。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})

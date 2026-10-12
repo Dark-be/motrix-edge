@@ -144,6 +144,7 @@ class BaseSession:
         frame_manager=None,
         adapter=None,
         capture_meta_store=None,
+        on_capture_status_dirty=None,
     ):
         self.name = name
         self.base_cfg = base_cfg
@@ -157,6 +158,9 @@ class BaseSession:
         # 进程内单实例——节点注入同一份（与 /v1/captures/meta 共用同一把锁）；
         # 缺省 None 表示会话自行按需创建，测试可注入临时 store。
         self.capture_meta_store = capture_meta_store or CaptureMetaStore()
+        # 采集命令（episode start/end、sync）落地的瞬间通知节点作废采集状态缓存：这些命令由会话
+        # 消费，节点主循环看不到，否则状态查询要等一整个刷新周期（见 ``EdgeNode.invalidate_capture_status``）。
+        self._on_capture_status_dirty = on_capture_status_dirty
         # 退出命令（session quit）：submit 通道命令由节点任务结束后补发回执
         self.exit_command = None
         # 外部请求停止标志（node 失联 ERROR 时终止仍在运行的任务线程用）
@@ -297,17 +301,29 @@ class BaseSession:
             return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_EPISODE_START:
             self._on_episode_start(cmd)
+            self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_EPISODE_END:
             self._on_episode_end(cmd)
+            self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_SYNC:
             self._on_capture_sync(cmd)
+            self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
         if name in _CAPTURE_META_COMMANDS:
             self._reply(cmd, self._on_capture_meta(cmd))
             return CommonDispatch.HANDLED
         return CommonDispatch.UNHANDLED
+
+    def _mark_capture_status_dirty(self) -> None:
+        """告知节点「采集状态可能已变」→ 节点作废缓存，下一拍立即重查（见 ``EdgeNode``）。
+
+        采集命令由会话消费（节点主循环此时不 poll），所以这个通知由会话发；未注入回调（测试 /
+        自定义会话）时为 no-op。
+        """
+        if self._on_capture_status_dirty is not None:
+            self._on_capture_status_dirty()
 
     def reject_not_applicable(self, cmd, scope: str | None = None) -> None:
         """未识别 / 当前循环不适用命令的统一回执（``<cmd> not applicable``）。

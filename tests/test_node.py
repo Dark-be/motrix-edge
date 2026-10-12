@@ -326,11 +326,13 @@ def _patch_get_session(monkeypatch, captured):
         adapter=None,
         policy_type=None,
         capture_meta_store=None,
+        on_capture_status_dirty=None,
     ):
         captured["session_type"] = session_type
         captured["adapter"] = adapter
         captured["policy_type"] = policy_type
         captured["capture_meta_store"] = capture_meta_store
+        captured["on_capture_status_dirty"] = on_capture_status_dirty
         return _FakeSelectSession()
 
     monkeypatch.setattr(node_mod, "get_session", fake_get_session)
@@ -349,6 +351,8 @@ def test_start_session_reuses_node_adapter(monkeypatch):
     assert captured["session_type"] == "capture"
     assert captured["adapter"] is node.adapter  # 复用节点 adapter
     assert captured["capture_meta_store"] is node.capture_meta_store  # 单实例：会话不另建 store
+    # 会话消费采集命令 → 回调节点作废采集状态缓存（开始 / 停止录制立刻可见）
+    assert captured["on_capture_status_dirty"] == node.invalidate_capture_status
     assert node.state == NodeState.ACTIVE
     assert node._task_thread is not None and node._task_thread.is_alive()  # 任务已启动
     node.session.stop()
@@ -871,6 +875,36 @@ def test_tick_refreshes_capture_status_cache():
     node.lifecycle.transition(NodeState.READY)
     node._tick()  # READY：不依赖采集会话也刷新采集状态缓存
     assert node.capture_status is adapter.status
+
+
+def test_invalidate_capture_status_refreshes_on_next_tick():
+    """``invalidate_capture_status()`` 后下一拍立即重查（采集命令落地后不必等整个间隔）。
+
+    回归：采集命令由会话消费，节点侧不知情；缺这个作废调用时「开始 / 停止录制」后
+    最多要等一整个 ``capture_status_interval`` 才在 ``GET /v1/captures`` 上看到新运行位。
+    """
+    from motrix_edge.adapter.base import CaptureStatus
+
+    calls = []
+
+    class _StatusAdapter(_FakeAdapter):
+        def capture_status(self):
+            calls.append(None)
+            return CaptureStatus(running=len(calls) > 1, meta={})
+
+    adapter = _StatusAdapter(available=True)
+    node = EdgeNode({}, command_source=lambda: None, probe_interval=0.0, capture_status_interval=3600.0)
+    node.initialize()  # INIT → IDLE
+    node.adapter = adapter
+    node.lifecycle.transition(NodeState.READY)
+    node._tick()  # 首拍：无缓存 → 查询（慢档下也只查这一次）
+    assert node.capture_status.running is False
+    node._tick()  # 慢档内：不重查
+    assert len(calls) == 1
+    node.invalidate_capture_status()  # 采集命令落地 → 作废缓存
+    node._tick()
+    assert node.capture_status.running is True
+    assert len(calls) == 2
 
 
 def test_tick_observes_into_frame_manager_when_ready():
