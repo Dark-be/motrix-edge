@@ -1,5 +1,4 @@
-# 包内默认配置（只读兜底）。外界配置：设置环境变量 MOTRIX_CONFIG_DIR 指向可写目录，
-# 同名文件（edge.yml / capture.yml）优先于包内默认。
+# 包内默认配置（只读）。现场覆盖文件：$MOTRIX_EDGE_DIR/config/edge.yml。
 INFO_LEVEL: INFO # DEBUG, INFO, ERROR
 
 # Edge 本地设备身份声明（引用，非权威；权威在 MotrixConsole）

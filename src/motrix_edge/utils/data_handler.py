@@ -15,7 +15,7 @@
 import datetime
 import os
 
-from motrix_edge.config import LOG_PATH
+from motrix_edge.config import get_log_dir
 
 # 进程内缓存日志文件路径：首次 debug_print 时确定（含时间戳），之后固定复用——
 # 避免每次写日志都重新 makedirs + 生成新文件名（旧实现跨秒产生海量日志文件）。
@@ -35,9 +35,10 @@ def file_log_enabled() -> bool:
 def _get_log_file() -> str:
     global _LOG_FILE
     if _LOG_FILE is None:
-        os.makedirs(LOG_PATH, exist_ok=True)
+        log_dir = get_log_dir()
+        os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        _LOG_FILE = os.path.join(LOG_PATH, f"log_{timestamp}.txt")
+        _LOG_FILE = os.path.join(log_dir, f"log_{timestamp}.txt")
     return _LOG_FILE
 
 

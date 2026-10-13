@@ -12,14 +12,14 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""config 包测试：选择性加载外界配置（MOTRIX_CONFIG_DIR / XDG）+ 包内默认兜底。"""
+"""config 包测试：运行根目录契约与包内默认回退。"""
 
 from motrix_edge.config import (
     DEFAULT_CONFIG_FILES,
     config_path,
     get_config_dir,
     get_log_dir,
-    get_state_dir,
+    get_root_dir,
     load_config,
     writable_config_path,
 )
@@ -29,33 +29,48 @@ def test_packaged_defaults_are_listed():
     assert "edge.yml" in DEFAULT_CONFIG_FILES
 
 
-def test_load_config_falls_back_to_packaged_default(monkeypatch):
-    """未设置 MOTRIX_CONFIG_DIR：load_config 读包内默认 yml（只读兜底）。"""
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+def test_root_dir_prefers_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("MOTRIX_EDGE_DIR", str(tmp_path))
+    assert get_root_dir() == tmp_path
+    assert get_config_dir() == tmp_path / "config"
+    assert get_log_dir() == tmp_path / "logs"
+    assert config_path("edge.yml") == tmp_path / "config" / "edge.yml"
+
+
+def test_root_dir_defaults_under_cwd(monkeypatch, tmp_path):
+    monkeypatch.delenv("MOTRIX_EDGE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert get_root_dir() == tmp_path / "motrix-edge"
+    assert get_config_dir() == tmp_path / "motrix-edge" / "config"
+    assert get_log_dir() == tmp_path / "motrix-edge" / "logs"
+
+
+def test_load_config_falls_back_without_writing(monkeypatch, tmp_path):
+    """现场配置缺失时读取包内默认，普通读取不创建运行目录。"""
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setenv("MOTRIX_EDGE_DIR", str(runtime_dir))
     cfg = load_config("edge.yml")
     assert cfg["INFO_LEVEL"] == "INFO"
     assert cfg["adapter"]["host"] == "127.0.0.1"
     assert cfg["policy"]["type"] == "lerobot-act"
+    assert not runtime_dir.exists()
 
 
-def test_load_config_unknown_name_returns_empty(monkeypatch):
-    monkeypatch.delenv("MOTRIX_CONFIG_DIR", raising=False)
+def test_load_config_unknown_name_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("MOTRIX_EDGE_DIR", str(tmp_path))
     assert load_config("no_such.yml") == {}
 
 
-def test_load_config_prefers_external_dir(monkeypatch, tmp_path):
-    """设置 MOTRIX_CONFIG_DIR：同名 yml 优先（覆盖包内默认）；缺失文件回退包内默认。"""
-    (tmp_path / "edge.yml").write_text("discover:\n  host: external-host\n", encoding="utf-8")
-    monkeypatch.setenv("MOTRIX_CONFIG_DIR", str(tmp_path))
-    assert get_config_dir() == tmp_path
-    assert config_path("edge.yml") == tmp_path / "edge.yml"
+def test_load_config_prefers_runtime_config(monkeypatch, tmp_path):
+    """``<root>/config`` 中的同名文件覆盖包内默认。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "edge.yml").write_text("discover:\n  host: local-host\n", encoding="utf-8")
+    monkeypatch.setenv("MOTRIX_EDGE_DIR", str(tmp_path))
     cfg = load_config("edge.yml")
-    assert cfg["discover"]["host"] == "external-host"
+    assert cfg["discover"]["host"] == "local-host"
 
 
-def test_writable_config_path_state_dir(monkeypatch, tmp_path):
-    """无外界配置目录：writable_config_path 落到状态目录（XDG_STATE_HOME/motrix）。"""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    assert get_state_dir() == tmp_path / "motrix"
-    assert get_log_dir() == tmp_path / "motrix"
-    assert writable_config_path("edge.yml") == tmp_path / "motrix" / "edge.yml"
+def test_writable_config_path_uses_runtime_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("MOTRIX_EDGE_DIR", str(tmp_path))
+    assert writable_config_path("capture.yml") == tmp_path / "config" / "capture.yml"

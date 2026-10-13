@@ -44,11 +44,11 @@ def _start_web(app, host: str, port: int):
 
     import uvicorn
 
-    from motrix_edge.config import LOG_PATH
+    from motrix_edge.config import get_log_dir
     from motrix_edge.utils.data_handler import file_log_enabled
     from motrix_edge.utils.logging import uvicorn_log_config
 
-    log_dir = LOG_PATH
+    log_dir = get_log_dir()
     # 开关的单点在 ``file_log_enabled()``（``uvicorn_log_config`` 缺省就读它）：关闭时不建目录
     # （不留空 logs/），也不在此处另判一次环境变量（同一开关两处判会口径漂移）
     if file_log_enabled():
@@ -62,14 +62,15 @@ def _start_web(app, host: str, port: int):
 def _run_node(args) -> None:
     """加载配置并启动 EdgeNode（阻塞式主循环，直到 Ctrl-C）。
 
-    配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省选择性加载——环境变量
-    ``MOTRIX_CONFIG_DIR`` 指向的外界配置优先，否则包内默认 ``edge.yml``（只读兜底）。
+    配置来源：``run --config <path>`` 指定 yaml 文件路径；缺省读取
+    ``<root>/config/edge.yml``，其中 ``root`` 来自 ``MOTRIX_EDGE_DIR``，未设置时为
+    ``<cwd>/motrix-edge``；现场文件不存在则读取包内只读默认值。
     node 主线程持续运行 + web 作为 node 的独立线程（接收外部 HTTP 请求并驱动
     node），本地 CLI 按键保留。
     """
     import os
 
-    from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_state_dir, load_config
+    from motrix_edge.config import config_path, get_config_dir, get_log_dir, get_root_dir, load_config
     from motrix_edge.utils.load_file import load_yaml
 
     explicit = getattr(args, "config", None)
@@ -81,7 +82,8 @@ def _run_node(args) -> None:
         config_source = explicit
     else:
         base_cfg = load_config("edge.yml")
-        config_source = config_path("edge.yml") or "packaged default (config/edge.yml)"
+        local_config = config_path("edge.yml")
+        config_source = local_config if local_config.exists() else "packaged default (config/edge.yml)"
 
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
@@ -93,13 +95,12 @@ def _run_node(args) -> None:
     from motrix_edge.server.webrtc import WebRTCService
     from motrix_edge.utils.data_handler import debug_print, file_log_enabled
 
-    # 打印配置来源 + 状态 / 日志目录（区分环境变量 MOTRIX_CONFIG_DIR vs 包内默认；文件日志默认关闭）
-    config_dir = get_config_dir()
+    # 打印生效路径；文件日志默认关闭，因此这里只报告目录、不创建目录。
     debug_print(
         "EdgeNode",
         f"Loaded config: {config_source}"
-        f" | config_dir={config_dir or 'packaged default (read-only)'}"
-        f" | state_dir={get_state_dir()}"
+        f" | root_dir={get_root_dir()}"
+        f" | config_dir={get_config_dir()}"
         f" | log_dir={get_log_dir()}"
         f" | file_logging={'ON' if file_log_enabled() else 'OFF (MOTRIX_LOG_FILE=0)'}",
         "INFO",

@@ -25,6 +25,9 @@ dependencies = [
   "motrix-edge",
 ]
 
+[dependency-groups]
+dev = ["pytest"]
+
 [tool.uv.sources]
 # 同仓部署：../ = motrix-edge 仓库根；独立部署时改为自己的 motrix-edge 路径/版本
 motrix-edge = { path = "../", editable = true }
@@ -55,4 +58,4 @@ exclude = ["tests*", "third_party*", "docs*", "assets*", "packages*", "build*"]
 
 [tool.pytest.ini_options]
 markers = ["manual: should be run manually."]
-testpaths = ["src", "scripts", "pipeline"]
+testpaths = ["tests"]

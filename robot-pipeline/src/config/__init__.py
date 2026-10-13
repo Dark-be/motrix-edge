@@ -12,14 +12,13 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""config 包 —— robot server 配置加载（包内默认兜底，外部目录优先）。
+"""config 包 —— robot server 运行目录解析与配置加载。
 
-配置来源分层（环境变量优先，包内默认兜底，与 motrix_edge config 同机制）：
-  1. 外界配置目录：环境变量 ``MOTRIX_CONFIG_DIR``（可写；同名 yml 覆盖包内默认）；
-  2. 包内默认：``src/config/*.yml``（package data，只读兜底，按 robot.type 选择）。
+``MOTRIX_ROBOT_PIPELINE_DIR`` 指定运行根目录，未设置时使用
+``<cwd>/motrix-robot-pipeline``。配置固定在 ``<root>/config``，日志固定在 ``<root>/logs``。
+现场配置不存在时读取包内只读默认值；普通读取不创建目录或文件。
 
-日志目录遵循 ``XDG_STATE_HOME``（缺省 ``CWD/logs``）。本模块在 import 时计算模块级
-``CONFIG_DIR`` / ``LOG_PATH``。
+路径在每次调用时解析，不保留 import 时快照。
 """
 
 import os
@@ -28,7 +27,12 @@ from pathlib import Path
 
 import yaml
 
-# robot server 配置文件（package data；外界配置目录存在同名文件时优先）
+ROOT_DIR_ENV = "MOTRIX_ROBOT_PIPELINE_DIR"
+DEFAULT_ROOT_DIR_NAME = "motrix-robot-pipeline"
+CONFIG_DIR_NAME = "config"
+LOG_DIR_NAME = "logs"
+
+# robot server 默认配置（package data；现场目录存在同名文件时优先）
 DEFAULT_CONFIG_FILES = (
     "test_robot.yml",
     "dual_piper.yml",
@@ -37,29 +41,37 @@ DEFAULT_CONFIG_FILES = (
 )
 
 
-def get_config_dir() -> Path | None:
-    """外部配置目录（``MOTRIX_CONFIG_DIR``）；未设置 → None（使用包内默认，只读）。"""
-    env = os.getenv("MOTRIX_CONFIG_DIR")
-    return Path(env).expanduser() if env else None
+def get_root_dir() -> Path:
+    """返回运行根目录：``$MOTRIX_ROBOT_PIPELINE_DIR`` 或 ``<cwd>/motrix-robot-pipeline``。"""
+    value = os.getenv(ROOT_DIR_ENV)
+    return Path(value).expanduser() if value else Path.cwd() / DEFAULT_ROOT_DIR_NAME
+
+
+def get_config_dir() -> Path:
+    """返回现场配置目录 ``<root>/config``。"""
+    return get_root_dir() / CONFIG_DIR_NAME
 
 
 def get_log_dir() -> Path:
-    """日志目录：``XDG_STATE_HOME``/motrix，缺省 ``CWD/logs``。"""
-    xdg = os.getenv("XDG_STATE_HOME")
-    return Path(xdg).expanduser() / "motrix" if xdg else Path.cwd() / "logs"
+    """返回日志目录 ``<root>/logs``。"""
+    return get_root_dir() / LOG_DIR_NAME
 
 
-def config_path(name: str) -> Path | None:
-    """配置文件的真实路径：外部配置目录 → ``{config_dir}/{name}``；否则 None（读包内默认）。"""
-    ext = get_config_dir()
-    return ext / name if ext is not None else None
+def config_path(name: str) -> Path:
+    """返回现场配置路径 ``<root>/config/<name>``，不创建文件。"""
+    return get_config_dir() / name
+
+
+def writable_config_path(name: str) -> Path:
+    """返回明确写操作使用的配置路径；路径规则与 :func:`config_path` 相同。"""
+    return config_path(name)
 
 
 def load_config(name: str) -> dict:
-    """加载 robot server 配置：外部配置目录优先，否则读包内默认 yml（只读兜底）；缺失 → {}。"""
+    """加载现场配置；不存在时读取包内默认值，均不存在则返回空字典。"""
     path = config_path(name)
-    if path is not None and path.exists():
-        with open(path, encoding="utf-8") as f:
+    if path.exists():
+        with path.open(encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     if name in DEFAULT_CONFIG_FILES:
         text = resources.files(__package__).joinpath(name).read_text(encoding="utf-8")
@@ -67,16 +79,16 @@ def load_config(name: str) -> dict:
     return {}
 
 
-# 对外暴露（模块级：环境已定的路径；无外界配置时 CONFIG_DIR 为 None = 用包内默认）
-CONFIG_DIR = get_config_dir()
-LOG_PATH = get_log_dir()
-
 __all__ = [
+    "ROOT_DIR_ENV",
+    "DEFAULT_ROOT_DIR_NAME",
+    "CONFIG_DIR_NAME",
+    "LOG_DIR_NAME",
     "DEFAULT_CONFIG_FILES",
+    "get_root_dir",
     "get_config_dir",
     "get_log_dir",
     "config_path",
+    "writable_config_path",
     "load_config",
-    "CONFIG_DIR",
-    "LOG_PATH",
 ]

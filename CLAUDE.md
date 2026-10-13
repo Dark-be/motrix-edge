@@ -26,7 +26,7 @@ src/motrix_edge/
 ├── identity/         # Edge 本地设备身份声明：Identity + headers() + 请求元数据生成器
 ├── lease/            # Edge 级租约机制：LeaseManager
 ├── server/           # MotrixEdge HTTP 控制面：FastAPI /v1/* + WebRTC
-├── config/           # 配置加载：MOTRIX_CONFIG_DIR 外界覆盖 + 包内默认 edge.yml（只读兜底）
+├── config/           # 运行根 MOTRIX_EDGE_DIR：<根>/config + <根>/logs，包内 YAML 只读兜底
 └── utils/            # commands（命令总线）/ data_handler / load_file
 ```
 

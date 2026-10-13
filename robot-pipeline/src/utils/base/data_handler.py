@@ -22,11 +22,11 @@ from typing import Any, Dict, List
 import numpy as np
 
 # from skimage.metrics import structural_similarity as ssim
-from config import LOG_PATH
+from config import get_log_dir
 
 
 def _get_log_file():
-    log_dir = LOG_PATH
+    log_dir = get_log_dir()
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     _LOG_FILE = os.path.join(log_dir, f"log_{timestamp}.txt")

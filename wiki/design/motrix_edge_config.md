@@ -2,38 +2,52 @@
 
 ## 摘要
 
-`src/motrix_edge/config/` 是**配置子包**：外界配置优先（环境变量 `MOTRIX_CONFIG_DIR`），否则用
-包内 **package data** 只读兜底（`edge.yml` / `capture.yml`）；日志 / 可写状态目录遵循 XDG（`XDG_STATE_HOME`，
-缺省回退 CWD）。CLI 分两处：入口与子命令在 `__main__.py`（console script `motrix-edge` 与
+`src/motrix_edge/config/` 统一解析配置与日志路径。Edge 与 robot-pipeline 各自只有一个运行根目录，
+其下固定使用 `config/` 和 `logs/`；包内 YAML 仅作只读默认值。CLI 分两处：入口与子命令在
+`__main__.py`（console script `motrix-edge` 与
 `python -m motrix_edge` 共用同一 `main()`），交互式会话集中在 `utils/cli.py`（`CliSession`）。
 
 > 迁移（issue #10）：仓库根顶层 `config/` 目录与 `_GLOBAL_CONFIG.py`（`ROOT_DIR` / `CONFIG_DIR` /
 > `DATA_PATH` / `LOG_PATH` 仓库根推导常量）已删除——顶层 `config/` 与 robot-pipeline 顶层
 > `config` 包同名会干扰 ruff isort 的 first-party 分类；`edge.yml` 移入包内作 package data。
 
+## 运行目录契约
+
+| 进程           | 根目录变量                  | 未设置时的根目录              |
+| -------------- | --------------------------- | ----------------------------- |
+| Edge           | `MOTRIX_EDGE_DIR`           | `<cwd>/motrix-edge`           |
+| robot-pipeline | `MOTRIX_ROBOT_PIPELINE_DIR` | `<cwd>/motrix-robot-pipeline` |
+
+每个根目录的布局固定：`<root>/config` 放现场配置，`<root>/logs` 放运行日志。路径函数在调用时读取
+环境变量，不缓存 import 时的结果；测试、嵌入式调用和同一解释器内重配不会拿到陈旧路径。容器必须传入
+**容器内可见路径**，并把对应目录挂载到持久卷；宿主路径不能直接作为容器内路径使用。
+
+`MOTRIX_CONFIG_DIR` 与 `XDG_STATE_HOME` 不再参与这两个进程的路径解析。运行根变量为空时才使用
+`<cwd>` 兜底，因此生产与容器部署应显式设置根目录，避免启动目录变化导致读写位置变化。
+
 ## 配置路径与加载
 
--   **优先级**：① 外界配置目录 `MOTRIX_CONFIG_DIR`（可写，同名 `yml` 覆盖包内默认）；
-    ② 包内默认 `src/motrix_edge/config/edge.yml`（`importlib.resources` 只读访问，不可写）。
+-   **优先级**：① `<root>/config/<name>` 中的现场配置；② 包内默认 YAML（只读兜底）。
+-   `load_config(name)` 只读，不创建目录或复制文件。现场配置缺失时直接读取包内默认，避免普通启动
+    在只读镜像或 bind mount 上产生副作用。
 -   **`capture.yml`**（采集元信息选项，`capture meta` 命令族维护）：与 `edge.yml` 同一套优先级——
-    外界目录同名文件可写副本，包内默认只读（写回时落到 `writable_config_path`）；包内默认在
-    **首次读 / 写时惰性播种**（构造不做 IO，配置目录不可写时降级只读）；见
+    现场文件可写、包内默认只读；`CaptureMetaStore` 首次访问时才把默认内容写入
+    `<root>/config/capture.yml`（构造不做 IO，目录不可写时降级只读）；见
     [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。
 -   `load_config(name)`：外界文件存在 → 读取；否则若 `name ∈ DEFAULT_CONFIG_FILES`
     （`("edge.yml", "capture.yml")`）读包内默认；均缺失 → `{}`（兜底不抛错）。
 -   `run --config <path>`：指定任意 yaml 路径（如 `/etc/motrix-edge/edge.yaml`）；
     **路径不存在 → `SystemExit("error: File ... does not exist.")`**（干净报错，不回显 traceback）。
 
-路径助手（`config/__init__.py`，模块级 `CONFIG_DIR` / `LOG_PATH` 在 import 时按已设环境变量计算）：
+路径助手（两个项目各自的 `config/__init__.py` 使用同一语义）：
 
-| 函数 / 常量                  | 说明                                                             |
-| ---------------------------- | ---------------------------------------------------------------- |
-| `get_config_dir()`           | 外界配置目录（`MOTRIX_CONFIG_DIR`）；未设置 → `None`（包内默认） |
-| `config_path(name)`          | 配置文件真实路径（外界目录存在时）；无外界目录 → `None`          |
-| `writable_config_path(name)` | 可写配置路径：外界目录优先，否则落到状态目录（包内默认只读）     |
-| `get_log_dir()`              | 日志目录：`XDG_STATE_HOME/motrix`，缺省 `CWD/logs`               |
-| `get_state_dir()`            | 可写状态目录：`XDG_STATE_HOME/motrix`，缺省 `CWD`                |
-| `CONFIG_DIR` / `LOG_PATH`    | 模块级导出（`LOG_PATH` 供 `debug_print` 与 uvicorn 日志使用）    |
+| 函数 / 常量                  | 说明                                                    |
+| ---------------------------- | ------------------------------------------------------- |
+| `get_root_dir()`             | 环境变量指定的根；未设置时回落到 `<cwd>/<project-name>` |
+| `get_config_dir()`           | `<root>/config`                                         |
+| `config_path(name)`          | `<root>/config/<name>`                                  |
+| `writable_config_path(name)` | 与 `config_path(name)` 相同，供明确需要写配置的组件使用 |
+| `get_log_dir()`              | `<root>/logs`                                           |
 
 配置段：
 

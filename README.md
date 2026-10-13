@@ -43,7 +43,7 @@ CLI / 控制面 ──CommandBus──▶ EdgeNode（node 生命周期状态机�
 | `identity/` | Edge 设备身份声明与请求元数据                                                                                                                       |
 | `lease/`    | Edge 级租约机制（`LeaseManager`）                                                                                                                   |
 | `utils/`    | 命令总线（CommandBus）/ 采集元信息选项（`capture_meta`）/ data handler 等工具                                                                       |
-| `config/`   | 配置加载：`MOTRIX_CONFIG_DIR` 外界目录覆盖 + 包内默认 `edge.yml` / `capture.yml`（package data，只读兜底）                                          |
+| `config/`   | 运行目录解析；现场配置优先，包内 `edge.yml` / `capture.yml` 只读兜底                                                                                |
 
 > adapter 经 Python **entry point**（`motrix_edge.adapters` 组）注册接入，当前内置
 > `test_robot`（虚拟，离线联调）与 `dual_piper`（双臂 Piper）；外部 SDK / 包亦可按同一
@@ -76,7 +76,7 @@ edge 经 `RobotAdapter` 下发指令（`execute` / `rollout` / `safe_stop` / `re
 ```text
 src/motrix_edge/     # edge 包（任务运行时）：node / adapter / session / policy /
                      #   server / frame / identity / lease / utils / config
-src/motrix_edge/config/edge.yml   # 边缘节点配置（package data；MOTRIX_CONFIG_DIR 同名文件覆盖）
+src/motrix_edge/config/edge.yml   # 边缘节点默认配置（package data，只读）
 robot-pipeline/      # 机械臂底层承载（独立 uv 子项目）：src 下 config / env /
                      #   robot / server / collector / utils，启动脚本在 scripts/
 wiki/                # 设计与计划文档
@@ -92,6 +92,11 @@ uv run pytest     # 运行测试
 uv run ruff check .
 npm run format    # ruff format + prettier
 ```
+
+运行文件使用一个根目录：`MOTRIX_EDGE_DIR`，缺省为 `<cwd>/motrix-edge`；现场配置放
+`<root>/config`，日志放 `<root>/logs`。robot-pipeline 对应使用
+`MOTRIX_ROBOT_PIPELINE_DIR`，缺省为 `<cwd>/motrix-robot-pipeline`。容器部署应传入容器内路径并
+挂载对应目录。
 
 机器人承载端（robot-pipeline）为独立子项目，需单独 `uv sync`，详见
 [robot-pipeline/README.md](robot-pipeline/README.md)。
