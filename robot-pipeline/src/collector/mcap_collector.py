@@ -137,10 +137,12 @@ class ActMcapCollector:
         self._start_wall: float | None = None  # 本轮采集开始墙钟时间（duration 兜底）
         self._first_ts: float | None = None  # 首帧 timestamp（秒）
         self._last_ts: float | None = None  # 末帧 timestamp（秒）
+        # DEBUG：同一事实已由 robot server 的启动清单（``collect`` 行）汇总打印，
+        # 默认不重复刷两处（需要细节时把该机型 yml 的 ``INFO_LEVEL`` 改成 ``DEBUG``）。
         debug_print(
             self.name,
             f"Initialized with save_dir={self._save_dir}, image_format={self._image_format}",
-            "INFO",
+            "DEBUG",
         )
 
     # -- public API ---------------------------------------------------------

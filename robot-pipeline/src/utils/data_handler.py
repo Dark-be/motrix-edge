@@ -144,10 +144,13 @@ def debug_print(name, info, level="INFO", end="\n", flush=True):
         "ERROR": "\033[91m",  # red
         "ENDC": "\033[0m",
     }
-    color = colors.get(level.upper(), "")
-    endc = colors["ENDC"]
     msg = f"[{level}][{name}] {info}"
-    print(f"{color}{msg}{endc}", end=end, flush=flush)
+    # 只在终端上色：docker logs / 重定向 / 管道里带 ANSI 转义会把内容弄脏（grep / 看板都受影响）；
+    # 与 motrix_edge 侧同一口径（那边同样按 isatty 判断）。
+    if sys.stdout.isatty():
+        print(f"{colors.get(level.upper(), '')}{msg}{colors['ENDC']}", end=end, flush=flush)
+    else:
+        print(msg, end=end, flush=flush)
 
     # 写入日志文件（INFO 及以上；MOTRIX_EDGE_LOG_FILE=0 关闭文件写入）
     if LOG_LEVELS[level.upper()] >= 20 and file_log_enabled():
