@@ -243,7 +243,10 @@ class BaseSession:
                 return RunResult.ERROR
             if outcome == CommonDispatch.UNHANDLED:
                 self.reject_not_applicable(cmd)
-            time.sleep(1)
+            # 无命令时才退避，避免空轮询；已经处理过命令则立即读取下一条。此前这里固定
+            # sleep(1)，会让 reset 等待整整一秒后才能消费紧随其后的 quit，也降低真实控制面的响应性。
+            if cmd is None:
+                time.sleep(1)
         return None
 
     def _on_capture_meta(self, cmd):

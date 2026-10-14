@@ -227,6 +227,12 @@ class InferSession(PolicyConfigFeature, BaseSession):
             thread = self._warmup_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=timeout)
+        # 工作线程若在最终日志前自行清空引用，session_finish() 就无法 join，日志和资源清理
+        # 可能越过当前会话边界。由等待方在确认线程结束后统一清理引用。
+        if thread is not None and not thread.is_alive():
+            with self._warmup_lock:
+                if self._warmup_thread is thread:
+                    self._warmup_thread = None
 
     def _connect_policy(self, cmd) -> None:
         """``infer connect``：启动**异步预热**（连接 + prepare + 取一块丢弃），立即回执。
@@ -296,7 +302,6 @@ class InferSession(PolicyConfigFeature, BaseSession):
         cancelled = self._warmup_cancel.is_set()
         with self._warmup_lock:
             self._warming = False
-            self._warmup_thread = None
             self._warmed_up = warmed and not cancelled
             self._warmup_error = (
                 None if self._warmed_up else ("cancelled" if cancelled else (reason or "warmup failed"))

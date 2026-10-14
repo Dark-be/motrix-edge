@@ -686,6 +686,7 @@ def test_infer_session_binds_adapter_layout_to_policy(monkeypatch):
     assert policy.bind_calls == 1  # InferSession 构造即 bind
     assert policy.bound_action_dim == 7  # 单臂 qpos 维数
     assert policy.bound_cameras == ["cam_head", "cam_right_wrist"]  # adapter 启用相机
+    session.session_finish()  # 回收 infer connect 启动的预热线程，避免日志泄漏到后续测试
 
 
 def test_infer_robot_reset_replies_ok(monkeypatch):
@@ -701,6 +702,7 @@ def test_infer_robot_reset_replies_ok(monkeypatch):
     assert session.run() == RunResult.FINISHED
     assert adapter.reset_calls >= 2  # run() 开头复位 + 命令复位
     assert replies[0].status == "ok"
+    session.session_finish()  # quit 只发取消信号；finish 负责等待预热线程真正退出
 
 
 def test_infer_wait_ready_robot_reset_replies(monkeypatch):
@@ -893,6 +895,7 @@ def test_infer_connect_warms_up_without_motion(monkeypatch):
     assert policy.prepare_calls == 1
     assert policy.infer_calls == 1  # 预热自己取了一块（丢弃）
     assert adapter.executed == []  # **预热不动机器人**
+    session.session_finish()
 
 
 def test_infer_connect_is_idempotent_and_reports_state(monkeypatch):
@@ -926,6 +929,7 @@ def test_infer_connect_is_idempotent_and_reports_state(monkeypatch):
     assert replies[0].data["connected"] is True
     assert replies[0].data["metadata"] == {"action_horizon": 16}
     assert replies[0].data["chunk_len"] == 50
+    session.session_finish()
 
 
 def test_infer_connect_failure_lands_in_warmup_error(monkeypatch):
@@ -964,6 +968,7 @@ def test_infer_connect_failure_lands_in_warmup_error(monkeypatch):
     assert "not warmed up" in replies[1].error
     assert policy.infer_calls == 0
     assert adapter.executed == []
+    session.session_finish()
 
 
 def test_infer_rollout_during_warmup_is_rejected(monkeypatch):
@@ -1002,6 +1007,7 @@ def test_infer_rollout_during_warmup_is_rejected(monkeypatch):
     assert "warmup in progress" in replies[1].error
     assert adapter.executed == []  # 既没 rollout 也没预热下发动作
     assert session.warmed_up is False  # quit 已取消预热
+    session.session_finish()  # 等待被取消的慢连接线程退出
 
 
 def test_infer_connect_cancelled_by_estop(monkeypatch):
@@ -1095,6 +1101,7 @@ def test_infer_connect_rewarms_after_connection_loss(monkeypatch):
     assert policy.connect_calls == 2  # 首次 connect + 重新预热
     assert session.warmed_up is True
     assert session.warmup_error is None
+    session.session_finish()
 
 
 def test_infer_rollout_blocked_again_after_connection_loss(monkeypatch):
@@ -1128,6 +1135,7 @@ def test_infer_rollout_blocked_again_after_connection_loss(monkeypatch):
     assert policy.infer_calls == infer_calls_after_warmup["n"]  # 没发起新的推理
     assert policy.connect_calls == 1  # 也没做惰性重连
     assert adapter.executed == []
+    session.session_finish()
 
 
 def test_infer_rollout_blocked_while_warming_even_if_warmup_not_required(monkeypatch):
@@ -1173,6 +1181,7 @@ def test_infer_rollout_blocked_while_warming_even_if_warmup_not_required(monkeyp
     assert observed["infer_calls"] == 0  # 没有与预热并发发起推理
     assert policy.connect_calls == 1  # 也没走惰性自连
     assert adapter.executed == []
+    session.session_finish()  # 等待被取消的慢连接线程退出
 
 
 def test_infer_rollout_requires_warmup(monkeypatch):
@@ -1263,6 +1272,7 @@ def test_infer_connect_success_replies_metadata(monkeypatch):
     assert replies[0].status == "ok"
     assert replies[0].data["connected"] is True
     assert replies[0].data["metadata"] == {"action_horizon": 16}
+    session.session_finish()  # 回收可能仍在收尾的异步预热线程
 
 
 def test_infer_stop_returns_error(monkeypatch):
@@ -1412,6 +1422,7 @@ def test_infer_connect_failure_records_warmup_error(monkeypatch):
     assert replies[0].data["started"] is True
     assert session.warmed_up is False
     assert "inference server not reachable" in (session.warmup_error or "")
+    session.session_finish()
 
 
 def test_infer_rollout_refused_during_teleop(monkeypatch):
