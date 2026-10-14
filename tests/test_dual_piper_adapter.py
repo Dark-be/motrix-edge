@@ -50,11 +50,7 @@ _GRIPPER = (0.5, 0.8)  # 每臂 1（顺序同 ARM_NAMES = left / right）
 
 
 def _state_vector(joints, gripper) -> np.ndarray:
-    """值段（每臂 6）+ 夹爪段（每臂 1）→ 状态向量（每臂「值 + 夹爪」交错，与机器人侧同规则）。
-
-    输出与 ``adapter.observe()`` 一致（``float32``）——否则 0.8 这类值在 float32/float64 间
-    不等，断言会假失败。
-    """
+    """每臂 joint + gripper 交错的采集状态。"""
     values = np.asarray(joints, dtype=np.float64).reshape(-1)
     grips = np.asarray(gripper, dtype=np.float64).reshape(-1)
     return np.concatenate(
@@ -114,8 +110,16 @@ def test_identity_and_capabilities():
 
     assert (adapter.name, adapter.type) == ("Piper", "dual_piper")
     assert caps.action_dim == 12  # 兼容字段 = 关节空间维度
-    assert caps.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
-    assert caps.action_spaces == ["joint", "pose", "pose_delta", "gripper"]
+    assert caps.action_dims == {
+        "joint": 12,
+        "joint_delta": 12,
+        "pose": 12,
+        "pose_delta": 12,
+        "gripper": 2,
+        "gripper_delta": 2,
+    }
+    assert caps.action_spaces == ["joint", "joint_delta", "pose", "pose_delta", "gripper", "gripper_delta"]
+    assert set(adapter.action_layouts()) >= {"joint_delta", "gripper_delta", "joint_delta+gripper_delta"}
     # 观测键 = observe() 实际产出的键（状态向量 qpos + 目标向量 action + 位姿），相机键在后
     assert caps.observation_keys[:3] == [KEY_QPOS, KEY_ACTION, KEY_POSE]
     assert caps.image_names == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
@@ -228,7 +232,7 @@ def test_observe_builds_edge_observation(monkeypatch):
     assert obs is not None
     assert obs[KEY_QPOS].dtype == np.float32
     assert obs[KEY_ACTION].dtype == np.float32
-    assert obs[KEY_QPOS].shape == (14,)  # 每臂「值 6 + 夹爪 1」× 2 臂
+    assert obs[KEY_QPOS].shape == (14,)
     # action 取 SHM 里进程侧的目标向量，而不是 qpos 副本（preview 显示真实指令）
     assert np.array_equal(obs[KEY_ACTION], _state_vector(np.arange(12, dtype=np.float32) + 100, _GRIPPER))
     for name in ("cam_head", "cam_left_wrist", "cam_right_wrist"):
@@ -413,13 +417,20 @@ def test_pose_frame_declares_flange():
 
 
 def test_pose_layout_is_advertised_and_forwarded():
-    """四个空间都已接入：宣称 joint / pose / pose_delta / gripper，且 rollout / execute 的 body 带 ``layout``。
+    """六个空间均已接入，且 rollout / execute 的 body 带 ``layout``。
 
     joint / pose / pose_delta 扁平维度相同，漏传就是静默误解释。
     """
     http = _FakeHttp()
     adapter = _adapter(http)
-    assert adapter.capabilities.action_spaces == ["joint", "pose", "pose_delta", "gripper"]
+    assert adapter.capabilities.action_spaces == [
+        "joint",
+        "joint_delta",
+        "pose",
+        "pose_delta",
+        "gripper",
+        "gripper_delta",
+    ]
     assert adapter.normalize_action_space("pose") is ActionSpace.POSE
 
     action = np.arange(12, dtype=np.float64)
@@ -440,6 +451,21 @@ def test_gripper_layout_is_forwarded():
     adapter.execute(np.array([0.2, 0.9]), layout="gripper")
 
     assert http.posts == [(PATH_EXECUTE, {FIELD_ACTION: [0.2, 0.9], FIELD_LAYOUT: "gripper"})]
+
+
+def test_delta_layout_is_forwarded():
+    http = _FakeHttp()
+    adapter = _adapter(http)
+    action = np.asarray(([0.1] * 6 + [-0.2]) * 2)
+
+    adapter.execute(action, layout="joint_delta+gripper_delta")
+
+    assert http.posts == [
+        (
+            PATH_EXECUTE,
+            {FIELD_ACTION: action.tolist(), FIELD_LAYOUT: "joint_delta+gripper_delta"},
+        )
+    ]
 
 
 def test_pose_requires_all_arms_enabled():

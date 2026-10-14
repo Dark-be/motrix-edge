@@ -55,10 +55,8 @@ def _robot(base_robot, section=None):
     class _Stub(base_robot.BaseRobot):
         NAME = "stub"
         ARM_NAMES = _ARMS
-        QPOS = 12
-        POSE = 12
+        ARM_CONTROLLERS = {"left": "arm_left", "right": "arm_right"}
         POSE_DIM_PER_ARM = 6
-        GRIPPER = 2
 
     config = {"init_joint": [0.0] * 12}
     if section is not None:
@@ -179,18 +177,26 @@ def test_hooks_shift_both_arms_and_report_tcp_frame(base_robot):
     assert robot.tcp_to_flange(tcp_pose) == pytest.approx(flange)
 
 
-def test_enabled_but_no_arms_declared_stays_flange(base_robot):
-    """未声明 ``ARM_NAMES`` 的机型（无臂概念）→ 配置不生效、帧名仍为 ``flange``。"""
+def test_concrete_robot_requires_arm_names(base_robot):
+    """具体机型必须声明物理臂，不能再靠整机总维度反推臂数。"""
 
     class _NoArm(base_robot.BaseRobot):
         NAME = "no_arm"
-        QPOS = 6
-        POSE = 6
         POSE_DIM_PER_ARM = 6
 
-    robot = _NoArm({"init_joint": [0.0] * 6, "tcp": {"enabled": True, "offset": [0.0, 0.0, 0.1]}})
-    assert robot.tcp_offsets == {}
-    assert robot.pose_frame == "flange"
+    with pytest.raises(ValueError, match="ARM_NAMES"):
+        _NoArm({"init_joint": [0.0] * 6})
+
+
+def test_concrete_robot_requires_controller_mapping_for_every_arm(base_robot):
+    """物理臂和执行控制器映射必须一一对应，避免子类按不同顺序展开数据。"""
+
+    class _BadMapping(base_robot.BaseRobot):
+        ARM_NAMES = _ARMS
+        ARM_CONTROLLERS = {"left": "arm_left"}
+
+    with pytest.raises(ValueError, match="ARM_CONTROLLERS keys"):
+        _BadMapping({"init_joint": [0.0] * 12})
 
 
 # ---- 运行期切换（``robot tcp`` → POST /v1/tcp；``robot gravity`` → POST /v1/gravity）----------
@@ -260,10 +266,7 @@ def test_set_gravity_installs_and_unloads_on_each_executing_arm(base_robot):
     class _Stub(base_robot.BaseRobot):
         NAME = "stub"
         ARM_NAMES = _ARMS
-        QPOS = 12
-        POSE = 12
         POSE_DIM_PER_ARM = 6
-        GRIPPER = 2
         ARM_CONTROLLERS = {"left": "arm_left", "right": "arm_right"}
 
     robot = _Stub({"init_joint": [0.0] * 12, "gravity": {"enabled": False, "alpha": 0.8}})

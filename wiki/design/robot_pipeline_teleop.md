@@ -5,7 +5,7 @@
 robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joint` / `pose`）、**映射模式**
 （`absolute` / `delta`）和位姿跟随时的**轴白名单**（`follow_axes`）。关节跟随保留既有行为；位姿跟随
 把主臂关节先正解为 `xyz + rpy`，按映射模式与轴白名单合成从臂目标，再逆解成关节目标。两者最终
-共用一条链路——写 `target_action` → `step_rad` 限速逼近 → MIT 下发。
+共用一条链路——写 `joint_target` → `step_rad` 限速生成 `joint_command` → MIT 下发。
 
 该能力只属于 robot-pipeline 的 teleop 映射：Edge 的 `rollout` / `execute`、动作 `layout` 与观测
 契约均不改变。配置缺省 `follow_space: joint`，升级不改变既有真机行为。
@@ -15,7 +15,7 @@ robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joi
 -   **接管不突变**：下发接管指令的那一刻，从臂 target 必须等于从臂**当时位姿**——此前残留的
     （可能已发散的）推理 target 被丢弃。这是接管可用性的底线：突变会同时毁掉安全与数据质量
     （`action` 是采集的指令列，跳变会污染整条轨迹）。
--   **限速唯一出处**：增量链路只决定 `target_action`，逐拍逼近幅度仍由 `step_rad` /
+-   **限速唯一出处**：增量链路只决定 `joint_target`，逐拍逼近幅度仍由 `step_rad` /
     `_step_toward()` 唯一负责，增量本身**不额外限幅**（主臂抖动放大由 `step_rad` 兜住）。
 -   **控制回路单写者**：主臂读取与 target 计算都在控制线程（`step()` 内），HTTP 线程只入队。
 -   **不新增 edge 侧同义契约**：`mode` 字段与取值单点定义在
@@ -51,13 +51,14 @@ robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joi
     三个命令共用 `command/config_commands.py::apply_teleop`（node 与会话同一实现）；
     命令名集合 `command/naming.py::TELEOP_COMMANDS`。
 
--   **覆盖范围**：关节与夹爪是**同一套语义**——`QPOS` 扁平向量逐元素增量
+-   **覆盖范围**：关节与夹爪是**同一套语义**——`joint_dim()` 长度的扁平关节向量逐元素增量
     （夹爪 target = 夹爪锚点 + 夹爪增量）。因此映射函数无需知道 action 布局，子类的
-    `_get_teleop_target()` 只返回主臂绝对扁平读数（偏置不含在内）。
--   **1:1 与常量偏置**：增量映射不带缩放（`k = 1`）；主臂读数上的**常量**偏置由基类统一叠加
-    （`_refresh_teleop_target()` 里取锚点之前），取值来自配置 `robot.teleop.joint_offset`
-    （逐关节 rad，逐臂一份或全臂共用；缺省全 0——主从零位差属现场值，子类不再写死）。
-    偏置在锚点式下自动抵消、不进入增量，因此只有 `absolute`（示教）下可见。
+    `_read_teleop_joint()` 只返回主臂绝对扁平读数（偏置不含在内）。
+-   **1:1 与常量偏置**：增量映射不带缩放（`k = 1`）。基类依次执行
+    `master_joint + joint_offset → FK → master_pose + pose_offset`：`joint_offset` 是逐关节 rad，
+    `pose_offset` 是当前位姿坐标系下逐分量的 `xyz`（m）+ `rpy`（rad），两者都可逐臂配置或由
+    全臂共用一组值，缺省全 0。偏置均在锚点采样前叠加，因此 `absolute` 下可见、`delta` 下由
+    锚点抵消；`pose_offset` 只参与 pose 跟随，不改变 joint 跟随。
 
 ### 跟随空间与位姿轴锁定
 
@@ -68,6 +69,8 @@ robot:
     teleop:
         follow_space: pose
         follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在启用 teleop 时的从臂锚点
+        joint_offset: [0, 0.1, 0, 0, 0, 0] # 每臂关节偏置，rad
+        pose_offset: [0, 0, 0.02, 0, 0, 0] # 每臂 xyz（m）+ rpy（rad）偏置
 ```
 
 | `follow_space`  | 主臂输入到从臂目标的处理             | `follow_axes`                                        |
@@ -81,7 +84,8 @@ Console 可在 teleop 关闭时选择 `joint` / `pose`，并在**每次开启**�
 新锚点，不允许运行中静默改变约束。joint 跟随收到 `follow_axes` 会明确拒绝；不具备 pose 动作与
 FK/IK 能力的机型收到 `follow_space: pose` 也会明确拒绝。
 
-位姿跟随的锚点在启用后的首次有效主臂读数拍原子采集：`master_pose_ref = FK(master_now)`，
+位姿跟随的锚点在启用后的首次有效主臂读数拍原子采集：
+`master_pose_ref = FK(master_now + joint_offset) + pose_offset`，
 `slave_pose_ref = FK(slave_current_action)`。未跟随轴始终取 `slave_pose_ref`；跟随轴按模式计算：
 
 -   `absolute`：取 `master_pose_now` 对应分量；
@@ -101,13 +105,13 @@ FK/IK 能力的机型收到 `follow_space: pose` 也会明确拒绝。
 
 锚点在 `delta` 启用后的**首次成功读数那一拍**一并采样（同一个 `step()` 内，两者同拍）：
 
-| 锚点                | 取值                                                    |
-| ------------------- | ------------------------------------------------------- |
-| `teleop_master_ref` | 该拍主臂扁平读数                                        |
-| `teleop_slave_ref`  | 该拍从臂位姿：`action` → `target_action` → `init_joint` |
+| 锚点                | 取值                                                          |
+| ------------------- | ------------------------------------------------------------- |
+| `teleop_master_ref` | 该拍主臂扁平读数                                              |
+| `teleop_slave_ref`  | 该拍从臂位置：`joint_command` → `joint_target` → `init_joint` |
 
--   **从臂参考取当前执行位置**（`action`）：即从臂此刻所在位置；接管瞬间增量恒 0 →
-    `target_action = slave_ref` = 从臂当前位姿。
+-   **从臂参考取当前执行位置**（`joint_command`）：接管瞬间增量恒 0 →
+    `joint_target = slave_ref`，不会跳向此前残留目标。
 -   **采样推迟到首次成功读数**，而不是在指令处理时同步读主臂：主臂瞬时读不到时不进入半接管
     状态，target 保持不变（不突变），下一拍继续尝试；一旦读到，增量必然从 0 开始。
 -   **锚点在接管期间固定**（`disable_teleop()` / 再次 `enable_teleop()` 时清空），
@@ -169,10 +173,10 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
 -   **主臂读数不可用（`None` / 读取异常）**：本拍**不刷新 target**（保持原值，不突变），只累计
     `teleop_read_failures` + **同一原因限流告警**；**不置 `last_error`**——接管中读不到主臂是预期
     状态（人还没接上 / 瞬时抖动），不能让 `/v1/health` 变不健康（否则一次 CAN 抖动会被 Edge
-    当成硬件故障）。读取异常与 `None` 走同一条路径（`_refresh_teleop_target` 统一 try/except），
+    当成硬件故障）。读取异常与 `None` 走同一条路径（`_refresh_teleop_targets` 统一 try/except），
     不会冒出 `step()`。
--   **单臂布局**：`step()` 目前硬编码双臂切片（`action[6:12]` / `action[12:]`），
-    `SinglePiperRobot` 跑到 `step()` 会 IndexError——单臂接入遥操作前需按类常量泛化布局。
+-   **单臂布局**：`step()` 按 `ARM_NAMES` 和每臂维度切块；`SinglePiperRobot` 与双臂机型
+    共用机器档案，仅消费 `left_master` / `left` 这一对主从臂。
 -   **接管前的对齐由人工完成**：主臂**不可被程序驱动**（Piper leader 模式只读），因此不提供
     「推理期主臂跟随从臂」；接管前操作员手动把主臂摆到与从臂相近的位姿，剩下的差值由锚点
     零化（见「增量锚点」）。

@@ -174,7 +174,14 @@ def test_adapters_info_returns_capabilities():
         assert info["available"] is True
         caps = info["capabilities"]
         assert caps["action_dim"] == 12  # 兼容字段 = 关节空间维度（双臂 6 × 2）
-        assert caps["action_dims"] == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+        assert caps["action_dims"] == {
+            "joint": 12,
+            "joint_delta": 12,
+            "pose": 12,
+            "pose_delta": 12,
+            "gripper": 2,
+            "gripper_delta": 2,
+        }
         assert "image_names" in caps and "capabilities" in caps
 
 
@@ -708,7 +715,7 @@ def test_preview_returns_latest_observation():
     node.frame_manager.update(
         {
             "observations/qpos": np.array([0.1, 0.2]),  # float64：float 转换精确
-            "observations/pose_target": np.array([0.3, 0.4]),  # 目标位姿（= FK(关节段目标)）
+            "observations/pose_action": np.array([0.3, 0.4]),  # 目标位姿（= FK(关节段目标)）
             "observations/images/cam_head": np.full((8, 8, 3), 128, dtype=np.uint8),
         }
     )
@@ -1073,8 +1080,7 @@ def test_leases_expired_rejected_410():
     """租约超期未续约 → 失效：受控操作拒绝（410），需重新签发。"""
     node = FakeNode()
     client = make_captures_client(node)
-    lease = install_lease(client, ttl=1)
-    time.sleep(1.2)  # ttl=1s 到期
+    lease = install_lease(client, ttl=1, expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
     # GET 保留过期状态：expired 且 leasable（可重新签发）
     snap = client.get("/v1/leases").json()
     assert snap["lease_id"] == lease

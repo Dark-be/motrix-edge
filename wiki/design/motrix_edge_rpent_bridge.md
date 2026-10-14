@@ -162,7 +162,7 @@ edge 的下发契约是 `layout` + `arms`（段宽见 [下发契约收敛](./rob
 | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 姿态   | `rot6d`（旋转矩阵前两列、列主序）→ 旋转矩阵（第三列 = 前两列叉乘，先 Gram-Schmidt 正交化）→ `rpy`（约定 `R = Rz(yaw) @ Ry(pitch) @ Rx(roll)`）                               |
 | 夹爪   | 对方 `+1 = 张开 / -1 = 闭合` → edge `[0, 1]`（`(g + 1) / 2`，先限幅）                                                                                                        |
-| 臂映射 | 按**臂名**对齐到 edge 启用臂；布局里有而 edge 未启用的臂忽略；edge 启用而布局未覆盖的臂**保持当前目标位姿**（优先 `observations/pose_target`，退化实测 `observations/pose`） |
+| 臂映射 | 按**臂名**对齐到 edge 启用臂；布局里有而 edge 未启用的臂忽略；edge 启用而布局未覆盖的臂**保持当前目标位姿**（优先 `observations/pose_action`，退化实测 `observations/pose`） |
 | 缩放   | **不做**（绝对位姿语义）；维度不符 / 臂名不相交 / 未知布局名 → `ok=false`                                                                                                    |
 
 -   **只做数值映射**、不缩放、不猜语义：布局名是唯一开关，不自动识别「增量 vs 绝对」；
@@ -291,9 +291,10 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
 反投影 + 坐标变换一条龙在 edge 完成，RPent 侧**不需要**再做本地标定。
 
 **位姿能力是前置条件**（真机 dual piper 曾踩过）：适配器**没声明 `pose_delta` 空间**时
-（也就没有 `observations/pose_target`）——`move_delta` / `rotate_delta` 会
+（也就没有 `observations/pose_action`）——`move_delta` / `rotate_delta` 会
 `ok=false kind=unsupported`、`settle` 回 `reached: null`，故 agent 启动就该拦。机器人侧需实现：
-`POSE = 12`（每臂 6 维 `xyz+rpy`、米/弧度）+ `get_observation_pose(qpos=None)`（与位姿解算
+`POSE_DIM_PER_ARM = 6`（双臂 `pose_dim() = 12`，每臂 `xyz+rpy`、米/弧度）+
+`get_observation_pose(joint=None)`（与位姿解算
 **同一套运动学**，位姿动作设计文档随位姿动作 MR 合入）+ `get_target_pose()`
 （= `FK(关节段目标)`：增量基准与上位判到位的参考）+ `POSE_FRAME`（与位姿下发同系：piper 缺省为
 `flange`，配了 `robot.tcp` 则由机器人上报 `tcp`——见 [末端 TCP](./robot_pipeline_tcp.md)）。
@@ -304,7 +305,7 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
     拿「实测位姿 + 增量」当绝对目标会把当前稳态误差（`τ_gravity / kp`）写进新目标，逐条累积且
     闭环永不收敛；同时上位「读基准 → 算 → 写」之间存在窗口（遥操作接管 / CLI 直控 / 别的会话改
     目标），窗口内目标一变就被旧基准覆盖。
--   **到位参考取目标位姿**：下发后先等 `observations/pose_target` 从下发前快照**跃迁**（确认命令
+-   **到位参考取目标位姿**：下发后先等 `observations/pose_action` 从下发前快照**跃迁**（确认命令
     已落地——下发走命令队列、观测按观察频率发布，不等就会拿旧目标当参考而误判到位），再以跃迁后的
     目标为参考判到位。命令一直未落地（超 `settle.target_wait_s`）→ `reached: null` +
     `not_applied`；跃迁后的目标与「快照 + 增量」不符 → `base_changed`（基准被第三方改动，回执
@@ -431,7 +432,7 @@ edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成
     **逐分量相加**，而 `matrix_to_rpy(R_cur · ΔR_tool · R_curᵀ)` 那种共轭写法相加后并不等于旋转复合
     （实测 `pitch=45°` 绕末端 z 转 20° 偏 **10.7°**、`pitch=89°` 偏 **28°**；chart 增量写法误差为
     **0**，`pitch` 接近 `±90°` 时增量数值会变大，那里优先用 `look_at`）；
--   **快照与竞态**：`R_cur` 取**下发前**的 `observations/pose_target`（取目标而不是实测：底层 MIT 有
+-   **快照与竞态**：`R_cur` 取**下发前**的 `observations/pose_action`（取目标而不是实测：底层 MIT 有
     稳态误差，用实测当基准会把误差逐条写进新目标）；窗口内被第三方（遥操作 / CLI / 别的会话）改了
     目标 → 既有的 `base_changed` 检查标出来；目标位姿不可用 → `kind=state`（不猜、不退实测）；
 -   **回执**：`delta_frame="tool"` / **`converted_delta_base`**（逐臂换算结果，含旋转的 chart 增量）
@@ -458,14 +459,14 @@ server:
 
 ### 实际取值（edge 认到的机器）
 
-| 项       | 值（可由 `env.get_env_meta` 自描述，**不要在包里写死**）                                                                                                                 |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 相机     | `cam_head` / `cam_left_wrist` / `cam_right_wrist`（各 640×480 **原图**；WebRTC 预览缓存另为 320×240）                                                                    |
-| 臂       | `left` / `right`（物理顺序；RPent 眼里每臂 7 = 值 6 + 夹爪 1，由桥接层拼 / 拆）                                                                                          |
-| 动作空间 | `joint`（每臂 6 关节角，缺省）/ `pose`（每臂 `xyz + rpy`，绝对）/ `pose_delta`（每臂 `xyz + rpy` 增量，**基准归机器人**）/ `gripper`（每臂 1）——RPent 每臂 7 = 值 + 夹爪 |
-| 夹爪     | `[0, 1]`（0 = 闭合，1 = 张开）                                                                                                                                           |
-| 末端位姿 | `observations/pose` = 每臂 `xyz + rpy`（米 / 弧度）+ `pose_frame`（如 `flange`）；每臂块另给 quat `tcp_pose`                                                             |
-| 任务语言 | `env.get_task_language` 读推理会话 prompt；真机任务文本建议由 `tasks.py` 自己给（RPent 侧未调用它）                                                                      |
+| 项       | 值（可由 `env.get_env_meta` 自描述，**不要在包里写死**）                                                                       |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 相机     | `cam_head` / `cam_left_wrist` / `cam_right_wrist`（各 640×480 **原图**；WebRTC 预览缓存另为 320×240）                          |
+| 臂       | `left` / `right`（物理顺序；RPent 眼里每臂 7 = 值 6 + 夹爪 1，由桥接层拼 / 拆）                                                |
+| 动作空间 | Edge 支持关节、位姿、夹爪的绝对 / 增量空间；RPent 当前映射使用 `joint` / `pose` / `pose_delta` / `gripper`，每臂 7 = 值 + 夹爪 |
+| 夹爪     | `[0, 1]`（0 = 闭合，1 = 张开）                                                                                                 |
+| 末端位姿 | `observations/pose` = 每臂 `xyz + rpy`（米 / 弧度）+ `pose_frame`（如 `flange`）；每臂块另给 quat `tcp_pose`                   |
+| 任务语言 | `env.get_task_language` 读推理会话 prompt；真机任务文本建议由 `tasks.py` 自己给（RPent 侧未调用它）                            |
 
 ### 启动顺序（P1-3）
 

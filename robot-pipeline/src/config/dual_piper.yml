@@ -47,7 +47,7 @@ robot:
       right:
         params: gravity/piper_6dof.json # 右臂参数：标定后换成 gravity/piper_right.json
   # 末端 TCP（可选；见 wiki/design/robot_pipeline_tcp.md）：位姿（pose / pose_delta 动作与
-  # observations/pose / pose_target 观测）的原点从法兰切到**工具末端**——开启后「往前 5 cm」
+  # observations/pose / pose_action 观测）的原点从法兰切到**工具末端**——开启后「往前 5 cm」
   # 让**尖端**走 5 cm（look_at / move_delta 同样作用在尖端）。offset = TCP 在**法兰系**下的
   # 位置（米），只允许纯平移（带姿态的 TCP 会让 RPent 的工具三轴与 look_at 指向轴同时失真，
   # 故意拒绝）；两臂末端不等长（腕相机 / 探针支架）时用 arms 逐臂覆盖。
@@ -67,6 +67,11 @@ robot:
     joint_offset:
       left: [0, 0.1, 0, 0, 0, 0]
       right: [0, 0.1, 0, 0, 0, 0]
+    # 主臂 FK 后的位姿常量偏置：每臂 xyz（m）+ rpy（rad）。仅 pose 跟随使用；姿态会 wrap。
+    # 与 joint_offset 一样，absolute 下可见、delta 下由锚点抵消；未列出的臂缺省全 0。
+    pose_offset:
+      left: [0, 0, 0, 0, 0, 0]
+      right: [0, 0, 0, 0, 0, 0]
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:

@@ -66,7 +66,7 @@ def _robot(module, depth=None):
         config["depth"] = depth
     robot = module.TestRobot(robot_config=config)
     robot.connect()
-    robot.sample_qpos()  # 观测线程的前提：控制线程先出过一拍状态
+    robot.sample_state()  # 观测线程的前提：控制线程先出过一拍状态
     return robot
 
 

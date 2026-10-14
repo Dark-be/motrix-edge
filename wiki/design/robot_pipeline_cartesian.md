@@ -6,7 +6,7 @@
 模式**，交替下发会逐帧互切、把力矩环的目标冲掉（详见
 [robot-pipeline 运行时](./robot_pipeline_runtime.md)「为什么不用 `move_p`」）。因此**末端位姿控制
 在机器人内部收敛为一次逆解**：`pose` / `pose_delta` 动作（每臂 `xyz + rpy`）先由
-`robot/kinematics` 的求解器转成关节目标，之后与关节动作**走完全相同的通路**（`target_action`
+`robot/kinematics` 的求解器转成关节目标，之后与关节动作**走完全相同的通路**（`joint_target`
 限速插值 → `set_joint` → MIT 位置环）。底层控制模式、MIT 参数、观测键与 edge 契约都不变。
 
 **下发只有关节角**：`set_joint` 只给 MIT 的 `p_des`，`kp` / `kd` 用缺省值；`t_ff` **缺省为 0**，
@@ -43,7 +43,7 @@
 | 动作空间 | `pose`（每臂 `xyz + rpy`，**绝对目标**）/ `pose_delta`（每臂 `xyz + rpy`，**增量**）                                                                                                                                                             |
 | 维度     | 两空间**扁平维度相同**（双臂各 12），也与 `joint` 相同，差别只在每臂值的语义                                                                                                                                                                     |
 | 单位     | 位置米、姿态弧度、关节弧度                                                                                                                                                                                                                       |
-| 坐标系   | **位姿系**（`POSE_FRAME`）：法兰（缺省）或**工具末端 TCP**（`robot.tcp`，见 [末端 TCP](./robot_pipeline_tcp.md)）；与 `observations/pose` / `observations/pose_target` 同系，均由 `robot/kinematics` 的 FK 给出，TCP 只是原点偏移（IK 仍解法兰） |
+| 坐标系   | **位姿系**（`POSE_FRAME`）：法兰（缺省）或**工具末端 TCP**（`robot.tcp`，见 [末端 TCP](./robot_pipeline_tcp.md)）；与 `observations/pose` / `observations/pose_action` 同系，均由 `robot/kinematics` 的 FK 给出，TCP 只是原点偏移（IK 仍解法兰） |
 | 缺省     | 不带 `layout` 字段 = `joint`；`pose_delta` 需机器人声明                                                                                                                                                                                          |
 
 契约取值单点定义在 `motrix_edge.adapter`（`ActionSpace` / `ACTION_SPACES`）；robot 侧用
@@ -72,7 +72,7 @@ kp`，0.05–0.25 rad 量级）。以实测为基准时每一条增量都把当�
     **末端系**给增量时必须换算：平移 `d_base = R_cur · d_tool`（精确），旋转下发的是
     **chart 增量** `wrap(rpy(R_cur · ΔR_tool) - rpy_cur)`（相加后与矩阵复合精确一致）——见
     [统一坐标系与外参产物](./robot_pipeline_frames.md)。
--   **基准可观**：目标位姿由机器人常驻发布为 `observations/pose_target`（= `FK(关节段目标)`，见
+-   **基准可观**：目标位姿由机器人常驻发布为 `observations/pose_action`（= `FK(关节段目标)`，见
     [动作空间与观测契约](./robot_pipeline_action_spaces.md)）——上位判到位（`settle`）拿它当参考，
     而不是自己攒基准。
 -   **未声明即不支持**：`pose_delta` 是**声明式**能力（`ACTION_SPACES`）。旧机器人不声明时下发
@@ -123,13 +123,13 @@ $$
 
 `robot/kinematics/ik.py`：阻尼最小二乘（Levenberg–Marquardt）迭代；经
 `PiperController.pose_to_joint(pose, seed, fallback_seeds=(), **ik_config)`（**静态**）暴露——
-**只解算不下发**：机器人类拿 `IkResult.q` 写 `target_action`，再逐拍 `set_joint`。
+**只解算不下发**：机器人类拿 `IkResult.q` 写 `joint_target`，再逐拍 `set_joint`。
 
 -   **误差**：$e = \big[p_{des}-p_{cur};\ \log_3(R_{des}R_{cur}^{\top})\big]\in\mathbb{R}^6$（基座系）；
     收敛判据为位置误差 ≤ `pos_tol`（缺省 1e-4 m）且姿态误差 ≤ `rot_tol`（缺省 1e-3 rad）。
 -   **更新**：$\Delta q = J^{\top}(JJ^{\top}+\lambda^2 I)^{-1}e$，$\lambda$ 为阻尼（缺省 1e-2，抑制
     奇异位形附近的大步长）；$\Delta q$ 按 `step_limit`（缺省 0.2 rad）裁切后 clip 到关节限位。
--   **种子**：机器人类传**当前指令位置**（`current_action()`，离目标近日与硬件同步），
+-   **种子**：机器人类传**当前关节命令**（`_joint_command_or_fallback()`，离目标近日与硬件同步），
     兜底 `init_joint` 段（`fallback_seeds`：仍不收敛时用 home 重试一次）。
 -   **返回**：`IkResult`（`ok` / `q` / `pos_err` / `rot_err` / `iterations` / `reason`）——**成功才给
     `q`**；失败带原因（`max_iters` / `joint_limit` / `seed_unavailable`），由调用方决定语义
@@ -145,7 +145,7 @@ flowchart LR
     A -->|"/v1/rollout {action, layout, arms}"| S["contract_server<br/>ActionRequest"]
     S -->|入队| Q["env.commands"]
     Q -->|控制线程 drain| R["机器人类（编排）<br/>按臂拆包 → PiperController.pose_to_joint"]
-    R -->|"每臂解算 → 关节目标"| T["target_action（关节空间）"]
+    R -->|"每臂解算 → 关节目标"| T["joint_target（关节空间）"]
     T -->|"step() 限速插值（每拍）"| C["controller.set_joint<br/>move_mit(p_des, ..., t_ff)"]
 ```
 
@@ -156,14 +156,15 @@ flowchart LR
     （`joint_to_pose(q)` 正解 / `pose_to_joint(pose, seed)` 解算，只解算不下发）；
     `set_joint(...)` 只给 `p_des`（`kp` / `kd` / `t_ff` 用缺省值）；真机依赖只有
     `get_joint` + `move_mit`（不含 SDK 位姿读写）；
--   `BaseRobot`：**只有骨架** —— 目标状态机（`target_action`）、逐拍限速插值、遥操作映射、观测组装、
+-   `BaseRobot`：**只有骨架** —— `joint/gripper` 的 command/target、逐拍限速插值、遥操作映射、观测组装、
     `layout` 校验（`plan_layout`）；子类不覆盖 `_prepare_target()` 时只支持 `joint`；
 -   机器人类（`DualPiperRobot` / `TestRobot`）：**编排**——`_prepare_target()` 里对 `pose` 逐臂调
     静态解算（起点 = 当前指令位置，兜底 home）→ 拼成关节 target；`get_observation_pose()` 用静态正解；
-    `_apply_action()` 逐臂 `set_joint` / `set_gripper`；另加装配与声明（控制器 / 相机 / 类常量，
+    `_apply_commands()` 逐臂 `set_joint` / `set_gripper`；另加装配与声明（控制器 / 相机 / 类常量，
     `robot.cartesian.ik` 求解参数在这里解析后直接传给解算）。
 
-`target_action` / `action` / 观测 `action` **始终是关节空间**，因此限速、遥操作、采集、观测链路零改动。
+robot 内部的 `joint_target` / `joint_command` 始终是关节空间；只有 server / 采集边界的观测 `action`
+按每臂 `[joint, gripper]` 融合。
 
 -   `contract_server`：`ActionRequest` 增加 `layout`（缺省 `joint`）与 `arms`，execute / rollout 透传到
     env；`/` 调试端点上报 `action_spaces`。

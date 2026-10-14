@@ -44,7 +44,7 @@ def wrap_angles(angles: np.ndarray) -> np.ndarray:
     """角度 wrap 到 ``[-π, π)``（与 ``π`` 等价的 ``-π`` 保留：二者旋转等价）。
 
     用于「增量叠加在 rpy chart 上」之后（``pose_delta``）：``rpy + Δrpy`` 可能超出主值区间，
-    wrap 回主值再送解算，保证 ``observations/pose_target`` 的取值区间稳定。
+    wrap 回主值再送解算，保证 ``observations/pose_action`` 的取值区间稳定。
     """
     return (np.asarray(angles, dtype=np.float64) + np.pi) % (2.0 * np.pi) - np.pi
 

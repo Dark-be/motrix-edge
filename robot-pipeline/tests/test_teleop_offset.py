@@ -12,11 +12,10 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""``robot.teleop.joint_offset``：主臂常量偏置的配置解析与映射语义（纯 numpy，不需要硬件 SDK）。
+"""``robot.teleop`` 主臂关节 / 位姿常量偏置的解析与映射语义（纯 numpy，不需要硬件 SDK）。
 
-钉住三件事：① 缺省（未配置）恒等——行为与没有这个键时一致；② ``absolute`` 下偏置叠在读数上、
-``delta`` 下由锚点抵消（不进入增量）；③ 配置写错（长度不符 / 非有限值 / 未知臂）一律按现场值
-口径报错，不静默忽略。设计见 ``wiki/design/robot_pipeline_teleop.md``。
+钉住三件事：① 缺省恒等；② ``absolute`` 下偏置可见、``delta`` 下由锚点抵消；③ 配置写错
+（长度不符 / 非有限值 / 未知臂）按现场值口径报错。设计见 ``wiki/design/robot_pipeline_teleop.md``。
 """
 
 import importlib
@@ -31,6 +30,7 @@ _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 _ARMS = ("left", "right")
 _MASTER = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7]  # 主臂读数（每臂 6）
 _OFFSET = [0.0, 0.1, 0.0, 0.0, 0.0, 0.0]
+_POSE_OFFSET = [0.01, -0.02, 0.03, 0.04, -0.05, 0.06]
 
 
 @pytest.fixture(scope="module")
@@ -47,9 +47,7 @@ def _robot(base_robot, config: dict | None = None):
     class _Stub(base_robot.BaseRobot):
         NAME = "stub"
         ARM_NAMES = _ARMS
-        QPOS = 12
-        POSE = 12
-        GRIPPER = 2
+        POSE_DIM_PER_ARM = 6
         ARM_CONTROLLERS = {"left": "arm_left", "right": "arm_right"}
         ACTION_SPACES = (
             base_robot.BaseRobot.ACTION_SPACE_JOINT,
@@ -58,20 +56,20 @@ def _robot(base_robot, config: dict | None = None):
             base_robot.BaseRobot.ACTION_SPACE_GRIPPER,
         )
 
-        def _get_teleop_target(self):
+        def _read_teleop_joint(self):
             return self.master.copy()
 
-        def _get_teleop_gripper(self):
+        def _read_teleop_gripper(self):
             return np.asarray([1.0, 1.0], dtype=np.float64)
 
-        def get_observation_qpos(self):
-            return np.zeros(self.QPOS)
+        def get_observation_joint(self):
+            return np.zeros(self.joint_dim())
 
         def get_observation_gripper(self):
-            return np.ones(self.GRIPPER)
+            return np.ones(self.gripper_dim())
 
-        def _apply_action(self, action):
-            self.applied = np.asarray(action, dtype=np.float64).copy()
+        def _apply_commands(self, joints, gripper):
+            self.applied = np.asarray(joints, dtype=np.float64).copy()
 
         def _pose_of_joints(self, joints):
             return np.asarray(joints, dtype=np.float64).reshape(-1).copy()
@@ -88,21 +86,29 @@ def _robot(base_robot, config: dict | None = None):
     return robot
 
 
-def _target_joints(robot):
-    return robot.target_action[: robot.QPOS]
+def _joint_target(robot):
+    return robot.joint_target
 
 
 def _offset_of(robot, arm: str):
-    per_arm = robot.QPOS // len(robot.ARM_NAMES)
+    per_arm = robot.JOINT_DIM_PER_ARM
     index = robot.state_arms().index(arm)
     return robot.teleop_joint_offset[index * per_arm : (index + 1) * per_arm]
+
+
+def _pose_offset_of(robot, arm: str):
+    per_arm = robot.POSE_DIM_PER_ARM
+    index = robot.state_arms().index(arm)
+    return robot.teleop_pose_offset[index * per_arm : (index + 1) * per_arm]
 
 
 # ---- 解析：缺省 / 两种取值形态 / 逐臂独立 -------------------------------------------------
 
 
 def test_absent_config_is_identity(base_robot):
-    assert np.allclose(_robot(base_robot).teleop_joint_offset, 0.0)
+    robot = _robot(base_robot)
+    assert np.allclose(robot.teleop_joint_offset, 0.0)
+    assert np.allclose(robot.teleop_pose_offset, 0.0)
 
 
 def test_flat_list_applies_to_every_arm(base_robot):
@@ -117,6 +123,18 @@ def test_per_arm_mapping_keeps_arms_independent(base_robot):
     assert np.allclose(_offset_of(robot, "right"), 0.0)  # 未列出的臂 = 无偏置
 
 
+def test_pose_offset_flat_list_applies_to_every_arm(base_robot):
+    robot = _robot(base_robot, {"teleop": {"pose_offset": _POSE_OFFSET}})
+    assert np.allclose(_pose_offset_of(robot, "left"), _POSE_OFFSET)
+    assert np.allclose(_pose_offset_of(robot, "right"), _POSE_OFFSET)
+
+
+def test_pose_offset_mapping_keeps_arms_independent(base_robot):
+    robot = _robot(base_robot, {"teleop": {"pose_offset": {"right": _POSE_OFFSET}}})
+    assert np.allclose(_pose_offset_of(robot, "left"), 0.0)
+    assert np.allclose(_pose_offset_of(robot, "right"), _POSE_OFFSET)
+
+
 # ---- 映射：absolute 叠加、delta 抵消 ------------------------------------------------------
 
 
@@ -127,14 +145,14 @@ def test_absolute_maps_master_plus_offset(base_robot):
     expected = list(_MASTER)
     expected[1] += 0.1  # 左臂 j2
     expected[7] += 0.1  # 右臂 j2（每臂 6 维）
-    assert np.allclose(_target_joints(robot), expected)
+    assert np.allclose(_joint_target(robot), expected)
 
 
 def test_absolute_without_offset_is_master_verbatim(base_robot):
     robot = _robot(base_robot)
     assert robot.enable_teleop("absolute")
     robot.step()
-    assert np.allclose(_target_joints(robot), _MASTER)
+    assert np.allclose(_joint_target(robot), _MASTER)
 
 
 def test_delta_cancels_offset(base_robot):
@@ -142,48 +160,80 @@ def test_delta_cancels_offset(base_robot):
     for robot in (plain, biased):
         assert robot.enable_teleop("delta")
         robot.step()  # 首拍采样锚点：增量恒 0（偏置已被零化）
-    assert np.allclose(_target_joints(plain), _target_joints(biased))
-    assert np.allclose(_target_joints(biased), 0.0)  # 从臂未被主臂读数 / 偏置拉动
+    assert np.allclose(_joint_target(plain), _joint_target(biased))
+    assert np.allclose(_joint_target(biased), 0.0)  # 从臂未被主臂读数 / 偏置拉动
 
 
 # ---- 位姿跟随：轴白名单 / absolute / delta / 失败保持 -------------------------------------
 
 
-def _set_slave_action(robot, joints):
-    robot.action = np.concatenate([np.asarray(joints, dtype=np.float64), np.ones(robot.GRIPPER)])
+def _set_slave_commands(robot, joints):
+    robot.joint_command = np.asarray(joints, dtype=np.float64)
+    robot.gripper_command = np.ones(robot.gripper_dim())
 
 
 def test_pose_absolute_locks_unfollowed_roll(base_robot):
     axes = ["x", "y", "z", "pitch", "yaw"]
     robot = _robot(base_robot, {"teleop": {"follow_space": "pose", "follow_axes": axes}})
-    slave = np.zeros(robot.QPOS)
+    slave = np.zeros(robot.joint_dim())
     slave[3], slave[9] = 0.9, -0.8
-    _set_slave_action(robot, slave)
+    _set_slave_commands(robot, slave)
 
     assert robot.enable_teleop("absolute")
     robot.step()
 
     expected = robot.master.copy()
     expected[3], expected[9] = slave[3], slave[9]
-    assert np.allclose(_target_joints(robot), expected)
+    assert np.allclose(_joint_target(robot), expected)
+
+
+def test_pose_absolute_applies_pose_offset_after_fk(base_robot):
+    robot = _robot(base_robot, {"teleop": {"follow_space": "pose", "pose_offset": _POSE_OFFSET}})
+
+    assert robot.enable_teleop("absolute")
+    robot.step()
+
+    expected = np.asarray(_MASTER, dtype=np.float64) + np.asarray(_POSE_OFFSET * 2)
+    assert np.allclose(_joint_target(robot), expected)
+
+
+def test_pose_delta_cancels_pose_offset(base_robot):
+    config = {"teleop": {"follow_space": "pose", "pose_offset": _POSE_OFFSET}}
+    plain, biased = _robot(base_robot, {"teleop": {"follow_space": "pose"}}), _robot(base_robot, config)
+    slave = np.asarray([0.1, 0.0, 0.2, 0.3, 0.1, -0.2] * 2)
+    for robot in (plain, biased):
+        _set_slave_commands(robot, slave)
+        assert robot.enable_teleop("delta")
+        robot.step()
+        robot.master += 0.02
+        robot.step()
+
+    assert np.allclose(_joint_target(plain), _joint_target(biased))
+
+
+def test_joint_follow_ignores_pose_offset(base_robot):
+    robot = _robot(base_robot, {"teleop": {"pose_offset": _POSE_OFFSET}})
+    assert robot.enable_teleop("absolute")
+    robot.step()
+    assert np.allclose(_joint_target(robot), _MASTER)
 
 
 def test_pose_delta_applies_only_followed_axes_from_anchor(base_robot):
     axes = ["x", "y", "z", "pitch", "yaw"]
     robot = _robot(base_robot, {"teleop": {"follow_space": "pose", "follow_axes": axes}})
     slave = np.asarray([0.1, 0.0, 0.2, 0.7, 0.1, -0.2, -0.1, 0.2, 0.0, -0.6, -0.1, 0.3])
-    _set_slave_action(robot, slave)
+    _set_slave_commands(robot, slave)
 
     assert robot.enable_teleop("delta")
     robot.step()  # 首拍采锚点：目标等于从臂锚点
-    assert np.allclose(_target_joints(robot), slave)
+    assert np.allclose(_joint_target(robot), slave)
 
     delta = np.asarray([0.02, -0.03, 0.04, 0.5, 0.06, -0.07] * 2)
     robot.master += delta
     robot.step()
     expected = slave + delta
     expected[3], expected[9] = slave[3], slave[9]  # roll 未跟随
-    assert np.allclose(_target_joints(robot), expected)
+    assert np.allclose(_joint_target(robot), expected)
 
 
 def test_runtime_pose_axes_override_only_one_teleop_enable(base_robot):
@@ -230,16 +280,16 @@ def test_runtime_pose_axes_reject_empty_and_joint_follow(base_robot):
 
 def test_pose_mapping_failure_keeps_previous_target(base_robot):
     robot = _robot(base_robot, {"teleop": {"follow_space": "pose"}})
-    _set_slave_action(robot, np.zeros(robot.QPOS))
+    _set_slave_commands(robot, np.zeros(robot.joint_dim()))
     assert robot.enable_teleop("delta")
     robot.step()
-    before = robot.target_action.copy()
+    before = robot.joint_target.copy()
 
     robot.master += 0.1
     robot.fail_ik = True
     robot.step()
 
-    assert np.array_equal(robot.target_action, before)
+    assert np.array_equal(robot.joint_target, before)
     assert robot.teleop_mapping_failures == 1
 
 
@@ -261,6 +311,19 @@ def test_rejects_non_finite(base_robot):
         _robot(base_robot, {"teleop": {"joint_offset": [float("nan")] + [0.0] * 5}})
 
 
+@pytest.mark.parametrize(
+    ("pose_offset", "message"),
+    [
+        ([0.0, 0.1], "pose_offset"),
+        ({"middle": [0.0] * 6}, "未知臂"),
+        ([float("inf")] + [0.0] * 5, "non-finite"),
+    ],
+)
+def test_rejects_invalid_pose_offset(base_robot, pose_offset, message):
+    with pytest.raises(ValueError, match=message):
+        _robot(base_robot, {"teleop": {"pose_offset": pose_offset}})
+
+
 def test_rejects_pose_axes_in_joint_follow(base_robot):
     with pytest.raises(ValueError, match="only valid"):
         _robot(base_robot, {"teleop": {"follow_space": "joint", "follow_axes": ["x"]}})
@@ -275,8 +338,16 @@ def test_rejects_invalid_pose_axes(base_robot, axes):
 def test_rejects_pose_follow_without_pose_capability(base_robot):
     class _JointOnly(base_robot.BaseRobot):
         ARM_NAMES = _ARMS
-        QPOS = 12
-        GRIPPER = 2
+        ARM_CONTROLLERS = {"left": "arm_left", "right": "arm_right"}
 
     with pytest.raises(ValueError, match="needs pose action capability"):
         _JointOnly({"init_joint": [0.0] * 12, "teleop": {"follow_space": "pose"}})
+
+
+def test_rejects_pose_offset_without_pose_capability(base_robot):
+    class _JointOnly(base_robot.BaseRobot):
+        ARM_NAMES = _ARMS
+        ARM_CONTROLLERS = {"left": "arm_left", "right": "arm_right"}
+
+    with pytest.raises(ValueError, match="pose_offset needs pose action capability"):
+        _JointOnly({"init_joint": [0.0] * 12, "teleop": {"pose_offset": _POSE_OFFSET}})

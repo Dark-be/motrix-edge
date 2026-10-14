@@ -65,7 +65,14 @@ from robot.calibration.store import load_frames
 from utils.data_handler import debug_print, file_log_enabled
 from utils.logging import uvicorn_log_config
 
-from motrix_edge.adapter.base import CAMERA_PREFIX, DEPTH_PREFIX, KEY_ACTION, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS
+from motrix_edge.adapter.base import (
+    CAMERA_PREFIX,
+    DEPTH_PREFIX,
+    KEY_ACTION,
+    KEY_POSE,
+    KEY_POSE_ACTION,
+    KEY_QPOS,
+)
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
     FIELD_ACTION_DIM,
@@ -144,7 +151,7 @@ def _robot_name(robot) -> str:
 
 
 def _robot_action_dims(robot) -> dict[str, int]:
-    """各**已声明**动作空间的维度（joint / pose / gripper）——机器人自己算（``action_dims()``）。"""
+    """各已声明绝对 / 增量动作空间的维度——机器人自己算（``action_dims()``）。"""
     action_dims = getattr(robot, "action_dims", None)
     if callable(action_dims):
         return {str(key): int(value) for key, value in action_dims().items()}
@@ -173,17 +180,32 @@ def _robot_state_arms(robot) -> list[str]:
 
 
 def _robot_state_dim(robot) -> int:
-    """状态向量（``observations/qpos`` / ``action``）宽度：每臂「值 + 夹爪」× 臂数（双臂 14）。
-
-    值段当前是关节角（``STATE_SPACE = joint``）；机器人整体切位姿时维度不变、语义由
-    ``state_layout()`` 自描述（采集 JSON 的 ``state_space`` / ``state_dims``）。
-    """
+    """采集边界 ``observations/qpos`` / ``action`` 的融合维度。"""
     return int(robot.state_vector_dim())
+
+
+def _interleave_state(robot, joint, gripper) -> np.ndarray:
+    """robot 分离物理量 → 每臂 ``[joint..., gripper]`` 的采集向量。"""
+    joint = np.asarray(joint, dtype=np.float64).reshape(-1)
+    gripper = np.asarray(gripper, dtype=np.float64).reshape(-1)
+    arms = int(robot.state_arm_count())
+    joint_per_arm = int(robot.state_value_dim_per_arm())
+    if joint.size != arms * joint_per_arm or gripper.size != arms:
+        raise ValueError(
+            f"{robot.name}: cannot pack state: joint={joint.size}, gripper={gripper.size}, "
+            f"expected {arms * joint_per_arm}+{arms}"
+        )
+    return np.concatenate(
+        [
+            np.concatenate([joint[index * joint_per_arm : (index + 1) * joint_per_arm], gripper[index : index + 1]])
+            for index in range(arms)
+        ]
+    )
 
 
 def _robot_pose_dim(robot) -> int:
     """位姿区宽度（每臂 xyz + rpy）；0 = 本机不提供位姿（不占位姿区）。"""
-    return int(getattr(robot, "POSE", 0) or 0)
+    return int(robot.pose_dim() or 0)
 
 
 def _robot_image_names(robot) -> list[str]:
@@ -254,13 +276,13 @@ class ActionRequest(BaseModel):
 
     action: list[float] = Field(
         ...,
-        description=("动作（按臂展开）：joint = 各臂 6 关节角；pose = 各臂 xyz+rpy；gripper = 各臂 1 夹爪"),
+        description="动作按臂展开；绝对 / delta 语义由 layout 段名确定",
     )
     layout: str | None = Field(
         default=None,
         description=(
             "下发布局：每臂块内的段序列，段名用 '+' 连接、书写顺序即块内顺序，"
-            "如 joint / gripper / joint+gripper / pose+gripper（缺省 joint）"
+            "如 joint_delta / gripper_delta / joint_delta+gripper_delta（缺省 joint）"
         ),
     )
     arms: list[str] | None = Field(
@@ -327,24 +349,28 @@ class _ShmPublisher:
     def publish(self, obs):
         """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约）。
 
-        写入 qpos（**状态向量**：每臂「值 + 夹爪」）+ action（**同维同布局**的目标向量）+
-        pose（实测位姿）+ pose_target（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位
+        将 robot 原始 joint / gripper 组装为每臂 7 维 qpos / action，并写入
+        pose（实测位姿）+ pose_action（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位
         可见）+ raw RGB 图像 + 深度图（机器人开启深度时；已对齐到彩色图）；位姿（与目标位姿）
-        仅在机器人提供（``POSE > 0``）时写入，深度仅在**生效的深度相机**有值时写入（否则不占该区）。
+        仅在机器人提供（``pose_dim() > 0``）时写入，深度仅在**生效的深度相机**有值时写入（否则不占该区）。
         """
-        if obs is None or obs.get(KEY_QPOS) is None:
+        if obs is None or obs.get(self.robot.KEY_JOINT) is None:
             return
         image_names = _robot_image_names(self.robot)
         depth_names = _robot_depth_names(self.robot)
+        joint = obs[self.robot.KEY_JOINT]
+        gripper = obs[self.robot.KEY_GRIPPER]
+        joint_action = obs.get(self.robot.KEY_JOINT_ACTION, joint)
+        gripper_action = obs.get(self.robot.KEY_GRIPPER_ACTION, gripper)
         standard = {
-            KEY_QPOS: obs[KEY_QPOS],
-            KEY_ACTION: obs.get(KEY_ACTION) if obs.get(KEY_ACTION) is not None else obs[KEY_QPOS].copy(),
+            KEY_QPOS: _interleave_state(self.robot, joint, gripper),
+            KEY_ACTION: _interleave_state(self.robot, joint_action, gripper_action),
             "seq": getattr(self.robot, "seq", 0),
         }
-        if obs.get(KEY_POSE) is not None:
-            standard[KEY_POSE] = obs[KEY_POSE]  # 末端位姿（笛卡尔原语 / 预览的输入）
-        if obs.get(KEY_POSE_TARGET) is not None:
-            standard[KEY_POSE_TARGET] = obs[KEY_POSE_TARGET]  # 目标位姿（= FK(关节段目标)）
+        if obs.get(self.robot.KEY_POSE) is not None:
+            standard[KEY_POSE] = obs[self.robot.KEY_POSE]
+        if obs.get(self.robot.KEY_POSE_ACTION) is not None:
+            standard[KEY_POSE_ACTION] = obs[self.robot.KEY_POSE_ACTION]
         for name in image_names:
             standard[f"{CAMERA_PREFIX}{name}"] = obs[f"{CAMERA_PREFIX}{name}"]
         depths = []
@@ -360,7 +386,7 @@ class _ShmPublisher:
             qpos=standard[KEY_QPOS],
             action=standard[KEY_ACTION],
             pose=standard.get(KEY_POSE),
-            pose_target=standard.get(KEY_POSE_TARGET),
+            pose_target=standard.get(KEY_POSE_ACTION),
             images=[standard[f"{CAMERA_PREFIX}{n}"] for n in image_names],
             # 深度区宽度固定：路数对不上（某相机本拍无深度）就不传，宁可本帧深度停在上一次
             depths=depths if len(depths) == len(depth_names) else None,
@@ -369,7 +395,7 @@ class _ShmPublisher:
     def _create_writer(self) -> ObsShmWriter:
         """创建共享内存写者（上次进程残留 → attach 后 unlink 重建）。
 
-        区域宽度：qpos / action = **状态向量维数**（每臂「值 + 夹爪」，双臂 14）；
+        区域宽度：qpos / action = 每臂 joint + gripper 的融合维数；
         pose / pose_target = 每臂 6 × 臂数（不提供位姿 → 0）；深度区 = **生效的深度相机**数
         （无深度 → 0，不占区）。
         """
@@ -504,7 +530,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 # 观测键 = standard_obs **实际产出**的键（状态向量 qpos + 目标向量 action + 位姿），
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
                 FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION]
-                + ([KEY_POSE, KEY_POSE_TARGET] if _robot_pose_dim(robot) > 0 else [])
+                + ([KEY_POSE, KEY_POSE_ACTION] if _robot_pose_dim(robot) > 0 else [])
                 + [f"{CAMERA_PREFIX}{n}" for n in image_names]
                 + [f"{DEPTH_PREFIX}{n}" for n in _robot_depth_names(robot)],
                 FIELD_CAPABILITIES: _robot_capabilities(robot),
@@ -567,7 +593,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             raise HTTPException(status_code=500, detail=str(e))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
-    def _apply_action(req: ActionRequest) -> dict:
+    def _apply_commands(req: ActionRequest) -> dict:
         _require_ready()
         try:
             env.robot_execute(req.action, layout=req.layout, arms=req.arms)
@@ -581,7 +607,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 
         ``layout="pose"`` 时由机器人侧解算一次（失败 → 422，不改既有目标）。
         """
-        return _apply_action(req)
+        return _apply_commands(req)
 
     @app.post(PATH_ROLLOUT)
     def rollout(req: ActionRequest):

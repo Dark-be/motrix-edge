@@ -52,11 +52,20 @@ env / contract server 透传；遥操作期间推理让位（`/v1/rollout` 409�
         锁轴复选框。
 -   [x] 补齐契约、映射与前端构建测试，并更新设计文档。
 
+## 阶段四：主臂位姿偏置
+
+-   [x] `BaseRobot` 解析逐臂 `robot.teleop.pose_offset`，与 `joint_offset` 共用严格的维度、臂名和
+        有限值校验；不具备 pose 能力的机型显式拒绝该配置。
+-   [x] 在主臂 FK 后、teleop 锚点与位姿映射前叠加 `xyz + rpy` 偏置并 wrap 姿态；保持 absolute
+        可见、delta 抵消、joint 跟随不受影响。
+-   [x] 更新双 Piper 示例配置、README、配置形状测试和 teleop 映射单测。
+-   [x] 运行 robot-pipeline 的针对性测试与全量测试，不运行 Edge 全量测试。
+
 ## 待启动（需先决策）
 
 -   [ ] 交回模型的平滑：`teleop=false` 后首拍 `rollout` 的 target 与人工位姿的差如何处理
         （RTC 过渡 / 等模型动作与当前位姿足够接近再交回）。
--   [ ] 单臂 `QPOS = 7` 的 `step()` 布局泛化（当前硬编码 14 维切片，`SinglePiperRobot` 会 IndexError）。
+-   [x] 单臂布局已按 `ARM_NAMES × JOINT_DIM_PER_ARM` 泛化，`SinglePiperRobot` 不再依赖整机总维度常量。
 -   [ ] episode 元信息标记接管区间（人工介入区间），便于数据筛选。
 
 ## 已定不做

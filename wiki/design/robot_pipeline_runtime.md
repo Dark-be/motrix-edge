@@ -27,7 +27,7 @@ flowchart LR
         Q1 --> C["控制线程 HZ（默认 30Hz）"]
         Q2 --> OB["观测线程 OBS_HZ（默认 10Hz）"]
     end
-    C -->|"step() / sample_qpos()"| R["BaseRobot（控制器 + 传感器）"]
+    C -->|"step() / sample_state()"| R["BaseRobot（控制器 + 传感器）"]
     OB -->|"build_observation()"| R
     OB -->|"on_frame(observation)"| PUB["server：写观测共享内存"]
     OB -->|"collect()"| COL["collector：MCAP 流式落盘"]
@@ -35,16 +35,16 @@ flowchart LR
 
 -   **HTTP 线程**（server handler）只做两件事：把指令入队、读 env 缓存（`observe()` / `health()` /
     `capture_status()`），不直接碰 robot 与 collector。
--   **控制线程**：消费运动指令 → `robot.step()` 限速接近 target → `robot.sample_qpos()` 采样机械臂状态。
+-   **控制线程**：消费运动指令 → `robot.step()` 限速接近 target → `robot.sample_state()` 采样机械臂状态。
 -   **观测线程**：消费采集指令 → `robot.build_observation()`（缓存状态 + 本拍相机帧）→ 帧钩子
     `on_frame`（server 据此发布共享内存）→ 采集落盘。
 
 ## 线程职责
 
-| 线程     | 频率             | 唯一写者                                                           | 消费队列           | 每拍动作                                       |
-| -------- | ---------------- | ------------------------------------------------------------------ | ------------------ | ---------------------------------------------- |
-| 控制线程 | `HZ`（30Hz）     | 机器人控制器 / `action` / `target_action` / `motion_state` / `seq` | `commands`         | 运动指令 → `step()` → `sample_qpos()`          |
-| 观测线程 | `OBS_HZ`（10Hz） | collector / `observation`                                          | `capture_commands` | 采集指令 → `build_observation()` → 发布 → 落盘 |
+| 线程     | 频率             | 唯一写者                                                         | 消费队列           | 每拍动作                                       |
+| -------- | ---------------- | ---------------------------------------------------------------- | ------------------ | ---------------------------------------------- |
+| 控制线程 | `HZ`（30Hz）     | 机器人控制器 / `*_command` / `*_target` / `motion_state` / `seq` | `commands`         | 运动指令 → `step()` → `sample_state()`         |
+| 观测线程 | `OBS_HZ`（10Hz） | collector / `observation`                                        | `capture_commands` | 采集指令 → `build_observation()` → 发布 → 落盘 |
 
 指令分类固定：`robot_reset` / `robot_execute` / `robot_rollout` / `robot_safe_stop` /
 `robot_set_teleop` 入 `commands`；`robot_capture_start` / `robot_capture_end` / `robot_capture_cancel` /
@@ -79,20 +79,19 @@ flowchart LR
 
 ## 观测组装（单点定义在 BaseRobot）
 
-`BaseRobot` 持有观测键常量（`KEY_QPOS` / `CAMERA_PREFIX` / `DEPTH_PREFIX` / `KEY_TIMESTAMP`）与两个**取数
+`BaseRobot` 持有原始观测键常量（`KEY_JOINT` / `KEY_GRIPPER` / `KEY_POSE` / 对应 `*_ACTION`）与两个**取数
 钩子**（子类实现，返回原始数据，不含契约键 / 时间戳）：
 
 | 钩子                       | 实现方       | 取数内容                                                     | 所属线程 |
 | -------------------------- | ------------ | ------------------------------------------------------------ | -------- |
-| `get_observation_qpos()`   | 各机器人子类 | 控制器读出的扁平 qpos                                        | 控制线程 |
+| `get_observation_joint()`  | 各机器人子类 | 控制器读出的扁平绝对关节角                                   | 控制线程 |
 | `get_observation_frames()` | 各机器人子类 | 各相机**本拍**帧（顺序 = `IMAGE_NAMES`；彩色恒有，深度可选） | 观测线程 |
 
 在钩子之上，`BaseRobot` 提供按线程划分的入口：
 
--   `sample_qpos()`（控制线程）：调 `get_observation_qpos()`，附上 `action`，`seq` 自增，
-    结果**缓存**进 `motion_state`（机械臂侧状态快照，**不含帧时刻**）；机器人提供位姿时
-    （`get_observation_pose()` 非 None）同拍把 `observations/pose` 一并放进快照——位姿与
-    qpos **同拍**，下游不会读到错拍的组合。
+-   `sample_state()`（控制线程）：分别读取 joint / gripper，并附上各自 target（原始键为
+    `joint_action` / `gripper_action`），`seq` 自增，结果**缓存**进 `motion_state`；机器人提供位姿时
+    同拍计算 `pose` / `pose_action`。此处不组装 qpos / action。
 -   `capture_frames()`（观测线程）：调 `get_observation_frames()`，组装为
     `observations/images/<cam_name>`（恒有）与 `observations/depth/<cam_name>`（仅**生效的
     深度相机**且本拍确实拿到深度时）——深度与彩色**同拍同源**（同一次取帧，见
@@ -100,7 +99,7 @@ flowchart LR
 -   `build_observation()`（观测线程）：`motion_state` + 本拍相机帧，并写入帧时刻 `timestamp`
     （**本线程打点**，观测拍取帧之前）；`motion_state` 为空（控制线程尚未采到第一拍）时返回
     `None`，该拍不出观测，下一拍重试。
--   `get_observation()`（单线程脚本 / 调试）：`sample_qpos()` + `capture_frames()` 现场取整帧
+-   `get_observation()`（单线程脚本 / 调试）：`sample_state()` + `capture_frames()` 现场取整帧
     （同样在取帧前打点 `timestamp`）。
 
 ⚠️ 相机取帧会阻塞，**控制线程不得调用取相机的方法**（`capture_frames` / `get_observation` /
@@ -113,9 +112,9 @@ flowchart LR
 无影响；但下游（mcap → ACT / LeRobot 转换）**不要按固定滞后做时间平移校正**，需要严格对齐时
 须知该滞后并非定值。
 
-## 观测三键（`observations/qpos` / `pose` / `pose_target`）+ 目标向量 `action`
+## 采集观测（`observations/qpos` / `pose` / `pose_action`）+ 目标向量 `action`
 
-观测**常驻、与动作空间无关**（下发 `joint` / `pose` / `pose_delta` / `gripper` 都不会改变观测的
+观测**常驻、与动作空间无关**（下发绝对或 `*_delta` 动作都不会改变观测的
 键与语义）：
 
 -   `observations/qpos`：**状态向量**（每臂「值 + 夹爪」交错；值当前是关节角）——数采 / VLA 要的
@@ -123,19 +122,20 @@ flowchart LR
 -   `action`：**目标向量**（同维同布局：每臂「关节目标 + 夹爪目标」；无指令时回退状态）；
 -   `observations/pose`：**实测末端位姿**（每臂 6 维 `xyz + rpy`，米 / 弧度，**不交错**）——由**同一帧关节角**
     正解；
--   `observations/pose_target`：**目标位姿** = `FK(关节段目标)`（同一套正解、同一拍）——增量动作
+-   `observations/pose_action`：**目标位姿** = `FK(关节段目标)`（同一套正解、同一拍）——增量动作
     （`pose_delta`）的解算结果靠它对上位可见（`settle` 判到位拿它当参考），「目标 − 实测」即当前
     稳态误差。
-    机器人用类常量 **`POSE`** 声明：0 = 不提供（这两个键都不出现、共享内存不占对应区），> 0 = 提供
+    机器人用 **`POSE_DIM_PER_ARM`** 声明：0 = 不提供（这两个键都不出现、共享内存不占对应区），> 0 = 提供
     （`_ShmPublisher` 创建写者时传 `pose_dim` / `pose_target_dim`，区域顺序
-    `qpos | action | gripper | pose | pose_target | images`）。
+    `qpos | action | pose | pose_target | images | depths`；共享内存内部沿用 `pose_target` 字段名）。
 
 -   **每臂 6 维** `xyz + rpy`，扁平顺序与 qpos 的臂布局一致（对齐 Edge 侧适配器的
     `ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}` 与 `_select_arm_segments`）；
 -   **test_robot**（虚拟）无真实运动学：用固定可逆映射 `POSE_MAP`（对角：`x←j1 y←j2 z←j3
 rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——「关节动 → EEF 跟着动」，
     预览与笛卡尔闭环都可解释；
--   **dual_piper（真机，已实现）**：`POSE = 12` + `get_observation_pose(qpos=None)` 用**同一拍关节角**经
+-   **dual_piper（真机，已实现）**：`POSE_DIM_PER_ARM = 6`，`pose_dim()` 根据双臂推导为 12；
+    `get_observation_pose(joint=None)` 用**同一拍关节角**经
     `robot/kinematics` 的正解解算（米 / 弧度，与 edge 契约同量纲同约定）——**与位姿目标的解算共用
     同一个运动学模型**，所以「读到的位姿」与「下发的位姿目标」同系可直接比对；底层硬件依赖
     只剩关节读写与 MIT 关节控制。SDK 法兰位姿（`get_flange_pose()`）**不在运行时链路**，只在现场
@@ -151,7 +151,7 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 ## 位姿动作下发：不经 `move_p`
 
 `pose` 是**动作语义**而非控制模式：机器人收到每臂 `xyz + rpy`（夹爪是另一个独立空间，另发一条）后，
-先由 `robot/kinematics` 的求解器解算成关节目标，之后与关节动作**走同一条通路**（`target_action`
+先由 `robot/kinematics` 的求解器解算成关节目标，之后与关节动作**走同一条通路**（`joint_target`
 限速插值 → MIT 位置环）。求解器、坐标系约定、失败语义见
 [robot-pipeline 位姿动作](./robot_pipeline_cartesian.md)。
 
@@ -197,7 +197,7 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 
 -   `stop()`：置运行位为假 → join 控制线程（2s）→ join 观测线程（6s，可能正阻塞在相机取帧，
     最长 5s）→ `robot.disconnect()`。超时未退出的线程是 daemon，随进程退出。
--   `safe_stop` 语义不变：清空 `target_action`，`step()` 不再下发；线程与观测继续运行，可直接恢复。
+-   `safe_stop` 语义不变：清空 `joint_target` / `gripper_target`，`step()` 不再下发；线程与观测继续运行。
 -   **采集落盘边界**：`capture start/end/cancel` 都在观测拍**开头**（`_drain_capture_commands()`）生效，
     `capture end` 使**本拍** `capturing=False` → **本拍帧不写入**，末尾 `_update_capture()` 才
     调用 `finish()`（写 footer + 元信息 JSON）；相机卡顿时 episode 落盘相应延后。与运动指令的

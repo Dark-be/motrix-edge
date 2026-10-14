@@ -17,11 +17,11 @@
 结构对齐原 ``alicia_piper_teleop_robot``：master（alicia 主手）+ slave（piper 从手）
 双控制器 + 3 相机。本骨架只声明布局 / 控制状态机（**无 profile**，obs/action 形态由
 类常量固定，与 DualPiperAdapter 协定一致）；硬件 SDK（alicia_d_sdk / pyAgxArm /
-pyrealsense2 / v4l2）**仅在机器人端安装**，接入时在 ``connect()`` / ``get_observation_qpos()`` /
-``get_observation_frames()`` / ``_apply_action()`` 中填充。
+pyrealsense2 / v4l2）**仅在机器人端安装**，接入时在 ``connect()`` / ``get_observation_joint()`` /
+``get_observation_frames()`` / ``_apply_commands()`` 中填充。
 
 遥操作：``teleop_enabled`` 默认 False（adapter 通讯控制中暂时均处于 false）；
-接入位见 ``_get_teleop_target()``（master 主手 → slave 从手）。
+接入位见 ``_read_teleop_joint()``（master 主手 → slave 从手）。
 """
 
 import cv2
@@ -47,8 +47,9 @@ class DualAliciaPiperRobot(BaseRobot):
         "streaming": True,
     }
 
-    QPOS = 12  # slave 从臂：每臂 6 关节（joint 空间）
-    GRIPPER = 2  # slave 从臂：每臂 1 夹爪（gripper 空间）
+    ARM_NAMES = ("left", "right")
+    ARM_CONTROLLERS = {"left": "left_arm", "right": "right_arm"}
+    MASTER_CONTROLLERS = {"left": "left_master", "right": "right_master"}
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     # 头部 = RealSense（序列号）；腕部 = USB 相机（V4L2 稳定软链 /dev/v4l/by-id/*）
@@ -91,12 +92,13 @@ class DualAliciaPiperRobot(BaseRobot):
         （``robot.ports`` / ``robot.cameras``，**必填**，构造时已校验）。硬件 SDK 仅在机器人
         端安装。
         """
-        self.controllers["left_master"].connect(port=self.ports["left_master"])
-        self.controllers["right_master"].connect(port=self.ports["right_master"])
+        for arm in self.ARM_NAMES:
+            master_name = self.MASTER_CONTROLLERS[arm]
+            self._master_controller_for_arm(arm).connect(port=self.ports[master_name])
         # 重力前馈只装在**执行**臂（Alicia 从手）：主手只读，不会被 set_joint 下发
         gravity = self.robot_config.get("gravity")
-        self.controllers["left_arm"].connect(port=self.ports["left"], gravity=gravity)
-        self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
+        for arm in self.ARM_NAMES:
+            self._controller_for_arm(arm).connect(port=self.ports[arm], gravity=gravity)
         debug_print(self.name, "Setup controllers done", "INFO")
         self.sensors["cam_head"].connect(
             device=self.camera_devices["cam_head"],
@@ -119,25 +121,24 @@ class DualAliciaPiperRobot(BaseRobot):
             sensor.disconnect()
             debug_print(self.name, f"Disconnect sensor {name} done", "INFO")
 
-    def get_observation_qpos(self) -> np.ndarray:
-        """当前帧**关节角**（扁平 ``QPOS`` 维 = 每臂 6）——从 slave 从臂控制器取。
+    def get_observation_joint(self) -> np.ndarray:
+        """当前帧关节角（扁平 ``joint_dim()`` 维），从执行臂读取并按 ``ARM_NAMES`` 展开。
 
-        ``sample_qpos()`` 再把它与 ``get_observation_gripper()`` 交错成状态向量
-        （``observations/qpos``：每臂「值 + 夹爪」）。
+        发布为 robot 原始键 ``joint``；夹爪由 ``gripper`` 发布。
         """
         parts: list[np.ndarray] = []
-        for name in ("left_arm", "right_arm"):
-            joint = self.controllers[name].get_joint()
+        for arm in self.ARM_NAMES:
+            joint = self._controller_for_arm(arm).get_joint()
             if joint is None:
-                raise RuntimeError(f"{self.name}.get_observation_qpos: {name} 从臂控制器读取失败（返回 None）")
-            parts.append(np.asarray(joint, dtype=np.float64).reshape(-1)[:6])
+                raise RuntimeError(f"{self.name}: arm {arm!r} joint read failed (None)")
+            parts.append(self._joint_block(joint, source=f"arm {arm!r}"))
         return np.concatenate(parts)
 
     def get_observation_gripper(self) -> np.ndarray:
-        """当前帧夹爪（扁平 ``GRIPPER`` 维 = 每臂 1）——读不到时该臂给 NaN。"""
+        """当前帧夹爪（扁平 ``gripper_dim()`` 维 = 每臂 1）——读不到时该臂给 NaN。"""
         values = []
-        for name in ("left_arm", "right_arm"):
-            gripper = self.controllers[name].get_gripper()
+        for arm in self.ARM_NAMES:
+            gripper = self._controller_for_arm(arm).get_gripper()
             values.append(np.nan if gripper is None else float(np.asarray(gripper, dtype=np.float64).reshape(-1)[0]))
         return np.asarray(values, dtype=np.float64)
 
@@ -166,37 +167,35 @@ class DualAliciaPiperRobot(BaseRobot):
             frames.append({"color": decoded, "depth": info.get("depth")})
         return frames
 
-    def _apply_action(self, action: np.ndarray):
-        """把底层目标向量 ``[关节段 | 夹爪段]`` 拆分到 slave 从臂下发（限速已在 step() 内完成）。
+    def _apply_commands(self, joints: np.ndarray, gripper: np.ndarray):
+        """逐臂下发 slave 的关节和夹爪。"""
+        joints = np.asarray(joints, dtype=np.float64).reshape(-1)
+        gripper = np.asarray(gripper, dtype=np.float64).reshape(-1)
+        for index, arm in enumerate(self.ARM_NAMES):
+            start = index * self.JOINT_DIM_PER_ARM
+            controller = self._controller_for_arm(arm)
+            controller.set_joint(joints[start : start + self.JOINT_DIM_PER_ARM].copy())
+            controller.set_gripper(float(gripper[index]))
 
-        set_joint 内部会 clip 关节角度（原地修改），故传 copy 避免改动 self.action。
-        """
-        values = np.asarray(action, dtype=np.float64).reshape(-1)
-        for index, name in enumerate(("left_arm", "right_arm")):
-            start = index * 6
-            controller = self.controllers[name]
-            controller.set_joint(values[start : start + 6].copy())
-            controller.set_gripper(float(values[self.QPOS + index]))
-
-    def _get_teleop_target(self) -> np.ndarray | None:
+    def _read_teleop_joint(self) -> np.ndarray | None:
         """遥操作**关节段**接入位：master 主手 → slave 从手（左→左、右→右）。
 
-        从 master 主手读取并返回扁平 ``QPOS`` 维主臂关节角；主手读取失败 / 未连接时返回 None
+        从 master 主手读取并返回扁平 ``joint_dim()`` 维主臂关节角；主手读取失败 / 未连接时返回 None
         （step() 保持原 target 不刷新）。
         """
         joints: list[np.ndarray] = []
-        for arm in ("left", "right"):
-            master = self.controllers[f"{arm}_master"].get_joint()
+        for arm in self.ARM_NAMES:
+            master = self._master_controller_for_arm(arm).get_joint()
             if master is None:
                 return None
-            joints.append(np.asarray(master, dtype=np.float64).reshape(-1)[:6].copy())
+            joints.append(self._joint_block(master, source=f"master arm {arm!r}"))
         return np.concatenate(joints).astype(np.float32)
 
-    def _get_teleop_gripper(self) -> np.ndarray | None:
+    def _read_teleop_gripper(self) -> np.ndarray | None:
         """遥操作**夹爪段**接入位：master 主手夹爪读数（每臂 1 维）；读不到 → None。"""
         values = []
-        for arm in ("left", "right"):
-            gripper = self.controllers[f"{arm}_master"].get_gripper()
+        for arm in self.ARM_NAMES:
+            gripper = self._master_controller_for_arm(arm).get_gripper()
             if gripper is None:
                 return None
             values.append(float(np.asarray(gripper, dtype=np.float64).reshape(-1)[0]))

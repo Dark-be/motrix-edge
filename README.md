@@ -57,9 +57,9 @@ edge `adapter` 的真实承载端——robot server 对外提供统一 `/v1` 指
 edge 经 `RobotAdapter` 下发指令（`execute` / `rollout` / `safe_stop` / `reset` / 采集回合
 控制等）并读取观测。
 
--   **控制循环**：`env`（BaseEnv）30Hz 主循环 + 命令队列；`robot`（BaseRobot）按
-    `step_rad` 对 action / target_action **限速逼近**，每帧 `step()` 后回读
-    `get_observation()`（qpos + images）；
+-   **控制循环**：`env`（BaseEnv）30Hz 主循环 + 命令队列；`robot`（BaseRobot）分别维护
+    joint/gripper 的 command 与 target，按 `step_rad` 生成关节 command，并用 `sample_state()`
+    缓存分离的物理量观测；
 -   **数据采集**：`collector`（act_mcap）把每轮 episode 流式写为 Foxglove MCAP + 同名
     JSON 元信息；
 -   **遥操作**：Leader→Follower / master→slave 主从跟随；

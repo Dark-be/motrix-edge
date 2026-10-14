@@ -16,7 +16,7 @@
 
 职责（不碰 HTTP / 共享内存 / 契约——那些归 robot server / contract_server）：
 - **控制线程**（``HZ``，默认 30Hz）：取本拍运动指令 → ``robot.step()`` 限速接近 target
-  → ``robot.sample_qpos()`` 采样机械臂状态（qpos / action）缓存。
+  → ``robot.sample_state()`` 采样并缓存分离的 joint / gripper / pose 状态。
   相机取帧与采集落盘都**不在**本线程，故相机 / 磁盘卡顿不会拖慢或中断机械臂控制。
 - **观测线程**（``OBS_HZ``，默认 10Hz = **真实取观测的频率**）：取相机帧 + 缓存状态拼装观测 → 帧钩子 ``on_frame``
   （server 据此读取观测并发布共享内存）→ 采集落盘。
@@ -38,7 +38,7 @@
   （判据都是 ``robot.teleop_enabled``，**不分遥操作模式**）；``execute`` / ``reset`` / ``safe_stop``
   不受影响（程控 / 安全优先，执行即结束遥操作）。
 
-层次：server (HTTP + 共享内存) → env (控制 / 观测线程 + 命令队列) → robot (action/target_action/step 限速)
+层次：server (HTTP + 共享内存) → env (控制 / 观测线程 + 命令队列) → robot (command/target/step 限速)
 
 env 收到采集开关的请求启动采集开关，从收到采集开始，到收到采集结束，会保存其中的一段episode（mcap）
 env 收到启动遥操作请求后，robot就会进入遥操作模式，robot会自行开始跟随遥操作。
@@ -540,7 +540,7 @@ class BaseEnv:
         """
         self._drain_commands()
         self.robot.step()
-        self.robot.sample_qpos()
+        self.robot.sample_state()
 
     def step_observe(self):
         """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 观测副本 → 帧回调 → 采集落盘。

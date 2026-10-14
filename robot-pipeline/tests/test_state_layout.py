@@ -123,34 +123,96 @@ def _robot(module, *, left_joint=(0.0,) * 6, right_joint=(0.0,) * 6, grippers=(0
 # ---- 状态 / 目标向量：每臂「值 + 夹爪」------------------------------------------
 
 
-def test_state_vector_is_per_arm_value_then_gripper(dual_piper):
-    """状态向量 = 每臂「关节 6 + 夹爪 1」交错（左先右后），夹爪不再单独成键。"""
+def test_dimensions_are_derived_from_arm_layout(dual_piper):
+    single_piper = _load("robot.single_piper_robot")
+
+    assert (dual_piper.DualPiperRobot.joint_dim(), dual_piper.DualPiperRobot.pose_dim()) == (12, 12)
+    assert dual_piper.DualPiperRobot.gripper_dim() == 2
+    assert (single_piper.SinglePiperRobot.joint_dim(), single_piper.SinglePiperRobot.pose_dim()) == (6, 0)
+    assert single_piper.SinglePiperRobot.gripper_dim() == 1
+    assert single_piper.SinglePiperRobot.ARM_NAMES == ("left",)
+    assert not ({"QPOS", "POSE", "GRIPPER"} & vars(dual_piper.DualPiperRobot).keys())
+
+
+def test_single_piper_selects_left_pair_from_dual_machine_profile():
+    """同一机器档案可含双臂完整接线；单臂机型只装配左主手与左从臂。"""
+    single_piper = _load("robot.single_piper_robot")
+    robot = single_piper.SinglePiperRobot(
+        robot_config={
+            "init_joint": [0.0] * 6,
+            "init_gripper": [1.0],
+            "ports": {"left_master": "m_left", "right_master": "m_right", "left": "left", "right": "right"},
+            "teleop": {"joint_offset": {"left": [0.1] * 6, "right": [0.2] * 6}},
+        }
+    )
+
+    assert robot.ports == {"left_master": "m_left", "left": "left"}
+    assert set(robot.controllers) == {"left_master", "left_arm"}
+    assert robot.controllers["left_master"].name == "left_master"
+    assert robot.controllers["left_arm"].name == "left"
+    assert robot.state_arms() == ["left"]
+    assert robot.teleop_joint_offset.tolist() == pytest.approx([0.1] * 6)
+
+
+def test_single_piper_teleop_gripper_reads_left_master():
+    single_piper = _load("robot.single_piper_robot")
+    robot = single_piper.SinglePiperRobot(
+        robot_config={
+            "init_joint": [0.0] * 6,
+            "init_gripper": [1.0],
+            "ports": {"left_master": "m_left", "left": "left"},
+        }
+    )
+    robot.controllers["left_master"] = _FakeArm(gripper=0.35)
+
+    assert robot._read_teleop_gripper().tolist() == pytest.approx([0.35])
+
+
+def test_robot_observation_uses_explicit_physical_keys(dual_piper):
+    """robot 原始帧按 joint / gripper / pose 分键，不带 observations 前缀。"""
     robot = _robot(dual_piper, left_joint=np.arange(6), right_joint=np.arange(6) + 10, grippers=(0.4, 0.6))
-    state = robot.sample_qpos()
+    state = robot.sample_state()
 
-    assert state[robot.KEY_QPOS].tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 0.4, 10, 11, 12, 13, 14, 15, 0.6])
-    assert "observations/gripper" not in state  # 夹爪就在状态向量里，不再有独立键
-    assert state[robot.KEY_POSE].shape == (12,)  # 位姿仍是每臂 6 维、**不交错**
+    assert state[robot.KEY_JOINT].tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15])
+    assert state[robot.KEY_GRIPPER].tolist() == pytest.approx([0.4, 0.6])
+    assert state[robot.KEY_POSE].shape == (12,)
     assert robot.state_vector_dim() == 14 and robot.state_value_dim_per_arm() == 6
+    assert {robot.KEY_JOINT, robot.KEY_GRIPPER, robot.KEY_POSE}.issubset(state)
+    assert all(not key.startswith("observations/") for key in state if key != robot.KEY_TIMESTAMP)
 
 
-def test_action_vector_matches_state_layout(dual_piper):
-    """``action`` = 同维同布局的目标向量（关节目标 + 夹爪目标）；无指令时回退状态。"""
+def test_robot_rejects_short_joint_block(dual_piper):
+    """控制器少回关节时立即报错，不能拼出长度不完整但看似有效的整机向量。"""
+    robot = _robot(dual_piper, left_joint=np.arange(5), right_joint=np.arange(6))
+
+    with pytest.raises(RuntimeError, match=r"joint dim 5 < JOINT_DIM_PER_ARM 6"):
+        robot.get_observation_joint()
+
+
+def test_robot_action_keys_are_explicit(dual_piper):
+    """robot 原始帧的 joint_action 与 gripper_action 分离。"""
     robot = _robot(dual_piper, left_joint=np.arange(6), right_joint=np.arange(6) + 10)
     targets = np.arange(12, dtype=np.float64) + 100
 
-    robot.set_target_action(targets)  # 关节段目标（每臂 6 → 共 12）
-    robot.set_target_gripper([0.1, 0.2])
-    state = robot.sample_qpos()
+    robot.set_joint_target(targets)  # 关节段目标（每臂 6 → 共 12）
+    robot.set_gripper_target([0.1, 0.2])
+    state = robot.sample_state()
 
-    assert state[robot.KEY_ACTION].shape == state[robot.KEY_QPOS].shape == (14,)
-    assert state[robot.KEY_ACTION].tolist() == pytest.approx(
-        [100, 101, 102, 103, 104, 105, 0.1, 106, 107, 108, 109, 110, 111, 0.2]
-    )
-    # 交错 ↔ 分段可逆（展示 / 桥接用）
-    values, gripper = robot.split_state(state[robot.KEY_ACTION])
-    assert values.tolist() == pytest.approx(list(targets))
-    assert gripper.tolist() == pytest.approx([0.1, 0.2])
+    assert state[robot.KEY_JOINT_ACTION].shape == state[robot.KEY_JOINT].shape == (12,)
+    assert state[robot.KEY_JOINT_ACTION].tolist() == pytest.approx(targets)
+    assert state[robot.KEY_GRIPPER_ACTION].tolist() == pytest.approx([0.1, 0.2])
+
+
+def test_gripper_target_can_run_without_joint_target(dual_piper):
+    robot = _robot(dual_piper, left_joint=np.arange(6), right_joint=np.arange(6) + 10)
+    robot.set_gripper_target([0.3, 0.4])
+
+    robot.step()
+
+    assert robot.controllers["left_arm"].joint.tolist() == pytest.approx(np.arange(6))
+    assert robot.controllers["right_arm"].joint.tolist() == pytest.approx(np.arange(6) + 10)
+    assert robot.controllers["left_arm"].gripper == pytest.approx(0.3)
+    assert robot.controllers["right_arm"].gripper == pytest.approx(0.4)
 
 
 # ---- 逐维自描述（采集 JSON）-----------------------------------------------------
@@ -162,16 +224,15 @@ def test_action_vector_matches_state_layout(dual_piper):
 def test_rollout_layout_writes_selected_arm_only(dual_piper):
     """layout="joint+gripper" + arms：只写所选臂的「关节 + 夹爪」，其余臂目标**原样保留**（不补 home）。"""
     robot = _robot(dual_piper)
-    robot.set_target_action(np.arange(12, dtype=np.float64) + 1.0)  # 已知的关节段目标
-    robot.set_target_gripper([0.2, 0.8])
+    robot.set_joint_target(np.arange(12, dtype=np.float64) + 1.0)  # 已知的关节段目标
+    robot.set_gripper_target([0.2, 0.8])
 
     assert robot.rollout([10, 11, 12, 13, 14, 15, 0.5], layout="joint+gripper", arms=["right"]) is True
 
-    target = robot.target_action
+    target = robot.joint_target
     assert target[:6].tolist() == pytest.approx(list(np.arange(6) + 1.0))  # 左臂关节未被覆盖
     assert target[6:12].tolist() == pytest.approx([10, 11, 12, 13, 14, 15])  # 右臂 = 模型关节
-    assert target[12] == pytest.approx(0.2)  # 左夹爪未被覆盖
-    assert target[13] == pytest.approx(0.5)  # 右夹爪 = 块末位
+    assert robot.gripper_target.tolist() == pytest.approx([0.2, 0.5])
 
 
 def test_rollout_layout_block_order_follows_arms_and_clips_gripper(dual_piper):
@@ -180,7 +241,53 @@ def test_rollout_layout_block_order_follows_arms_and_clips_gripper(dual_piper):
     action = [1, 2, 3, 4, 5, 6, 1.5, 7, 8, 9, 10, 11, 12, -0.5]
 
     assert robot.rollout(action, layout="joint+gripper", arms=["left", "right"]) is True
-    assert robot.target_action.tolist() == pytest.approx([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1.0, 0.0])
+    assert robot.joint_target.tolist() == pytest.approx([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    assert robot.gripper_target.tolist() == pytest.approx([1.0, 0.0])
+
+
+def test_delta_layouts_add_to_targets_for_selected_arm(dual_piper):
+    """joint/gripper delta 以 target 为基准，且只修改选中的臂。"""
+    robot = _robot(dual_piper)
+    robot.set_joint_target(np.arange(12, dtype=np.float64))
+    robot.set_gripper_target([0.2, 0.8])
+
+    robot.apply_layout(
+        [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.35],
+        layout="joint_delta+gripper_delta",
+        arms=["right"],
+    )
+
+    assert robot.joint_target[:6].tolist() == pytest.approx(np.arange(6))
+    assert robot.joint_target[6:].tolist() == pytest.approx([6.1, 6.8, 8.3, 8.6, 10.5, 10.4])
+    assert robot.gripper_target.tolist() == pytest.approx([0.2, 1.0])
+
+
+def test_delta_layouts_fall_back_to_command(dual_piper):
+    """尚无 target 时，delta 从本拍 command 起算，而不是从 home 或零起算。"""
+    robot = _robot(dual_piper)
+    robot.joint_command = np.arange(12, dtype=np.float64)
+    robot.gripper_command = np.asarray([0.4, 0.6])
+
+    robot.apply_layout(
+        [0.5] * 6 + [-0.2],
+        layout="joint_delta+gripper_delta",
+        arms=["left"],
+    )
+
+    assert robot.joint_target[:6].tolist() == pytest.approx(np.arange(6) + 0.5)
+    assert robot.joint_target[6:].tolist() == pytest.approx(np.arange(6, 12))
+    assert robot.gripper_target.tolist() == pytest.approx([0.2, 0.6])
+
+
+def test_layout_rejects_two_motion_or_two_gripper_segments(dual_piper):
+    robot = _robot(dual_piper)
+
+    with pytest.raises(ValueError, match="one motion segment"):
+        robot.apply_layout([0.0] * 12, layout="joint+joint_delta", arms=["left"])
+    with pytest.raises(ValueError, match="one gripper segment"):
+        robot.apply_layout([0.0, 0.0], layout="gripper+gripper_delta", arms=["left"])
+
+    assert robot.joint_target is None and robot.gripper_target is None
 
 
 def test_rollout_layout_validates_before_touching_target(dual_piper):
@@ -198,7 +305,7 @@ def test_rollout_layout_validates_before_touching_target(dual_piper):
     with pytest.raises(ValueError, match="non-finite"):
         robot.rollout([0.0] * 6 + [float("nan")], layout="joint+gripper", arms=["right"])  # 非有限
 
-    assert robot.target_action is None  # 一条坏动作不会写目标
+    assert robot.joint_target is None  # 一条坏动作不会写目标
 
 
 def test_rollout_layout_refuses_during_teleop(dual_piper):
@@ -207,7 +314,7 @@ def test_rollout_layout_refuses_during_teleop(dual_piper):
     robot.teleop_enabled = True
 
     assert robot.rollout([0.0] * 7, layout="joint+gripper", arms=["right"]) is False
-    assert robot.target_action is None
+    assert robot.joint_target is None
 
 
 def test_pose_layout_writes_selected_arm_only(test_robot):
@@ -215,15 +322,15 @@ def test_pose_layout_writes_selected_arm_only(test_robot):
     robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
     initial = np.asarray([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3])
     desired_right = np.asarray([0.4, 0.6, 0.8, 1.0, 1.2, 1.4])
-    robot.set_target_action(initial)
-    robot.set_target_gripper([0.2, 0.8])
+    robot.set_joint_target(initial)
+    robot.set_gripper_target([0.2, 0.8])
     right_pose = test_robot.TestArmController.joint_to_pose(desired_right)
 
     robot.apply_layout(right_pose, layout="pose", arms=["right"])
 
-    assert robot.target_action[:6].tolist() == pytest.approx(initial[:6])
-    assert robot.target_action[6:12].tolist() == pytest.approx(desired_right)
-    assert robot.target_action[12:].tolist() == pytest.approx([0.2, 0.8])
+    assert robot.joint_target[:6].tolist() == pytest.approx(initial[:6])
+    assert robot.joint_target[6:12].tolist() == pytest.approx(desired_right)
+    assert robot.gripper_target.tolist() == pytest.approx([0.2, 0.8])
 
 
 def test_pose_delta_layout_writes_selected_arm_only(test_robot):
@@ -231,15 +338,15 @@ def test_pose_delta_layout_writes_selected_arm_only(test_robot):
     robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
     initial = np.asarray([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3])
     delta = np.asarray([0.02, -0.04, 0.06, 0.1, -0.2, 0.3])
-    robot.set_target_action(initial)
-    robot.set_target_gripper([0.2, 0.8])
+    robot.set_joint_target(initial)
+    robot.set_gripper_target([0.2, 0.8])
 
     robot.apply_layout(delta, layout="pose_delta", arms=["right"])
 
     expected_right = initial[6:12] + np.asarray([0.1, -0.2, 0.3, 0.1, -0.2, 0.3])
-    assert robot.target_action[:6].tolist() == pytest.approx(initial[:6])
-    assert robot.target_action[6:12].tolist() == pytest.approx(expected_right)
-    assert robot.target_action[12:].tolist() == pytest.approx([0.2, 0.8])
+    assert robot.joint_target[:6].tolist() == pytest.approx(initial[:6])
+    assert robot.joint_target[6:12].tolist() == pytest.approx(expected_right)
+    assert robot.gripper_target.tolist() == pytest.approx([0.2, 0.8])
 
 
 def test_execute_solve_failure_has_no_state_side_effect(test_robot, monkeypatch):
@@ -254,7 +361,7 @@ def test_execute_solve_failure_has_no_state_side_effect(test_robot, monkeypatch)
     with pytest.raises(test_robot.CartesianActionError, match="synthetic solve failure"):
         robot.execute([0.0] * 12, layout="pose")
 
-    assert robot.target_action is None
+    assert robot.joint_target is None
     assert robot.teleop_enabled is True
 
 
@@ -272,17 +379,12 @@ def test_state_layout_describes_every_dim(dual_piper):
     assert [d["index"] for d in layout["state_dims"]] == list(range(14))
 
 
-def test_state_layout_follows_state_space_switch(dual_piper, monkeypatch):
-    """整体切位姿：只改 ``STATE_SPACE``——维度不变（仍 14），值段 kind 变 pose、名字变 x/y/z/rx/ry/rz。"""
+def test_state_layout_is_always_joint(dual_piper):
+    """qpos / action 布局固定为关节，不再允许切换为 pose。"""
     robot = _robot(dual_piper)
-    monkeypatch.setattr(dual_piper.DualPiperRobot, "STATE_SPACE", "pose")
-
     layout = robot.state_layout()
-    assert layout["state_space"] == "pose"
-    assert [d["name"] for d in layout["state_dims"][:6]] == ["x", "y", "z", "rx", "ry", "rz"]
-    assert all(d["kind"] == "pose" for d in layout["state_dims"][:6])
-    assert len(layout["state_dims"]) == 14  # 维度不变：值 6 + 夹爪 1，每臂
-    assert layout["action_space"] == "joint"  # action 恒为关节目标（底层始终关节控制）
+    assert layout["state_space"] == layout["action_space"] == "joint"
+    assert {d["kind"] for d in layout["state_dims"]} == {"joint", "gripper"}
 
 
 def test_collector_writes_layout_into_episode_json(collector, tmp_path):
@@ -337,8 +439,16 @@ def piper_controller():
 
 @pytest.fixture(scope="module")
 def gravity():
-    """导入 robot-pipeline 的 robot.gravity（重力模型 / 前馈，无硬件依赖）。"""
-    return _load("robot.gravity")
+    """导入重力动力学模型与前馈（无硬件依赖）。"""
+    return _load("robot.dynamics.gravity")
+
+
+def test_gravity_runtime_and_calibration_modules_are_separated(gravity):
+    """Controller 依赖的运行期模块不再携带采样与拟合流程。"""
+    calibration = _load("robot.calibration.gravity")
+
+    assert hasattr(gravity, "GravityCompensator") and not hasattr(gravity, "fit_gravity")
+    assert hasattr(calibration, "fit_gravity") and calibration.GravityModel is gravity.GravityModel
 
 
 def _model(gravity, value=0.1):

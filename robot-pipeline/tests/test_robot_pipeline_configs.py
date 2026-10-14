@@ -48,6 +48,15 @@ def test_config_dir_is_populated():
     assert sorted(p.name for p in _CONFIG_FILES), f"未找到 robot-pipeline 机型配置：{_CONFIG_DIR}"
 
 
+def test_single_piper_reuses_dual_piper_left_port_keys():
+    """单臂与双臂机型共享机器档案键，只选择左主手 / 左从臂。"""
+    single_ports = set(_load("single_piper.yml")["robot"]["ports"])
+    dual_ports = set(_load("dual_piper.yml")["robot"]["ports"])
+
+    assert single_ports == {"left_master", "left"}
+    assert single_ports < dual_ports
+
+
 @pytest.mark.parametrize("name", [p.name for p in _CONFIG_FILES])
 def test_config_parses_and_declares_required_sections(name):
     data = _load(name)
@@ -127,17 +136,17 @@ def test_tcp_offset_flag_matches_shipped_defaults():
             assert block.get("enabled") is False, f"{name} 的 robot.tcp.enabled 出厂应为 false"
 
 
-def test_teleop_block_shape_and_joint_offsets():
+def test_teleop_block_shape_and_offsets():
     """``robot.teleop``（可选，见 wiki/design/robot_pipeline_teleop.md）形状校验。
 
-    偏置长度 / 数值写错在机器人构造期报错（``BaseRobot._resolve_teleop_joint_offset``）；这里钉
-    形状与臂名（与 ``_TCP_ARMS`` 同一份机器人类声明），避免配置写坏时 CI 全绿。
+    偏置长度 / 数值写错在机器人构造期报错；这里钉形状与臂名（与 ``_TCP_ARMS`` 同一份机器人类
+    声明），避免配置写坏时 CI 全绿。
     """
     for path in _CONFIG_FILES:
         block = _load(path.name)["robot"].get("teleop")
         if block is None:
             continue
-        assert set(block) <= {"joint_offset", "follow_space", "follow_axes"}, (
+        assert set(block) <= {"joint_offset", "pose_offset", "follow_space", "follow_axes"}, (
             f"{path.name} 的 robot.teleop 有未知键：{set(block)}"
         )
         follow_space = block.get("follow_space", "joint")
@@ -149,23 +158,24 @@ def test_teleop_block_shape_and_joint_offsets():
             assert set(follow_axes) <= {"x", "y", "z", "roll", "pitch", "yaw"}, (
                 f"{path.name} 的 follow_axes 非法：{follow_axes!r}"
             )
-        offset = block.get("joint_offset")
-        if offset is None:
-            continue
-        if isinstance(offset, dict):
-            assert path.name in _TCP_ARMS, f"{path.name} 带了逐臂 joint_offset，但 _TCP_ARMS 没登记臂名"
-            assert set(offset) <= set(_TCP_ARMS[path.name]), f"{path.name} 的 joint_offset 含未知臂：{set(offset)}"
-            per_arm = list(offset.values())
-        else:
-            per_arm = [offset]
-        assert per_arm, f"{path.name} 的 joint_offset 为空"
-        for values in per_arm:
-            assert isinstance(values, list) and len(values) == 6, (
-                f"{path.name} 的 joint_offset 每臂应为 6 个关节值（rad），实为 {values!r}"
-            )
-            assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in values), (
-                f"{path.name} 的 joint_offset 含非数值项：{values!r}"
-            )
+        for key in ("joint_offset", "pose_offset"):
+            offset = block.get(key)
+            if offset is None:
+                continue
+            if isinstance(offset, dict):
+                assert path.name in _TCP_ARMS, f"{path.name} 带了逐臂 {key}，但 _TCP_ARMS 没登记臂名"
+                assert set(offset) <= set(_TCP_ARMS[path.name]), f"{path.name} 的 {key} 含未知臂：{set(offset)}"
+                per_arm = list(offset.values())
+            else:
+                per_arm = [offset]
+            assert per_arm, f"{path.name} 的 {key} 为空"
+            for values in per_arm:
+                assert isinstance(values, list) and len(values) == 6, (
+                    f"{path.name} 的 {key} 每臂应为 6 个值，实为 {values!r}"
+                )
+                assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in values), (
+                    f"{path.name} 的 {key} 含非数值项：{values!r}"
+                )
 
 
 def _registered_robot_types() -> set[str]:

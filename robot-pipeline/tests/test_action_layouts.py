@@ -226,3 +226,17 @@ def test_http_action_request_rejects_legacy_action_space_key(env_module):
     with pytest.raises(ValidationError):
         models.ActionRequest(action=[0.0] * 7, action_space="pose")
     assert models.ActionRequest(action=[0.0] * 7, layout="pose").layout == "pose"  # 新键正常
+
+
+def test_server_packs_joint_and_gripper_per_arm(env_module):
+    """跨进程边界仍按每臂 ``6 joint + 1 gripper`` 组装 qpos / action。"""
+    models = importlib.import_module("server.contract_server")
+    robot = types.SimpleNamespace(
+        name="fake_robot",
+        state_arm_count=lambda: 2,
+        state_value_dim_per_arm=lambda: 6,
+    )
+
+    packed = models._interleave_state(robot, np.arange(12), [0.25, 0.75])
+
+    assert packed.tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 0.25, 6, 7, 8, 9, 10, 11, 0.75])

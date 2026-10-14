@@ -30,7 +30,7 @@ from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
     KEY_ACTION,
     KEY_POSE,
-    KEY_POSE_TARGET,
+    KEY_POSE_ACTION,
     KEY_QPOS,
     ActionSpace,
 )
@@ -82,10 +82,9 @@ SOURCE_TARGET = "target"
 SOURCE_MEASURED = "measured"
 
 #: ``source`` → 该来源下 ``joint`` / ``pose`` **值段**的观测键。
-#: 夹爪槽恒取 ``joint`` 族那一条（``qpos`` / ``action`` **本身**就是每臂「值 + 夹爪」交错，
-#: 而 ``pose`` / ``pose_target`` 只含位姿）——故值段与夹爪槽**同源**，混合基准拼不出来。
+#: qpos / action 本身是每臂「值 + 夹爪」交错；pose 只含位姿。
 _VALUE_KEYS: dict[str, tuple[str, str]] = {
-    SOURCE_TARGET: (KEY_ACTION, KEY_POSE_TARGET),
+    SOURCE_TARGET: (KEY_ACTION, KEY_POSE_ACTION),
     SOURCE_MEASURED: (KEY_QPOS, KEY_POSE),
 }
 
@@ -506,9 +505,7 @@ class RpentService:
     def _gripper_slots(self, frame: dict, count: int, *, source: str = SOURCE_MEASURED) -> np.ndarray | None:
         """``source`` 那条 **qpos** 里每臂的**夹爪槽**（每臂末位）→ 扁平 ``count`` 维。
 
-        夹爪不单独成观测键：它与值段同属一条 qpos（每臂「值 + 夹爪」交错），故唯一读法就是取每臂
-        末位；``source`` 与 :meth:`_qpos` 共用同一口径（``target`` = 基座，``measured`` = 到位判定 /
-        状态回报），混合来源在 API 上就拼不出来。
+        夹爪与值段同属一条 qpos / action，按每臂块末位读取。
         """
         values = as_float_array(frame.get(_VALUE_KEYS[source][0]))
         stride = self._qpos_stride(ActionSpace.JOINT)
@@ -551,7 +548,7 @@ class RpentService:
         values = as_float_array(frame.get(joint_key if space is ActionSpace.JOINT else pose_key))
         if stride <= 0 or values is None:
             return None
-        if space is ActionSpace.JOINT:  # qpos 自带夹爪槽，原样裁到启用臂
+        if space is ActionSpace.JOINT:
             return values[: stride * count].astype(np.float32) if values.size >= stride * count else None
         value_dim = stride - 1
         gripper = self._gripper_slots(frame, count, source=source)
@@ -689,7 +686,7 @@ class RpentService:
 
         为什么换算必须在上位：机器人侧的 ``pose_delta`` 是**基座系**的 chart 相加
         （基准 = ``FK(关节段目标)``），它不知道“沿末端哪根轴”。换算用**快照**
-        （``observations/pose_target`` 的姿态），窗口内被第三方（遥操作 / CLI / 别的会话）改了目标 →
+        （``observations/pose_action`` 的姿态），窗口内被第三方（遥操作 / CLI / 别的会话）改了目标 →
         既有的 ``base_changed`` 检查会标出来；快照本身就不可用 → 报 ``state``，不猜。
 
         分量语义（``x/y/z`` = 前/左/上）先经 ``ego_axes.basis()`` 换到**法兰系**（0 位时这组轴与基座
@@ -714,7 +711,7 @@ class RpentService:
             rpy = None if snapshot is None else np.asarray(snapshot, dtype=np.float64)[start + 3 : start + 6]
             if rpy is None or not np.all(np.isfinite(rpy)):
                 raise RpentError(
-                    f"{what}: 末端系增量需要当前**目标位姿**（observations/pose_target）的姿态做换算，"
+                    f"{what}: 末端系增量需要当前**目标位姿**（observations/pose_action）的姿态做换算，"
                     "但机器人没有发布它——先确认位姿观测",
                     kind="state",
                 )
@@ -1159,7 +1156,7 @@ class RpentService:
         夹爪**不碰**（本原语只动位姿）：RPent 布局里的夹爪列只是占位，不再拿实测夹爪当绝对目标重
         发（否则会把刚下发、尚未走完的 ``set_gripper`` 目标抹回实测值）。
 
-        到位判定需要**绝对目标**：取自观测 ``observations/pose_target``（= ``FK(关节段目标)``，
+        到位判定需要**绝对目标**：取自观测 ``observations/pose_action``（= ``FK(关节段目标)``，
         由机器人随位姿一起发布）。下发后先等它从快照跃迁（确认命令已落地），再以跃迁后的目标为
         参考等到位：目标一直未跃迁（超 ``settle.target_wait_s``）→ ``reached: null`` +
         ``not_applied``（不谎报到位）；跃迁后与「快照 + 增量」不符 → ``base_changed``（基准被第三方
@@ -1214,7 +1211,7 @@ class RpentService:
     def _pose_target_reference(
         self, before: np.ndarray | None, predicted: np.ndarray | None, override: Any = None
     ) -> tuple[np.ndarray | None, dict]:
-        """等 ``observations/pose_target`` 从下发前快照跃迁 → ``(参考目标, 标志)``。
+        """等 ``observations/pose_action`` 从下发前快照跃迁 → ``(参考目标, 标志)``。
 
         为什么需要：增量下发走命令队列（异步）、观测按观察频率发布，故「下发返回」不等于「目标已
         改」——不等就会拿**旧目标**当参考，把「实测本就在旧目标附近」误判成到位。
@@ -1224,7 +1221,7 @@ class RpentService:
         ——基准被第三方改动，回执如实标注）。增量为 0 时不等跃迁（本就在目标上）。
         """
         if before is None:
-            return None, {"no_pose_target": True, "reason": "robot publishes no observations/pose_target"}
+            return None, {"no_pose_target": True, "reason": "robot publishes no observations/pose_action"}
         self._view.require_adapter()  # 未绑定 adapter → state 错（与其余路径一致）
         stride = self._qpos_stride(ActionSpace.POSE)
         if predicted is not None and not self._pose_values_differ(predicted, before, stride):
@@ -1346,7 +1343,7 @@ class RpentService:
     def _qpos_stride(self, space: ActionSpace) -> int:
         """该空间下一条 **qpos** 的每臂宽度（= 值维数 + 夹爪 1）；空间未声明 → ``0``。
 
-        qpos = 每臂「值 + 夹爪」交错拼装（``observations/qpos`` / ``action`` 即此形态）：值段是真正的
+        qpos / action 按每臂「值 + 夹爪」交错：值段是真正的
         控制内容（``value_dim``），夹爪是每臂末位；``gripper`` 空间的值段**就是**夹爪，故无 ``+1``。
         未声明时返回 ``0``（而不是 ``1``）：否则会把值段的第 0 维当夹爪槽读出来。
         """
@@ -1486,7 +1483,7 @@ class RpentService:
         """外部布局块 → edge 每臂 ``[xyz, rpy, gripper]`` 笛卡尔**绝对目标**（逐帧转换）。
 
         只做数值映射（按臂切分 / rot6d → rpy / 夹爪域 / 臂名对齐）：不缩放、不猜语义。
-        布局未覆盖的 edge 启用臂用**当前目标**回填：位姿取 ``observations/pose_target``（= ``action``
+        布局未覆盖的 edge 启用臂用**当前目标**回填：位姿取 ``observations/pose_action``（= ``action``
         关节段的位姿投影）、夹爪槽取 ``observations/action`` 的每臂末位（**同一条目标向量的两种投影**），
         缺键才整体回落实测（``pose`` + ``qpos`` 夹爪槽）。保持的是**目标**而不是实测：MIT 有稳态误差，
         拿实测回填会把误差写进新目标，逐 chunk 累积。需 ``pose_dim > 0``。
