@@ -113,6 +113,10 @@ class BaseEnv:
         robot_layout = getattr(self.robot, "state_layout", None)
         if set_state_layout is not None and callable(robot_layout):
             set_state_layout(robot_layout())
+        # 注入控制模式（各执行控制器的 ``mit`` / ``mit+gravity`` / ``joint``）：collector 写 JSON
+        # 元信息时附带 ``control_mode`` / ``control``——下游据此判断数据是否带重力前馈。重力前馈在
+        # ``robot.connect()`` 里才装载，故 ``start()`` 里连上后再注入一次（以实际生效状态为准）。
+        self._inject_control_layout()
         self._episode_open = False  # 当前是否有未关闭的 episode
 
         # 实测帧率统计：两线程各自最近周期窗口（帧间隔秒），health / 慢帧告警倒推实测 Hz。
@@ -272,11 +276,24 @@ class BaseEnv:
         return self.observation
 
     # ---- 生命周期 ----------------------------------------------------------------------
+    def _inject_control_layout(self) -> None:
+        """把各执行控制器的控制模式注入 collector（采集 JSON 的 ``control_mode`` / ``control``）。
+
+        **必须在 ``robot.connect()`` 之后再调一次**：重力前馈在 ``connect()`` 里才装载（构造期只
+        拿得到「未装载」的基线），角色（leader / follower）同样在 ``connect()`` 里定型——只注入
+        构造期一次会漏报 ``mit+gravity``，数据里就少了一条「这一段带重力前馈」的关键事实。
+        """
+        set_control_layout = getattr(self._collector, "set_control_layout", None)
+        robot_control = getattr(self.robot, "control_layout", None)
+        if set_control_layout is not None and callable(robot_control):
+            set_control_layout(robot_control())
+
     def start(self):
         """启动：连接机器人并拉起**控制线程 + 观测线程**（server 的 lifespan 调用）。"""
         if self._running:
             return
         self.robot.connect()
+        self._inject_control_layout()  # 控制模式在 connect() 后才定型（重力前馈此时装载）
         self._running = True
         self._control_thread = threading.Thread(
             target=self._control_loop, daemon=True, name=f"{self.robot.name}-control"
