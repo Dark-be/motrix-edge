@@ -1497,22 +1497,10 @@ def test_captures_exit_finishes_session():
     assert lease2 != lease
 
 
-@pytest.mark.skip(
-    reason="临时跳过：真实节点观测会遗留原生帧线程，进程退出时偶发 SIGABRT "
-    "(`terminate called without an active exception`，exit 134)，本地/CI 间歇失败。"
-    "待实现线程安全 teardown 后再启用。"
-)
 def test_captures_real_node_observes_until_exit(tmp_path):
     """端到端：web（CaptureService）驱动真实 EdgeNode + FakeRobotAdapter，enter → 持续观测 → exit。"""
     cfg = {
         **BASE_CFG,
-        "adapter": [
-            {
-                "name": "Test Robot",
-                "type": "test_robot",
-                "data_dir": str(tmp_path),  # 运行时行为参数（适配器特有）；能力由适配器返回
-            }
-        ],
         "capture": {"obs_freq": 30},
     }
     from motrix_edge.node import EdgeNode, NodeState
@@ -1527,7 +1515,8 @@ def test_captures_real_node_observes_until_exit(tmp_path):
     node.initialize()  # INIT → IDLE（构造后默认 INIT，先完成初始化再置 READY）
     node.lifecycle.transition(NodeState.READY)
     leases = LeaseManager()
-    threading.Thread(target=node.run, name="node", daemon=True).start()
+    node_thread = threading.Thread(target=node.run, name="node", daemon=True)
+    node_thread.start()
     client = TestClient(
         create_app(BASE_CFG, node=node, commands=CommandService(bus, leases=leases), lease_manager=leases)
     )
@@ -1567,6 +1556,10 @@ def test_captures_real_node_observes_until_exit(tmp_path):
                 leases.revoke(active)
         except Exception:  # noqa: BLE001
             pass
+        client.close()
+        node.stop()
+        node_thread.join(timeout=2.0)
+        assert not node_thread.is_alive()
 
 
 def wait_capture_state(client, state, timeout=5.0):

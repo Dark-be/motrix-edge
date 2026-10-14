@@ -54,6 +54,9 @@ stateDiagram-v2
     前端按 5 Hz 轮询要看连续读数）；采集命令（`capture episode start|end`、`capture sync`）由
     会话消费，会话经 `on_capture_status_dirty` 回调 `EdgeNode.invalidate_capture_status`，
     使「开始 / 停止录制」的下一拍就反映到 `GET /v1/captures`，不必等整个间隔。
+-   **退出**：Ctrl-C 或其他线程调用幂等的 `stop()` 后，主循环统一按「任务线程 → 会话 → adapter」
+    顺序收尾。`stop()` 只发出线程安全的停止信号；需要等待资源完全释放的调用方负责持有运行
+    `run()` 的线程并 `join()`，禁止依赖 daemon 线程随解释器退出。
 
 ## 命令分发
 

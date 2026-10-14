@@ -27,7 +27,7 @@
 会话一步完成（原 capture.start/infer.start + session.run 两个流程合并）。adapter 生命
 周期归节点（READY 绑定、任务间保持、ERROR 恢复释放），会话复用节点 adapter（只引用
 不持有）。run() 持续监听命令源并驱动 _tick 周期任务（IDLE 探测 / READY·ACTIVE 失联
-检查），直到 Ctrl-C。
+检查），直到 Ctrl-C 或外部调用 stop()。
 """
 
 import threading
@@ -188,6 +188,9 @@ class EdgeNode:
         # 命令（会话命令由任务线程内的会话循环消费）；_tick 检测线程结束收尾。
         self._task_thread = None
         self._task_result = None
+        # 节点主循环停止信号：Event 支持 HTTP / 测试等其他线程安全地请求退出。
+        # stop() 为终止操作（幂等）；同一 EdgeNode 实例停止后不重新运行。
+        self._stop_event = threading.Event()
 
         # 节点级 active adapter（生命周期归节点）：IDLE 探测到可用后绑定，任务间保持，
         # ERROR 恢复时释放；会话复用（注入），不各自实例化。
@@ -270,15 +273,16 @@ class EdgeNode:
         INIT 仅存在于初始化阶段（构造后默认状态）；进入 IDLE 后不再回 INIT（状态机
         单向转移）。重复调用（已离开 INIT）为 no-op。
         """
-        self.lifecycle.transition(NodeState.IDLE)  # 状态入日志在 _log_state（不在两处各说一遍）
+        if self.state == NodeState.INIT:
+            self.lifecycle.transition(NodeState.IDLE)  # 状态入日志在 _log_state（不在两处各说一遍）
         return self.state
 
     def run(self):
-        """持续监听命令并驱动生命周期。返回最终状态。"""
+        """持续监听命令并驱动生命周期，直到 Ctrl-C 或 :meth:`stop`。"""
         self.initialize()  # 初始化（INIT → IDLE）；INIT 仅存在于初始化阶段
         debug_print("EdgeNode", "主循环启动，开始消费命令（Ctrl-C 退出）", "DEBUG")
         try:
-            while True:
+            while not self._stop_event.is_set():
                 self._tick()  # 周期任务：探测 / 失联检查 / 任务线程收尾
                 if self._task_thread is None:
                     cmd = self.command_source()
@@ -289,14 +293,26 @@ class EdgeNode:
                 critical = self._poll_critical()
                 if critical is not None:
                     self._dispatch(critical)
-                time.sleep(self.poll_interval)
+                # Event.wait 保留轮询节奏，同时让 stop() 无需等完整 poll_interval 即可唤醒退出。
+                self._stop_event.wait(self.poll_interval)
         except KeyboardInterrupt:
             debug_print("EdgeNode", "用户中断，退出。", "WARNING")
         finally:
-            self._join_task_thread()
+            # 外部停止可能发生在 ACTIVE：先请求会话循环结束并等待，再释放会话和 adapter，
+            # 避免后台线程继续访问已经释放的原生资源。
+            self._stop_task_thread()
             self._shutdown_session()
             self._release_adapter()
         return self.lifecycle.state
+
+    def stop(self) -> None:
+        """线程安全地请求主循环退出。
+
+        本方法只发信号，不在调用方线程释放资源；``run()`` 的 ``finally`` 统一按
+        「任务线程 → 会话 → adapter」顺序收尾。调用方需要确定资源已经释放时，应保留运行
+        ``run()`` 的线程并 ``join()``。
+        """
+        self._stop_event.set()
 
     def _poll_critical(self):
         """取一条安全命令（急停等）：命令源支持旁路（``CommandBus.poll_critical``）才取。
