@@ -162,7 +162,7 @@ class PiperKinematics:
         """基座系几何雅可比（6×6，行 0-2 线速度 / 行 3-5 角速度）——与 ``pose`` 误差同系。
 
         关节 i 的转轴 = ``T_0_i`` 的 z 轴、轴上一点 = ``T_0_i`` 的原点（本实现约定；由
-        ``tests/test_piper_kinematics.py`` 的有限差分用例逐列钉住——若改动 ``_dh_matrix``，
+        ``robot-pipeline/tests/test_piper_kinematics.py`` 的有限差分用例逐列钉住——若改动 ``_dh_matrix``，
         该用例会立刻报错）。
         """
         transforms = self.prefix_transforms(q)

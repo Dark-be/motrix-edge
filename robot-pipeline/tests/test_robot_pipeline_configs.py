@@ -14,9 +14,9 @@
 
 """robot-pipeline 机型的配置文件：**能被解析** + 关键字段形状正确。
 
-robot-pipeline 自身没有自动化测试，配置只在机器人进程启动时才被 yaml 解析——曾出现过
-``collector.skip_until_motion`` 缩进写坏、``test_robot`` 启动直接失败而 CI 全绿的情况。
-本用例把「配置可解析 + 关键字段」纳入 CI（配置是 YAML，不是代码，ruff/pytest 都不会碰它）。
+配置只在机器人进程启动时才被 yaml 解析——曾出现过 ``collector.skip_until_motion`` 缩进写坏、
+``test_robot`` 启动直接失败而 CI 全绿的情况。本用例把「配置可解析 + 关键字段」纳入 CI
+（配置是 YAML，不是代码，ruff 不会检查它）。
 """
 
 import math
@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-_CONFIG_DIR = Path(__file__).resolve().parents[1] / "robot-pipeline" / "src" / "config"
+_CONFIG_DIR = Path(__file__).resolve().parents[1] / "src" / "config"
 _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
 # 需要「帧头跳过」配置的机型（遥操作系统；其余机型保留代码缺省 HEAD_SKIP_DEFAULTS）
 _HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml")

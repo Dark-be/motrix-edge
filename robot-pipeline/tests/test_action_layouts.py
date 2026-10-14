@@ -34,7 +34,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 
 
@@ -61,6 +61,9 @@ class _FakeCollector:
 
     def finish(self):
         self.calls.append("finish")
+
+    def cancel(self):
+        self.calls.append("cancel")
 
     def set_meta(self, meta):
         self.meta.update(meta or {})

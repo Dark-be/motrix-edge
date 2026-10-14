@@ -188,4 +188,4 @@ DH 参数与关节读数方向必须与真机一致，验证方式（现场）�
 1.  `robot-pipeline/scripts/verify_cartesian.py` 读若干位形，比较 `fk(q)` 与 `get_flange_pose()` 的
     位置 / 姿态误差（默认只读；`--cycles` 才小幅摆动）——偏差应在毫米级，否则先修正 DH 或关节符号。
 2.  同一脚本可做往返（位姿 → 关节 → 正解 → 位姿）与「限位边界拒绝」冒烟。
-3.  离线单测（`tests/test_piper_kinematics.py`）钉住 FK↔IK 自洽、rpy 往返、限位裁切与失败语义。
+3.  离线单测（`robot-pipeline/tests/test_piper_kinematics.py`）钉住 FK↔IK 自洽、rpy 往返、限位裁切与失败语义。

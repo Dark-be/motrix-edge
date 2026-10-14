@@ -39,11 +39,11 @@
 
 ### C. 测试
 
--   [x] `tests/test_robot_tcp.py`（17 例）：配置解析（关闭恒等 / 逐臂覆盖 / 7 类非法配置）+ 换算
+-   [x] `robot-pipeline/tests/test_robot_tcp.py`（17 例）：配置解析（关闭恒等 / 逐臂覆盖 / 7 类非法配置）+ 换算
         （沿法兰 z 平移 / 偏移随姿态转 / 往返精确 / 逐臂 / 尖端语义）+ 基类钩子（关闭恒等 / 开启互逆 /
-        无臂名回退）；沿用 `tests/test_piper_kinematics.py` 的「插入 robot-pipeline/src 后导入纯 numpy
+        无臂名回退）；沿用 `robot-pipeline/tests/test_piper_kinematics.py` 的「插入 robot-pipeline/src 后导入纯 numpy
         模块」手法
--   [x] `tests/test_robot_pipeline_configs.py`：用**同一个解析器**把出厂配置过一遍 + 出厂默认关闭
+-   [x] `robot-pipeline/tests/test_robot_pipeline_configs.py`：用**同一个解析器**把出厂配置过一遍 + 出厂默认关闭
 -   [x] `tests/test_dual_piper_adapter.py`：`pose_frame()` 从 health 读回（不单独发请求）/ 未上报
         回退类常量 / 偏移非法不采纳 / 失联保留上次已知值 / `set_tcp`·`set_gravity` 请求体 + 4xx →
         `ValueError`

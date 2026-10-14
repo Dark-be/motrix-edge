@@ -28,7 +28,7 @@
    ``T_world_cam = T_world_board · T_cam_board``。
 
 放在库里（而不是脚本里）是为了**能离线单测**：合成一份样本 → 解算 → 复现真值（见
-``tests/test_robot_calibration.py``）。
+``robot-pipeline/tests/test_robot_calibration.py``）。
 """
 
 from __future__ import annotations

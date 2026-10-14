@@ -65,7 +65,7 @@ env / contract server 透传 `layout`（+ `arms` 作用域），edge adapter 声
 
 ## 阶段五：测试与校验
 
--   [x] `tests/test_piper_kinematics.py`：rpy 往返 / 万向锁、`log3` 轴角、正解 ↔ 位姿一致、
+-   [x] `robot-pipeline/tests/test_piper_kinematics.py`：rpy 往返 / 万向锁、`log3` 轴角、正解 ↔ 位姿一致、
         **雅可比 = 正解数值导数**、限位裁切、逆解可达 / 不可达 / 坏输入 / fallback 起点。
 -   [x] `tests/test_piper_controller.py`：限位裁切（全 6 关节 / 就地裁切 / 告警去重 / 维数拒绝 /
         `t_ff` 透传）+ **静态**转换（正解 ↔ 解算往返、失败语义、`**ik_config` 覆盖、无 SDK 位姿读写）。
