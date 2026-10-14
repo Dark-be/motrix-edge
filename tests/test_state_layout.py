@@ -98,6 +98,12 @@ def dual_piper():
 
 
 @pytest.fixture(scope="module")
+def test_robot():
+    """导入带可逆线性运动学的 TestRobot。"""
+    return _load("robot.test_robot")
+
+
+@pytest.fixture(scope="module")
 def collector():
     """导入 robot-pipeline 的 ActMcapCollector（mcap 依赖在 ``start()`` 里才导入）。"""
     return _load("collector.mcap_collector")
@@ -202,6 +208,54 @@ def test_rollout_layout_refuses_during_teleop(dual_piper):
 
     assert robot.rollout([0.0] * 7, layout="joint+gripper", arms=["right"]) is False
     assert robot.target_action is None
+
+
+def test_pose_layout_writes_selected_arm_only(test_robot):
+    """部分臂 pose：未选臂以目标 FK 补齐，不能把它的关节值误当成位姿。"""
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+    initial = np.asarray([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3])
+    desired_right = np.asarray([0.4, 0.6, 0.8, 1.0, 1.2, 1.4])
+    robot.set_target_action(initial)
+    robot.set_target_gripper([0.2, 0.8])
+    right_pose = test_robot.TestArmController.joint_to_pose(desired_right)
+
+    robot.apply_layout(right_pose, layout="pose", arms=["right"])
+
+    assert robot.target_action[:6].tolist() == pytest.approx(initial[:6])
+    assert robot.target_action[6:12].tolist() == pytest.approx(desired_right)
+    assert robot.target_action[12:].tolist() == pytest.approx([0.2, 0.8])
+
+
+def test_pose_delta_layout_writes_selected_arm_only(test_robot):
+    """部分臂 pose_delta：未选臂增量为 0，不能混入该臂现有的关节目标。"""
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+    initial = np.asarray([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 0.3, 0.5, 0.7, 0.9, 1.1, 1.3])
+    delta = np.asarray([0.02, -0.04, 0.06, 0.1, -0.2, 0.3])
+    robot.set_target_action(initial)
+    robot.set_target_gripper([0.2, 0.8])
+
+    robot.apply_layout(delta, layout="pose_delta", arms=["right"])
+
+    expected_right = initial[6:12] + np.asarray([0.1, -0.2, 0.3, 0.1, -0.2, 0.3])
+    assert robot.target_action[:6].tolist() == pytest.approx(initial[:6])
+    assert robot.target_action[6:12].tolist() == pytest.approx(expected_right)
+    assert robot.target_action[12:].tolist() == pytest.approx([0.2, 0.8])
+
+
+def test_execute_solve_failure_has_no_state_side_effect(test_robot, monkeypatch):
+    """首条命令解算失败：目标仍未初始化，execute 也不能提前退出遥操作。"""
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+    assert robot.enable_teleop("absolute")
+
+    def reject_target(*_args):
+        raise test_robot.CartesianActionError("synthetic solve failure")
+
+    monkeypatch.setattr(robot, "_prepare_target", reject_target)
+    with pytest.raises(test_robot.CartesianActionError, match="synthetic solve failure"):
+        robot.execute([0.0] * 12, layout="pose")
+
+    assert robot.target_action is None
+    assert robot.teleop_enabled is True
 
 
 def test_state_layout_describes_every_dim(dual_piper):

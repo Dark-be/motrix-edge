@@ -101,6 +101,10 @@ _apply_targets(action, layout, arms) -> None
 | `pose_delta` | 值段（同上）                | 基准 = **当前关节段目标**的 FK 位姿，叠加增量后解算 |
 | `gripper`    | 夹爪段 `[QPOS + arm_index]` | 值钳到 `[0, 1]`                                     |
 
+部分臂位姿下发仍构造完整的逐臂解算输入，但未选臂不能混用关节值：`pose` 用该臂当前关节段目标的
+FK 位姿补齐，`pose_delta` 用零增量补齐。解算结果只提交所选臂；任一解算失败时整条
+`target_action` 与遥操作状态均保持不变。
+
 写入路径就这一张表 + 一个循环：`execute` / `rollout` / 原语 / RPent 都走 `plan_layout()` →
 `apply_layout()`（不再有按空间直写与逐臂块各写一份）；`reset()` 仍走 `set_target_action(init_joint)` +
 `set_target_gripper(init_gripper)`（它是"两段整体复位"，与 layout 无关）。

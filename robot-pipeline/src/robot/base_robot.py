@@ -512,33 +512,42 @@ class BaseRobot:
         """按 ``layout`` / ``arms`` 写目标。
 
         - 值段（``joint`` / ``pose`` / ``pose_delta``）→ 关节段：未选臂保持当前目标，选中臂用本次
-          值，再整体解算一次（位姿类在子类 ``_prepare_target()`` 里解）；
+          值；位姿类先用目标 FK / 零增量补齐未选臂，再在子类 ``_prepare_target()`` 里整体解算；
         - ``gripper`` → 夹爪段（钳到 ``[0, 1]``）；
         - 整条 ``target_action`` 一次赋值，多段同一控制拍生效。
 
         解算失败（超限位 / 不收敛）→ ``CartesianActionError`` 且不改目标。
         """
         plan = self.plan_layout(action, layout, arms)
-        target = self._ensure_target().copy()
+        target = self._target_snapshot()
         offsets: dict[str, tuple[int, int]] = {}
         cursor = 0
         for kind, dim in plan.segments:
             offsets[kind] = (cursor, dim)
             cursor += dim
         names = self.state_arms()
-        value_per_arm = self.state_value_dim_per_arm()
+        joint_per_arm = self.QPOS // len(names)
         value_kind = next((kind for kind, _ in plan.segments if kind != self.ACTION_SPACE_GRIPPER), None)
         if value_kind is not None:
             offset, dim = offsets[value_kind]
-            full = target[: self.QPOS].copy()  # 未选臂保持当前目标
+            if value_kind == self.ACTION_SPACE_JOINT:
+                full = target[: self.QPOS].copy()  # 未选臂保持当前关节目标
+            elif value_kind == self.ACTION_SPACE_POSE:
+                pose = self.get_target_pose()
+                if pose is None:
+                    raise CartesianActionError(f"{self.name}: pose target base is unavailable")
+                full = np.asarray(pose, dtype=np.float64).reshape(-1).copy()
+            else:
+                # pose_delta 的未选臂增量必须是 0；不能把该臂的关节目标误当成位姿增量。
+                full = np.zeros(self.POSE, dtype=np.float64)
             for row, arm in enumerate(plan.scope):
                 index = names.index(arm)
-                full[index * value_per_arm : (index + 1) * value_per_arm] = plan.blocks[row][offset : offset + dim]
+                full[index * dim : (index + 1) * dim] = plan.blocks[row][offset : offset + dim]
             solved = self._prepare_target(full, value_kind)  # 位姿类在这里解算（失败 → 不写目标）
             for arm in plan.scope:
                 index = names.index(arm)
-                target[index * value_per_arm : (index + 1) * value_per_arm] = solved[
-                    index * value_per_arm : (index + 1) * value_per_arm
+                target[index * joint_per_arm : (index + 1) * joint_per_arm] = solved[
+                    index * joint_per_arm : (index + 1) * joint_per_arm
                 ]
         if self.ACTION_SPACE_GRIPPER in offsets:
             offset, _ = offsets[self.ACTION_SPACE_GRIPPER]
@@ -560,10 +569,10 @@ class BaseRobot:
         - ``layout``（缺省 ``joint``）：每臂块内的段序列，如 ``joint+gripper``；``joint`` 直写、
           ``pose`` / ``pose_delta`` 先解算成关节目标、``gripper`` 只写夹爪段，各段同一拍落地。
         - ``arms``（缺省 = 全部臂）：只写这些臂，其余臂目标原样保留；给出时 ``action`` 维度按
-          全部臂算（要「只控部分臂」必须显式给 ``arms``）。
+          所选臂算（要「只控部分臂」必须显式给 ``arms``）。
         """
-        self.disable_teleop()
         self.apply_layout(action, layout, arms)
+        self.disable_teleop()  # 仅成功落地后抢回；非法动作 / IK 失败保持原遥操作状态
 
     def rollout(
         self,
@@ -772,6 +781,16 @@ class BaseRobot:
         if self.target_action is None:
             self.target_action = np.concatenate([self.current_action(), self.current_gripper()])
         return self.target_action
+
+    def _target_snapshot(self) -> np.ndarray:
+        """构造本次下发的局部目标副本；不修改 ``target_action``。
+
+        ``apply_layout()`` 在局部副本上完成补段与 FK / IK，全部成功后才一次提交。这样首条命令
+        解算失败时，``target_action`` 仍保持 ``None``，符合失败零副作用契约。
+        """
+        if self.target_action is not None:
+            return self.target_action.copy()
+        return np.concatenate([self.current_action(), self.current_gripper()])
 
     # ---- 遥操作（模式 / 锚点）----
     def resolve_teleop_follow(self, follow_space=None, follow_axes=None) -> tuple[str, tuple[str, ...]]:
