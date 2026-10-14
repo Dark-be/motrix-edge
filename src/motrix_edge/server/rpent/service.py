@@ -302,6 +302,8 @@ class RpentService:
             "pose_convention": "xyz_rpy" if pose_dim else None,
             # 读（位姿值）与写（pose 动作）必须同系；机器人侧用哪个系由它自己声明
             "pose_frame": view.pose_frame,
+            # 该系的原点在法兰外的偏移（米，逐臂）；非 tcp 系 → None（见「末端 TCP」设计文档）
+            "tcp_offset": view.tcp_offset,
             "gripper_range": [0.0, 1.0],  # 0 = 闭合，1 = 张开（独立 gripper 空间，每臂 1 维）
             "arms": arms,
             "all_arms": view.all_arms,

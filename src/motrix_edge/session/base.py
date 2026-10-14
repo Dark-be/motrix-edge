@@ -38,6 +38,7 @@ from motrix_edge.command import (
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
     CMD_SESSION_QUIT,
+    SWITCH_COMMANDS,
     TELEOP_COMMANDS,
     CommandResult,
     apply_teleop,
@@ -288,6 +289,11 @@ class BaseSession:
             return CommonDispatch.HANDLED
         if name in TELEOP_COMMANDS:
             self._set_teleop(cmd)
+            return CommonDispatch.HANDLED
+        if name in SWITCH_COMMANDS:
+            # robot tcp / robot gravity：运行位开关**离开会话才能切**（tcp 换 observations/pose
+            # 的原点、gravity 改 control_mode；robot teleop 不受此限——人工接管是会话中的操作）。
+            self.reject_not_applicable(cmd, "during a session (quit the session first)")
             return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_EPISODE_START:
             self._on_episode_start(cmd)

@@ -57,8 +57,10 @@ from motrix_edge.command import (
     CMD_SESSION_RUN,
     META_SOURCE,
     SOURCE_INTERNAL,
+    SWITCH_COMMANDS,
     TELEOP_COMMANDS,
     CommandResult,
+    apply_switch,
     apply_teleop,
     handle_capture_meta,
     handle_infer_rtc,
@@ -570,6 +572,20 @@ class EdgeNode:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
             self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode))
+            return True
+        if cmd.name in SWITCH_COMMANDS:  # robot tcp / robot gravity：运行位开关
+            # **会话中一律拒绝**（tcp 换 observations/pose 的原点、gravity 改 control_mode；
+            # 机器人 teleop 不受此限——人工接管本来就是会话中的操作）。
+            in_session = self.session is not None
+            try:
+                data = apply_switch(self.adapter, cmd, in_session=in_session)
+            except ValueError as exc:
+                code = ErrorCode.CONFLICT if in_session else ErrorCode.INVALID_ARGUMENT
+                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=code))
+                return True
+            # 运行位真值走 health（切换不留影子）：催一次刷新，让紧随其后的状态查询看到新值
+            self._last_alive_check = 0.0
+            self._reply(cmd, ok_result(node_state=self.state, **data))
             return True
         return False
 

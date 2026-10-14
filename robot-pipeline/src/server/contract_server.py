@@ -81,6 +81,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_DETAIL,
     FIELD_ENDPOINT,
     FIELD_FRAMES,
+    FIELD_GRAVITY,
     FIELD_HEAD_SKIP,
     FIELD_HEIGHT,
     FIELD_INTRINSICS,
@@ -90,6 +91,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
     FIELD_OK,
+    FIELD_POSE_FRAME,
     FIELD_ROBOT,
     FIELD_ROBOT_MODEL_ID,
     FIELD_ROBOT_MODEL_VERSION,
@@ -98,6 +100,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_STATE_ARMS,
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
+    FIELD_TCP_OFFSET,
     FIELD_TYPE,
     FIELD_WIDTH,
     INTRINSICS_KEYS,
@@ -108,10 +111,12 @@ from motrix_edge.adapter.http_contract import (
     PATH_CAPTURE_SYNC,
     PATH_DISCOVER,
     PATH_EXECUTE,
+    PATH_GRAVITY,
     PATH_HEALTH,
     PATH_RESET,
     PATH_ROLLOUT,
     PATH_SAFE_STOP,
+    PATH_TCP,
     PATH_TELEOP,
     TELEOP_MODES,
     VALUE_MOUNT_FIXED,
@@ -266,6 +271,27 @@ class TeleopRequest(BaseModel):
         default=DEFAULT_TELEOP_MODE,
         description="遥操作映射模式：absolute=主臂绝对位姿直连 / delta=人工接管（锚点增量）",
     )
+
+
+class TcpRequest(BaseModel):
+    """``/v1/tcp``：运行期切换位姿系（法兰 ↔ 工具末端）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., description="true = 位姿（读 + 写）以工具末端为原点；false = 法兰")
+    offset: list[float] | None = Field(
+        default=None,
+        description="TCP 在**法兰系**下的位置（米，3 个数）；缺省用配置 robot.tcp.offset（运行期值不写回 yml）",
+    )
+
+
+class GravityRequest(BaseModel):
+    """``/v1/gravity``：运行期开关重力前馈（执行臂）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., description="true = 启用重力前馈；false = 卸载（t_ff 下一拍回到 0）")
+    alpha: float | None = Field(default=None, description="前馈比例覆盖（0 = 保留装载但不补偿）")
 
 
 class CaptureSyncRequest(BaseModel):
@@ -458,6 +484,8 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 FIELD_ACTION_DIMS: _robot_action_dims(robot),
                 FIELD_ACTION_LAYOUTS: _robot_action_layouts(robot),
                 FIELD_STATE_ARMS: _robot_state_arms(robot),
+                # 位姿系 / TCP 偏移与重力前馈运行位**不走 discover**：它们运行期可切，走
+                # ``/v1/health``（Edge 本来就周期拉）才能随时新鲜，见 wiki/design/robot_pipeline_tcp.md
                 # 观测键 = standard_obs **实际产出**的键（状态向量 qpos + 目标向量 action + 位姿），
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
                 FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION]
@@ -482,6 +510,10 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             FIELD_DETAIL: detail,
             FIELD_CONTROL_HZ: h.get("control_hz"),
             FIELD_MEASURED_HZ: h.get("measured_hz"),
+            # 运行位（运行期可切，走 health 读回即随时新鲜；见 wiki/design/robot_pipeline_tcp.md）
+            FIELD_POSE_FRAME: h.get("pose_frame"),
+            FIELD_TCP_OFFSET: h.get("tcp_offset"),
+            FIELD_GRAVITY: h.get("gravity"),
         }
 
     # ---------------------------------------------------------------- 相机元数据（静态）
@@ -563,6 +595,36 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         if req.mode not in TELEOP_MODES:
             raise HTTPException(status_code=422, detail=f"unknown teleop mode {req.mode!r} (expect {TELEOP_MODES})")
         env.robot_set_teleop(req.enabled, req.mode)
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+
+    @app.post(PATH_TCP)
+    def tcp(req: TcpRequest):
+        """运行期切换位姿系：``enabled`` + 可选 ``offset``（米，3 个数）。
+
+        与构造期的 ``robot.tcp`` 同一套校验（非法 → 422，**运行位不变**）；切换只改语义（不动机
+        目标），在飞目标对应的物理位姿不变、机械臂不会跳。会话中不能切（由 Edge 判：同一 episode
+        内 ``observations/pose`` 的语义不能前后不一致）；设计见 ``wiki/design/robot_pipeline_tcp.md``。
+        """
+        _require_ready()
+        try:
+            env.robot_set_tcp(req.enabled, req.offset)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+
+    @app.post(PATH_GRAVITY)
+    def gravity(req: GravityRequest):
+        """运行期开关重力前馈（执行臂）：``enabled`` + 可选 ``alpha``。
+
+        ``enabled=false`` → 卸载模型（``t_ff`` 下一拍起回到 0 = 纯位置环）；``alpha`` 覆盖配置的
+        比例。参数 / 限幅仍来自 ``robot.gravity``（不动标定产物）。会话中不能切（由 Edge 判：
+        ``control_mode`` 是采集数据的元信息）；设计见 ``wiki/design/robot_pipeline_impedance.md``。
+        """
+        _require_ready()
+        try:
+            env.robot_set_gravity(req.enabled, req.alpha)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_SAFE_STOP)

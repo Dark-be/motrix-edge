@@ -28,8 +28,10 @@ from motrix_edge.command import (
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
+    CMD_ROBOT_GRAVITY,
     CMD_ROBOT_RESET,
     CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TCP,
     CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_RUN,
@@ -481,6 +483,7 @@ class _FakeExecAdapter:
         self.execute_layouts: list[str | None] = []
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
+        self.switch_calls: list[tuple[str, bool, object]] = []  # robot tcp / robot gravity
 
     def reset(self):
         self.reset_calls += 1
@@ -491,6 +494,12 @@ class _FakeExecAdapter:
 
     def set_teleop(self, enabled: bool, mode: str | None = None):
         self.teleop_calls.append((bool(enabled), mode))
+
+    def set_tcp(self, enabled: bool, offset=None):
+        self.switch_calls.append(("tcp", bool(enabled), offset))
+
+    def set_gravity(self, enabled: bool, alpha: float | None = None):
+        self.switch_calls.append(("gravity", bool(enabled), alpha))
 
 
 def _ready_node_with_exec_adapter():
@@ -758,6 +767,56 @@ def test_robot_teleop_not_applicable_in_idle():
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# robot tcp / robot gravity（运行位开关：位姿系 / 重力前馈；**离开会话才能切**）
+# ---------------------------------------------------------------------------
+
+
+def test_robot_tcp_and_gravity_in_ready_call_adapter():
+    """READY 下 robot tcp / robot gravity：enabled + 可选参数 → adapter，回执 ok 并回显。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TCP, params={"enabled": "true", "offset": "[0,0,0.1]"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_GRAVITY, params={"enabled": True, "alpha": "0.5"}, reply_to=replies.append))
+
+    assert adapter.switch_calls == [("tcp", True, [0.0, 0.0, 0.1]), ("gravity", True, 0.5)]
+    assert replies[0].data["tcp"] is True and replies[0].data["offset"] == [0.0, 0.0, 0.1]
+    assert replies[1].data["gravity"] is True and replies[1].data["alpha"] == 0.5
+    assert node._last_alive_check == 0.0  # 催一次心跳刷新（运行位真值从 health 读回）
+
+
+def test_switch_commands_reject_bad_params():
+    """参数非法 → rejected（不调用 adapter）：offset 必须 3 个有限数、alpha 必须是有限数。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TCP, params={"enabled": "true", "offset": "0,0"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_GRAVITY, params={"enabled": "true", "alpha": "nan"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_TCP, params={}, reply_to=replies.append))
+
+    assert [r.status for r in replies] == ["rejected"] * 3
+    assert [r.code for r in replies] == [ErrorCode.INVALID_ARGUMENT] * 3
+    assert adapter.switch_calls == []
+
+
+def test_switch_commands_rejected_while_a_session_is_active():
+    """**会话中**（node.session 非 None）切位姿系 / 重力前馈 → 409，且**不下发**。
+
+    同一会话内的观测语义 / 数据元信息不能前后不一致；人工接管（robot teleop）不受此限
+    ——它是会话中的正常操作，由会话层直接处理（见 test_capture_session / test_infer_session）。
+    """
+    node, adapter = _ready_node_with_exec_adapter()
+    node.lifecycle.transition(NodeState.ACTIVE)
+    node.session = _FakeSession()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TCP, params={"enabled": "false"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_GRAVITY, params={"enabled": "true"}, reply_to=replies.append))
+
+    assert [r.status for r in replies] == ["rejected", "rejected"]
+    assert [r.code for r in replies] == [ErrorCode.CONFLICT] * 2
+    assert all("quit the session first" in r.error for r in replies)
+    assert adapter.switch_calls == []
     assert replies[0].code == ErrorCode.CONFLICT
 
 

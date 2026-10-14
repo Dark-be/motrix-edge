@@ -25,12 +25,14 @@
 | 方法 | 路径                     | 请求 body              | 响应 body                                      |
 | ---- | ------------------------ | ---------------------- | ---------------------------------------------- |
 | POST | ``/v1/discover``         | —                      | ``{status, robot}``（robot 自描述见下）    |
-| GET  | ``/v1/health``           | —                      | ``{ok, detail, control_hz, measured_hz}``      |
+| GET  | ``/v1/health``           | —                      | ``{ok, detail, control_hz, measured_hz, 运行位}`` |
 | GET  | ``/v1/cameras``          | —                      | ``{cameras}``（尺寸 / 彩色内参 / 深度比例；静态） |
 | POST | ``/v1/reset``            | —                      | ``{status}``                                   |
 | POST | ``/v1/execute``          | ``{action, layout?, arms?}`` | ``{status}``                                   |
 | POST | ``/v1/rollout``          | ``{action, layout?, arms?}`` | ``{status}``                                   |
 | POST | ``/v1/teleop``           | ``{enabled, mode?}``   | ``{status}``                                   |
+| POST | ``/v1/tcp``              | ``{enabled, offset?}`` | ``{status}``                                   |
+| POST | ``/v1/gravity``          | ``{enabled, alpha?}``  | ``{status}``                                   |
 | POST | ``/v1/safe_stop``        | —                      | ``{status}``                                   |
 | GET  | ``/v1/capture/status``   | —                      | 采集状态（运行位 / 元信息 / 数据目录）        |
 | POST | ``/v1/capture/sync``     | ``{meta}``             | ``{status}``                                   |
@@ -39,6 +41,12 @@
 
 - ``/v1/discover``：机器人进程**自描述探活**（不初始化）——声明身份与它支持被哪些
   adapter 类型操作（``supported_adapters``），edge 据此把 adapter 标记为可用并选择。
+- ``/v1/health`` 除健康位外还带**运行位**：``pose_frame`` / ``tcp_offset``（位姿读写的坐标系，
+  与 ``robot.tcp`` 同一口径）与 ``gravity``（重力前馈状态：``control_mode`` + 逐臂``active`` /
+  ``alpha`` / ``params``，与采集 JSON 的 ``control`` 段同源）。二者都**运行期可切**
+  （``/v1/tcp`` / ``/v1/gravity``）；走 health 而不是自描述，是因为 Edge 本来就每 2s 拉一次
+  ——读回就是**随时新鲜**的，不需要另做缓存与过期（见
+  [末端 TCP](../../../wiki/design/robot_pipeline_tcp.md)）。
 - ``/v1/capture/status`` 响应字段：``running``（进程是否正在采集）/ ``meta``（``capture sync``
   同步的元信息全集）/ ``data_dir``——**合并**了原 ``/v1/data_status``（已删除，避免两处
   状态不一致）；数据文件列表不在本端点：数据的扫描 / 选择 / 打包见
@@ -85,6 +93,8 @@ PATH_RESET = "/v1/reset"  # 程序复位到 home
 PATH_EXECUTE = "/v1/execute"  # 直接下发 raw 动作
 PATH_ROLLOUT = "/v1/rollout"  # 推理闭环：模型 action（按 layout / arms 下发）
 PATH_TELEOP = "/v1/teleop"  # 设置遥操作（enabled=true 遥操作 / false 程控；mode 可选）
+PATH_TCP = "/v1/tcp"  # 运行期切换位姿系（enabled + 可选 offset）；**离开会话才能切**
+PATH_GRAVITY = "/v1/gravity"  # 运行期开关重力前馈（enabled + 可选 alpha）；同样离开会话才能切；不支持 → 422
 PATH_SAFE_STOP = "/v1/safe_stop"  # 安全停止（软停：停发指令并保持位姿，不断电）
 PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态（运行位 / 元信息 / 数据目录）
 PATH_CAPTURE_SYNC = "/v1/capture/sync"  # 同步采集元信息到进程（保存数据时附加）
@@ -99,6 +109,9 @@ FIELD_ACTION_LAYOUTS = "action_layouts"  # robot：本机器人支持的 layout�
 FIELD_STATE_ARMS = "state_arms"  # robot：物理臂序（arms 缺省时的块序）
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
+FIELD_ENABLED = "enabled"  # tcp / gravity：是否启用（与 teleop 同字面量，刻意保持同名）
+FIELD_OFFSET = "offset"  # tcp：TCP 在法兰系下的位置（米，3 个数；缺省 = 用配置 robot.tcp.offset）
+FIELD_ALPHA = "alpha"  # gravity：前馈比例覆盖（缺省 = 用配置；0 = 保留装载但不补偿）
 FIELD_DATA_DIR = "data_dir"  # capture status：数据目录（SDK 进程自维护；edge 只收集 / 上传）
 FIELD_HEAD_SKIP = "head_skip"  # capture status：帧头跳过进度（{"skipped": n}；null = 未在跳过）
 FIELD_META = "meta"  # capture sync：采集元信息（dict，保存数据时附加）
@@ -118,6 +131,9 @@ FIELD_ROBOT_MODEL_VERSION = "robot_model_version"  # robot：机器人型号版�
 FIELD_ACTION_DIM = "action_dim"  # robot：joint 空间维度（兼容字段）
 FIELD_ACTION_DIMS = "action_dims"  # robot：各动作空间维度（{joint: 12, pose: 12, pose_delta: 12, gripper: 2}）
 FIELD_OBSERVATION_KEYS = "observation_keys"  # robot：观测键布局（含 observations/images/<cam>）
+FIELD_POSE_FRAME = "pose_frame"  # health：位姿（读 + 写）所在坐标系名（flange | tcp）——**运行位**
+FIELD_TCP_OFFSET = "tcp_offset"  # health：TCP 在法兰系下的位置（米，逐臂；非 tcp 时为 null）
+FIELD_GRAVITY = "gravity"  # health：重力前馈状态（{control_mode, arms:{...}}；与采集 control 段同源）
 FIELD_CONTROLLERS = "controllers"  # robot：控制器列表
 FIELD_SENSORS = "sensors"  # robot：传感器列表
 FIELD_CAPABILITIES = "capabilities"  # robot：能力 dict（capture / execute / streaming）
@@ -185,6 +201,7 @@ __all__ = [
     "FIELD_ACTION_DIM",
     "FIELD_ACTION_DIMS",
     "FIELD_ACTION_LAYOUTS",
+    "FIELD_ALPHA",
     "FIELD_ARMS",
     "FIELD_CAPABILITIES",
     "FIELD_CONTROL_HZ",
@@ -193,12 +210,16 @@ __all__ = [
     "FIELD_HEAD_SKIP",
     "FIELD_LAYOUT",
     "FIELD_DETAIL",
+    "FIELD_ENABLED",
     "FIELD_ENDPOINT",
+    "FIELD_GRAVITY",
     "FIELD_MEASURED_HZ",
     "FIELD_META",
     "FIELD_NAME",
     "FIELD_OBSERVATION_KEYS",
+    "FIELD_OFFSET",
     "FIELD_OK",
+    "FIELD_POSE_FRAME",
     "FIELD_ROBOT",
     "FIELD_ROBOT_MODEL_ID",
     "FIELD_ROBOT_MODEL_VERSION",
@@ -208,6 +229,7 @@ __all__ = [
     "FIELD_STATE_ARMS",
     "FIELD_STATUS",
     "FIELD_SUPPORTED_ADAPTERS",
+    "FIELD_TCP_OFFSET",
     "FIELD_TELEOP_ENABLED",
     "FIELD_TELEOP_MODE",
     "FIELD_TYPE",
@@ -217,10 +239,12 @@ __all__ = [
     "PATH_CAPTURE_SYNC",
     "PATH_DISCOVER",
     "PATH_EXECUTE",
+    "PATH_GRAVITY",
     "PATH_HEALTH",
     "PATH_RESET",
     "PATH_ROLLOUT",
     "PATH_SAFE_STOP",
+    "PATH_TCP",
     "PATH_TELEOP",
     "TELEOP_MODES",
     "VALUE_ACTION_SPACE_GRIPPER",

@@ -68,20 +68,22 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 
 职责面与「角色」一一对应：
 
-| 职责面          | 方法                                         | 说明                                                                                                                                                |
-| --------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| discover/health | `health()`                                   | 健康检查；实时 `GET /v1/health`（SDK 型无后台心跳线程），缓存 `running`                                                                             |
-|                 | `release()`                                  | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                                                                                                     |
-| capabilities    | `capabilities`（属性）                       | 声明能力：动作维度 / 支持的动作空间 / 观测键布局 / 能力 dict                                                                                        |
-| observe         | `observe()`                                  | 读取**最新观测缓存**（JPEG 图像 + qpos + 位姿，含 action，机器人开深度时另含深度图）；**不推进 / 不影响运行**                                       |
-| execute         | `execute(action)`                            | 直接下发 raw 动作（立即执行）                                                                                                                       |
-| teleop          | `set_teleop(enabled, mode=None)`             | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；支持者记录 `teleop_enabled` / `teleop_mode` 供 server 状态上报，不支持者默认 no-op 且保持 `False` |
-| capture status  | `capture_status()`                           | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）                                                                           |
-| capture sync    | `sync_capture_meta(meta)`                    | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                                                                            |
-| capture episode | `start_capture()` / `end_capture()`          | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                                                                                                  |
-| rollout         | `rollout(action, *, layout=None, arms=None)` | 推理闭环：接收模型 action 经 HTTP 转发进程（`layout` 声明每臂块的段序列、`arms` 声明作用域）；遥操作中进程拒收 → 返回 `False`                       |
-| safe_stop       | `safe_stop()`                                | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**                                                                                   |
-| 生命周期辅助    | `reset()`                                    | 程序复位到 home（非阻塞）                                                                                                                           |
+| 职责面          | 方法                                                                 | 说明                                                                                                                                                |
+| --------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| discover/health | `health()`                                                           | 健康检查；实时 `GET /v1/health`（SDK 型无后台心跳线程），缓存 `running` + **运行位**（`pose_frame` / `tcp_offset` / `gravity`）                     |
+|                 | `release()`                                                          | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                                                                                                     |
+| capabilities    | `capabilities`（属性）                                               | 声明能力：动作维度 / 支持的动作空间 / 观测键布局 / 能力 dict                                                                                        |
+| observe         | `observe()`                                                          | 读取**最新观测缓存**（JPEG 图像 + qpos + 位姿，含 action，机器人开深度时另含深度图）；**不推进 / 不影响运行**                                       |
+| execute         | `execute(action)`                                                    | 直接下发 raw 动作（立即执行）                                                                                                                       |
+| teleop          | `set_teleop(enabled, mode=None)`                                     | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；支持者记录 `teleop_enabled` / `teleop_mode` 供 server 状态上报，不支持者默认 no-op 且保持 `False` |
+| tcp / gravity   | `set_tcp(enabled, offset=None)` / `set_gravity(enabled, alpha=None)` | 运行位开关（位姿系 / 重力前馈）：转发 `POST /v1/tcp` / `/v1/gravity`；机器人回 4xx → `ValueError`（回执 rejected，不静默当成功）                    |
+|                 | `pose_frame()` / `tcp_offset_by_arm()`                               | 位姿系名与逐臂 TCP 偏移：**从 health 读回**（机器人开着 `robot.tcp` 时报 `tcp`）；失联 → 保留上一次已知值，从未成功过 → 类常量 `POSE_FRAME`         |
+| capture status  | `capture_status()`                                                   | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）                                                                           |
+| capture sync    | `sync_capture_meta(meta)`                                            | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                                                                            |
+| capture episode | `start_capture()` / `end_capture()`                                  | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                                                                                                  |
+| rollout         | `rollout(action, *, layout=None, arms=None)`                         | 推理闭环：接收模型 action 经 HTTP 转发进程（`layout` 声明每臂块的段序列、`arms` 声明作用域）；遥操作中进程拒收 → 返回 `False`                       |
+| safe_stop       | `safe_stop()`                                                        | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**                                                                                   |
+| 生命周期辅助    | `reset()`                                                            | 程序复位到 home（非阻塞）                                                                                                                           |
 
 ### 观测键契约（standard_obs 键名）
 
@@ -113,7 +115,10 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 -   **形状 / 单位**：每臂 `xyz(3) + rpy(3)` = 6 维、米 / 弧度（`pose_convention: xyz_rpy`）。
     SDK 若有 `0.001 mm` / `0.001°` 之类整数标度，由**机器人进程**换算后再写入位姿区。
 -   **坐标系**：`POSE_FRAME`（如 `flange` / `tcp` / `fk`）声明"这是哪个系"。位姿观测与位姿
-    动作**必须同一个系**——`move_delta` 这类「当前位姿 + 增量」差一个常量偏移就会打偏。
+    动作**必须同一个系**——`move_delta` 这类「当前位姿 + 增量」差一个常量偏移就会打偏。机器人可配
+    这个系（`robot.tcp`，见 [末端 TCP](./robot_pipeline_tcp.md)），且**运行期可切**（`POST /v1/tcp`），
+    因此**真实适配器的 `POSE_FRAME` 以机器人心跳为准**（`GET /v1/health` 的 `pose_frame` /
+    `tcp_offset`，节点每 2s 探活顺带读回）；失联保留上一次已知值，从未成功过才回退类常量。
 -   **能力以声明为准**：`effective_pose_dim_per_arm()` 取适配器声明的 `pose` 每臂维数（未声明
     `pose` 空间 → 0）；位姿键也只在声明时才进 `capabilities.observation_keys`，上游（agent / 策略）
     能提前拒绝而不是拿到空位姿再猜。读侧另有一道**实际长度**校验（见下条）。
@@ -217,19 +222,21 @@ adapter:
 
 -   **HTTP 指令下行**（`http_contract.py`）：端点路径 + body 字段**单点定义**。端点一览（前缀 `/v1`）：
 
-| 方法 | 路径                                    | 请求 body                  | 响应 body                                                                             |
-| ---- | --------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------- |
-| POST | `/v1/discover`                          | —                          | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`）   |
-| GET  | `/v1/health`                            | —                          | `{ok, detail}`                                                                        |
-| GET  | `/v1/cameras`                           | —                          | `{cameras, frames}`（尺寸 / **彩色内参** / 深度比例 / 安装方式；`frames` = 标定外参） |
-| POST | `/v1/reset`                             | —                          | `{status}`                                                                            |
-| POST | `/v1/execute`                           | `{action, layout?, arms?}` | `{status}`                                                                            |
-| POST | `/v1/rollout`                           | `{action, layout?, arms?}` | `{status}`；**遥操作中 → 409**（推理让位）                                            |
-| POST | `/v1/teleop`                            | `{enabled, mode?}`         | `{status}`（`mode`：`absolute` 缺省 / `delta` 人工接管）                              |
-| POST | `/v1/safe_stop`                         | —                          | `{status}`                                                                            |
-| GET  | `/v1/capture/status`                    | —                          | `{running, meta, data_dir}`                                                           |
-| POST | `/v1/capture/sync`                      | `{meta}`                   | `{status}`                                                                            |
-| POST | `/v1/capture/start` / `/v1/capture/end` | —                          | `{status}`                                                                            |
+| 方法 | 路径                                    | 请求 body                  | 响应 body                                                                                    |
+| ---- | --------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------- |
+| POST | `/v1/discover`                          | —                          | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`）          |
+| GET  | `/v1/health`                            | —                          | `{ok, detail, control_hz, measured_hz}` + **运行位** `pose_frame` / `tcp_offset` / `gravity` |
+| GET  | `/v1/cameras`                           | —                          | `{cameras, frames}`（尺寸 / **彩色内参** / 深度比例 / 安装方式；`frames` = 标定外参）        |
+| POST | `/v1/reset`                             | —                          | `{status}`                                                                                   |
+| POST | `/v1/execute`                           | `{action, layout?, arms?}` | `{status}`                                                                                   |
+| POST | `/v1/rollout`                           | `{action, layout?, arms?}` | `{status}`；**遥操作中 → 409**（推理让位）                                                   |
+| POST | `/v1/teleop`                            | `{enabled, mode?}`         | `{status}`（`mode`：`absolute` 缺省 / `delta` 人工接管）                                     |
+| POST | `/v1/tcp`                               | `{enabled, offset?}`       | `{status}`；非法偏移 → `422`（Edge 侧命令 `robot tcp`）                                      |
+| POST | `/v1/gravity`                           | `{enabled, alpha?}`        | `{status}`；机型 / 控制器不支持 → `422`（Edge 侧命令 `robot gravity`）                       |
+| POST | `/v1/safe_stop`                         | —                          | `{status}`                                                                                   |
+| GET  | `/v1/capture/status`                    | —                          | `{running, meta, data_dir}`                                                                  |
+| POST | `/v1/capture/sync`                      | `{meta}`                   | `{status}`                                                                                   |
+| POST | `/v1/capture/start` / `/v1/capture/end` | —                          | `{status}`                                                                                   |
 
 -   **共享内存观测上行**（`shm_contract.py`）：SDK 进程按 `run_hz` 持续把观测（qpos + 目标
     action + raw RGB 图像）写入共享内存（`ObsShmWriter`），adapter 经 `ObsShmReader` 读取并

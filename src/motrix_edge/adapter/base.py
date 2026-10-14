@@ -119,12 +119,20 @@ class HealthStatus:
 
     ``control_hz`` = 机器人名义控制频率（env 控制线程 ``HZ``）；``measured_hz`` = 实测
     控制线程帧率（robot server 最近窗口统计）；未知时为 None。
+
+    ``pose_frame`` / ``tcp_offset`` / ``gravity`` = **运行位**（机器人的位姿系 / TCP 偏移 / 重力
+    前馈状态）：它们运行期可切（``/v1/tcp`` / ``/v1/gravity``），故随**每次 health** 一起回来
+    ——Edge 周期拉 health（默认 2s）就等于「随时刷新的读回」，不需要另做缓存与过期。
+    未上报（旧机器人进程）→ 均 None，调用方回退自己声明的类常量。
     """
 
     ok: bool
     detail: str = ""
     control_hz: float | None = None  # 名义控制频率（Hz）
     measured_hz: float | None = None  # 实测控制线程帧率（Hz）
+    pose_frame: str | None = None  # 位姿（读 + 写）所在坐标系名（flange | tcp）
+    tcp_offset: dict | None = None  # TCP 在法兰系下的位置（米，逐臂；非 tcp 时 None）
+    gravity: dict | None = None  # 重力前馈状态（control_mode + 逐臂 active/alpha/params）
 
 
 @dataclass
@@ -641,6 +649,25 @@ class RobotAdapter(ABC):
         默认 no-op（**不支持遥操作的适配器不记录状态**，保持 ``teleop_enabled=False``）；
         支持遥操作的子类按需覆盖（如经 HTTP 转发机器人进程 /v1/teleop），并在生效后同步
         ``teleop_enabled`` / ``teleop_mode`` 供 server 状态上报。
+        """
+        pass
+
+    # ---- 运行位（位姿系 / 重力前馈）：运行期可切，**读回一律走 health** ----------------
+    # 与 teleop 的区别：teleop 只影响「谁在控」，Edge 不参与计算，所以用本地影子即可；
+    # 位姿系 / TCP 偏移会进 Edge 的坐标换算（``GET /v1/depth`` 的腕相机世界坐标）与 agent
+    # 的位姿解释——影子错一个常量就会静默算错，所以它们必须**读回**（见 ``health()``）。
+    def set_tcp(self, enabled: bool, offset=None) -> None:
+        """运行期切换位姿系（法兰 ↔ 工具末端；``offset`` = TCP 在法兰系下的位置，米）。
+
+        默认 no-op（不支持运行期切换的适配器不转发）；支持者覆盖（如 HTTP 转发 /v1/tcp）。
+        切换与查询不分家：切换后的真值从 ``health().pose_frame`` / ``health().tcp_offset`` 读回。
+        """
+        pass
+
+    def set_gravity(self, enabled: bool, alpha: float | None = None) -> None:
+        """运行期开关重力前馈（``alpha`` 覆盖前馈比例；0 = 保留装载但不补偿）。
+
+        默认 no-op；支持者覆盖（如 HTTP 转发 /v1/gravity）。状态从 ``health().gravity`` 读回。
         """
         pass
 

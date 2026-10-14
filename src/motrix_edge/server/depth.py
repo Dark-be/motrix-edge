@@ -49,7 +49,16 @@ from motrix_edge.adapter.http_contract import (
     FIELD_XYZ_WORLD,
 )
 from motrix_edge.errors import ErrorCode, ServiceError
-from motrix_edge.geometry import MOUNT_FIXED, FrameError, transform_points
+from motrix_edge.geometry import (
+    MOUNT_FIXED,
+    FrameError,
+    compose,
+    invert_transform,
+    make_transform,
+    pose_to_transform,
+    transform_points,
+    transform_to_pose,
+)
 from motrix_edge.geometry import pixel_to_camera as deproject_pixel
 from motrix_edge.lease import LeaseError, LeaseManager
 
@@ -204,7 +213,7 @@ class DepthService:
         item = frames.cameras.get(camera)
         if item is None:
             return self._round(xyz_camera), None, None, None
-        poses = self._pose_by_arm(latest)
+        poses = self._flange_pose_by_arm(latest)
         if item.mount != MOUNT_FIXED and item.arm not in poses:
             # 腕相机但这一拍没位姿（机器人不提供 / 形状不符）→ 只丢世界坐标，不报错
             return self._round(xyz_camera), None, None, None
@@ -215,13 +224,36 @@ class DepthService:
         xyz_world = transform_points(matrix, xyz_camera)
         return self._round(xyz_camera), self._round(xyz_world), "world", frames.world
 
-    def _pose_by_arm(self, latest: dict) -> dict:
-        """最新帧里**按臂名**的位姿（``observations/pose``，每臂 ``xyz + rpy``）——布局由 adapter 给。"""
+    def _flange_pose_by_arm(self, latest: dict) -> dict:
+        """最新帧里**按臂名**的位姿（``observations/pose``）→ **法兰系**（腕相机外参合成的前提）。
+
+        布局由 adapter 给（每臂 ``xyz + rpy``）；但位姿本身是 **``POSE_FRAME`` 系**的值——机器人开启
+        ``robot.tcp`` 时原点在工具末端，需先按 ``T_base_flange = T_base_tcp · T_flange_tcp⁻¹`` 还原，
+        否则腕相机的世界坐标会整体偏一个 TCP 偏移（``FrameSet.world_from_camera`` 的腕相机段用的是
+        ``T_flange_cam``）。上报了偏移却没给该臂 → 该臂不参与换算（宁可少给 ``xyz_world``，不搞错系）。
+        """
         adapter = getattr(self._node, "adapter", None)
         splitter = getattr(adapter, "pose_by_arm", None)
         if not callable(splitter):
             return {}
-        return splitter(latest.get(KEY_POSE))
+        poses = dict(splitter(latest.get(KEY_POSE)) or {})
+        offsets = self._tcp_offsets(adapter)
+        if not poses or not offsets:
+            return poses
+        identity = np.eye(3, dtype=np.float64)
+        return {
+            arm: transform_to_pose(
+                compose(pose_to_transform(pose), invert_transform(make_transform(identity, offsets[arm])))
+            )
+            for arm, pose in poses.items()
+            if arm in offsets
+        }
+
+    @staticmethod
+    def _tcp_offsets(adapter) -> dict:
+        """适配器上报的 TCP 偏移（法兰系，米，逐臂）；未上报 / 非 TCP 位姿系 → 空 dict。"""
+        getter = getattr(adapter, "tcp_offset_by_arm", None)
+        return dict(getter() or {}) if callable(getter) else {}
 
     @staticmethod
     def _round(values) -> list[float]:

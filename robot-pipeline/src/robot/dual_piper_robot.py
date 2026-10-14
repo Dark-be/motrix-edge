@@ -26,7 +26,9 @@
   （``PiperController.pose_to_joint``，静态纯函数），仍走 MIT 关节通路（**不经 ``move_p``**）；
   位姿观测由同一模型的静态正解给出（与解算同源）；
 - 配置 ``robot.cartesian.ik``（求解参数）在这里解析后直接用于解算（限位无需配置：解算与下发
-  共用 ``PIPER_JOINT_LIMITS``）。
+  共用 ``PIPER_JOINT_LIMITS``）；配置 ``robot.tcp``（末端 TCP 偏移）把位姿读 / 写的原点从法兰
+  切到工具末端——正解末尾乘 ``T_flange_tcp``、解算前还原法兰（见
+  ``wiki/design/robot_pipeline_tcp.md``）。
 
 硬件 SDK（pyAgxArm / pyrealsense2 / v4l2）**仅在机器人端安装**。
 """
@@ -151,12 +153,15 @@ class DualPiperRobot(BaseRobot):
 
         实测位姿（``get_observation_pose(qpos)``）与目标位姿（``get_target_pose()``）共用这一个
         换算层，保证「读到的」与「下发的目标」严格同系（同一 ``PiperKinematics`` 模型）。
+
+        正解给的是**法兰系**位姿，末尾统一经 ``pose_to_tcp()`` 换到**位姿系**（``robot.tcp`` 未开启
+        时就是法兰，零扰动）——两个观测键因此始终同系，可直接比较。
         """
         values = np.asarray(joints, dtype=np.float64).reshape(-1)
         if values.shape[0] < self.QPOS or not np.all(np.isfinite(values[: self.QPOS])):
             return np.full(self.POSE, np.nan)
         arms = values[: self.QPOS].reshape(len(self.ARM_NAMES), self.JOINTS_PER_ARM)
-        return np.concatenate([PiperController.joint_to_pose(arm) for arm in arms])
+        return self.pose_to_tcp(np.concatenate([PiperController.joint_to_pose(arm) for arm in arms]))
 
     def get_target_pose(self) -> np.ndarray | None:
         """**目标位姿** = ``FK(关节段目标)``（每臂 ``xyz + rpy``，法兰系，米 / 弧度）。
@@ -227,8 +232,11 @@ class DualPiperRobot(BaseRobot):
     def _solve_pose(self, pose: np.ndarray, seed: np.ndarray) -> np.ndarray:
         """绝对目标位姿（每臂 ``xyz + rpy``）→ 关节段目标（逐臂静态逆解，起点 ``seed``）。
 
+        ``pose`` 是**位姿系**的值（``robot.tcp`` 开启时原点在 TCP）——解算前统一经
+        ``tcp_to_flange()`` 还原成法兰，伊此 IK / 限位 / 标定对照脚本都只看法兰。
         逆解在**控制线程**里、每条命令只做一次（不进 30Hz 控制拍）；失败只影响该条命令。
         """
+        flange_pose = self.tcp_to_flange(pose)
         start_joints = np.asarray(seed, dtype=np.float64).reshape(-1)
         home = np.asarray(self.init_joint, dtype=np.float64).reshape(-1)
         joints: list[np.ndarray] = []
@@ -236,7 +244,7 @@ class DualPiperRobot(BaseRobot):
             start = index * self.POSE_DIM_PER_ARM
             joint_start = index * self.JOINTS_PER_ARM
             span = slice(joint_start, joint_start + self.JOINTS_PER_ARM)
-            block = pose[start : start + self.POSE_DIM_PER_ARM]
+            block = flange_pose[start : start + self.POSE_DIM_PER_ARM]
             result = PiperController.pose_to_joint(
                 block, start_joints[span], fallback_seeds=(home[span],), **self.ik_config
             )

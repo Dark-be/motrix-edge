@@ -41,8 +41,16 @@ from .naming import (
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
     CMD_INFER_RTC_SET,
+    CMD_ROBOT_TCP,
 )
-from .params import TELEOP_COMMAND_MODES, parse_bool, parse_meta, teleop_mode_for
+from .params import (
+    TELEOP_COMMAND_MODES,
+    parse_alpha,
+    parse_bool,
+    parse_meta,
+    parse_offset,
+    teleop_mode_for,
+)
 
 
 def apply_teleop(adapter, cmd) -> tuple[bool, str | None]:
@@ -61,6 +69,31 @@ def apply_teleop(adapter, cmd) -> tuple[bool, str | None]:
     mode = teleop_mode_for(cmd.name, cmd.params.get("mode"))
     adapter.set_teleop(enabled, mode)
     return enabled, mode
+
+
+def apply_switch(adapter, cmd, *, in_session: bool) -> dict:
+    """``robot tcp`` / ``robot gravity`` 的唯一实现（node 与会话共用，与 ``apply_teleop`` 同构）。
+
+    两条命令都会改「**同一会话内的语义**」：``tcp`` 换 ``observations/pose`` 的原点、``gravity``
+    改 ``control_mode``（采集 JSON 的元信息）——因此**离开会话才能切**（同 ``adapter config set``
+    先例）。⚠️ 与 ``robot teleop`` 不同：人工接管是**会话中**的正常操作，不受此限。
+
+    ``enabled`` 必填；``offset``（tcp，米，3 个数）/ ``alpha``（gravity，前馈比例）可选。
+    参数非法 / 会话中切换 → ``ValueError``（调用方回执 rejected）；成功返回回执字段（回显请求）。
+    """
+    if in_session:
+        raise ValueError(
+            f"{cmd.name}: quit the session first（切换位姿系 / 重力前馈会让同一会话内的观测语义与"
+            "数据元信息前后不一致；人工接管 robot teleop 不受此限）"
+        )
+    enabled = parse_bool(cmd.params.get("enabled"))
+    if cmd.name == CMD_ROBOT_TCP:
+        offset = parse_offset(cmd.params.get("offset"))
+        adapter.set_tcp(enabled, offset)
+        return {"tcp": enabled, "offset": offset}
+    alpha = parse_alpha(cmd.params.get("alpha"))
+    adapter.set_gravity(enabled, alpha)
+    return {"gravity": enabled, "alpha": alpha}
 
 
 def get_rtc_params(base_cfg) -> dict:

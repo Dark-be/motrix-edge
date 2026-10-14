@@ -59,18 +59,24 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_ALPHA,
     FIELD_ARMS,
     FIELD_CAMERAS,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
     FIELD_DETAIL,
+    FIELD_ENABLED,
     FIELD_FRAMES,
+    FIELD_GRAVITY,
     FIELD_LAYOUT,
     FIELD_MEASURED_HZ,
     FIELD_META,
     FIELD_NAME,
+    FIELD_OFFSET,
     FIELD_OK,
+    FIELD_POSE_FRAME,
     FIELD_RUNNING,
+    FIELD_TCP_OFFSET,
     FIELD_TELEOP_ENABLED,
     FIELD_TELEOP_MODE,
     PATH_CAMERAS,
@@ -79,10 +85,12 @@ from motrix_edge.adapter.http_contract import (
     PATH_CAPTURE_STATUS,
     PATH_CAPTURE_SYNC,
     PATH_EXECUTE,
+    PATH_GRAVITY,
     PATH_HEALTH,
     PATH_RESET,
     PATH_ROLLOUT,
     PATH_SAFE_STOP,
+    PATH_TCP,
     PATH_TELEOP,
 )
 from motrix_edge.adapter.shm_contract import ObsShmReader
@@ -93,6 +101,26 @@ from motrix_edge.utils.data_handler import debug_print
 # 直接当米 → 1e5 量级），丢弃该拍位姿并记 ERROR，不喂给策略 / planner。
 POSE_MAX_ABS_XYZ_M = 10.0  # 位置：米（工作站半径远小于此）
 POSE_MAX_ABS_RPY_RAD = 7.0  # 姿态：弧度（约 2π，留余量）
+
+
+def _parse_tcp_offset(payload) -> dict | None:
+    """health 的 ``tcp_offset`` 段 → ``{臂: [x, y, z]}``；缺失 → ``None``。
+
+    形状 / 取值不合法 → ``None``（宁可不换算，不拿半个偏移去算世界坐标）——消费方据此视为
+    「机器人在法兰系」，**不报错**（与其它可选项同一套「可关」口径）。
+    """
+    if not isinstance(payload, dict) or not payload:
+        return None
+    offsets: dict[str, list[float]] = {}
+    for arm, values in payload.items():
+        try:
+            array = np.asarray(values, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if array.shape[0] != 3 or not np.all(np.isfinite(array)):
+            return None
+        offsets[str(arm)] = [float(value) for value in array]
+    return offsets or None
 
 
 def _as_opt_float(value) -> float | None:
@@ -141,6 +169,10 @@ class HttpShmAdapter(RobotAdapter):
         self._camera_meta_problem: str | None = None  # 元数据不可用原因（同原因只记一条）
         self._frames: FrameSet | None = None  # 统一坐标系外参产物（未标定 → None）
         self._frames_problem: str | None = None  # 产物不可用原因（同原因只记一条）
+        # 最近一次 health（**运行位的唯一来源**：位姿系 / TCP 偏移 / 重力状态）：node 每 2s
+        # 拉一次 health，这里随手存下返回体；没拉过时 pose_frame() / tcp_offset_by_arm() 自己
+        # 拉一次。**不做 TTL 缓存**——值随 health 回来，本身就是随时新鲜的。
+        self._health: HealthStatus | None = None
         self._depth_mismatch_logged: str | None = None  # 深度路数 / 形状不符原因（同原因只记一条）
 
         # 本地记录（便于调试与无硬件测试）
@@ -201,7 +233,10 @@ class HttpShmAdapter(RobotAdapter):
     def health(self) -> HealthStatus:
         """健康检查：实时 ``GET /v1/health``（SDK 自维护硬件；Edge 只查询）。
 
-        附带 robot 名义 / 实测控制频率（control_hz / measured_hz，robot env 上报）。
+        兼作**运行位读回**：控制频率（control_hz / measured_hz）+ 位姿系 / TCP 偏移 / 重力前馈
+        状态都随这次响应回来，并存进 ``self._health``（``pose_frame()`` / ``tcp_offset_by_arm()``
+        从这里取）。失联 / 未就绪时**保留上一次成功的运行位**——位姿系参与 Edge 侧坐标换算，
+        宁可稍旧，也不能退回「按法兰算」。
         """
         data = {}
         try:
@@ -212,12 +247,18 @@ class HttpShmAdapter(RobotAdapter):
             debug_print(self.name, f"health check failed: {exc}", "WARNING")
             ok = False
         self._running = ok
-        return HealthStatus(
+        status = HealthStatus(
             ok=ok,
             detail=str(data.get(FIELD_DETAIL) or ""),
             control_hz=_as_opt_float(data.get(FIELD_CONTROL_HZ)),
             measured_hz=_as_opt_float(data.get(FIELD_MEASURED_HZ)),
+            pose_frame=str(data.get(FIELD_POSE_FRAME) or "") or None,
+            tcp_offset=_parse_tcp_offset(data.get(FIELD_TCP_OFFSET)),
+            gravity=data.get(FIELD_GRAVITY) or None,
         )
+        if ok or self._health is None:
+            self._health = status
+        return status
 
     # ---- 指令（经 HTTP 转发 SDK 进程）-------------------------------------------
     def reset(self) -> None:
@@ -246,6 +287,49 @@ class HttpShmAdapter(RobotAdapter):
             body[FIELD_ARMS] = arms_out
         debug_print(self.name, f"execute sent: {target.tolist()} layout={name}", "INFO")
         self._client().post(PATH_EXECUTE, json=body)
+
+    def _post_switch(self, path: str, body: dict, what: str) -> None:
+        """下发运行位开关并**检查回执**：4xx/5xx → ``ValueError``（回执 rejected）。
+
+        与动作指令（``execute`` / ``rollout``：失败只影响那一条，且新旧状态都能从 health 看到）
+        不同：开关是**操作员的显式动作**，静默成功会让现场以为切了、实际没切（``robot gravity``
+        在无重力支持的机型上回 422 就是这类）。
+        """
+        resp = self._client().post(path, json=body)
+        if resp.status_code >= 400:
+            detail = ""
+            try:
+                detail = str(resp.json().get("detail") or "")
+            except Exception:  # noqa: BLE001 非 JSON 回包（网关 / 代理页）
+                detail = ""
+            raise ValueError(f"robot refused {what}: HTTP {resp.status_code}{f' ({detail})' if detail else ''}")
+
+    def set_tcp(self, enabled: bool, offset=None) -> None:
+        """运行期切换位姿系（法兰 ↔ 工具末端）：HTTP 转发 SDK 进程。
+
+        ``offset``（3 个数，米）给定时覆盖配置的公共偏移（**运行期值**，不写回 yml）。
+        **不留影子**：真值一律从 ``health()`` 读回（位姿系进 Edge 的坐标换算，影子与真值不一致
+        就会静默差一个常量）。会话内不允许切（由 node 判，见 ``command.apply_switch``）；
+        机器人回 4xx（偏移非法 / 无臂可换）→ ``ValueError``。
+        """
+        body: dict = {FIELD_ENABLED: bool(enabled)}
+        if offset is not None:
+            body[FIELD_OFFSET] = [float(value) for value in offset]
+        debug_print(self.name, f"tcp set to {bool(enabled)} offset={offset}", "INFO")
+        self._post_switch(PATH_TCP, body, "tcp switch")
+
+    def set_gravity(self, enabled: bool, alpha: float | None = None) -> None:
+        """运行期开关重力前馈（执行臂）：HTTP 转发 SDK 进程。
+
+        ``alpha`` 给定时覆盖前馈比例（0 = 保留装载但不补偿）。**不留影子**：状态从 ``health()``
+        的 ``gravity`` 段读回。会话内不允许切（由 node 判）；机器人回 4xx（机型不支持重力前馈）
+        → ``ValueError``。
+        """
+        body: dict = {FIELD_ENABLED: bool(enabled)}
+        if alpha is not None:
+            body[FIELD_ALPHA] = float(alpha)
+        debug_print(self.name, f"gravity set to {bool(enabled)} alpha={alpha}", "INFO")
+        self._post_switch(PATH_GRAVITY, body, "gravity switch")
 
     def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
         """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
@@ -391,6 +475,38 @@ class HttpShmAdapter(RobotAdapter):
             if name:
                 infos[name] = dict(item)
         return infos, self._parse_frames(body.get(FIELD_FRAMES))
+
+    def pose_frame(self) -> str:
+        """位姿（读 + 写）所在坐标系名：**从 health 读回**（运行期可切），未上报 → 类常量。
+
+        位姿观测与位姿动作必须同系（``env.get_env_meta.pose_frame`` 就是它）：机器人开着
+        ``robot.tcp`` 时报 ``tcp``，本层如实转述（不自己推），否则调用方的 ``move_delta`` 会
+        差一个常量。**不留影子**：切换后的真值也走这里（``/v1/tcp`` 只负责下发命令）。
+        旧机器人进程不报该字段 / 进程不可达 → 回退适配器自己声明的类常量。
+        """
+        health = self._health or self.health()
+        declared = str(getattr(health, "pose_frame", None) or "").strip()
+        return declared or str(self.POSE_FRAME)
+
+    def tcp_offset_by_arm(self) -> dict[str, np.ndarray]:
+        """TCP 在**法兰系**下的位置（米，逐臂）；未上报 / 非 TCP 位姿系 → 空 dict。
+
+        只有机器人的位姿系是 ``tcp`` 时才有值。消费方（``server/depth.py`` 的腕相机外参合成）
+        用它把读到的位姿**还原回法兰**：``T_base_flange = T_base_tcp · T_flange_tcp⁻¹``。
+        同一次 health 响应里取值（与 ``pose_frame()`` 同源，不会一个旧一个新）。
+        """
+        health = self._health or self.health()
+        raw = getattr(health, "tcp_offset", None) or {}
+        if not isinstance(raw, dict):
+            return {}
+        offsets: dict[str, np.ndarray] = {}
+        for arm, values in raw.items():
+            array = np.asarray(values, dtype=np.float64).reshape(-1)
+            if array.shape[0] != 3 or not np.all(np.isfinite(array)):
+                debug_print(self.name, f"tcp_offset 非法（arm={arm}）：{values}，已忽略", "WARNING")
+                return {}
+            offsets[str(arm)] = array.copy()
+        return offsets
 
     def _parse_frames(self, payload) -> FrameSet | None:
         """``frames`` 段 → :class:`FrameSet`（缺失 → ``None``；非法 → ``None`` + 一条 WARNING）。"""

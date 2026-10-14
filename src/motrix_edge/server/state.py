@@ -55,6 +55,9 @@ def adapter_state(node) -> dict:
       （``absolute`` 示教 / ``delta`` 增量接管）——**仅支持遥操作的 adapter 会上报**
       （``set_teleop`` 记录；不支持者为 False / None），供前端显示「当前：程控 / 遥操作 /
       人工接管」并据此决定是否允许推理。
+    - ``pose_frame`` / ``tcp_offset`` / ``gravity``：**运行位**（位姿系 / TCP 偏移 / 重力前馈），
+      取自节点缓存的心跳（机器人 ``/v1/health``，周期刷新）——切换走 ``robot tcp`` /
+      ``robot gravity``，真值一律从 health 读回（不留影子）。
     """
     adapter = getattr(node, "adapter", None)
     health = getattr(node, "adapter_health", None)
@@ -66,6 +69,9 @@ def adapter_state(node) -> dict:
         "measured_hz": getattr(health, "measured_hz", None) if health is not None else None,
         "teleop": teleop,
         "teleop_mode": getattr(adapter, "teleop_mode", None) if teleop else None,
+        "pose_frame": getattr(health, "pose_frame", None) if health is not None else None,
+        "tcp_offset": getattr(health, "tcp_offset", None) if health is not None else None,
+        "gravity": getattr(health, "gravity", None) if health is not None else None,
     }
 
 
