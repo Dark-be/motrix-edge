@@ -84,7 +84,7 @@ def make_discovered(**overrides) -> DiscoveredRobot:
 
 
 def _patch_discover_client(monkeypatch, payload=None, error=None):
-    """把 discover_adapter 里的 ``httpx.Client`` 替换为桩（返回 canned 响应或抛错）。"""
+    """把 discover_adapter 里的 ``httpx2.Client`` 替换为桩（返回 canned 响应或抛错）。"""
 
     class _Resp:
         def __init__(self, payload):
@@ -112,7 +112,7 @@ def _patch_discover_client(monkeypatch, payload=None, error=None):
                 raise self._error
             return _Resp(self._payload)
 
-    monkeypatch.setattr("motrix_edge.adapter.httpx", SimpleNamespace(Client=_Client))
+    monkeypatch.setattr("motrix_edge.adapter.httpx2", SimpleNamespace(Client=_Client))
 
 
 def test_discover_adapter_returns_none_when_no_process(monkeypatch):

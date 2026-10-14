@@ -116,7 +116,7 @@ uv sync --extra webrtc   # 只补 WebRTC 预览
 > （**仅 torch**；其余依赖走内网 `pypi.mp` 索引，带 sha256）。取舍与核对依据见 `pyproject.toml`
 > 的 `[tool.uv]` 注释。
 
-不引入额外依赖的客户端 / 服务**不设选项**（如 RPent 面只用核心依赖里的 `httpx` / `numpy`）。
+不引入额外依赖的客户端 / 服务**不设选项**（如 RPent 面只用核心依赖里的 `httpx2` / `numpy`）。
 对应的测试文件在依赖缺失时**不收集**（pytest 头部会列出被跳过的文件），因此不带可选面跑
 测试只覆盖核心面。
 

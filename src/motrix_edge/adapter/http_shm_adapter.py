@@ -40,7 +40,7 @@ Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 /
 """
 
 import cv2
-import httpx
+import httpx2
 import numpy as np
 
 from motrix_edge.adapter.base import (
@@ -165,7 +165,7 @@ class HttpShmAdapter(RobotAdapter):
         self.http_timeout = self.HTTP_TIMEOUT
 
         # 惰性连接资源：首次指令 / 观测时建立（SDK 自维护硬件与连接）
-        self._http: httpx.Client | None = None  # SDK HTTP 客户端（指令下行）
+        self._http: httpx2.Client | None = None  # SDK HTTP 客户端（指令下行）
         self._shm: ObsShmReader | None = None  # 共享内存观测读者（观测上行）
         self._running = False  # 机器人进程最近一次确认是否运行（health 实时刷新）
         self._pose_problem_logged: str | None = None  # 位姿不可用原因（同原因只记一条）
@@ -195,10 +195,10 @@ class HttpShmAdapter(RobotAdapter):
         """机器人进程最近一次确认是否运行（health 实时刷新）。"""
         return self._running
 
-    def _client(self) -> httpx.Client:
+    def _client(self) -> httpx2.Client:
         """惰性建立 SDK HTTP 客户端（首次指令 / 查询时）。"""
         if self._http is None:
-            self._http = httpx.Client(base_url=self.sdk_url, timeout=self.http_timeout)
+            self._http = httpx2.Client(base_url=self.sdk_url, timeout=self.http_timeout)
         return self._http
 
     def release(self):
@@ -398,7 +398,7 @@ class HttpShmAdapter(RobotAdapter):
         持续推理（30Hz）会反复命中 409，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
         """
         resp = self._client().post(path, json=body)
-        if resp.status_code == httpx.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
+        if resp.status_code == httpx2.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
             self.rollout_refused_calls += 1
             if not self._rollout_refused_logged:
                 self._rollout_refused_logged = True

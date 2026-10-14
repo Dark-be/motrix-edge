@@ -14,12 +14,12 @@ dependencies = [
     "opencv-python-headless",  # 图像处理
     "fastapi>=0.141.1",
     "uvicorn>=0.52.1",
-    "httpx>=0.28.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）
+    "httpx2>=2.13.1",  # HTTP 客户端（adapter 中间件转发 SDK 指令）+ Starlette TestClient 后端
     "prompt-toolkit>=3.0.53",  # 交互式 CLI（utils/cli.py）：行编辑 / 历史 / 补全
 ]
 
 # 可选面：**按是否引入额外第三方依赖分组** —— 不引入额外依赖的客户端 / 服务不设选项
-# （如 RPent 面只用 httpx + numpy，已在上面 dependencies 里，测试无需跳过）。
+# （如 RPent 面只用 httpx2 + numpy，已在上面 dependencies 里，测试无需跳过）。
 # 装法：``uv sync --extra <名>``（或 ``--extra all`` 一次装齐）；详见 README「安装」。
 [project.optional-dependencies]
 # openpi 策略客户端：WebSocket + msgpack 一问一答（transport/ws.py、policy/openpi/）
@@ -37,9 +37,9 @@ all = ["motrix-edge[openpi,lerobot,webrtc]"]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest",
     "pytest-cov",
+    "pytest-timeout>=2.4.0",
     "ruff",
     "grpcio-tools>=1.62.0",  # 重生成 vendored lerobot/transport 的 services_pb2{,_grpc}.py
     "protobuf>=4.25",

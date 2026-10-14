@@ -108,15 +108,6 @@ wheels = [
 ]
 
 [[package]]
-name = "certifi"
-version = "2026.7.22"
-source = { registry = "http://pypi.mp/simple" }
-sdist = { url = "http://pypi.mp/packages/certifi/2026.7.22/certifi-2026.7.22.tar.gz", hash = "sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55" }
-wheels = [
-    { url = "http://pypi.mp/packages/certifi/2026.7.22/certifi-2026.7.22-py3-none-any.whl", hash = "sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775" },
-]
-
-[[package]]
 name = "cffi"
 version = "2.1.1"
 source = { registry = "http://pypi.mp/simple" }
@@ -422,7 +413,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "http://pypi.mp/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "http://pypi.mp/packages/exceptiongroup/1.3.1/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219" }
 wheels = [
@@ -632,31 +623,42 @@ wheels = [
 ]
 
 [[package]]
-name = "httpcore"
-version = "1.0.9"
+name = "httpcore2"
+version = "2.13.1"
 source = { registry = "http://pypi.mp/simple" }
 dependencies = [
-    { name = "certifi" },
     { name = "h11" },
+    { name = "truststore" },
 ]
-sdist = { url = "http://pypi.mp/packages/httpcore/1.0.9/httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8" }
+sdist = { url = "http://pypi.mp/packages/httpcore2/2.13.1/httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103" }
 wheels = [
-    { url = "http://pypi.mp/packages/httpcore/1.0.9/httpcore-1.0.9-py3-none-any.whl", hash = "sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55" },
+    { url = "http://pypi.mp/packages/httpcore2/2.13.1/httpcore2-2.13.1-py3-none-any.whl", hash = "sha256:e1e05d4f25f7d7d496bfb96748f6f4b67657b03da069b3a68c36069f3db73d0a" },
 ]
 
 [[package]]
-name = "httpx"
-version = "0.28.1"
+name = "httpx2"
+version = "2.13.1"
 source = { registry = "http://pypi.mp/simple" }
 dependencies = [
-    { name = "anyio" },
-    { name = "certifi" },
-    { name = "httpcore" },
+    { name = "anyio", marker = "sys_platform != 'emscripten'" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
+    { name = "httpx2-jsfetch", marker = "python_full_version >= '3.12' and sys_platform == 'emscripten'" },
     { name = "idna" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "http://pypi.mp/packages/httpx/0.28.1/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc" }
+sdist = { url = "http://pypi.mp/packages/httpx2/2.13.1/httpx2-2.13.1.tar.gz", hash = "sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa" }
 wheels = [
-    { url = "http://pypi.mp/packages/httpx/0.28.1/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad" },
+    { url = "http://pypi.mp/packages/httpx2/2.13.1/httpx2-2.13.1-py3-none-any.whl", hash = "sha256:6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4" },
+]
+
+[[package]]
+name = "httpx2-jsfetch"
+version = "1.0"
+source = { registry = "http://pypi.mp/simple" }
+sdist = { url = "http://pypi.mp/packages/httpx2-jsfetch/1.0/httpx2_jsfetch-1.0.tar.gz", hash = "sha256:70a0e3eabfef7cce5ad9c629f7d01ca05e418f586646f4ddf14782e4c1454c60" }
+wheels = [
+    { url = "http://pypi.mp/packages/httpx2-jsfetch/1.0/httpx2_jsfetch-1.0-py3-none-any.whl", hash = "sha256:cb916b707601e69a07721aabc8f3f6659be3a6893bc1ff5c6f9e02241df2da32" },
 ]
 
 [[package]]
@@ -789,7 +791,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "numpy", version = "2.2.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version >= '3.12'" },
@@ -824,10 +826,10 @@ webrtc = [
 [package.dev-dependencies]
 dev = [
     { name = "grpcio-tools" },
-    { name = "httpx" },
     { name = "protobuf" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pytest-timeout" },
     { name = "ruff" },
 ]
 
@@ -836,7 +838,7 @@ requires-dist = [
     { name = "aiortc", marker = "extra == 'webrtc'", specifier = ">=1.15.0,<2.0.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "grpcio", marker = "extra == 'lerobot'", specifier = ">=1.62.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "motrix-edge", extras = ["openpi", "lerobot", "webrtc"], marker = "extra == 'all'" },
     { name = "msgpack", marker = "extra == 'openpi'", specifier = ">=1.0.5" },
     { name = "numpy" },
@@ -852,10 +854,10 @@ provides-extras = ["openpi", "lerobot", "webrtc", "all"]
 [package.metadata.requires-dev]
 dev = [
     { name = "grpcio-tools", specifier = ">=1.62.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "protobuf", specifier = ">=4.25" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "ruff" },
 ]
 
@@ -1462,6 +1464,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "http://pypi.mp/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "http://pypi.mp/packages/pytest-timeout/2.4.0/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a" }
+wheels = [
+    { url = "http://pypi.mp/packages/pytest-timeout/2.4.0/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "http://pypi.mp/simple" }
@@ -1678,6 +1692,15 @@ wheels = [
     { url = "http://pypi.mp/packages/torch/2.9.1+cpu/torch-2.9.1+cpu-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:3ac2b8df2c55430e836dcda31940d47f1f5f94b8731057b6f20300ebea394dd9" },
     { url = "http://pypi.mp/packages/torch/2.9.1+cpu/torch-2.9.1+cpu-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:5b688445f928f13563b7418b17c57e97bf955ab559cf73cd8f2b961f8572dbb3" },
     { url = "http://pypi.mp/packages/torch/2.9.1+cpu/torch-2.9.1+cpu-cp314-cp314t-win_amd64.whl", hash = "sha256:cf9c3e50b595721ca6b488bdcc326e0f1af73ed28b9b66eff504a96649bb5c96" },
+]
+
+[[package]]
+name = "truststore"
+version = "0.10.5"
+source = { registry = "http://pypi.mp/simple" }
+sdist = { url = "http://pypi.mp/packages/truststore/0.10.5/truststore-0.10.5.tar.gz", hash = "sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd" }
+wheels = [
+    { url = "http://pypi.mp/packages/truststore/0.10.5/truststore-0.10.5-py3-none-any.whl", hash = "sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c" },
 ]
 
 [[package]]

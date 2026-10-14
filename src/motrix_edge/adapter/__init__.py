@@ -29,7 +29,7 @@
 
 from importlib.metadata import entry_points
 
-import httpx
+import httpx2
 
 from motrix_edge.utils.data_handler import debug_print
 
@@ -78,7 +78,7 @@ def discover_adapter(
     """
     url = f"http://{host}:{port}"
     try:
-        with httpx.Client(base_url=url, timeout=1.0) as client:
+        with httpx2.Client(base_url=url, timeout=1.0) as client:
             resp = client.post(PATH_DISCOVER)
             resp.raise_for_status()
             robot = resp.json().get(FIELD_ROBOT, {})
