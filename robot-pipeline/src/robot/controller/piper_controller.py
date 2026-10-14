@@ -21,7 +21,7 @@ from config import resolve_config_file
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 from utils.data_handler import debug_print, set_log_level
 
-from robot.gravity import (
+from robot.dynamics.gravity import (
     DEFAULT_ALPHA,
     DEFAULT_PARAMS_RELATIVE,
     T_FF_LIMIT_NM,
@@ -43,7 +43,7 @@ _KINEMATICS = PiperKinematics()
 # ``τ_gravity / kp`` 附近的平衡点（“设定什么关节就是什么关节”并不成立）。上位任何
 # 「到位」判定（edge 的 ``settle`` / RPent 的 ``reached``）都得按**实测稳态误差**设容差。
 #
-# 重力前馈（可选，见 ``robot.gravity`` 与 wiki/design/robot_pipeline_impedance.md）：装载后
+# 重力前馈（可选，见 ``robot.dynamics.gravity`` 与 wiki/design/robot_pipeline_impedance.md）：装载后
 # ``t_ref`` 改为每拍的 ``α·τ̂_g(q_meas)``（仍受固件 ±16 N·m 限幅），上面那条平衡点描述因此
 # 只在**未装载 / 占位参数 / 降级**时成立。
 MIT_CTRL_CFG = [
@@ -104,7 +104,7 @@ class PiperController(ArmController):
     ``move_p`` 在本层因此无路可达（与 MIT 互斥）。
 
     **重力前馈（可选）**：``MIT_CTRL_CFG`` 本身只有 P/D（``t_ref = 0``、``vel_ref = 0``），不补
-    重力 / 科氏 / 摩擦；装载 ``robot.gravity`` 后每拍的 ``t_ff`` 改为 ``α·τ̂_g(q_meas)``（仍受固件
+    重力 / 科氏 / 摩擦；装载重力模型后每拍的 ``t_ff`` 改为 ``α·τ̂_g(q_meas)``（仍受固件
     ±16 N·m 限幅与异常降级）。参数未标定（占位全 0）时 ``t_ff`` 恒为 0，行为与未装载一致；因此
     ``τ_gravity / kp`` 那条平衡点描述只在**未装载 / 占位 / 降级**时成立。标定与设计见
     ``wiki/design/robot_pipeline_impedance.md``。
