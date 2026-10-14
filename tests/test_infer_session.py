@@ -135,6 +135,7 @@ class _FakeAdapter:
         # 录制（capture episode start/end）+ 采集元信息同步记录
         self.start_capture_calls = 0
         self.end_capture_calls = 0
+        self.cancel_capture_calls = 0
         self.synced_meta: list[dict] = []
 
     def release(self):
@@ -173,6 +174,9 @@ class _FakeAdapter:
     def end_capture(self):
         self.end_capture_calls += 1
 
+    def cancel_capture(self):
+        self.cancel_capture_calls += 1
+
     def sync_capture_meta(self, meta):
         self.synced_meta.append(meta)
 
@@ -189,6 +193,24 @@ def _build_session(adapter, policy, signals, warmup_required=True):
     # infer_freq 1000 → 主循环几乎不 sleep，测试快；adapter 由节点注入（会话只引用）
     cfg = {"policy": {"infer_freq": 1000, "warmup_required": warmup_required}}
     return infer_session.InferSession(cfg, command_source=make_signals(*signals), adapter=adapter)
+
+
+def test_infer_accepts_capture_status_dirty_callback(monkeypatch):
+    """节点统一注入采集状态回调时，推理会话应接收并透传给基座。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    dirty = []
+
+    session = infer_session.InferSession(
+        {"policy": {"infer_freq": 1000}},
+        command_source=make_signals("session quit"),
+        adapter=adapter,
+        on_capture_status_dirty=lambda: dirty.append(None),
+    )
+    session._mark_capture_status_dirty()
+
+    assert dirty == [None]
 
 
 # 时序前置条件的有界等待：测试用的 fake policy 是即时返回的，5s 已是数量级余量
@@ -422,6 +444,25 @@ def test_infer_capture_episode_recording_toggles(monkeypatch):
     assert replies[0].data["episode"] == "start"
     assert replies[0].data["recording"] is True
     assert replies[1].data["episode"] == "end"
+    assert replies[1].data["recording"] is False
+
+
+def test_infer_capture_episode_cancel_discards_recording(monkeypatch):
+    """推理录制取消：adapter.cancel_capture 被调用，录制位复位并回显 cancel。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    start = _REGISTRY.parse_argv(["capture", "episode", "start"])
+    cancel = _REGISTRY.parse_argv(["capture", "episode", "cancel"])
+    start.reply_to = replies.append
+    cancel.reply_to = replies.append
+    session = _build_session(adapter, policy, (PROMPT_CMD, start, cancel, "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert adapter.cancel_capture_calls == 1
+    assert session.recording is False
+    assert replies[1].data["episode"] == "cancel"
     assert replies[1].data["recording"] is False
 
 

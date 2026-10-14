@@ -80,7 +80,7 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 |                 | `pose_frame()` / `tcp_offset_by_arm()`                               | 位姿系名与逐臂 TCP 偏移：**从 health 读回**（机器人开着 `robot.tcp` 时报 `tcp`）；失联 → 保留上一次已知值，从未成功过 → 类常量 `POSE_FRAME`         |
 | capture status  | `capture_status()`                                                   | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）                                                                           |
 | capture sync    | `sync_capture_meta(meta)`                                            | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                                                                            |
-| capture episode | `start_capture()` / `end_capture()`                                  | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                                                                                                  |
+| capture episode | `start_capture()` / `end_capture()` / `cancel_capture()`             | 通知进程开始 / 保存结束 / 取消丢弃一轮采集（episode）；默认 no-op                                                                                   |
 | rollout         | `rollout(action, *, layout=None, arms=None)`                         | 推理闭环：接收模型 action 经 HTTP 转发进程（`layout` 声明每臂块的段序列、`arms` 声明作用域）；遥操作中进程拒收 → 返回 `False`                       |
 | safe_stop       | `safe_stop()`                                                        | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**                                                                                   |
 | 生命周期辅助    | `reset()`                                                            | 程序复位到 home（非阻塞）                                                                                                                           |

@@ -36,6 +36,7 @@ env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程�
     POST /v1/safe_stop     急停
     POST /v1/capture/start 开始一轮采集（episode 开始）
     POST /v1/capture/end   结束一轮采集（episode 结束）
+    POST /v1/capture/cancel 取消当前采集（停止并丢弃本轮文件）
     POST /v1/capture/sync  同步采集元信息 {meta}（采集员 / 任务名等）
     GET  /v1/capture/status {running, meta, data_dir}
 
@@ -107,6 +108,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_WIDTH,
     INTRINSICS_KEYS,
     PATH_CAMERAS,
+    PATH_CAPTURE_CANCEL,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
@@ -464,6 +466,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 PATH_SAFE_STOP,
                 PATH_CAPTURE_START,
                 PATH_CAPTURE_END,
+                PATH_CAPTURE_CANCEL,
             ],
         }
 
@@ -663,6 +666,13 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         """结束一轮采集（episode 结束）：env 置 capturing=False，保存为一条 episode。"""
         _require_ready()
         env.robot_capture_end()
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+
+    @app.post(PATH_CAPTURE_CANCEL)
+    def capture_cancel():
+        """取消当前采集：env 置 capturing=False，并删除本轮已写文件。"""
+        _require_ready()
+        env.robot_capture_cancel()
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_CAPTURE_SYNC)

@@ -17,11 +17,13 @@
 一次「回合」在本项目里是三件事同一边界（见 [会话（session）](../../../wiki/design/motrix_edge_session.md)
 的「会话分层」）：
 
-1. **mcap 录制**：由机器人进程执行（``adapter.start_capture`` / ``end_capture``）；
+1. **mcap 录制**：由机器人进程执行（``adapter.start_capture`` / ``end_capture`` /
+   ``cancel_capture``）；
 2. **回合标识**：``episode_id``（``{毫秒}-{序号}``）+ 递增序号；写进回执、日志与本仓状态；
 3. **训练数据边界**（仅 RL）：``rl/episode_buffer`` 的过渡缓冲以同一 ``episode_id`` 开轮/关轮。
 
-本模块只负责 1 + 2（**无回执、无日志**：回执形状与日志口径归会话）；3 由 RL 会话在自己的钩子里额外
+本模块只负责 1 + 2（**无回执、无日志**：回执形状与日志口径归会话）；取消时由 adapter 丢弃
+本轮文件但保留 episode 标识用于诊断。3 由 RL 会话在自己的钩子里额外
 驱动。原先 capture / infer / rl 三处各写一份「start_capture + 回合号 + episode_id 拼接」，收敛到这里。
 
 **不做多线程**（见 design「冻结的取舍」）：本对象只被会话循环线程读写，不加锁。
@@ -88,6 +90,19 @@ class EpisodeRecorder:
         """
         adapter = self._require_adapter("end")
         adapter.end_capture()
+        self._recording = False
+
+    def cancel(self) -> None:
+        """取消本轮：通知机器人进程停止录制并丢弃本轮文件。
+
+        与 :meth:`end` 一样保持幂等通知语义；机器人进程负责删除已经流式写入的临时文件，
+        本地保留 ``episode_id`` 仅用于回执与诊断。
+
+        Raises:
+            RuntimeError: 会话未绑定适配器。
+        """
+        adapter = self._require_adapter("cancel")
+        adapter.cancel_capture()
         self._recording = False
 
     def _require_adapter(self, action: str):

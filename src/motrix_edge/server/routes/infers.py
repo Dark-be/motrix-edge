@@ -14,8 +14,8 @@
 
 """routes.infers —— ``/v1/infers/*`` 的 HTTP 映射（推理会话控制）。
 
-无回合概念：``enter`` → ``rollout``（单步 / 持续）→ ``exit``；录制由 ``episode/start·end``
-（= ``capture episode start/end``）、元信息由 ``sync``（= ``capture sync``）。每个动作都映射为
+无回合概念：``enter`` → ``rollout``（单步 / 持续）→ ``exit``；录制由 ``episode/start·end·cancel``
+（= ``capture episode start/end/cancel``）、元信息由 ``sync``（= ``capture sync``）。每个动作都映射为
 **一条命令**（经 ``CommandService.submit``，由推理会话消费）——与 CLI 逐条对应，路由不做业务
 判断；``GET /v1/infers`` 是只读快照（``server/status.py``）。未注入 → 501。
 
@@ -26,6 +26,7 @@
 from fastapi import APIRouter, Header
 
 from motrix_edge.command import (
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_SYNC,
@@ -139,6 +140,11 @@ def build_router(services: Services) -> APIRouter:
     def infers_episode_end(x_lease_id: str | None = Header(default=None)):
         """结束一轮推理 rollout 录制（capture episode end）：robot 保存该 episode。受控操作。"""
         return accepted(_commands().submit(CMD_CAPTURE_EPISODE_END, lease_id=x_lease_id))
+
+    @router.post("/v1/infers/episode/cancel")
+    def infers_episode_cancel(x_lease_id: str | None = Header(default=None)):
+        """取消本轮 rollout 录制：停止 robot 录制并丢弃本轮文件。受控操作。"""
+        return accepted(_commands().submit(CMD_CAPTURE_EPISODE_CANCEL, lease_id=x_lease_id))
 
     @router.post("/v1/infers/sync")
     def infers_sync(req: InferSyncRequest, x_lease_id: str | None = Header(default=None)):

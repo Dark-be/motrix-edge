@@ -84,6 +84,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_TELEOP_MODE,
     FIELD_TELEOP_SPACE,
     PATH_CAMERAS,
+    PATH_CAPTURE_CANCEL,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
@@ -449,6 +450,11 @@ class HttpShmAdapter(RobotAdapter):
         """结束一轮采集：HTTP 转发 SDK 进程（episode 结束）。"""
         debug_print(self.name, "capture episode end", "INFO")
         self._client().post(PATH_CAPTURE_END)
+
+    def cancel_capture(self) -> None:
+        """取消当前采集：HTTP 转发 SDK 进程（停止并丢弃本轮文件）。"""
+        debug_print(self.name, "capture episode cancel", "INFO")
+        self._client().post(PATH_CAPTURE_CANCEL)
 
     # ---- observe（共享内存观测上行）---------------------------------------------
     def camera_infos(self) -> dict[str, dict]:

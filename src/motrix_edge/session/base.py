@@ -26,6 +26,7 @@ import time
 
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.command import (
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -97,6 +98,7 @@ STEP_LOOP_COMMANDS = (
     CMD_ROBOT_RESET,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_EPISODE_END,
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_SYNC,
 )
 
@@ -307,6 +309,10 @@ class BaseSession:
             self._on_episode_end(cmd)
             self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
+        if name == CMD_CAPTURE_EPISODE_CANCEL:
+            self._on_episode_cancel(cmd)
+            self._mark_capture_status_dirty()
+            return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_SYNC:
             self._on_capture_sync(cmd)
             self._mark_capture_status_dirty()
@@ -355,13 +361,18 @@ class BaseSession:
         推理会话在此加 prompt 门控（录制 ``task_name`` = prompt）；RL 会话在此清空过渡缓冲并记回合号。
         """
         self.recorder.start()
-        self._reply(cmd, ok_result(state="ready", episode="start"))
+        self._reply(cmd, ok_result(state="ready", episode="start", recording=True))
         return True
 
     def _on_episode_end(self, cmd) -> None:
         """``capture episode end``：默认实现 = **采集会话**（通知机器人保存 episode + 回执）。"""
         self.recorder.end()
-        self._reply(cmd, ok_result(state="ready", episode="end"))
+        self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+
+    def _on_episode_cancel(self, cmd) -> None:
+        """``capture episode cancel``：停止当前录制并丢弃本轮文件。"""
+        self.recorder.cancel()
+        self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
 
     def _on_capture_sync(self, cmd) -> None:
         """``capture sync --meta <json>``：同步采集元信息到机器人进程（三个会话同款）。"""

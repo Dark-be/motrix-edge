@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from motrix_edge.adapter.base import CaptureStatus
 from motrix_edge.command import (
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_SYNC,
@@ -378,6 +379,9 @@ class FakeCaptureSession:
             if name == CMD_CAPTURE_EPISODE_END:  # 结束一轮采集
                 self.recording = False
                 self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+            elif name == CMD_CAPTURE_EPISODE_CANCEL:  # 取消并丢弃本轮采集
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
             else:  # 未识别命令（当前会话不适用）统一回执，避免 submit 挂起（镜像真实 CaptureSession）
                 cmd_name = getattr(cmd, "name", None)
                 self._reply(
@@ -484,6 +488,9 @@ class FakeInferSession:
             elif name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
                 self.recording = False
                 self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+            elif name == CMD_CAPTURE_EPISODE_CANCEL:  # 推理时取消并丢弃 rollout 录制
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
             elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
                 # 与产线一致：走 parse_meta（同时接受 CLI 文本与 HTTP 原生 dict）
                 self._reply(cmd, ok_result(state="ready", meta=parse_meta((cmd.params or {}).get("meta"))))
@@ -1256,8 +1263,8 @@ def test_commands_robot_teleop_returns_receipt():
     assert zero.json()["data"]["teleop"] is False
 
 
-def test_commands_capture_episode_start_end_return_receipts():
-    """capability=capture/episode/start|end → submit，回执回显 episode / recording。
+def test_commands_capture_episode_start_end_cancel_return_receipts():
+    """capture episode start / end / cancel 均回显 episode / recording。
 
     采集按钮据此互锁：开始采集回执 → 禁用「开始」、使能「结束」（前端还会读
     ``capture_status.running`` 作为权威位）。
@@ -1285,6 +1292,21 @@ def test_commands_capture_episode_start_end_return_receipts():
     assert ended.status_code == 200
     assert ended.json()["data"]["episode"] == "end"
     assert ended.json()["data"]["recording"] is False
+
+    assert (
+        client.post(
+            "/v1/commands",
+            json={"command_id": "c3", "lease_id": lease, "capability": "capture/episode/start"},
+        ).status_code
+        == 200
+    )
+    cancelled = client.post(
+        "/v1/commands",
+        json={"command_id": "c4", "lease_id": lease, "capability": "capture/episode/cancel"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["data"]["episode"] == "cancel"
+    assert cancelled.json()["data"]["recording"] is False
 
     assert client.delete("/v1/captures", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
@@ -2045,8 +2067,8 @@ def test_infers_config_available_before_session():
     assert cfg["missing"] == []
 
 
-def test_infers_episode_recording_start_end():
-    """推理时 rollout 录制：episode start/end → capture episode 命令 → recording 状态翻转。"""
+def test_infers_episode_recording_start_end_cancel():
+    """推理 rollout 录制支持保存结束与取消丢弃。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
@@ -2071,6 +2093,13 @@ def test_infers_episode_recording_start_end():
     assert node.session.recording is False
     assert CMD_CAPTURE_EPISODE_START in [getattr(c, "name", None) for c in node.session.pulled]
     assert CMD_CAPTURE_EPISODE_END in [getattr(c, "name", None) for c in node.session.pulled]
+    # 再开一轮并取消：走独立端点与独立命令。
+    assert client.post("/v1/infers/episode/start", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post("/v1/infers/episode/cancel", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    assert r.json()["episode"] == "cancel"
+    assert r.json()["recording"] is False
+    assert CMD_CAPTURE_EPISODE_CANCEL in [getattr(c, "name", None) for c in node.session.pulled]
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
 

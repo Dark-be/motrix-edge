@@ -67,7 +67,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 | 层                                   | 职责                                                                                                                                                                                                                                                  | 不做什么                                                             |
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | **基座**（`BaseSession` + 命令骨架） | 生命周期（`session_start` / `run` / `session_finish`）、**命令循环**（取命令 → 分发 → 回执 → 未识别兜底）、能力校验（`required_capability`）、**无引擎的默认 `run`**（`capture` 直接使用）、急停 / 退出 / 复位 / 直发动作 / 遥操作                    | 不产生动作（不 `observe`）、不训练、不管理 learner 通道              |
-| **功能**（feature）                  | 录制（`capture episode start/end` + mcap + `episode_id`，`session/recording.py`）、采集元信息（`capture meta *`）、采集同步（`capture sync`）、策略配置（`infer config/model`，`session/policy_config.py`；infer / rl 共用）、RTC 参数（`infer rtc`） | 不决定“每步做什么”，不持步进节拍                                     |
+| **功能**（feature）                  | 录制（`capture episode start/end/cancel` + mcap + `episode_id`，`session/recording.py`）、采集元信息（`capture meta *`）、采集同步（`capture sync`）、策略配置（`infer config/model`，`session/policy_config.py`；infer / rl 共用）、RTC 参数（`infer rtc`） | 不决定“每步做什么”，不持步进节拍                                     |
 | **引擎**（engine）                   | “**本步动作从哪来**”：`step(observation)` + `reset()`（`session/engine.py`）；`RtcEngine`（包 `RTCManager`：块缓存 / 三元切分 / 预取，返回动作）与 `RtcResidualEngine`（同样是 `RTCManager` 取 base，但额外叠加本地残差、返回 `StepResult`）          | 不处理命令、不管生命周期、不管录制与上行（上行归会话自己的数据回路） |
 
 装配结果：
@@ -97,8 +97,8 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
 -   `run()`：`adapter.reset()` → 等待就绪 → 持续消费命令直到 `session quit` 退出。
     **显示观测由节点级持续写入 `frame_manager`**，本会话不再 `observe` / 写 `frame_manager`。
 -   命令：`session quit` 退出、`robot estop` 急停、`robot execute <qpos> [joint|pose]` 直发动作、
-    `robot teleop <bool> [mode]` / `robot teach <bool>` / `robot takeover <bool>` 遥操作 —— 示教（absolute）与人工接管（delta）、`capture episode start/end` 控制一轮采集
-    （回执回显 `episode` / `recording`）、
+    `robot teleop <bool> [mode]` / `robot teach <bool>` / `robot takeover <bool>` 遥操作 —— 示教（absolute）与人工接管（delta）、`capture episode start/end/cancel` 控制一轮采集
+    （`end` 保存 MCAP + JSON；`cancel` 停止并删除本轮 MCAP、不生成 JSON；回执回显 `episode` / `recording`）、
     `capture sync --meta <json>` 把采集元信息（采集员 / 任务名等）同步到机器人进程（进程保存数据时附加）；`capture meta list/add/edit/delete/delete-key` 管理元信息选项（配置级命令，任务态同样可用，读写 `capture.yml`）。
 -   采集数据由适配器 / 进程自维护；采集会话期间周期查询 `adapter.capture_status()`（node 刷新缓存）上报元信息。
 -   **已实现**：上述命令全部来自**基座 + 功能**（见「会话分层」）——`CaptureSession` 本体只剩
@@ -136,7 +136,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     -   多步（`count`）与 `drain` 模式**已取消**：动作块只作策略内部缓存、由 rtc 统一管理；
         录制 rollout 走 `capture episode start/end`（多余的 `count` 字段被忽略）。
 -   命令：`infer connect`、`infer rollout [mode]`、`infer config` / `infer model`、
-    `infer rtc`、`capture episode start` / `end`（rollout 录制）、`capture sync`、`session quit`
+    `infer rtc`、`capture episode start` / `end` / `cancel`（rollout 录制）、`capture sync`、`session quit`
     （退出回 home）、`robot estop`、`robot reset`、`robot execute`、`robot teleop` / `robot teach` / `robot takeover`；
     `capture meta list/add/edit/delete/delete-key`（配置级命令，任务态同样可用）。
 -   单步主循环与持续推理循环**共用**一批命令（策略配置 / RTC / 录制 / 同步），

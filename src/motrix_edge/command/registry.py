@@ -26,6 +26,7 @@ from .naming import (
     CMD_ADAPTER_CONFIG,
     CMD_ADAPTER_CONFIG_CURRENT,
     CMD_ADAPTER_CONFIG_SET,
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -178,6 +179,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ROBOT_GRAVITY, positional=("enabled", "alpha")),
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
+        CommandSpec(name=CMD_CAPTURE_EPISODE_CANCEL),  # capture episode cancel
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>
         CommandSpec(name=CMD_CAPTURE_META_LIST, positional=("key",)),  # capture meta list [key]
         CommandSpec(name=CMD_CAPTURE_META_ADD, positional=("key", "value")),  # capture meta add <key> <value>

@@ -51,6 +51,7 @@ CMD_ROBOT_GRAVITY = "robot gravity"  # 运行期开关重力前馈（位置参�
 SWITCH_COMMANDS = (CMD_ROBOT_TCP, CMD_ROBOT_GRAVITY)
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
+CMD_CAPTURE_EPISODE_CANCEL = "capture episode cancel"  # 取消当前采集（停止且丢弃本轮文件）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）
 CMD_CAPTURE_META_LIST = "capture meta list"  # 列出采集元信息选项（位置参数 key 可选）
 CMD_CAPTURE_META_ADD = "capture meta add"  # 新增采集元信息选项（位置参数 key, value）

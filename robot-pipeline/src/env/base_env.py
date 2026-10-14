@@ -236,6 +236,11 @@ class BaseEnv:
         debug_print(self.robot.name, "HTTP 收到命令: capture/end（结束采集）", "INFO")
         self.capture_commands.put(("capture_end", None))
 
+    def robot_capture_cancel(self):
+        """取消当前采集：入队，由观测线程停止录制并丢弃本轮文件。"""
+        debug_print(self.robot.name, "HTTP 收到命令: capture/cancel（取消并丢弃本轮）", "INFO")
+        self.capture_commands.put(("capture_cancel", None))
+
     def robot_capture_sync(self, meta: dict):
         """同步采集元信息（operator / task_name / description 等）到 collector：入队。
 
@@ -516,6 +521,9 @@ class BaseEnv:
                 elif cmd == "capture_end":
                     self.capturing = False
                     self._finish_head_skip()
+                elif cmd == "capture_cancel":
+                    self.capturing = False
+                    self._cancel_capture()
                 elif cmd == "capture_sync":
                     self._collector.set_meta(payload)
                 else:
@@ -647,3 +655,11 @@ class BaseEnv:
             f"capture: 本轮未记录（主臂无有效移动，跳过 {state['skipped']} 帧）",
             "WARNING",
         )
+
+    def _cancel_capture(self) -> None:
+        """丢弃当前 episode（观测线程内调用，保持 collector 单写者）。"""
+        self._head_skip = None
+        if not self._episode_open:
+            return
+        self._episode_open = False
+        self._collector.cancel()

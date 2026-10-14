@@ -221,6 +221,10 @@ class FakeRobotAdapter(RobotAdapter):
         self.capture_episodes.append("end")
         self.capture_running = False
 
+    def cancel_capture(self) -> None:
+        self.capture_episodes.append("cancel")
+        self.capture_running = False
+
     # -- 采集状态 / 元信息同步（进程自维护；供测试断言）--------------------------
     def capture_status(self):
         """采集状态：运行位 + 采集员 / 任务名等元信息 + 数据目录 / 列表。"""

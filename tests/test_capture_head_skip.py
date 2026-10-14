@@ -50,6 +50,9 @@ class _FakeCollector:
     def finish(self):
         self.calls.append("finish")
 
+    def cancel(self):
+        self.calls.append("cancel")
+
     def set_meta(self, meta):
         self.meta.update(meta or {})
 
@@ -166,6 +169,35 @@ def test_episode_without_motion_produces_no_file(base_env_module):
     _tick(env)
 
     assert collector.calls == []  # 没有 start / collect / finish
+    assert env.capture_status()["head_skip"] is None
+
+
+def test_cancel_discards_open_episode(base_env_module):
+    """已经开始落盘后取消：观测线程调用 collector.cancel，不再走 finish。"""
+    env, _, collector = _build(base_env_module)
+    env.robot_capture_start()
+    _tick(env)
+
+    env.robot_capture_cancel()
+    _tick(env)
+
+    assert collector.calls == ["start", "collect", "cancel"]
+    assert env.capturing is False
+    assert env._episode_open is False
+
+
+def test_cancel_before_motion_creates_no_file(base_env_module):
+    """帧头仍在等待主臂移动时取消：没有文件可删，只复位本轮状态。"""
+    env, robot, collector = _build(base_env_module)
+    robot.teleop_enabled = True
+    robot.sample = (_Q0, _G0)
+    env.robot_capture_start()
+    _tick(env)
+
+    env.robot_capture_cancel()
+    _tick(env)
+
+    assert collector.calls == []
     assert env.capture_status()["head_skip"] is None
 
 

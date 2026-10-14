@@ -700,7 +700,7 @@ class RobotAdapter(ABC):
         """
         pass
 
-    # ---- 采集回合控制（capture episode start / end）---------------------------
+    # ---- 采集回合控制（capture episode start / end / cancel）------------------
     def start_capture(self) -> None:
         """开始一轮采集（episode 开始）：通知适配器 / 机器人进程开启录制。
 
@@ -714,6 +714,14 @@ class RobotAdapter(ABC):
 
         默认 no-op；采集由适配器 / 机器人进程自维护的适配器按需覆盖（如经 HTTP 转发
         机器人进程 /v1/capture/end）。
+        """
+        pass
+
+    def cancel_capture(self) -> None:
+        """取消当前采集：停止录制并通知机器人进程丢弃本轮文件。
+
+        默认 no-op；采集由适配器 / 机器人进程自维护的适配器按需覆盖（如经 HTTP 转发
+        机器人进程 /v1/capture/cancel）。
         """
         pass
 

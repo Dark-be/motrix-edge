@@ -38,6 +38,7 @@
 | POST | ``/v1/capture/sync``     | ``{meta}``             | ``{status}``                                   |
 | POST | ``/v1/capture/start``    | —                      | ``{status}``                                   |
 | POST | ``/v1/capture/end``      | —                      | ``{status}``                                   |
+| POST | ``/v1/capture/cancel``   | —                      | ``{status}``                                   |
 
 - ``/v1/discover``：机器人进程**自描述探活**（不初始化）——声明身份与它支持被哪些
   adapter 类型操作（``supported_adapters``），edge 据此把 adapter 标记为可用并选择。
@@ -102,6 +103,7 @@ PATH_CAPTURE_STATUS = "/v1/capture/status"  # 采集状态（运行位 / 元信�
 PATH_CAPTURE_SYNC = "/v1/capture/sync"  # 同步采集元信息到进程（保存数据时附加）
 PATH_CAPTURE_START = "/v1/capture/start"  # 开始一轮采集（episode 开始）
 PATH_CAPTURE_END = "/v1/capture/end"  # 结束一轮采集（episode 结束）
+PATH_CAPTURE_CANCEL = "/v1/capture/cancel"  # 取消当前采集（停止并丢弃本轮文件）
 
 # ---- 请求 body 字段 ----
 FIELD_ACTION = "action"  # execute / rollout：动作数据（按 layout 的段序逐臂块拼接）
@@ -245,6 +247,7 @@ __all__ = [
     "FIELD_TELEOP_SPACE",
     "FIELD_TYPE",
     "PATH_CAPTURE_END",
+    "PATH_CAPTURE_CANCEL",
     "PATH_CAPTURE_START",
     "PATH_CAPTURE_STATUS",
     "PATH_CAPTURE_SYNC",

@@ -387,6 +387,33 @@ def test_collector_control_defaults_to_empty(collector, tmp_path):
     assert instance.meta["control_mode"] is None and instance.meta["control"] == {}
 
 
+def test_collector_cancel_removes_mcap_and_json(collector, tmp_path):
+    """取消录制关闭 writer 后删除 MCAP，并防御性删除同名 JSON。"""
+
+    class _Writer:
+        def __init__(self):
+            self.finished = False
+
+        def finish(self):
+            self.finished = True
+
+    instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
+    path = tmp_path / "cancelled.mcap"
+    json_path = path.with_suffix(".json")
+    path.write_bytes(b"partial")
+    json_path.write_text("{}", encoding="utf-8")
+    writer = _Writer()
+    instance._path = path
+    instance._writer = writer
+    instance._fp = path.open("ab")
+
+    assert instance.cancel() == path
+    assert writer.finished is True
+    assert not path.exists()
+    assert not json_path.exists()
+    assert instance.cancel() is None
+
+
 def test_env_control_layout_follows_connect_time_gravity(
     dual_piper, piper_controller, collector, gravity, tmp_path, monkeypatch
 ):

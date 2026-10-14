@@ -205,23 +205,29 @@ def test_capture_switch_commands_rejected_during_session(tmp_path):
     session.session_finish()
 
 
-def test_capture_episode_start_end_during_observe(tmp_path):
-    """观测期间 capture episode start / end：adapter.start_capture / end_capture。"""
+def test_capture_episode_start_end_cancel_during_observe(tmp_path):
+    """观测期间 start / end / cancel 分别保存或丢弃本轮。"""
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
     session = CaptureSession(
         make_config(tmp_path),
-        command_source=make_signals("capture episode start", "capture episode end", "session quit"),
+        command_source=make_signals(
+            "capture episode start",
+            "capture episode end",
+            "capture episode start",
+            "capture episode cancel",
+            "session quit",
+        ),
         frame_manager=FrameManager(),
         adapter=adapter,
     )
     session.session_start()
     assert session.run() == RunResult.FINISHED
-    assert adapter.capture_episodes == ["start", "end"]  # 开启一轮 → 结束一轮
+    assert adapter.capture_episodes == ["start", "end", "start", "cancel"]
     session.session_finish()
 
 
 def test_capture_commands_mark_status_dirty(tmp_path):
-    """采集命令落地即回调节点（episode start / end / sync 各一次）→ 节点作废采集状态缓存。
+    """采集命令落地即回调节点（episode start / end / cancel / sync）→ 节点作废状态缓存。
 
     回归：这些命令由会话消费，节点主循环看不到；少了这个回调，「开始 / 停止录制」后
     最多要等一整个刷新间隔才会在 GET /v1/captures 上看到新运行位。
@@ -233,6 +239,7 @@ def test_capture_commands_mark_status_dirty(tmp_path):
         command_source=make_signals(
             "capture episode start",
             "capture episode end",
+            "capture episode cancel",
             'capture sync --meta \'{"operator": "张三"}\'',
             "session quit",
         ),
@@ -242,7 +249,7 @@ def test_capture_commands_mark_status_dirty(tmp_path):
     )
     session.session_start()
     assert session.run() == RunResult.FINISHED
-    assert len(dirty) == 3  # start / end / sync 各通知一次
+    assert len(dirty) == 4  # start / end / cancel / sync 各通知一次
     session.session_finish()
 
 

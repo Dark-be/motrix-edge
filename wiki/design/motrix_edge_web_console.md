@@ -38,7 +38,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 2. **会话区（采集 / 推理二选一）**：同一时刻只可能有一个会话，故两张卡共用一块位置——顶部「会话类型」分段控件切换（会话进行中则锁定为当前会话）；只有被选中的那张面板参与渲染。
 
-3. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束（`capture episode start/end`）按采集运行位互锁**——开始后（收到回执或 `capture_status.running=true`）「开始」置灰、「结束」使能，反之亦然，避免误触反序操作；另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与节点 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
+3. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束 / 取消（`capture episode start/end/cancel`）按采集运行位互锁**——未录制时显示“开始录制”，录制中并排显示“停止录制”和“取消录制”；停止会保存本轮文件，取消经确认后结束当前录制并删除本轮文件。另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与机器人进程 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
 
 4. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制；头部显示**当前遥操作位**（程控 / 遥操作（absolute）/ 人工接管（增量）），关遥操作在未开启时置灰。
 
@@ -71,8 +71,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
     - **推理会话卡片按钮区**（一个按钮 = 一个命令）：**进入推理**、**连接推理节点 / 重新连接**
       （同一命令 `infer connect`：未连接时作重试入口，已连接时用于服务端变更后重连并预热）、
       **推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`）/ **停止推理**
-      （`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制**
-      （`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；
+      （`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制 / 取消录制**
+      （`POST /v1/infers/episode/start·end·cancel` → `capture episode start/end/cancel`，robot 不关心模式；
       开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带
       `task_name=prompt`）、**退出推理**。推理只提供「单步」与「持续」两种模式。
     - 卡片下部：RTC 卡片 → **策略服务器 metadata**（只展示 `metadata` 与「已连接 / 未连接」徽标，
@@ -103,6 +103,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 | `POST /v1/infers/rollout`（body `mode=continuous`）    | `infer rollout continuous` |
 | `POST /v1/infers/episode/start`                        | `capture episode start`    |
 | `POST /v1/infers/episode/end`                          | `capture episode end`      |
+| `POST /v1/infers/episode/cancel`                       | `capture episode cancel`   |
 | `POST /v1/infers/sync`                                 | `capture sync`             |
 | `POST /v1/infers/config`                               | `infer config set <json>`  |
 | `POST /v1/infers/rtc`                                  | `infer rtc set <json>`     |

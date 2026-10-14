@@ -53,6 +53,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_TELEOP_FOLLOW_AXES,
     FIELD_TELEOP_MODE,
     FIELD_TELEOP_SPACE,
+    PATH_CAPTURE_CANCEL,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_EXECUTE,
@@ -436,12 +437,13 @@ def test_rollout_layout_returns_false_when_sdk_refuses_teleop():
 # ---- capture episode（采集回合控制）------------------------------------------
 
 
-def test_start_end_capture_forwards_to_sdk():
-    """start_capture / end_capture：HTTP 转发 SDK /v1/capture/start、/v1/capture/end。"""
+def test_start_end_cancel_capture_forwards_to_sdk():
+    """录制 start / end / cancel 均转发到对应 SDK 端点。"""
     adapter = _exec_adapter()
     adapter.start_capture()
     adapter.end_capture()
-    assert [p[0] for p in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END]
+    adapter.cancel_capture()
+    assert [p[0] for p in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END, PATH_CAPTURE_CANCEL]
 
 
 # ---------------------------------------------------------------------------

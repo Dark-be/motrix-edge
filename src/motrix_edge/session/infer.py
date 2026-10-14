@@ -58,7 +58,14 @@ class InferSession(PolicyConfigFeature, BaseSession):
     required_capability = AdapterCapability.EXECUTE
 
     def __init__(
-        self, base_cfg, command_source=None, frame_manager=None, adapter=None, policy_type=None, capture_meta_store=None
+        self,
+        base_cfg,
+        command_source=None,
+        frame_manager=None,
+        adapter=None,
+        policy_type=None,
+        capture_meta_store=None,
+        on_capture_status_dirty=None,
     ):
         super().__init__(
             base_cfg=base_cfg,
@@ -67,6 +74,7 @@ class InferSession(PolicyConfigFeature, BaseSession):
             frame_manager=frame_manager,
             adapter=adapter,
             capture_meta_store=capture_meta_store,
+            on_capture_status_dirty=on_capture_status_dirty,
         )
         self.policy_config = self.base_cfg.get("policy", {})
         # 推理步进频率（Hz）：会话 观测→推理→下发动作 的节奏。``policy.infer_freq`` 可调
@@ -582,6 +590,12 @@ class InferSession(PolicyConfigFeature, BaseSession):
         self.recorder.end()
         debug_print(self.name, "Rollout recording ended (capture episode end).", "INFO")
         self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+
+    def _on_episode_cancel(self, cmd) -> None:
+        """``capture episode cancel``：停止 rollout 录制并丢弃本轮文件。"""
+        self.recorder.cancel()
+        debug_print(self.name, "Rollout recording cancelled (episode discarded).", "INFO")
+        self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
 
     def _on_infer_rtc(self, cmd):
         """``infer rtc`` / ``infer rtc set <json>``：查询 / 设置 RTC 参数（应用到运行中 manager）。
