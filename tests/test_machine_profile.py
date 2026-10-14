@@ -222,12 +222,25 @@ def test_save_machine_profile_uses_cwd_fallback(config, tmp_path, monkeypatch):
     assert path == tmp_path / "motrix-robot-pipeline" / "config" / "robot" / "pc16.yml"
 
 
+def test_force_single_piper_is_a_packaged_default_config(config, ext_dir):
+    assert "force_single_piper.yml" in config.list_configs()
+    loaded = config.load_config("force_single_piper", machine=None)
+    assert loaded["robot"]["type"] == "force_single_piper_robot"
+    assert loaded["robot"]["ports"] == {"master": "master_left", "slave": "right"}
+
+
 # ---- 设备声明 / 步骤 / 补丁 ------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "robot_type",
-    ["dual_piper_robot", "dual_alicia_piper_robot", "single_piper_robot", "test_robot"],
+    [
+        "dual_piper_robot",
+        "dual_alicia_piper_robot",
+        "single_piper_robot",
+        "force_single_piper_robot",
+        "test_robot",
+    ],
 )
 def test_robot_declares_device_kinds(setup_module, robot_type):
     """每个机器人的 PORT_KINDS / CAMERA_KINDS 与键清单对齐（漏声明由 check_declarations 报错）。

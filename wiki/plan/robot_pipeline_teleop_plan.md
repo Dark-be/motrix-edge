@@ -52,6 +52,21 @@ env / contract server 透传；遥操作期间推理让位（`/v1/rollout` 409�
         锁轴复选框。
 -   [x] 补齐契约、映射与前端构建测试，并更新设计文档。
 
+## 阶段四：力反馈双 Follower 接线
+
+-   [x] `force_single_piper_robot` 固定主臂 `master_left`、从臂 `right` 的示例接线，两侧连接即进入
+        Follower/MIT，不再切换或恢复 Leader。
+-   [x] 启用耦合时以两侧实测角初始化，随后把对方完整实测角交叉下发；两侧沿用相同的默认 MIT
+        参数，不增加专用增益和位置误差裁切。
+-   [x] 删除不再使用的运行期模式切换配置与恢复逻辑，更新真机说明和状态机测试。
+
+## 阶段五：力反馈双臂同步复位
+
+-   [x] `force_single_piper_robot.reset()` 同时建立主臂 `init_joint - joint_offset` 与从臂
+        `init_joint` 目标，保持 HTTP reset 的非阻塞语义。
+-   [x] 控制线程以两侧实测角为起点按 `step_rad` 同步推进，并用默认 MIT 参数下发。
+-   [x] teleop / execute / safe-stop / 故障明确抢占双臂 reset，补齐状态机测试与真机说明。
+
 ## 待启动（需先决策）
 
 -   [ ] 交回模型的平滑：`teleop=false` 后首拍 `rollout` 的 target 与人工位姿的差如何处理

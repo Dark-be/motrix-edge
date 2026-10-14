@@ -26,7 +26,7 @@ src/                      # robot-pipeline 包（src 布局，包名 config/env/
   config/                 # robot server 配置 + 加载逻辑 + 机器档案探测
     __init__.py           # load_config（现场配置 → 机器档案深合并 → 包内示例兜底）
     setup.py / probe.py   # 一键填档（交互逐个插）+ 设备枚举（can / serial / realsense / v4l2）
-    *.yml                 # **示例**配置（test_robot / dual_piper / dual_alicia_piper / single_piper）——
+    *.yml                 # **示例**配置（含 force_single_piper 双向力反馈机型）——
                           # 实际配置在 <根>/config/：<机型>.yml（整份）或 robot/<machine>.yml（差异）
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
@@ -96,12 +96,13 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 具体机器人实现（`BaseRobot` 子类）在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册
 （类型名 -> 模块 + 类名）；配置 `robot.type` 即按此自动匹配：
 
-| 注册类型                  | 实现                                                 | 说明                                 |
-| ------------------------- | ---------------------------------------------------- | ------------------------------------ |
-| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）             |
-| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                       |
-| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作 |
-| `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂 Leader+Follower 遥操作          |
+| 注册类型                   | 实现                                                   | 说明                                 |
+| -------------------------- | ------------------------------------------------------ | ------------------------------------ |
+| `test_robot`               | `robot.test_robot.TestRobot`                           | 虚拟（无硬件，离线联调）             |
+| `dual_piper_robot`         | `robot.dual_piper_robot.DualPiperRobot`                | 真实双臂接入位                       |
+| `dual_alicia_piper_robot`  | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot`   | 双臂：Alicia 主手 + Piper 从手遥操作 |
+| `single_piper_robot`       | `robot.single_piper_robot.SinglePiperRobot`            | 单臂 Leader+Follower 遥操作          |
+| `force_single_piper_robot` | `robot.force_single_piper_robot.ForceSinglePiperRobot` | 单臂双向柔顺 MIT 力反馈遥操作        |
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
 `INFO_LEVEL`（日志级别 DEBUG / INFO / ERROR，robot server 启动时读）、`server`（监听
@@ -111,6 +112,7 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
 -   `dual_piper.yml` —— `robot.type: dual_piper_robot`
 -   `dual_alicia_piper.yml` —— `robot.type: dual_alicia_piper_robot`
 -   `single_piper.yml` —— `robot.type: single_piper_robot`
+-   `force_single_piper.yml` —— `robot.type: force_single_piper_robot`
 
 配置和日志共用运行根目录。`MOTRIX_ROBOT_PIPELINE_DIR` 指定根目录，未设置时使用
 `<cwd>/motrix-robot-pipeline`；现场配置放 `<root>/config`，日志放 `<root>/logs`。加载配置时现场
@@ -497,6 +499,7 @@ robot:
 ## 遥操作
 
 -   `single_piper`：Leader 主臂（读取）+ Follower 从臂（执行），同构映射；
+-   `force_single_piper`：teleop 期间主、从 Piper 都进入柔顺 MIT 控制，互相跟随对方实测关节角；
 -   `dual_piper` / `dual_alicia_piper`：master 主手（alicia）+ slave 从手（piper），
     左 → 左、右 → 右。
 
@@ -526,7 +529,23 @@ robot:
 FK / IK 的机器人能启用该配置，配置写错会在启动时失败。
 
 两种模式的完整语义、锚点采样时机与边界见
-[robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。
+[robot-pipeline 遥操作（单向映射 / 双向力反馈）](../wiki/design/robot_pipeline_teleop.md)。
+
+### `force_single_piper` 真机启用顺序
+
+该机型把两侧同拍实测关节角直接交叉作为目标，两臂沿用 `PiperController` 的同一套默认 MIT 参数，
+不把实测力矩直接回灌，也不覆盖 `kp` / `kd`。`robot.force_feedback.max_initial_error` 只用于
+absolute 模式启用前的对齐保护。建议现场按以下顺序：
+
+1. 主臂接 `master_left`、从臂接 `right`；两侧均以 Follower/MIT 启动。急停可达、两臂无负载，先保持
+   `gravity.enabled: false`，逐关节确认方向与零位偏置；
+2. 分别标定 `gravity.arms.master/slave`，从小 `alpha` 验证后再启用重力补偿；
+3. 先用 `mode=delta` 原位采锚点，再测试 `absolute`；从臂接触软障碍开始，最后才接触刚性桌面；
+4. 任一侧读数或下发异常会立即解耦、清目标，但两侧仍保持 Follower；此时先排障，不要直接重复开启。
+
+该机型的 `robot reset` 会同步复位两臂：从臂趋近 `init_joint`，主臂趋近
+`init_joint - teleop.joint_offset`，两侧都从实测角按 `step_rad` 逐拍推进并使用默认
+MIT 参数。复位为非阻塞操作；确认两臂稳定到位后再开启 `absolute` teleop。
 
 **遥操作期间推理让位**：遥操作开着（不分模式：遥操作即人工接管）时，`POST /v1/rollout` 返回
 `409`（不改 target、不退出遥操作）；`execute` / `reset` / `safe_stop` 不受影响（执行即结束

@@ -29,7 +29,7 @@ import yaml
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "robot-pipeline" / "src" / "config"
 _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
 # 需要「帧头跳过」配置的机型（遥操作系统；其余机型保留代码缺省 HEAD_SKIP_DEFAULTS）
-_HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml")
+_HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml", "force_single_piper.yml")
 # 声明深度观测的机型（见 wiki/design/robot_pipeline_depth.md）
 _DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
 # 机型 → 臂名（校验 ``robot.tcp.arms`` 的键名用；与机器人类的 ``ARM_NAMES`` 一致）
@@ -166,6 +166,15 @@ def test_teleop_block_shape_and_joint_offsets():
             assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in values), (
                 f"{path.name} 的 joint_offset 含非数值项：{values!r}"
             )
+
+
+def test_force_feedback_config_shape():
+    block = _load("force_single_piper.yml")["robot"].get("force_feedback")
+    assert set(block) == {"max_initial_error"}
+    values = block["max_initial_error"]
+    assert isinstance(values, list) and len(values) == 6
+    assert all(isinstance(value, (int, float)) and math.isfinite(value) and value > 0 for value in values)
+    assert _load("force_single_piper.yml")["robot"]["ports"] == {"master": "master_left", "slave": "right"}
 
 
 def _registered_robot_types() -> set[str]:

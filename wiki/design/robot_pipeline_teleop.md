@@ -1,4 +1,4 @@
-# robot-pipeline 遥操作（绝对映射 / 增量接管）
+# robot-pipeline 遥操作（单向映射 / 双向力反馈）
 
 ## 摘要
 
@@ -9,6 +9,11 @@ robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joi
 
 该能力只属于 robot-pipeline 的 teleop 映射：Edge 的 `rollout` / `execute`、动作 `layout` 与观测
 契约均不改变。配置缺省 `follow_space: joint`，升级不改变既有真机行为。
+
+`force_single_piper_robot` 是独立机型：它不改变既有 `single_piper_robot` 的只读 Leader 语义，
+而是在 teleop 开启期间把主、从两台 Piper 都置于 MIT 可控状态，逐拍互相跟随对方的**实测关节角**。
+从臂被障碍阻挡后产生的位置误差因此会反向成为主臂的位置误差，操作员能通过柔顺位置环感到阻力；
+减小施力后，两臂在同一虚拟耦合关系中重新收敛。
 
 ## 目标与约束
 
@@ -176,3 +181,56 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
 -   **接管前的对齐由人工完成**：主臂**不可被程序驱动**（Piper leader 模式只读），因此不提供
     「推理期主臂跟随从臂」；接管前操作员手动把主臂摆到与从臂相近的位姿，剩下的差值由锚点
     零化（见「增量锚点」）。
+
+## 双向力反馈机型
+
+`force_single_piper_robot` 由一台主臂和一台从臂组成，对 Edge 暴露的状态 / 动作仍是从臂单臂
+`joint + gripper`；双向耦合是 robot-pipeline 内部控制策略，不新增 HTTP 契约。
+
+### 控制关系
+
+两台 Piper 从连接开始都处于 SDK Follower/MIT 模式：主臂 CAN 接口为 `master_left`，从臂 CAN 接口为
+`right`。teleop 开启后，两侧在同一控制拍读取实测角度并交叉下发：
+
+-   `absolute`：`q_slave_des = q_master_meas + joint_offset`，
+    `q_master_des = q_slave_meas - joint_offset`；
+-   `delta`：沿用启用拍锚点，`q_slave_des = q_slave_ref + q_master_meas - q_master_ref`，反向关系为
+    `q_master_des = q_master_ref + q_slave_meas - q_slave_ref`；
+-   两侧都沿用 `PiperController` 的默认 MIT 参数，且把对方的完整实测位置作为目标，因此没有固定的
+    “命令端 / 被动端”；夹爪仍为主到从单向映射，不声明夹爪力反馈。
+
+`joint_offset` 只负责两台机械臂零位差。`absolute` 启用前要求变换后的主从关节差不超过
+`force_feedback.max_initial_error`；超限拒绝启用，防止启用耦合时两臂被远端目标猛拉。`delta` 在当前
+位置采锚点，可用于主从未绝对对齐的接管。控制拍不再另加位置误差裁切；主从位置差就是两侧默认
+MIT 位置环的对称弹簧误差，使任一侧受阻都能传到另一侧。关闭 teleop 只解除交叉耦合，不改变任一控制器的
+Follower 角色。
+
+`robot reset` 对该机型是双臂同步复位：从臂目标为 `init_joint`，主臂目标为
+`init_joint - joint_offset`。控制线程每拍从两侧**实测角**出发，分别按 `step_rad` 向目标推进，并沿用
+默认 MIT 参数下发；夹爪仍只复位从臂。reset 保持非阻塞，后续 teleop、execute、
+safe-stop 或任一侧读写失败都会终止复位控制权，避免与其他目标源同时写两臂。
+
+### 接管边界
+
+`robot.force_feedback` 只保留绝对模式的接管对齐阈值：
+
+```yaml
+robot:
+    force_feedback:
+        max_initial_error: [0.25, 0.25, 0.25, 0.35, 0.35, 0.35]
+```
+
+-   `max_initial_error` 是六关节正数数组；缺省均为 `0.25 rad`，只限制 absolute 接管瞬间，不参与
+    后续耦合；
+-   力反馈机型不覆盖 `PiperController` 的 MIT 参数，两侧与普通执行臂使用同一个 `MIT_CTRL_CFG`；
+-   重力前馈仍由 `robot.gravity.arms.master/slave` 分臂装载，启用前必须有可信的逐臂标定参数；禁止把
+    一台臂的标定文件无验证地复制给另一台。
+
+### 失效安全
+
+-   主臂或从臂读数为 `None`、维度错误、非有限，或任一侧下发异常：本拍不继续交叉下发，立即关闭
+    teleop、清空目标；两臂仍保持 Follower，错误写入 `last_error`，health 变为不健康；
+-   teleop 关闭、`safe_stop`、`execute`、`reset` 都解除双向耦合；其中 reset 同步控制两臂，execute
+    仍只控制从臂；
+-   力反馈只来自位置误差形成的虚拟弹簧 / 阻尼，不把实测力矩回灌为 `t_ff`，重力前馈原则仍以
+    [重力补偿与阻抗控制](./robot_pipeline_impedance.md)为准。

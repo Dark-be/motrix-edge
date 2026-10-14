@@ -1,0 +1,42 @@
+# ⚠️ 示例配置：真机接线与逐臂重力参数写到运行根 config/ 或机器档案，不要直接依赖本文件现场值。
+INFO_LEVEL: INFO
+
+server:
+  host: 0.0.0.0
+  port: 8090
+
+robot:
+  name: force_single_piper_001
+  type: force_single_piper_robot
+  init_joint: [0, 0, 0, 0, 0, 0]
+  init_gripper: [1]
+  # 双向力反馈固定接线：两台 Piper 都以 Follower/MIT 启动。
+  ports:
+    master: master_left # 主臂
+    slave: right # 从臂
+  master_firmware: v188
+  slave_firmware: v188
+  teleop:
+    follow_space: joint
+    joint_offset: [0, 0, 0, 0, 0, 0]
+  # 只配置接管时的对齐保护；两侧均使用 PiperController 的同一套默认 MIT 参数。
+  force_feedback:
+    max_initial_error: [0.25, 0.25, 0.25, 0.35, 0.35, 0.35]
+  # 重力补偿要依赖可信的逐臂标定。未分别标定 master/slave 前保持关闭。
+  gravity:
+    enabled: false
+    alpha: 1.0
+    t_ff_limit: 16.0
+    params: gravity/piper_6dof.json
+    arms:
+      master: { params: gravity/piper_master.json }
+      slave: { params: gravity/piper_slave.json }
+
+collector:
+  type: act_mcap
+  save_dir: ./data/force_single_piper
+  image_format: jpeg
+  skip_until_motion:
+    enabled: true
+    joint_eps: 0.05
+    gripper_eps: 0.05

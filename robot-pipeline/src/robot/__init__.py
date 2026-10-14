@@ -38,6 +38,10 @@ ROBOT_REGISTRY = {
         "DualAliciaPiperRobot",
     ),  # 双臂：Alicia 主手 + Piper 从手
     "single_piper_robot": ("robot.single_piper_robot", "SinglePiperRobot"),  # 单臂 Leader+Follower 遥操作
+    "force_single_piper_robot": (
+        "robot.force_single_piper_robot",
+        "ForceSinglePiperRobot",
+    ),  # 单臂双向 MIT 力反馈遥操作
 }
 
 

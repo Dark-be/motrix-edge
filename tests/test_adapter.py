@@ -20,6 +20,7 @@ capabilities 能力声明、health / ready。机器人 SDK 进程（HTTP + 共�
 测试套件内。
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -273,6 +274,13 @@ def test_fallback_when_no_discovered():
 def test_robot_adapters_lists_entry_points():
     names = {t for t, _, _ in robot_adapters()}
     assert names >= {"test_robot", "dual_piper"}
+
+
+def test_single_piper_entry_points_are_declared_in_project():
+    """本地 editable 元数据可能未重装；直接钉住发布配置，CI ``uv sync`` 后即成为运行时 entry points。"""
+    source = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert 'single_piper = "motrix_edge.adapter.single_piper_adapter:SinglePiperAdapter"' in source
+    assert 'force_single_piper = "motrix_edge.adapter.single_piper_adapter:ForceSinglePiperAdapter"' in source
 
 
 def test_get_adapter_with_required_capability():

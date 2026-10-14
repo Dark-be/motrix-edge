@@ -57,6 +57,7 @@ DEFAULT_CONFIG_FILES = (
     "dual_piper.yml",
     "dual_alicia_piper.yml",
     "single_piper.yml",
+    "force_single_piper.yml",
 )
 
 
