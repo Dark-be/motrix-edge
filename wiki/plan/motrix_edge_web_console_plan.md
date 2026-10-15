@@ -38,3 +38,6 @@ webrtc）。纯前端、零后端改动。功能完整落地后删除本文档�
         `capture sync`（`POST /v1/captures/sync`，`CapturesStatus.capture_status`）
 -   [x] 会话卡片折叠（采集 / 推理可收起；当前会话切换时自动收起另一张）
 -   [x] 按钮 / 输入框最小长度（`whitespace-nowrap`），状态值小屏纵向堆叠防覆盖输入框
+-   [x] 采集 / 推理 / 手动 / 调试页复用 3D 场景；实测 qpos 用实色臂，Robot `action` 用蓝色半透明臂
+-   [x] 策略 schema 增加 `options`，layout 类配置由通用表单渲染为固定候选下拉并在后端校验
+-   [x] `/v1/preview` 与数值观测卡展示 Robot 显式提供的逐臂 `qpos_err`

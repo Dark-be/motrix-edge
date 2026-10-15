@@ -201,6 +201,8 @@ def test_robot_action_keys_are_explicit(dual_piper):
     assert state[robot.KEY_JOINT_ACTION].shape == state[robot.KEY_JOINT].shape == (12,)
     assert state[robot.KEY_JOINT_ACTION].tolist() == pytest.approx(targets)
     assert state[robot.KEY_GRIPPER_ACTION].tolist() == pytest.approx([0.1, 0.2])
+    assert state[robot.KEY_JOINT_ERROR].tolist() == pytest.approx(targets - state[robot.KEY_JOINT])
+    assert state[robot.KEY_GRIPPER_ERROR].tolist() == pytest.approx(np.asarray([0.1, 0.2]) - state[robot.KEY_GRIPPER])
 
 
 def test_gripper_target_can_run_without_joint_target(dual_piper):

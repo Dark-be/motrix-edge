@@ -68,7 +68,8 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
 一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos` **状态向量** = 每臂「值 +
-夹爪」交错、`action` **目标向量** = 同维同布局、`observations/images/<cam>`，机器人提供末端位姿时
+夹爪」交错、`observations/qpos_err` = Robot 同帧计算的目标误差、`action` **目标向量** = 同维同布局、
+`observations/images/<cam>`，机器人提供末端位姿时
 另有 `observations/pose` / `observations/pose_action`）、HTTP 端点、共享内存布局都由
 **motrix_edge.adapter** 下的契约文件单点定义；robot server 复用这些定义，env 只负责控制 robot，
 不碰 HTTP / 共享内存。
@@ -154,7 +155,7 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
         下发按它遍历
     -   `POSE_DIM_PER_ARM`：每臂末端位姿宽度（`xyz + rpy`；**0 = 不提供位姿观测**）；整机长度由
         `pose_dim()` 推导，并由静态正解给出，
-        robot server 据此把**实测位姿**与**动作位姿**写入共享内存（布局 v7 的
+        robot server 据此把**实测位姿**与**动作位姿**写入共享内存（布局 v8 的
         `pose` / `pose_target` 传输区）
     -   `GRIPPER_DEADZONE`：夹爪死区（piper 为 0.2；缺省 0）
     -   `IMAGE_NAMES` / `IMAGES`：相机名与分辨率

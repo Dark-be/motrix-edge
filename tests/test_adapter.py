@@ -40,6 +40,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE,
     KEY_POSE_ACTION,
     KEY_QPOS,
+    KEY_QPOS_ERR,
     AdapterCapability,
     DiscoveredRobot,
     RobotAdapter,
@@ -258,6 +259,7 @@ def test_capabilities_declares_action_dim_and_observation_keys():
     assert caps.action_spaces == ["joint", "joint_delta", "pose", "pose_delta", "gripper", "gripper_delta"]
     assert caps.observation_keys == [
         KEY_QPOS,
+        KEY_QPOS_ERR,
         KEY_ACTION,
         KEY_POSE,
         KEY_POSE_ACTION,

@@ -54,6 +54,7 @@ from motrix_edge.adapter.http_contract import FIELD_DEPTH  # 相机元数据的�
 # ---- 观测键契约（standard_obs 字典的键名，与 ACT 采集格式一致）----------------
 # 每臂 ``[joint..., gripper]`` 交错；action 与其同维同布局。
 KEY_QPOS = "observations/qpos"
+KEY_QPOS_ERR = "observations/qpos_err"
 KEY_ACTION = "action"
 # 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ``ARM_NAMES``；单位米 / 弧度）——位姿原语的输入；
 # 机器人不提供位姿时该键不出现（``POSE_DIM_PER_ARM = 0``）。
@@ -184,8 +185,8 @@ class RobotCapabilities:
     维度按类别不同（运动段每臂 6，夹爪段每臂 1），故维度以
     ``action_dims`` 字典给出（``action_dim`` 保留为关节空间维度的兼容字段）。
 
-    观测**常驻**（与动作空间无关）：``observations/qpos`` / ``action`` = 每臂
-    ``[joint..., gripper]`` 的实测 / 目标向量，``observations/pose`` = 实测末端位姿、
+    观测**常驻**（与动作空间无关）：``observations/qpos`` / ``observations/qpos_err`` / ``action`` = 每臂
+    ``[joint..., gripper]`` 的实测 / 目标误差 / 目标向量，``observations/pose`` = 实测末端位姿、
     ``observations/pose_action`` = 目标位姿（机器人不提供位姿时后两个键不出现）。
     """
 

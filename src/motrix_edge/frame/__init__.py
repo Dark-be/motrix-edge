@@ -36,7 +36,7 @@ _PREVIEW_JPEG_QUALITY = 80
 def cache_observation(obs: dict, image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE) -> dict:
     """整理 adapter 观测为 Edge 侧缓存帧：摄像头帧降采样为 ``image_size`` JPEG。
 
-    obs 由 ``adapter.observe()`` 返回（图像为 JPEG，如 640x480）；其余值（qpos / action /
+    obs 由 ``adapter.observe()`` 返回（图像为 JPEG，如 640x480）；其余值（qpos / qpos_err / action /
     pose / **深度图**）原样透传——深度是 ``uint16`` 数组，不进 JPEG 也不降采样（降采样会
     破坏「像素 ↔ 深度」的对应关系，而去掉像素对应关系的深度图没有用）。
     """

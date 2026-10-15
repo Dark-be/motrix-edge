@@ -41,6 +41,7 @@ from motrix_edge.adapter.http_contract import (
 )
 
 KEY_OBS_QPOS = "observations/qpos"
+KEY_OBS_QPOS_ERR = "observations/qpos_err"
 KEY_OBS_IMAGE_PREFIX = "observations/images/"
 
 # ---- 动作布局（策略输出 → adapter 下发通路）----------------------------------------------

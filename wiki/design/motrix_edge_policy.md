@@ -92,7 +92,8 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
 
 只提供两样东西，**不含任何策略专属字段**：
 
--   边缘观测键：`KEY_OBS_QPOS = "observations/qpos"`、`KEY_OBS_IMAGE_PREFIX =
+-   边缘观测键：`KEY_OBS_QPOS = "observations/qpos"`、`KEY_OBS_QPOS_ERR =
+"observations/qpos_err"`、`KEY_OBS_IMAGE_PREFIX =
 "observations/images/"`（= adapter / robot-pipeline 的 `observe()` 输出键）；
 -   图像原语：`to_rgb_uint8(image)`（jpeg bytes / ndarray → uint8 RGB，浮点按约定归一而不
     静默截断）、`resize_with_pad(image, h, w)`（等比缩放 + 居中补零，复刻 openpi 的
@@ -180,7 +181,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
     对齐——这正是上面「图像约定」与「块长兜底」存在的原因。
 -   **观测组装**：`lerobot_features`（随 `SendPolicyInstructions` 下发）由客户端按当前观测
     声明，格式与官方 `hw_to_dataset_features(..., use_video=False)` 同形：
-    `observation.state`（`dtype=float32` + `shape` + `names=[qpos_i]`）与
+    `observation.state`（`dtype=float32` + `shape`；`observation_layout=qpos` 时名字为
+    `[qpos_i]`，`qpos+qpos_err` 时为 `[qpos_i..., qpos_err_i...]`）与
     `observation.images.<相机名>`（`dtype=image` + `shape` + `names`，HWC）。服务端
     `build_dataset_frame` 按这些名字取值，并**用客户端声明的相机名去索引 checkpoint 的
     `image.features`**，故相机名必须等于训练时的名字（`rename_cameras` 负责改名；`image_cameras`
@@ -230,16 +232,18 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 | 策略          | 专有配置项                                                                                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `openpi`      | `prompt`（必填，语言指令）、`image_size`（默认 224）                                                                                       |
-| `lerobot-act` | `pretrained_name_or_path`（必填，服务端加载的 checkpoint）、`device`（默认 cpu）、`actions_per_chunk`（默认 50）、`image_size`（默认 224） |
+| `lerobot-act` | `observation_layout`（`qpos` / `qpos+qpos_err`）、`pretrained_name_or_path`（必填）、`device`（默认 cpu）、`actions_per_chunk`（默认 50）、`image_size`（默认 224） |
 
 -   清单由 `policy_config_items(policy_type)` 提供（CLI `infer config`、前端表单、HTTP
     `/v1/infers/config` 同一来源）；`runtime_keys` 由 `runtime` 派生。
+-   枚举项在 schema 中声明 `options`：前端据此渲染下拉框，后端按同一候选集合校验；当前用于
+    `action_layout` 与 lerobot-act 的 `observation_layout`，避免自由文本产生无效搭配。
 -   长文本项（`prompt` / `system_prompt`）带 `multiline: true`：前端渲染**多行 textarea**
     （占满整行、可拖拽调高），键名不在前端硬编码。
 -   **`runtime`（会话内改能否立即生效）按「配置何时下发给服务端」划分**，不是按客户端能不能读：
     -   `openpi`（每请求独立，无握手状态）：`prompt` / `image_size` 在每次 `infer_chunk` **现读**
         → 会话内改立即生效（`runtime: True`）；
-    -   `lerobot-act`（握手级）：`pretrained_name_or_path` / `device` / `actions_per_chunk` /
+    -   `lerobot-act`（握手级）：`observation_layout` / `pretrained_name_or_path` / `device` / `actions_per_chunk` /
         `image_size` 只在 `Ready` 之后的 `SendPolicyInstructions` 里随 `RemotePolicyConfig`
         下发一次（服务端据此加载 checkpoint、定动作块长），会话内改**不重发、不生效** → 标
         `runtime: False`，**退出会话重进才生效**（前端据 `runtime_keys` 在会话内禁用这些输入框，
@@ -250,8 +254,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
     -   公共项 `warmup_required`（预热门控）：同为**会话级**（进入会话时读取，会话内改需退出重进）；
         语义见「端点与预热」。
     -   公共项 `action_layout`（模型动作布局）：同为**会话级**（下发通路在进入会话时固化）。取值
-        `joint`（缺省）= 每臂 6 关节角，夹爪另经 `gripper` 段（需两次下发）；`joint+gripper` = 每臂「6 关节角 +
-        1 夹爪」→ 一条请求同时写关节与夹爪（未选臂由机器人保持，逐臂块与 `observations/qpos` 同构，
+        `joint`（缺省）= 绝对关节目标；`joint_delta` = 叠加到机器人当前 target 的关节增量；两者均可与
+        `gripper` / `gripper_delta` 组合（未选臂由机器人保持，逐臂块与 `observations/qpos` 同构，
         见 [robot-pipeline 动作空间](./robot_pipeline_action_spaces.md)）。**布局不按动作长度猜测**
         （非法取值在进入会话时报错），且与会话的 `enabled_arms` 共同决定动作维度。
 -   运行时写入内存态 `base_cfg["policy"]`（不写回 yaml），按策略 schema 白名单校验（类型不符 /
@@ -267,7 +271,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 | --------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
 | `host` / `port`             | 客户端传输层         | 推理节点端点（连接目标）；进入会话时固化（改需退出重进）                                    |
 | `warmup_required`           | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
-| `action_layout`             | 会话（InferSession） | 模型输出的动作语义 → 下发方式（`joint` 缺省 / `joint+gripper` 一条请求写两段）              |
+| `action_layout`             | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                     |
+| `observation_layout`        | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                         |
 | `prompt`（openpi）          | 服务端（每帧）       | 语言条件：帧里带就用帧里的，缺了才由 checkpoint 的 `default_prompt` 兜底，随后逐帧 tokenize |
 | `image_size`（openpi）      | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |
 | `image_size`（lerobot-act） | **客户端**           | 同上（端侧 letterbox 压缩），但 lerobot 服务端**只拉伸不兜底** → 必须与训练分辨率一致       |

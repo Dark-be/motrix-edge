@@ -72,6 +72,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE,
     KEY_POSE_ACTION,
     KEY_QPOS,
+    KEY_QPOS_ERR,
 )
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
@@ -362,8 +363,11 @@ class _ShmPublisher:
         gripper = obs[self.robot.KEY_GRIPPER]
         joint_action = obs.get(self.robot.KEY_JOINT_ACTION, joint)
         gripper_action = obs.get(self.robot.KEY_GRIPPER_ACTION, gripper)
+        joint_error = obs[self.robot.KEY_JOINT_ERROR]
+        gripper_error = obs[self.robot.KEY_GRIPPER_ERROR]
         standard = {
             KEY_QPOS: _interleave_state(self.robot, joint, gripper),
+            KEY_QPOS_ERR: _interleave_state(self.robot, joint_error, gripper_error),
             KEY_ACTION: _interleave_state(self.robot, joint_action, gripper_action),
             "seq": getattr(self.robot, "seq", 0),
         }
@@ -384,6 +388,7 @@ class _ShmPublisher:
             self._writer = self._create_writer()
         self._writer.write(
             qpos=standard[KEY_QPOS],
+            qpos_err=standard[KEY_QPOS_ERR],
             action=standard[KEY_ACTION],
             pose=standard.get(KEY_POSE),
             pose_target=standard.get(KEY_POSE_ACTION),
@@ -411,6 +416,7 @@ class _ShmPublisher:
                 image_count=len(image_names),
                 image_size=image_size,
                 qpos_dim=qpos_dim,
+                qpos_err_dim=qpos_dim,
                 action_dim=qpos_dim,
                 pose_dim=_robot_pose_dim(self.robot),
                 pose_target_dim=_robot_pose_dim(self.robot),  # 目标位姿随实测位姿同生共死
@@ -529,7 +535,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 # ``/v1/health``（Edge 本来就周期拉）才能随时新鲜，见 wiki/design/robot_pipeline_tcp.md
                 # 观测键 = standard_obs **实际产出**的键（状态向量 qpos + 目标向量 action + 位姿），
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
-                FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_ACTION]
+                FIELD_OBSERVATION_KEYS: [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION]
                 + ([KEY_POSE, KEY_POSE_ACTION] if _robot_pose_dim(robot) > 0 else [])
                 + [f"{CAMERA_PREFIX}{n}" for n in image_names]
                 + [f"{DEPTH_PREFIX}{n}" for n in _robot_depth_names(robot)],
@@ -733,7 +739,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 调试（非契约）
     @app.get("/observe")
     def observe_debug():
-        """调试用：最新观测状态向量（每臂「值 + 夹爪」）+ 位姿 + 目标向量 + 相机 JPEG(base64)。
+        """调试用：最新状态、目标误差、目标向量、位姿与相机 JPEG(base64)。
 
         Edge 侧实际经共享内存读观测（本端点为调试用）；逐维含义见 ``state_layout()``
         （采集 JSON 的 ``state_space`` / ``state_dims``）。
@@ -744,6 +750,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         out = {
             "ready": True,
             "qpos": np.asarray(obs[KEY_QPOS], dtype=np.float64).tolist(),
+            "qpos_err": np.asarray(obs[KEY_QPOS_ERR], dtype=np.float64).tolist(),
             "seq": obs.get("seq"),
             "state_layout": robot.state_layout(),
         }

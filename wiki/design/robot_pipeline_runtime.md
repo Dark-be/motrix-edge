@@ -90,7 +90,8 @@ flowchart LR
 在钩子之上，`BaseRobot` 提供按线程划分的入口：
 
 -   `sample_state()`（控制线程）：分别读取 joint / gripper，并附上各自 target（原始键为
-    `joint_action` / `gripper_action`），`seq` 自增，结果**缓存**进 `motion_state`；机器人提供位姿时
+    `joint_action` / `gripper_action`）及同拍 `joint_error` / `gripper_error`（目标减实测），
+    `seq` 自增，结果**缓存**进 `motion_state`；机器人提供位姿时
     同拍计算 `pose` / `pose_action`。此处不组装 qpos / action。
 -   `capture_frames()`（观测线程）：调 `get_observation_frames()`，组装为
     `observations/images/<cam_name>`（恒有）与 `observations/depth/<cam_name>`（仅**生效的
@@ -119,6 +120,8 @@ flowchart LR
 
 -   `observations/qpos`：**状态向量**（每臂「值 + 夹爪」交错；值当前是关节角）——数采 / VLA 要的
     就是它；**夹爪是每臂块末位，不再单独成键**（逐维含义见采集 JSON 的 `state_space` / `state_dims`）；
+-   `observations/qpos_err`：机器人按同拍 `action - qpos` 生成的目标跟踪误差，与 qpos 同维同布局；
+    经共享内存提供给 Edge 推理，但不改变现有 MCAP 落盘 schema；
 -   `action`：**目标向量**（同维同布局：每臂「关节目标 + 夹爪目标」；无指令时回退状态）；
 -   `observations/pose`：**实测末端位姿**（每臂 6 维 `xyz + rpy`，米 / 弧度，**不交错**）——由**同一帧关节角**
     正解；
@@ -127,7 +130,7 @@ flowchart LR
     稳态误差。
     机器人用 **`POSE_DIM_PER_ARM`** 声明：0 = 不提供（这两个键都不出现、共享内存不占对应区），> 0 = 提供
     （`_ShmPublisher` 创建写者时传 `pose_dim` / `pose_target_dim`，区域顺序
-    `qpos | action | pose | pose_target | images | depths`；共享内存内部沿用 `pose_target` 字段名）。
+    `qpos | qpos_err | action | pose | pose_target | images | depths`；共享内存内部沿用 `pose_target` 字段名）。
 
 -   **每臂 6 维** `xyz + rpy`，扁平顺序与 qpos 的臂布局一致（对齐 Edge 侧适配器的
     `ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}` 与 `_select_arm_segments`）；

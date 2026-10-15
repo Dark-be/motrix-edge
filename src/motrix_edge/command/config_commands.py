@@ -186,10 +186,14 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
         low, high = item.get("min"), item.get("max")
         if (low is not None and value < low) or (high is not None and value > high):
             raise ValueError(f"{key} must be within [{low}, {high}], got {value}")
-        return value
-    if kind == "bool":
-        return parse_bool(raw)
-    return str(raw).strip()
+    elif kind == "bool":
+        value = parse_bool(raw)
+    else:
+        value = str(raw).strip()
+    options = item.get("options") or []
+    if options and value not in options:
+        raise ValueError(f"{key} must be one of {options}, got {value!r}")
+    return value
 
 
 def set_policy_config(base_cfg, policy_type: str, params: dict) -> dict:

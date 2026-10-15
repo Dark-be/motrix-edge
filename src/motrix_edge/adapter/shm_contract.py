@@ -19,10 +19,11 @@
 [`http_contract`](./http_contract.py)（``robot-pipeline`` 契约服务为服务器 /
 ``test_adapter`` 客户端），不经过共享内存。
 
-布局（版本 **7**）：``header | qpos | action | pose | pose_target | images | depths``
+布局（版本 **8**）：``header | qpos | qpos_err | action | pose | pose_target | images | depths``
 
 - ``header``：固定 numpy dtype（magic / 几何 / 动态状态），记录各数据区偏移。
 - ``qpos`` / ``action``：每臂 ``[joint..., gripper]`` 交错的实测 / 目标向量。
+- ``qpos_err``：与 ``qpos`` 同布局的目标误差，由机器人按 ``action - qpos`` 同帧计算。
 - ``pose``：``float64[pose_dim]`` **实测末端位姿**（每臂 ``xyz + rpy``，单位米 / 弧度）——由机器人
   用与位姿目标同一套运动学正解得出（``pose_dim = 0`` = 本机不提供位姿，不占位姿区）。
 - ``pose_target``：``float64[pose_target_dim]`` **目标位姿** = ``FK(关节段目标)``——底层位姿目标，
@@ -63,6 +64,8 @@ OBS_SHM_HEADER = np.dtype(
         ("image_channels", "<i8"),
         ("qpos_dim", "<i8"),
         ("qpos_offset", "<i8"),
+        ("qpos_err_dim", "<i8"),
+        ("qpos_err_offset", "<i8"),
         ("action_dim", "<i8"),
         ("action_offset", "<i8"),
         ("pose_dim", "<i8"),
@@ -82,14 +85,15 @@ OBS_SHM_HEADER = np.dtype(
 )
 
 _OBS_SHM_MAGIC = 0x4D4F544F4E474F  # "MOTONGO"
-# v7：qpos / action 均为每臂 joint + gripper 的融合向量。
-_OBS_SHM_VERSION = 7
+# v8：新增机器人侧同帧计算的 qpos_err 区。
+_OBS_SHM_VERSION = 8
 
 
 def _layout(
     image_count: int,
     image_size: tuple[int, int],
     qpos_dim: int,
+    qpos_err_dim: int,
     action_dim: int,
     pose_dim: int = 0,
     pose_target_dim: int = 0,
@@ -98,7 +102,7 @@ def _layout(
 ) -> dict:
     """计算共享内存块布局（各数据区偏移 / 大小 / 总大小）；维数 / 路数为 0 时不占对应区。
 
-    区域顺序固定：``qpos | action | pose | pose_target | images | depths``。
+    区域顺序固定：``qpos | qpos_err | action | pose | pose_target | images | depths``。
     深度图尺寸缺省跟随 ``image_size``（对齐到彩色图后同尺寸）。
     """
     w, h = image_size
@@ -108,7 +112,9 @@ def _layout(
     header_size = OBS_SHM_HEADER.itemsize
     qpos_offset = header_size
     qpos_bytes = qpos_dim * np.dtype("<f8").itemsize
-    action_offset = qpos_offset + qpos_bytes
+    qpos_err_offset = qpos_offset + qpos_bytes
+    qpos_err_bytes = qpos_err_dim * np.dtype("<f8").itemsize
+    action_offset = qpos_err_offset + qpos_err_bytes
     action_bytes = action_dim * np.dtype("<f8").itemsize
     pose_offset = action_offset + action_bytes
     pose_bytes = pose_dim * np.dtype("<f8").itemsize
@@ -121,6 +127,7 @@ def _layout(
     return {
         "header_size": header_size,
         "qpos_offset": qpos_offset,
+        "qpos_err_offset": qpos_err_offset,
         "action_offset": action_offset,
         "pose_offset": pose_offset,
         "pose_target_offset": pose_target_offset,
@@ -145,13 +152,14 @@ class ObsShmWriter:
         image_count: int,
         image_size: tuple[int, int],
         qpos_dim: int,
+        qpos_err_dim: int,
         action_dim: int,
         pose_dim: int = 0,
         pose_target_dim: int = 0,
         depth_count: int = 0,
         depth_size: tuple[int, int] | None = None,
     ):
-        """``qpos_dim`` / ``action_dim`` = 每臂 joint + gripper 的融合向量维数；
+        """``qpos_dim`` / ``qpos_err_dim`` / ``action_dim`` = 每臂 joint + gripper 的融合向量维数；
         ``pose_dim`` / ``pose_target_dim`` 为 0 → 不占对应区（本机不提供位姿）；
         ``depth_count`` 为 0 → 不占深度区（本机无深度相机）；``depth_size`` 缺省跟随
         ``image_size``（对齐到彩色图后同尺寸）。"""
@@ -159,6 +167,7 @@ class ObsShmWriter:
         self.image_count = image_count
         self.image_size = tuple(image_size)  # (width, height)
         self.qpos_dim = qpos_dim
+        self.qpos_err_dim = qpos_err_dim
         self.action_dim = action_dim
         self.pose_dim = int(pose_dim)
         self.pose_target_dim = int(pose_target_dim)
@@ -168,6 +177,7 @@ class ObsShmWriter:
             image_count,
             self.image_size,
             qpos_dim,
+            qpos_err_dim,
             action_dim,
             pose_dim=self.pose_dim,
             pose_target_dim=self.pose_target_dim,
@@ -186,6 +196,8 @@ class ObsShmWriter:
         h["image_height"], h["image_width"], h["image_channels"] = self.image_size[1], self.image_size[0], 3
         h["qpos_dim"] = qpos_dim
         h["qpos_offset"] = self._layout["qpos_offset"]
+        h["qpos_err_dim"] = qpos_err_dim
+        h["qpos_err_offset"] = self._layout["qpos_err_offset"]
         h["action_dim"] = action_dim
         h["action_offset"] = self._layout["action_offset"]
         h["pose_dim"] = self.pose_dim
@@ -202,6 +214,9 @@ class ObsShmWriter:
         h["capturing"] = 0
 
         self._qpos = np.ndarray((qpos_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["qpos_offset"])
+        self._qpos_err = np.ndarray(
+            (qpos_err_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["qpos_err_offset"]
+        )
         self._action = np.ndarray(
             (action_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["action_offset"]
         )
@@ -237,20 +252,22 @@ class ObsShmWriter:
     def write(
         self,
         qpos: np.ndarray,
+        qpos_err: np.ndarray,
         action: np.ndarray,
         images: list[np.ndarray],
         pose: np.ndarray | None = None,
         pose_target: np.ndarray | None = None,
         depths: list[np.ndarray] | None = None,
     ) -> None:
-        """写入最新观测帧（qpos / action / pose / pose_target / images / depths），最后更新 header 动态字段。
+        """写入最新观测帧（qpos / qpos_err / action / pose / pose_target / images / depths）。
 
-        ``qpos`` / ``action`` = 每臂 ``[joint..., gripper]`` 的状态 / 目标；
+        ``qpos`` / ``qpos_err`` / ``action`` = 每臂 ``[joint..., gripper]`` 的状态 / 目标误差 / 目标；
         ``pose`` / ``pose_target`` 仅在构造时对应维数 > 0 时生效（``None`` → 本帧保持旧值）；
         ``depths`` 仅在构造时 ``depth_count > 0`` 时生效（每张为 ``uint16[H][W]``，缺省 / ``None``
         → 本帧保持旧值）。
         """
         self._qpos[:] = np.asarray(qpos, dtype="<f8")
+        self._qpos_err[:] = np.asarray(qpos_err, dtype="<f8")
         self._action[:] = np.asarray(action, dtype="<f8")
         if self._pose is not None and pose is not None:
             values = np.asarray(pose, dtype="<f8")
@@ -295,8 +312,8 @@ class ObsShmWriter:
 class ObsShmReader:
     """共享内存观测读者（adapter 侧）：attach 已存在的共享内存块并读取最新观测。
 
-    - 几何字段（图像数量 / 尺寸 / 深度路数 / qpos 与 action 维度）与各数据区偏移从 header 读。
-    - ``read()`` 返回 ``{"qpos", "action", "images"}``（构造时 ``pose_dim > 0``
+    - 几何字段（图像数量 / 尺寸 / 深度路数 / 状态维度）与各数据区偏移从 header 读。
+    - ``read()`` 返回 ``{"qpos", "qpos_err", "action", "images"}``（构造时 ``pose_dim > 0``
       则额外含 ``"pose"`` / ``"pose_target"``；``depth_count > 0`` 则额外含 ``"depths"``）；
       无帧 / 撕裂帧 / **陈旧帧**返回 None。
     - ``running`` / ``capturing`` 属性：只读 SDK 侧状态位。
@@ -346,10 +363,14 @@ class ObsShmReader:
         self.image_count = int(header["image_count"])
         self.image_size = (int(header["image_width"]), int(header["image_height"]))  # (width, height)
         self.qpos_dim = int(header["qpos_dim"])
+        self.qpos_err_dim = int(header["qpos_err_dim"])
         self.action_dim = int(header["action_dim"])
         self.pose_dim = int(header["pose_dim"])
         self.pose_target_dim = int(header["pose_target_dim"])
         self._qpos = np.ndarray((self.qpos_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["qpos_offset"]))
+        self._qpos_err = np.ndarray(
+            (self.qpos_err_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["qpos_err_offset"])
+        )
         self._action = np.ndarray((self.action_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["action_offset"]))
         self._pose = (
             np.ndarray((self.pose_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["pose_offset"]))
@@ -414,10 +435,10 @@ class ObsShmReader:
         return bool(self._header["capturing"]) if self._header is not None else False
 
     def read(self) -> dict | None:
-        """读取最新观测帧：``{"qpos", "action", "pose", "pose_target", "images", "depths"}``；
+        """读取最新观测帧：``{"qpos", "qpos_err", "action", "pose", "pose_target", "images", "depths"}``；
         无帧 / 撕裂 / 陈旧帧返回 None。
 
-        ``qpos`` / ``action`` = 每臂 ``[joint..., gripper]`` 的实测 / 目标向量；``pose``
+        ``qpos`` / ``qpos_err`` / ``action`` = 每臂 ``[joint..., gripper]`` 的实测 / 目标误差 / 目标；``pose``
         （实测位姿）与 ``pose_target``（目标位姿 = ``FK(关节段目标)``）仅在写者启用了位姿区
         （``pose_dim > 0``）时出现；``depths``（每张 ``uint16[H][W]``，已对齐到彩色图）仅在
         写者启用了深度区（``depth_count > 0``）时出现。
@@ -437,6 +458,7 @@ class ObsShmReader:
             self._reattach()  # 旧段冻结：尝试接同名新段，本帧视为无观测
             return None
         qpos = self._qpos.copy()
+        qpos_err = self._qpos_err.copy()
         action = self._action.copy()
         pose = self._pose.copy() if self._pose is not None else None
         pose_target = self._pose_target.copy() if self._pose_target is not None else None
@@ -444,7 +466,7 @@ class ObsShmReader:
         depths = [self._depths[i].copy() for i in range(self.depth_count)] if self._depths is not None else None
         if int(self._header["frame_seq"]) != seq0:
             return None  # 撕裂帧（写入中途），丢弃
-        frame = {"qpos": qpos, "action": action, "images": images}
+        frame = {"qpos": qpos, "qpos_err": qpos_err, "action": action, "images": images}
         if pose is not None:
             frame["pose"] = pose
         if pose_target is not None:

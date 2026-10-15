@@ -23,6 +23,7 @@ from motrix_edge.policy.contract import (
     resize_with_pad,
     to_rgb_uint8,
 )
+from motrix_edge.policy.lerobot_act.client import LerobotActClient
 
 
 @pytest.fixture
@@ -35,6 +36,46 @@ def test_resize_with_pad_center_pads():
     out = resize_with_pad(img, 224, 224)
     assert out.shape == (224, 224, 3)
     assert out.dtype == np.uint8
+
+
+def test_act_state_can_concatenate_robot_qpos_error():
+    """新 ACT 输入按 qpos、qpos_err 顺序拼接；Edge 不从 action 推导误差。"""
+    client = LerobotActClient(
+        {
+            "host": "127.0.0.1",
+            "port": 1,
+            "observation_layout": "qpos+qpos_err",
+            "image_cameras": ["cam_head", "cam_right_wrist"],
+        }
+    )
+    obs = {
+        "observations/qpos": np.arange(7, dtype=np.float32),
+        "observations/qpos_err": np.arange(7, dtype=np.float32) + 10,
+        "action": np.full(7, 999, dtype=np.float32),
+        "observations/images/cam_head": np.zeros((8, 8, 3), dtype=np.uint8),
+        "observations/images/cam_right_wrist": np.zeros((8, 8, 3), dtype=np.uint8),
+    }
+
+    features = client._lerobot_features(obs)
+    raw = client._build_raw_observation(obs)
+
+    state = features["observation.state"]
+    assert state["shape"] == (14,)
+    assert state["names"] == [f"qpos_{i}" for i in range(7)] + [f"qpos_err_{i}" for i in range(7)]
+    assert [raw[name] for name in state["names"]] == pytest.approx([*range(7), *range(10, 17)])
+    assert set(features) == {
+        "observation.state",
+        "observation.images.cam_head",
+        "observation.images.cam_right_wrist",
+    }
+
+
+def test_act_qpos_error_layout_requires_matching_robot_observation():
+    client = LerobotActClient({"host": "127.0.0.1", "port": 1, "observation_layout": "qpos+qpos_err"})
+    with pytest.raises(KeyError, match="observations/qpos_err"):
+        client._lerobot_features({"observations/qpos": np.zeros(7)})
+    with pytest.raises(ValueError, match="qpos_err shape"):
+        client._lerobot_features({"observations/qpos": np.zeros(7), "observations/qpos_err": np.zeros(6)})
 
 
 def test_jpeg_roundtrip_preserves_rgb_channels():

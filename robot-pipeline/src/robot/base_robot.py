@@ -85,8 +85,10 @@ class BaseRobot:
     KEY_JOINT = "joint"  # 实测绝对关节角
     KEY_GRIPPER = "gripper"  # 实测夹爪开合
     KEY_POSE = "pose"  # 实测末端位姿（pose_dim() > 0；每臂 xyz + rpy）
-    KEY_JOINT_ACTION = "joint_action"  # 采集用关节目标；无目标时回退实测
-    KEY_GRIPPER_ACTION = "gripper_action"  # 采集用夹爪目标；无目标时回退实测
+    KEY_JOINT_ACTION = "joint_action"  # 当前关节目标；无目标时回退实测
+    KEY_GRIPPER_ACTION = "gripper_action"  # 当前夹爪目标；无目标时回退实测
+    KEY_JOINT_ERROR = "joint_error"  # 关节跟踪误差 = 目标 - 实测
+    KEY_GRIPPER_ERROR = "gripper_error"  # 夹爪跟踪误差 = 目标 - 实测
     KEY_POSE_ACTION = "pose_action"  # 关节目标的 FK 位姿（pose_dim() > 0）
     KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打点）
     CAMERA_PREFIX = "observations/images/"  # 彩色图像键前缀
@@ -1167,11 +1169,15 @@ class BaseRobot:
         gripper = self.get_observation_gripper()
         joint_target = self.get_joint_target()
         gripper_target = self.get_gripper_target()
+        joint_action = joint.copy() if joint_target is None else joint_target
+        gripper_action = gripper.copy() if gripper_target is None else gripper_target
         state = {
             self.KEY_JOINT: joint,
             self.KEY_GRIPPER: gripper,
-            self.KEY_JOINT_ACTION: joint.copy() if joint_target is None else joint_target,
-            self.KEY_GRIPPER_ACTION: gripper.copy() if gripper_target is None else gripper_target,
+            self.KEY_JOINT_ACTION: joint_action,
+            self.KEY_GRIPPER_ACTION: gripper_action,
+            self.KEY_JOINT_ERROR: joint_action - joint,
+            self.KEY_GRIPPER_ERROR: gripper_action - gripper,
         }
         pose = self.get_observation_pose(joint)
         if pose is not None:

@@ -15,7 +15,7 @@
 """server/preview —— 观测预览服务（独立于 capture / infer 会话）。
 
 预览是**只读观测展示**：从 ``node.frame_manager``（observe 循环每帧写入的缓存）
-读取最新观测（qpos / action / 末端位姿 + 摄像头名列表 + 臂名），**不依赖任何会话**——无需进入采集 /
+读取最新观测（qpos / qpos_err / action / 末端位姿 + 摄像头名列表 + 臂名），**不依赖任何会话**——无需进入采集 /
 推理会话，预览随时可开。受控操作：须持有有效租约（``X-Lease-Id``）。
 
 图像不内联：HTTP JSON 不承载二进制，图像（jpeg / raw）由 WebRTC（/v1/webrtc/offer）
@@ -27,6 +27,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE,
     KEY_POSE_ACTION,
     KEY_QPOS,
+    KEY_QPOS_ERR,
     depth_names_of,
     image_names_of,
 )
@@ -55,8 +56,8 @@ class PreviewService:
         self._leases = leases
 
     def preview(self, lease_id: str | None = None) -> dict:
-        """最新观测预览：adapter 身份 / observation（状态向量拆出的 qpos / gripper + pose /
-        pose_target / action + 臂名）。
+        """最新观测预览：adapter 身份 / observation（状态向量拆出的 qpos / gripper，以及
+        qpos_err / pose / pose_target / action + 臂名）。
 
         不要求会话 —— 无会话时返回当前观测缓存（可能为空），预览随时可开。
         〚qpos〛/〚gripper〛由融合状态向量在展示层拆分；〚pose〛= **实测**末端位姿、
@@ -83,6 +84,7 @@ class PreviewService:
             "observation": {
                 "qpos": self._to_float_list(values),
                 "gripper": self._to_float_list(gripper),
+                "qpos_err": self._to_float_list(latest.get(KEY_QPOS_ERR)),
                 "pose": self._to_float_list(latest.get(KEY_POSE)),
                 "pose_target": self._to_float_list(latest.get(KEY_POSE_ACTION)),
                 "action": self._to_float_list(latest.get(KEY_ACTION)),

@@ -144,6 +144,7 @@ def test_health_returns_identity_and_version():
         "port",
         "warmup_required",
         "action_layout",
+        "observation_layout",
         "pretrained_name_or_path",
         "device",
         "actions_per_chunk",
@@ -707,7 +708,7 @@ def test_preview_requires_lease():
 
 
 def test_preview_returns_latest_observation():
-    """GET /v1/preview：返回 session state / adapter / observation（qpos / action + 摄像头名列表）。"""
+    """GET /v1/preview：返回状态 / 目标误差 / 动作与摄像头名列表。"""
     node = FakeNode()
     client = make_captures_client(node)
     lease = enter_captures(client, node)
@@ -715,6 +716,7 @@ def test_preview_returns_latest_observation():
     node.frame_manager.update(
         {
             "observations/qpos": np.array([0.1, 0.2]),  # float64：float 转换精确
+            "observations/qpos_err": np.array([0.01, -0.02]),
             "observations/pose_action": np.array([0.3, 0.4]),  # 目标位姿（= FK(关节段目标)）
             "observations/images/cam_head": np.full((8, 8, 3), 128, dtype=np.uint8),
         }
@@ -726,6 +728,7 @@ def test_preview_returns_latest_observation():
     assert body["adapter"]["name"] == "Test Robot"
     obs = body["observation"]
     assert obs["qpos"] == [0.1, 0.2]
+    assert obs["qpos_err"] == [0.01, -0.02]
     assert obs["pose_target"] == [0.3, 0.4]  # 目标位姿随观测一起回（MIT 稳态误差可见）
     # 图像不内联（HTTP JSON 不承载二进制）：只返回摄像头名列表，图像由 WebRTC 推流
     assert obs["images"] == ["cam_head"]

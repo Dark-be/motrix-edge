@@ -50,6 +50,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE,
     KEY_POSE_ACTION,
     KEY_QPOS,
+    KEY_QPOS_ERR,
     Action,
     ActionSpace,
     CaptureStatus,
@@ -214,8 +215,8 @@ class HttpShmAdapter(RobotAdapter):
     # ---- capabilities ----------------------------------------------------------
     @property
     def capabilities(self) -> RobotCapabilities:
-        # 状态键在前（qpos → action → 位姿实测 / 目标，与 SHM 布局顺序一致），相机键在后
-        obs_keys = [KEY_QPOS, KEY_ACTION]
+        # 状态键在前（qpos → qpos_err → action → 位姿），相机键在后
+        obs_keys = [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION]
         if self.effective_pose_dim_per_arm() > 0:
             # 机器人提供位姿才声明（否则观测里确实没有这两个键）
             obs_keys.append(KEY_POSE)
@@ -565,7 +566,8 @@ class HttpShmAdapter(RobotAdapter):
         只返回启用臂 / 启用相机的观测（configure 裁剪）；SDK 进程把观测填充到共享内存，
         observe 只读取、不推进 SDK 运行。尚无首帧时返回 ``None``。
 
-        ``observations/qpos`` / ``action`` 固定为每臂 ``[joint..., gripper]`` 的实测 / 目标向量；
+        ``observations/qpos`` / ``observations/qpos_err`` / ``action`` 固定为每臂
+        ``[joint..., gripper]`` 的实测 / 目标误差 / 目标向量；
         ``observations/pose`` = **实测**位姿、
         ``observations/pose_action`` = **目标**位姿（= ``FK(关节段目标)``，随位姿一起提供）；
         机器人开启深度时额外给
@@ -580,6 +582,7 @@ class HttpShmAdapter(RobotAdapter):
         per_arm = self.state_dim_per_arm()
         obs = {
             KEY_QPOS: np.asarray(self._select_arm_segments(frame["qpos"], per_arm), dtype=np.float32),
+            KEY_QPOS_ERR: np.asarray(self._select_arm_segments(frame["qpos_err"], per_arm), dtype=np.float32),
             # action = 目标向量（机器人的关节目标 + 夹爪目标；无指令时进程回退 qpos）——不是 qpos 副本：
             # SHM 布局单独带 action 区（见 shm_contract），preview 显示的是真指令
             KEY_ACTION: np.asarray(self._select_arm_segments(frame["action"], per_arm), dtype=np.float32),

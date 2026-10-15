@@ -4,7 +4,8 @@
 
 robot 底层只控制关节。`joint` 直接写关节目标；`pose` / `pose_delta` 先按当前位姿系解释，完成
 TCP→ 法兰换算和 IK 后再写同一条关节目标链。robot 原始观测以无前缀的明确物理量键发布；到
-Edge / 数据采集边界后，再组装成既有的每臂 7 维 `observations/qpos` 与 `action`。
+Edge 边界后，再组装成每臂 7 维 `observations/qpos`、`observations/qpos_err` 与 `action`。
+落盘仍只保存 qpos / action，保持数据集 schema 稳定。
 
 ## 目标与约束
 
@@ -38,6 +39,8 @@ Edge / 数据采集边界后，再组装成既有的每臂 7 维 `observations/q
 | `joint_action`   | 当前关节目标；无目标回退 joint | 12       |
 | `gripper`        | 实测夹爪开合                   | 2        |
 | `gripper_action` | 当前夹爪目标；无目标回退实测   | 2        |
+| `joint_error`    | 关节目标 − 实测关节角          | 12       |
+| `gripper_error`  | 夹爪目标 − 实测夹爪值          | 2        |
 | `pose`           | 实测末端位姿                   | 12       |
 | `pose_action`    | 关节目标的 FK 位姿             | 12       |
 
@@ -48,7 +51,9 @@ Edge / 数据采集边界后，再组装成既有的每臂 7 维 `observations/q
 
 发布器按物理臂顺序，把 `joint` 与 `gripper` 组装为每臂 `[j1..j6, gripper]`，得到
 `observations/qpos`；把 `joint_action` 与 `gripper_action` 同样组装为 `action`。双臂时二者均为
-14 维。位姿映射为 `observations/pose` / `observations/pose_action`。
+14 维。`joint_error` / `gripper_error` 同样组装成 14 维 `observations/qpos_err`。误差在
+`BaseRobot.sample_state()` 内按同拍目标和实测值计算，Edge 只消费，不缓存或反推机器人目标。
+位姿映射为 `observations/pose` / `observations/pose_action`。
 
 `state_layout()` 描述的也是采集边界布局：每臂 7 维，标签为 `j1..j6, gripper`。
 
@@ -88,8 +93,8 @@ Edge / 数据采集边界后，再组装成既有的每臂 7 维 `observations/q
 
 ## 共享内存
 
-共享内存保持 v7 分区：`qpos | action | pose | pose_action | images | depths`。其中 qpos / action 已在
-robot server 发布前完成每臂 7 维组装，不另设夹爪分区。
+共享内存 v8 分区：`qpos | qpos_err | action | pose | pose_action | images | depths`。三个状态向量均在
+robot server 发布前完成每臂 7 维组装，不另设夹爪分区；同一个 frame sequence 保证三者同帧。
 
 ## 相关文档
 

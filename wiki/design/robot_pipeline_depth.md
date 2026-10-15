@@ -36,7 +36,7 @@ Phase 2 不必再改契约。
 ```mermaid
 graph LR
     RS["RealSense<br/>color + depth + align(color)"] --> RB["BaseRobot<br/>build_observation()"]
-    RB -->|"observations/depth/&lt;cam&gt;"| SHM["共享内存 v7<br/>… | images | depths"]
+    RB -->|"observations/depth/&lt;cam&gt;"| SHM["共享内存 v8<br/>… | images | depths"]
     SHM --> AD["HttpShmAdapter.observe()"]
     AD --> FM["FrameManager 最新帧缓存"]
     FM --> DP["DepthService<br/>GET /v1/depth"]
@@ -61,10 +61,10 @@ graph LR
 `observations/images/<cam>` 的**源分辨率**（`width` / `height`）像素一一对应——注意
 `/v1/preview` 缓存的是降采样图，两者不是同一网格，故查询坐标用**归一化**值（见下）。
 
-### 共享内存布局 v7
+### 共享内存布局 v8
 
 ```
-header | qpos | action | pose | pose_target | images | depths
+header | qpos | qpos_err | action | pose | pose_target | images | depths
 ```
 
 -   新增 header 字段：`depth_count` / `depth_width` / `depth_height` / `depth_offset` /
