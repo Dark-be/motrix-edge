@@ -38,6 +38,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_POSE_ACTION, KEY_QPOS, KEY_QPOS_ERR
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 _QPOS = [0.0] * 12  # joint 空间：每臂 6 关节角 × 2 臂
@@ -179,6 +181,64 @@ def test_robot_observation_uses_explicit_physical_keys(dual_piper):
     assert robot.state_vector_dim() == 14 and robot.state_value_dim_per_arm() == 6
     assert {robot.KEY_JOINT, robot.KEY_GRIPPER, robot.KEY_POSE}.issubset(state)
     assert all(not key.startswith("observations/") for key in state if key != robot.KEY_TIMESTAMP)
+
+
+def test_standard_observation_packs_fused_contract_vectors(dual_piper):
+    """``standard_observation()``：融合键（每臂「值 + 夹爪」）由 robot **单点**产出。
+
+    采集器落盘与共享内存发布读的是**同一份**契约观测——回归点：融合曾经只在 server 层做过、且
+    不回写观测，采集器拿到原始 ``joint`` / ``gripper`` → 每拍 ``KeyError: 'observations/qpos'``
+    （日志刷 ``env observe step error``、episode 0 帧）。
+    """
+    robot = _robot(dual_piper, left_joint=np.arange(6), right_joint=np.arange(6) + 10, grippers=(0.4, 0.6))
+    robot.motion_state = robot.sample_state()
+    robot.motion_state[f"{robot.CAMERA_PREFIX}cam_head"] = np.zeros((2, 2, 3), dtype=np.uint8)
+    robot.motion_state[robot.KEY_TIMESTAMP] = 12.5
+
+    obs = robot.standard_observation()
+
+    assert obs[KEY_QPOS].tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 0.4, 10, 11, 12, 13, 14, 15, 0.6])
+    assert obs[KEY_ACTION].shape == (14,) and obs[KEY_QPOS_ERR].shape == (14,)
+    assert obs[KEY_QPOS_ERR].tolist() == pytest.approx((obs[KEY_ACTION] - obs[KEY_QPOS]).tolist())
+    # 位姿键按**契约名**（带 observations/ 前缀，与 robot 原始 pose / pose_action 不同名）
+    assert obs[KEY_POSE].shape == (12,) and obs[KEY_POSE_ACTION].shape == (12,)
+    assert obs[f"{robot.CAMERA_PREFIX}cam_head"].shape == (2, 2, 3)  # 本拍帧原样带走
+    assert obs["timestamp"] == pytest.approx(12.5) and obs["seq"] == robot.seq
+    assert robot.KEY_JOINT not in obs and robot.KEY_GRIPPER not in obs  # 原始键不外泄：消费方只认契约键
+
+
+def test_standard_observation_without_first_sample(dual_piper):
+    """控制线程还没采到第一拍 → 无观测（``None``），不是一份缺键的假观测。"""
+    robot = _robot(dual_piper)
+
+    assert robot.standard_observation() is None
+
+
+def test_interleave_state_rejects_mismatched_blocks(dual_piper):
+    """关节 / 夹爪长度与臂布局不符 → 立即报错（不拼出一条看似有效的状态向量）。"""
+    robot = _robot(dual_piper)
+
+    with pytest.raises(ValueError, match=r"cannot pack state"):
+        robot.interleave_state(np.arange(5), [0.25, 0.75])
+    with pytest.raises(ValueError, match=r"cannot pack state"):
+        robot.interleave_state(np.arange(12), [0.25])
+
+
+def test_collector_consumes_standard_observation(dual_piper, collector, tmp_path):
+    """真采集器 + robot 契约观测：episode 要真的写进帧（回归：融在 server 层时这里是 0 帧）。"""
+    pytest.importorskip("mcap_ros2", reason="robot-pipeline 侧依赖（mcap），宿主机 / 容器可能未装")
+
+    robot = _robot(dual_piper, grippers=(0.4, 0.6))
+    instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
+    instance.start()
+    for _ in range(2):
+        robot.motion_state = robot.sample_state()
+        instance.collect(robot.standard_observation())
+    path = instance.finish()
+
+    assert path is not None and path.exists()
+    meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert meta["frames"] == 2  # 每拍都真的落了帧（不是 0）
 
 
 def test_robot_rejects_short_joint_block(dual_piper):

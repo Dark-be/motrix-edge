@@ -136,8 +136,7 @@ flowchart LR
     `ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}` 与 `_select_arm_segments`）；
 -   **test_robot**（虚拟）无真实运动学：用固定可逆映射 `POSE_MAP`（对角：`x←j1 y←j2 z←j3
 rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——「关节动 → EEF 跟着动」，
-    预览与笛卡尔闭环都可解释；
--   **dual_piper（真机，已实现）**：`POSE_DIM_PER_ARM = 6`，`pose_dim()` 根据双臂推导为 12；
+    预览与笛卡尔闭环都可解释；- **dual_piper（真机，已实现）**：`POSE_DIM_PER_ARM = 6`，`pose_dim()` 根据双臂推导为 12；
     `get_observation_pose(joint=None)` 用**同一拍关节角**经
     `robot/kinematics` 的正解解算（米 / 弧度，与 edge 契约同量纲同约定）——**与位姿目标的解算共用
     同一个运动学模型**，所以「读到的位姿」与「下发的位姿目标」同系可直接比对；底层硬件依赖
@@ -146,6 +145,11 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 -   **读取失败 → 写 NaN**（而不是 `None`）：写者的 `pose=None` 语义是「本帧保持旧值」，那会让
     下游把陈旧位姿当真值；NaN 写进位姿区后 edge 侧的量纲/有限性防护会**丢弃该帧位姿**，
     下游看到的是「声明了但本拍不可用」而不是「一个错的真值」（同原因只告警一条）；
+-   **组装单点** `BaseRobot.standard_observation()`：共享内存发布（`_ShmPublisher.publish`）与采集落盘
+    （`ActMcapCollector.collect`）消费的是**同一份**契约观测——融合向量 + 位姿 + 本拍图像 +
+    `timestamp` + `seq`，由 robot 层一次组装，env 观测线程一拍算好同时喂给两方（server 只发布、
+    collector 只落盘）。⚠️ 谁都不要再自己拼一份：曾经融合只在 server 层做过、且不回写观测，
+    采集器就拿到原始 `joint` / `gripper` → 每拍 `KeyError: 'observations/qpos'`、episode 0 帧。
 -   采集（`ActMcapCollector`）落 `observations/qpos`（**状态向量** = 每臂「值 + 夹爪」）+ `action`
     （**目标向量**，同维同布局）+ 相机 topic，**位姿不入 mcap**（数据集格式未定，暂不扩 schema）；
     每轮 mcap 的同名 JSON 里写 `state_space` / `state_dims` / `action_space` / `action_dims`

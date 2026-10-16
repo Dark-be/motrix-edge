@@ -68,7 +68,7 @@ from pathlib import Path
 import numpy as np
 from utils.data_handler import debug_print
 
-# standard_obs keys (see Robot.get_standard_obs())
+# standard_obs keys（见 ``BaseRobot.standard_observation()``）
 KEY_QPOS = "observations/qpos"  # 每臂「关节 + 夹爪」交错
 KEY_ACTION = "action"  # 同维同布局的目标向量
 CAMERA_PREFIX = "observations/images/"

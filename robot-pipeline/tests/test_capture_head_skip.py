@@ -26,6 +26,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 _Q0 = np.array([0.1] * 12)
@@ -33,7 +35,7 @@ _G0 = np.array([1.0, 1.0])
 
 
 class _FakeCollector:
-    """最小 collector：只记调用序列（绕过 mcap 依赖）。"""
+    """最小 collector：只记调用序列（绕过 mcap 依赖）+ 校验交上来的观测键。"""
 
     def __init__(self, cfg):
         self.cfg = dict(cfg or {})
@@ -46,6 +48,10 @@ class _FakeCollector:
         self.calls.append("start")
 
     def collect(self, observation):
+        # 真采集器按契约取融合键（``standard_obs[KEY_QPOS]``）：这里钉住 env 交上来的形状——
+        # 回归点：融合只在 server 层做过（且不回写观测）时，这里拿到的是原始 joint / gripper，
+        # 真采集器每拍 KeyError: 'observations/qpos'、episode 0 帧。
+        assert KEY_QPOS in observation and KEY_ACTION in observation, f"契约观测缺融合键：{sorted(observation)}"
         self.calls.append("collect")
 
     def finish(self):
@@ -99,7 +105,9 @@ def _build(base_env_module, **collector_cfg):
     robot = _FakeRobot()
     cfg = {"type": "act_mcap", "save_dir": "/tmp/head-skip", **collector_cfg}
     env = base_env_module.BaseEnv(robot, cfg)
-    env.observation = {"qpos": [0.0] * 12}
+    # 观测线程每拍交给采集器的是**契约观测**（融合键；形状由 ``BaseRobot.standard_observation()``
+    # 单点产出，见 tests/test_state_layout.py 的 standard_observation 用例）。
+    env.standard_observation = {KEY_QPOS: [0.0] * 14, KEY_ACTION: [0.0] * 14}
     return env, robot, env._collector
 
 

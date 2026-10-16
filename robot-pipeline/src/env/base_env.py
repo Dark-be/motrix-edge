@@ -18,8 +18,9 @@
 - **控制线程**（``HZ``，默认 30Hz）：取本拍运动指令 → ``robot.step()`` 限速接近 target
   → ``robot.sample_state()`` 采样并缓存分离的 joint / gripper / pose 状态。
   相机取帧与采集落盘都**不在**本线程，故相机 / 磁盘卡顿不会拖慢或中断机械臂控制。
-- **观测线程**（``OBS_HZ``，默认 10Hz = **真实取观测的频率**）：取相机帧 + 缓存状态拼装观测 → 帧钩子 ``on_frame``
-  （server 据此读取观测并发布共享内存）→ 采集落盘。
+- **观测线程**（``OBS_HZ``，默认 10Hz = **真实取观测的频率**）：取相机帧 + 缓存状态 → 契约观测
+  （``robot.standard_observation()``：融合 qpos / action / qpos_err + 位姿 + 本拍图像）→ 帧钩子 ``on_frame``
+  （server 据此发布共享内存）→ 采集落盘；两个消费方读**同一份**。
 - **命令队列**：HTTP 线程（server handler）调用 ``robot_reset`` / ``robot_execute`` /
   ``robot_rollout`` / ``robot_safe_stop`` / ``robot_set_teleop`` **只把运动指令入队**，由
   控制线程每拍取出执行；``robot_capture_*`` **只把采集指令入队**，由观测线程取出执行。
@@ -82,6 +83,9 @@ class BaseEnv:
         self._step_error_streak = 0  # step 连续失败计数（任一帧成功即清零）
         self.on_frame = None  # 每帧回调（server 设置：读取观测并发布共享内存）
         self.observation = {}  # 观测线程保留的最新原始观测副本（其他消费方只读）
+        # 最新**契约观测**（robot.standard_observation()：融合 qpos / action / qpos_err + 位姿 + 图像）
+        # ——共享内存发布与采集落盘消费的就是它（同一份，别各自拼）。
+        self.standard_observation = {}
         # 命令队列：HTTP 线程入队，各自由唯一消费者线程取出执行（组件单写者）。
         # ⚠️ FIFO 只保证队列内顺序：两条队列生效时机不同（≤1/HZ vs ≤1/OBS_HZ），跨队列顺序不保证。
         self.commands: queue.Queue = queue.Queue()  # 运动指令（控制线程消费，≤1/HZ 生效）
@@ -543,10 +547,11 @@ class BaseEnv:
         self.robot.sample_state()
 
     def step_observe(self):
-        """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 观测副本 → 帧回调 → 采集落盘。
+        """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 契约观测 → 帧回调 → 采集落盘。
 
-        ``robot.build_observation()`` 只在本方法调用；帧回调（如共享内存发布）读
-        ``self.observation`` 副本，不重复触发取数。控制线程尚未采到第一拍时本拍无观测。
+        ``robot.build_observation()`` 只在本方法调用；随后 `robot.standard_observation()` 把分离状态
+        融合成**契约观测**（一份，见该方法 docstring），帧回调（共享内存发布）与采集器读的是**同一份**
+        ——不重复触发取数，也不会出现「两边各自拼、拼得不一样」。
 
         观测帧的 ``timestamp`` 由 ``build_observation()``（本线程）在打帧时写入，故帧时刻反映
         观测节奏（``OBS_HZ``），不是控制拍的机械臂采样时刻。
@@ -555,13 +560,16 @@ class BaseEnv:
         observation = self.robot.build_observation()
         if observation is None:
             return  # 控制线程尚未采到第一拍（启动瞬间）：本拍不出观测，下一拍重试
-        self.observation = observation  # 保留最新原始观测副本
+        self.observation = observation  # 保留最新原始观测副本（其他消费方只读）
+        # 契约观测（融合 qpos / action / qpos_err + 位姿 + 本拍图像）由 robot 单点组装，**同一份**
+        # 交给帧回调（共享内存发布）与采集落盘——两边要的键完全一样，谁都不要再自己拼一次。
+        self.standard_observation = self.robot.standard_observation(observation)
         if self.on_frame is not None:
-            self.on_frame(self.observation)
+            self.on_frame(self.standard_observation)
         self._update_capture()
 
     def _update_capture(self):
-        """按 capturing 记录观测：True→记录本帧；False→结束并保存为一条 episode。
+        """按 capturing 记录观测：True→记录本帧（**契约观测**，见 ``step_observe``）；False→结束并保存。
 
         ⚠️ 采集开关在同一拍**开头**（``_drain_capture_commands``）统一生效：同一拍内 drain 到
         ``capture_start`` + ``capture_end``（``capturing`` 先真后假、``_episode_open`` 从未置位）
@@ -584,7 +592,7 @@ class BaseEnv:
                 start = getattr(self._collector, "start", None)
                 if start is not None:
                     start()
-            self._collector.collect(self.observation)
+            self._collector.collect(self.standard_observation)
         elif self._episode_open:
             self._episode_open = False
             self._collector.finish()  # 写 footer + 同名 JSON 元信息（文件列表不经契约上报）

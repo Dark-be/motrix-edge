@@ -25,6 +25,12 @@ from dataclasses import dataclass
 import numpy as np
 from utils.data_handler import debug_print
 
+from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
+
+# 位姿键在 edge 观测契约里带 ``observations/`` 前缀（与 robot 原始的 ``pose`` / ``pose_action`` 不同名，
+# 故取别名避免与类属性同名）：``standard_observation()`` 的输出键就是这一套。
+from motrix_edge.adapter.base import KEY_POSE as OBSERVATION_POSE_KEY
+from motrix_edge.adapter.base import KEY_POSE_ACTION as OBSERVATION_POSE_ACTION_KEY
 from motrix_edge.adapter.http_contract import FIELD_ARM, FIELD_MOUNT, VALUE_MOUNT_FIXED, VALUE_MOUNT_WRIST
 from robot.kinematics import tcp, wrap_angles
 
@@ -1187,6 +1193,61 @@ class BaseRobot:
             state[self.KEY_POSE_ACTION] = target_pose
         self.motion_state = state
         return self.motion_state
+
+    def interleave_state(self, values, gripper) -> np.ndarray:
+        """分离物理量 → **状态向量**（每臂「值 + 夹爪」交错，长度 = ``state_vector_dim()``）。
+
+        与 :meth:`state_layout` 的逐维含义同源：``state_arm_count()`` 臂 ×（每臂
+        ``state_value_dim_per_arm()`` 个值 + 1 夹爪）。长度不符立即报错（不猜、不补齐）。
+        """
+        values = np.asarray(values, dtype=np.float64).reshape(-1)
+        gripper = np.asarray(gripper, dtype=np.float64).reshape(-1)
+        arms = int(self.state_arm_count())
+        per_arm = int(self.state_value_dim_per_arm())
+        if values.size != arms * per_arm or gripper.size != arms:
+            raise ValueError(
+                f"{self.name}: cannot pack state: values={values.size}, gripper={gripper.size}, "
+                f"expected {arms * per_arm}+{arms}"
+            )
+        return np.concatenate(
+            [
+                np.concatenate([values[index * per_arm : (index + 1) * per_arm], gripper[index : index + 1]])
+                for index in range(arms)
+            ]
+        )
+
+    def standard_observation(self, state: dict | None = None) -> dict | None:
+        """分离状态 → **契约观测**（共享内存发布与采集落盘消费的**同一份形状**）。
+
+        ``state`` = :meth:`sample_state` 的缓存 + 本拍帧 + ``timestamp``（缺省取 ``motion_state``）；
+        输出 = 融合向量（``observations/qpos`` / ``action`` / ``observations/qpos_err``，每臂「值 +
+        夹爪」）+ 位姿（机型提供位姿时）+ 本拍图像（彩色 / 深度）+ ``timestamp`` + ``seq``，键名取
+        edge 观测契约（``motrix_edge.adapter.base``）。
+
+        **组装只有这一处**：server 只负责发布、collector 只负责落盘，两边都不再自己拼向量——
+        曾经由 server 单独组装（且不回写观测）时，采集器拿到的是原始 ``joint`` / ``gripper``，
+        每拍抛 ``KeyError: 'observations/qpos'``、episode 一帧都写不进去。
+        """
+        values = self.motion_state if state is None else state
+        if values is None:
+            return None
+        try:
+            fused = {
+                KEY_QPOS: self.interleave_state(values[self.KEY_JOINT], values[self.KEY_GRIPPER]),
+                KEY_QPOS_ERR: self.interleave_state(values[self.KEY_JOINT_ERROR], values[self.KEY_GRIPPER_ERROR]),
+                KEY_ACTION: self.interleave_state(values[self.KEY_JOINT_ACTION], values[self.KEY_GRIPPER_ACTION]),
+                "seq": int(self.seq),
+            }
+        except KeyError as exc:
+            raise ValueError(f"{self.name}: observation missing key {exc}（控制线程还没采到第一拍？）") from exc
+        if values.get(self.KEY_POSE) is not None:
+            fused[OBSERVATION_POSE_KEY] = values[self.KEY_POSE]
+        if values.get(self.KEY_POSE_ACTION) is not None:
+            fused[OBSERVATION_POSE_ACTION_KEY] = values[self.KEY_POSE_ACTION]
+        for key, value in values.items():
+            if key.startswith((self.CAMERA_PREFIX, self.DEPTH_PREFIX)) or key == self.KEY_TIMESTAMP:
+                fused[key] = value
+        return fused
 
     # ---- 相机与深度（彩色 + 深度观测；相机元数据供 robot server 上报）------------------
     def _resolve_depth_cameras(self) -> list[str]:

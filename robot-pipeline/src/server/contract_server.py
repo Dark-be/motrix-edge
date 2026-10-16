@@ -22,8 +22,9 @@
 
 env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程取帧发布、状态切换、接收
 控制方法（robot_reset / robot_execute ...）。本模块把 /v1 指令桥接到 env，并在每拍回调
-（env.on_frame，由 env 观测线程触发）中读取 env 保留的观测副本（= 控制线程采样的机械臂
-状态 + 本拍相机帧）组装 standard_obs、写入共享内存、缓存供 /observe 调试。
+（env.on_frame，由 env 观测线程触发）中把 env 交来的**契约观测**
+（= ``robot.standard_observation()``：融合 qpos / action / qpos_err + 位姿 + 本拍相机帧）写入
+共享内存、缓存供 /observe 调试——**不自己拼状态向量**（采集器落盘读的也是同一份）。
 
 端点（前缀 /v1）:
     POST /v1/discover      自描述探活
@@ -185,25 +186,6 @@ def _robot_state_dim(robot) -> int:
     return int(robot.state_vector_dim())
 
 
-def _interleave_state(robot, joint, gripper) -> np.ndarray:
-    """robot 分离物理量 → 每臂 ``[joint..., gripper]`` 的采集向量。"""
-    joint = np.asarray(joint, dtype=np.float64).reshape(-1)
-    gripper = np.asarray(gripper, dtype=np.float64).reshape(-1)
-    arms = int(robot.state_arm_count())
-    joint_per_arm = int(robot.state_value_dim_per_arm())
-    if joint.size != arms * joint_per_arm or gripper.size != arms:
-        raise ValueError(
-            f"{robot.name}: cannot pack state: joint={joint.size}, gripper={gripper.size}, "
-            f"expected {arms * joint_per_arm}+{arms}"
-        )
-    return np.concatenate(
-        [
-            np.concatenate([joint[index * joint_per_arm : (index + 1) * joint_per_arm], gripper[index : index + 1]])
-            for index in range(arms)
-        ]
-    )
-
-
 def _robot_pose_dim(robot) -> int:
     """位姿区宽度（每臂 xyz + rpy）；0 = 本机不提供位姿（不占位姿区）。"""
     return int(robot.pose_dim() or 0)
@@ -336,64 +318,43 @@ class CaptureSyncRequest(BaseModel):
 
 
 class _ShmPublisher:
-    """server 侧观测发布器：组装 standard_obs 并写入共享内存（env 不碰共享内存）。
+    """server 侧观测发布器：把**契约观测**写入共享内存（env 不碰共享内存）。
 
-    env 观测线程每拍回调（on_frame）把保留的观测副本传入 publish()；本类按 adapter 契约
-    组装 standard_obs、写入 ObsShmWriter，并缓存供 /observe 调试。
+    env 观测线程每拍回调（on_frame）把 ``robot.standard_observation()`` 的结果传入 publish()；
+    本类只做「缓存 + 按 adapter 契约写 ObsShmWriter」——融合向量与图像键都由 robot 层单点组装，
+    采集器落盘读的也是同一份，**本类不再自己拼状态向量**（曾经自己拼且不回写观测 → 采集器
+    拿不到 ``observations/qpos``）。
     """
 
     def __init__(self, robot):
         self.robot = robot
         self._writer: ObsShmWriter | None = None
-        self.last_obs: dict = {}  # 最新 standard_obs（/observe 调试用）
+        self.last_obs: dict = {}  # 最新契约观测（/observe 调试用）
 
-    def publish(self, obs):
-        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约）。
+    def publish(self, observation):
+        """发布一帧观测（``observation`` = ``robot.standard_observation()`` 的输出）。
 
-        将 robot 原始 joint / gripper 组装为每臂 7 维 qpos / action，并写入
-        pose（实测位姿）+ pose_action（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位
-        可见）+ raw RGB 图像 + 深度图（机器人开启深度时；已对齐到彩色图）；位姿（与目标位姿）
-        仅在机器人提供（``pose_dim() > 0``）时写入，深度仅在**生效的深度相机**有值时写入（否则不占该区）。
+        写入共享内存：qpos（状态向量）/ qpos_err（目标跟踪误差）/ action（目标向量）+ pose（实测位姿）
+        + pose_action（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位可见）+ raw RGB 图像
+        + 深度图（机器人开启深度时；已对齐到彩色图）；位姿（与目标位姿）仅在机器人提供
+        （``pose_dim() > 0``）时写入，深度仅在**生效的深度相机**有值时写入（否则不占该区）。
         """
-        if obs is None or obs.get(self.robot.KEY_JOINT) is None:
+        if not observation:
             return
         image_names = _robot_image_names(self.robot)
         depth_names = _robot_depth_names(self.robot)
-        joint = obs[self.robot.KEY_JOINT]
-        gripper = obs[self.robot.KEY_GRIPPER]
-        joint_action = obs.get(self.robot.KEY_JOINT_ACTION, joint)
-        gripper_action = obs.get(self.robot.KEY_GRIPPER_ACTION, gripper)
-        joint_error = obs[self.robot.KEY_JOINT_ERROR]
-        gripper_error = obs[self.robot.KEY_GRIPPER_ERROR]
-        standard = {
-            KEY_QPOS: _interleave_state(self.robot, joint, gripper),
-            KEY_QPOS_ERR: _interleave_state(self.robot, joint_error, gripper_error),
-            KEY_ACTION: _interleave_state(self.robot, joint_action, gripper_action),
-            "seq": getattr(self.robot, "seq", 0),
-        }
-        if obs.get(self.robot.KEY_POSE) is not None:
-            standard[KEY_POSE] = obs[self.robot.KEY_POSE]
-        if obs.get(self.robot.KEY_POSE_ACTION) is not None:
-            standard[KEY_POSE_ACTION] = obs[self.robot.KEY_POSE_ACTION]
-        for name in image_names:
-            standard[f"{CAMERA_PREFIX}{name}"] = obs[f"{CAMERA_PREFIX}{name}"]
-        depths = []
-        for name in depth_names:
-            depth = obs.get(f"{DEPTH_PREFIX}{name}")
-            if depth is not None:
-                standard[f"{DEPTH_PREFIX}{name}"] = depth
-                depths.append(depth)
-        self.last_obs = standard
+        self.last_obs = dict(observation)
         if self._writer is None:
             self._writer = self._create_writer()
+        # 深度区宽度固定：路数对不上（某相机本拍无深度）就不传，宁可本帧深度停在上一次
+        depths = [value for name in depth_names if (value := observation.get(f"{DEPTH_PREFIX}{name}")) is not None]
         self._writer.write(
-            qpos=standard[KEY_QPOS],
-            qpos_err=standard[KEY_QPOS_ERR],
-            action=standard[KEY_ACTION],
-            pose=standard.get(KEY_POSE),
-            pose_target=standard.get(KEY_POSE_ACTION),
-            images=[standard[f"{CAMERA_PREFIX}{n}"] for n in image_names],
-            # 深度区宽度固定：路数对不上（某相机本拍无深度）就不传，宁可本帧深度停在上一次
+            qpos=observation[KEY_QPOS],
+            qpos_err=observation[KEY_QPOS_ERR],
+            action=observation[KEY_ACTION],
+            pose=observation.get(KEY_POSE),
+            pose_target=observation.get(KEY_POSE_ACTION),
+            images=[observation[f"{CAMERA_PREFIX}{name}"] for name in image_names],
             depths=depths if len(depths) == len(depth_names) else None,
         )
 
