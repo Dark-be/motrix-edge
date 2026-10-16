@@ -57,7 +57,7 @@ http://<edge>:8000` 后，agent 的 `move_delta` / `rotate_delta` / `set_gripper
 | `env.get_camera_meta`                         | 相机名与规格                             |
 | `env.reset`                                   | 复位（dual-Franka 要求**显式复位**语义） |
 | `env.move_delta` / `env.rotate_delta`         | 相对位移 / 相对姿态（笛卡尔增量）        |
-| `env.set_gripper`                             | 夹爪开合（`open: bool`）                 |
+| `env.set_gripper`                             | 夹爪开合度（`open`：bool 或 `[0, 1]`）   |
 | `env.recover_joint_posture`                   | 关节复位（可保持已夹持物体）             |
 | `env.chunk_step` / `env.step`                 | 执行动作块 / 单步                        |
 | `env.get_task_language` / `env.render_camera` | 任务语言描述 / 取相机帧                  |
@@ -104,7 +104,7 @@ flowchart LR
 | `env.get_robot_state`                 | qpos / pose / 每臂夹爪 + `wrapped_state_vector`                                                   | —                                                                                                              |
 | `env.reset`                           | 命令通道 `robot/reset`（含租约与回执）                                                            | 不隐式复位                                                                                                     |
 | `env.move_delta` / `env.rotate_delta` | `adapter.rollout(..., layout="pose_delta")`                                                       | 增量交给机器人叠加在**关节段目标**上                                                                           |
-| `env.set_gripper`                     | `adapter.rollout(..., layout="joint+gripper")`                                                    | 关节段取**目标**（`action`），夹爪同拍落地                                                                     |
+| `env.set_gripper`                     | `adapter.rollout(..., layout="joint+gripper")`                                                    | 关节段取**目标**（`action`），夹爪同拍落地；`open` = 开合度（bool ≡ 1.0 / 0.0），越界拒绝                      |
 | `env.recover_joint_posture`           | `adapter.rollout(..., layout="joint+gripper")`：每臂 `HOME["joint"]` + 保持夹爪                   | **已对齐**（无 `HOME["joint"]` 声明才退回 `adapter.reset()` 并标 `fallback`，见「与 RPent 客户端的形态对齐」） |
 | `env.step`                            | 单帧 `adapter.rollout(...)` → gym 5 元组                                                          | 遥操作中拒拍 → `ok=false`                                                                                      |
 | `env.chunk_step`                      | 逐帧 `adapter.rollout(...)`（频率由 `server.rpent.step_hz` 定，null = 机器人上报的 `control_hz`） | 回 `observation` / `terminated` / `truncated`                                                                  |
@@ -181,15 +181,15 @@ edge 的下发契约是 `layout` + `arms`（段宽见 [下发契约收敛](./rob
 以下几处 RPent 客户端 / 工具期望的形态与 edge 的原生返回不同，已按下表结论对齐（改 edge 或
 RPent 侧适配二选一）。右列处置**均已落地**：
 
-| 项                          | RPent 期望                                                  | edge 现状                              | 结论                                                                                                                                                                                   |
-| --------------------------- | ----------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 末端位姿编码                | `tcp_pose = [x, y, z, qx, qy, qz, qw]`（过了 `from_quat`）  | 扁平 `pose` 仍是 `xyz + rpy`           | **已解决**：每臂块额外给 quat `tcp_pose`（两种约定共存）                                                                                                                               |
-| 机器人状态结构              | 每臂块 `left_arm` / `right_arm`（关节 / 夹爪 / `tcp_pose`） | 扁平 + 每臂块                          | **已解决**（`env.get_robot_state` 同时给两套）                                                                                                                                         |
-| 观测图分辨率                | 原图（如 640×480）                                          | 默认 `image_source: native` → **原图** | **已解决**（planner 面向给原图；`preview` 可回 320×240；VLA 逐帧观测恒走缓存）                                                                                                         |
-| `recover_joint_posture`     | 关节复位**保持已夹持物**                                    | 关节回 home + **保持夹爪**             | **已解决**：关节回 `HOME["joint"]`（无声明才退回 `adapter.reset()` 并标注 fallback）；夹爪基座与 `set_gripper` 同源（取 `action` 的目标夹爪槽，缺 `action` 整体退实测），回执 `source` |
-| `env.get_env_meta` 严格比对 | `BaseEnvClient` 断言 meta **完全相等**                      | 我方 meta 是超集                       | **已澄清**：自写 client（其 franka 包覆写了 `__init__`，断言不执行）                                                                                                                   |
-| 内联相机来源                | `dump_state` 只读 `get_camera_meta` 的 `agent_observation`  | 两处共用同一 helper                    | **已解决**（缺这项模型只拿到路径、盲跑）                                                                                                                                               |
-| 原语到位判定                | 工具返回前就知道「到没到」                                  | `settle` 阻塞到到位 / 超时 / 停滞      | **已解决**（回执 `reached` / `final_err`（+ 分项 `final_err_m` / `final_err_rad`）/ `elapsed_s` / `stalled` / `timeout`，可逐次覆盖）                                                  |
+| 项                          | RPent 期望                                                  | edge 现状                              | 结论                                                                                                                                                                                                   |
+| --------------------------- | ----------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 末端位姿编码                | `tcp_pose = [x, y, z, qx, qy, qz, qw]`（过了 `from_quat`）  | 扁平 `pose` 仍是 `xyz + rpy`           | **已解决**：每臂块额外给 quat `tcp_pose`（两种约定共存）                                                                                                                                               |
+| 机器人状态结构              | 每臂块 `left_arm` / `right_arm`（关节 / 夹爪 / `tcp_pose`） | 扁平 + 每臂块                          | **已解决**（`env.get_robot_state` 同时给两套）                                                                                                                                                         |
+| 观测图分辨率                | 原图（如 640×480）                                          | 默认 `image_source: native` → **原图** | **已解决**（planner 面向给原图；`preview` 可回 320×240；VLA 逐帧观测恒走缓存）                                                                                                                         |
+| `recover_joint_posture`     | 关节复位**保持已夹持物**                                    | 关节回 home + **保持夹爪**             | **已解决**：关节回 `HOME["joint"]`（无声明才退回 `adapter.reset()` 并标注 fallback）；夹爪基座与 `set_gripper` 同源（取 `action` 的目标夹爪槽，缺 `action` 整体退实测），回执 `source`                 |
+| `env.get_env_meta` 严格比对 | `BaseEnvClient` 断言 meta **完全相等**                      | 我方 meta 是超集                       | **已澄清**：自写 client（其 franka 包覆写了 `__init__`，断言不执行）                                                                                                                                   |
+| 内联相机来源                | `dump_state` 只读 `get_camera_meta` 的 `agent_observation`  | 两处共用同一 helper                    | **已解决**（缺这项模型只拿到路径、盲跑）                                                                                                                                                               |
+| 原语到位判定                | 工具返回前就知道「到没到」                                  | `settle` 阻塞到到位 / 超时 / 停滞      | **已解决**（回执 `reached` / `final_err`（+ 分项 `final_err_m` / `final_err_rad`）/ `elapsed_s` / `stalled` / `timeout`，可逐次覆盖；判到位后再 dwell `dwell_s` 才回执，见「MIT 力矩控制的容差标定」） |
 
 ## RPent 侧机器人包（`robots/motrix_edge/`）
 
@@ -280,9 +280,14 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
 
 #### E. 夹爪
 
-| 工具名                           | edge 方法                     | 参数   | 回执里必须读的字段                                                           |
-| -------------------------------- | ----------------------------- | ------ | ---------------------------------------------------------------------------- |
-| `open_gripper` / `close_gripper` | `env.set_gripper(arm?, open)` | `arm?` | `reached` / `final_err` / `stalled`（**`stalled` = 已接触/夹住，不是失败**） |
+| 工具名                           | edge 方法                         | 参数                 | 回执里必须读的字段                                                           |
+| -------------------------------- | --------------------------------- | -------------------- | ---------------------------------------------------------------------------- |
+| `open_gripper` / `close_gripper` | `env.set_gripper(arm?, open)`     | `arm?`               | `reached` / `final_err` / `stalled`（**`stalled` = 已接触/夹住，不是失败**） |
+| `set_gripper`（**按开合度**）    | `env.set_gripper(arm?, open=0.4)` | `arm?` / `open` 数值 | 同上（`open` 回显生效值；`target` 是全臂 qpos）                              |
+
+`open` 与自描述 `gripper_range` 同域（`[0, 1]`，0 = 闭合 / 1 = 张开）：bool 等价于两端点，数值
+按开合度落地——RPent 想要「合到一半夹住薄片」这类动作，不必再凑 `open` / `close` 两个端点。
+域外 / 非数值 → `ok=false` + `kind=argument`（不静默夹到 0 / 1：agent 会以为是自己算错）。
 
 **不注册**：`request_scene_reset`（属探索模式 + 操作员介导的**场景**恢复，真机必须人工）、
 `segment`（依赖 RPent 本地的分割模型；edge 只给几何）、`request_operator_verdict`（探索模式）。
@@ -348,8 +353,14 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
     前馈**已标定接通**后的残余静态误差量级（此前为盖住未补偿的 `τ_g / kp` 曾有意放大到
     5 cm / 0.4 rad ≈ 23°）；现场仍应按回执 `final_err_m` / `final_err_rad` 的平台值微调，
     宁可先松后紧。**其余键不必写进 yml**：`enabled`（true）/ `timeout_s`（5s）/ `max_timeout_s`（90s）/ `stall_s`（1s）/
-    `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）缺键即取 `rpent/settle.py` 的兜底；
+    `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）/ `dwell_s`（0.3s，非标定量——
+    `edge.yml` 里写同值只是为了让它显式可见）缺键即取 `rpent/settle.py` 的兜底；
 -   **位置与姿态分别比容差**（`pos_tol` 比米、`rot_tol` 比弧度），不把两种量纲混进一个阈值；
+-   **判到位后再 dwell 一小段**（`dwell_s`，缺省与 `edge.yml` 部署值都是 0.3s）：`reached` 成立后
+    edge **再多等这一段**才回执——夹爪的回读可能**领先物理**（部分固件把下发值直接当反馈，误差一拍
+    就是 0），「判到位」只证明**命令生效**，不证明**动作做完**；不等就会让 RPent 紧接着的
+    `dump_state` 拍到还没夹住的那一帧。只加在**判到位**这条路径上（超时 / 停滞不额外等，失败不缺
+    时间），`elapsed_s` 含它；逐次 `settle={"dwell_s": 0}` 关掉（自己轮询观测的流式场景）；
 -   `stalled` 也**可能是「已到稳态误差平台」而不是受阻**——两者从位置观测上不可区分，planner 应结合
     `final_err` 判断（接近容差 → 可补一小步；远大于容差且不再变化 → 受阻 / 需 restage）；
 -   若现场看到「一直等到 `timeout` 也判不出 `stalled`」，是误差噪声让 `stall_eps` 失效

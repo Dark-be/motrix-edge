@@ -57,6 +57,11 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         **位置与姿态分别比容差**（不把米和弧度混进一个阈值）；⚠️ 底层 MIT 只有 P/D、无重力前馈
         （`t_ff = 0`）→ 存在稳态误差，缺省容差取 **5cm / 0.4rad**（先把静态误差盖住，否则
         `reached` 永远不成立、每个写原语都走满 `stall_s` / `timeout_s`），按现场实测收敛后收紧。
+-   [x] **夹爪开合度 + 判到位后 dwell**：`env.set_gripper` 的 `open` 收 bool（≡ 1.0 / 0.0）或
+        `[0, 1]` 的**开合度**（与自描述 `gripper_range` 同域；域外 / 非数值 → `ok=false` +
+        `kind=argument`，不静默限幅）；settle 新增 `dwell_s`（0.3s）——`reached` 成立后**再多等
+        一小段**才回执（夹爪等量的回读可能领先物理，「判到位」只证明命令生效），只加在判到位这条
+        路径，可逐次 `settle={"dwell_s": 0}` 关掉。
 -   [x] **每臂状态块**：`env.get_robot_state` 除扁平 `qpos` / `pose` / `gripper` 外，再给
         `left_arm` / `right_arm`（`qpos` / `gripper` / `tcp_pose` quat），兼顾两套约定。
 -   [x] **相机元数据自描述**：`env.get_camera_meta` 带 `agent_observation`

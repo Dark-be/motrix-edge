@@ -23,17 +23,24 @@ RPent 紧接着的 ``dump_state`` 看到尚未动的那一帧 → planner 以为
 - :func:`wait_for_reached`：轮询观测误差，直到落进容差 / 停滞 / 超时 → 回执；
 - :func:`unreached`：不适用场景（``dry_run`` / 关闭 / 机器人不提供位姿）的 ``reached: null`` 回执。
 
+**判到位后再 dwell 一小段**（``dwell_s``，缺省 0.3s）：``reached`` 成立后 edge **再多等一小段**
+才回执。理由是**回读可能领先物理**——夹爪尤其明显（部分固件把下发值直接当反馈，误差一拍就是 0），
+物理上夹爪还在合/开；此时「判到位」只证明**命令已生效**，不证明**动作已完成**，RPent 紧接着的
+``dump_state`` 会拍到还没夹住的那一帧。dwell 只加在**判到位**这条路径上（超时 / 停滞已经不缺时间，
+白等只会让失败更慢）；``elapsed_s`` 含 dwell。逐次 ``settle={"dwell_s": 0}`` 可关掉。
+
 **容差按残余静态误差标定**：底层只有 P/D，未补偿（无前馈 / 参数未标定 / 前馈降级）时关节停在
 ``τ_gravity / kp`` 附近、“设定什么关节就是什么关节”并不成立；容差小于残余误差时 ``reached`` 永远
-不成立（每个原语都走满 ``stall_s`` / ``timeout_s``）。**部署值**（``edge.yml`` 只声明这两个：当前
-位置 2cm / 姿态 0.2rad ≈ 11.5°）是按 ``robot.gravity`` 重力前馈**已标定接通**后的残余误差量级收敛的
+不成立（每个原语都走满 ``stall_s`` / ``timeout_s``）。**部署值**（``edge.yml`` 的
+``server.rpent.settle`` 只放**需要现场看**的三项：容差位置 2cm / 姿态 0.2rad ≈ 11.5°，
+以及非标定量的 ``dwell_s``）是按 ``robot.gravity`` 重力前馈**已标定接通**后的残余误差量级收敛的
 ——此前为盖住未补偿的静态误差曾有意放大到 5cm / 0.4rad ≈ 23°；现场仍应按 ``final_err`` 实测平台
 值微调（其余键**缺键即取下方类默认**，不必写进 yml；标定见
 ``wiki/design/motrix_edge_rpent_bridge.md``「MIT 力矩控制的容差标定」）。
 
 **回执字段**（RPent 按它判成败，勿改名）：``reached`` / ``final_err``（主误差）/ ``final_err_m``
 （位置，米；仅位姿）/ ``final_err_rad``（姿态或关节，弧度）/ ``elapsed_s`` / ``settle_timeout_s``
-/ ``settle_pos_tol`` / ``settle_rot_tol``，外加标志 ``stalled`` / ``timeout``。
+/ ``settle_pos_tol`` / ``settle_rot_tol`` / ``settle_dwell_s``，外加标志 ``stalled`` / ``timeout``。
 """
 
 from __future__ import annotations
@@ -66,6 +73,9 @@ class SettleConfig:
     stall_eps: float = 1e-4  # 视为“有改善”的最小增量（小于编码器噪声 → 见模块 docstring）
     poll_s: float = 0.02
     target_wait_s: float = 1.0  # 增量下发后等「命令落地」的上限（见 service._pose_target_reference）
+    # 判到位后再等一小段才回执（回读领先物理时，命令生效 ≠ 动作完成；见模块 docstring）。
+    # 缺省值就是生效值：这是「别让 agent 拍到还没夹住的那一帧」的行为约定，不是现场标定量。
+    dwell_s: float = 0.3
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> SettleConfig:
@@ -88,6 +98,7 @@ class SettleConfig:
             stall_eps=max(float(self.stall_eps), 0.0),
             poll_s=max(float(self.poll_s), 0.001),
             target_wait_s=max(float(self.target_wait_s), 0.0),
+            dwell_s=max(float(self.dwell_s), 0.0),
         )
 
     def with_override(self, override: Any = None) -> SettleConfig:
@@ -146,6 +157,7 @@ def receipt(config: SettleConfig, reached: bool, errors: Errors | None, started:
         "settle_timeout_s": float(config.timeout_s),
         "settle_pos_tol": config.pos_tol,
         "settle_rot_tol": config.rot_tol,
+        "settle_dwell_s": float(config.dwell_s),
         **{key: True for key in flags},
     }
 
@@ -157,6 +169,8 @@ def wait_for_reached(probe: Callable[[], Errors | None], *, space: ActionSpace, 
     ``stall_s`` 内没改善 → ``reached: false`` + ``stalled: true``（撞到东西 / 力不足；MIT 下也
     常见于「已到稳态误差平台」——两者从位置观测上不可区分，回执同时给 ``final_err`` 与生效容差，
     由 agent 自己判）。
+
+    判到位后**在返回前多等 ``dwell_s``**（只在到达这条路径；见模块 docstring）。
     """
     started = time.monotonic()
     deadline = started + config.timeout_s
@@ -169,6 +183,8 @@ def wait_for_reached(probe: Callable[[], Errors | None], *, space: ActionSpace, 
             last = errors
             main, pos_err, rot_err = errors
             if config.within(pos_err, rot_err, space):
+                if config.dwell_s > 0:
+                    time.sleep(config.dwell_s)
                 return receipt(config, True, errors, started)
             if main < best - config.stall_eps:
                 best, best_at = main, time.monotonic()

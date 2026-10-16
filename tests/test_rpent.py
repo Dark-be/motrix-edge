@@ -569,9 +569,7 @@ def test_move_delta_sends_delta_and_reports_robot_target(env):
 def test_move_delta_single_arm_keeps_the_other(env):
     """指定 ``arm`` → 只改该臂，另一臂增量恒为 0（``rotate_delta`` 同形）。"""
     service, _node, adapter, _leases, _commands = env
-    result = service.call(
-        "env.rotate_delta", kwargs={"arm": "right", "delta_rpy": [0.0, 0.1, 0.0], "settle": False}
-    )
+    result = service.call("env.rotate_delta", kwargs={"arm": "right", "delta_rpy": [0.0, 0.1, 0.0], "settle": False})
 
     values, layout = adapter.rollout_calls[-1]
     assert layout == "pose_delta"
@@ -629,6 +627,35 @@ def test_set_gripper_only_changes_gripper(env):
     action, layout = adapter.rollout_calls[-1]
     assert layout == "joint+gripper"
     assert list(grippers_of(action)) == pytest.approx([1.0, 1.0])
+
+
+def test_set_gripper_accepts_openness_in_unit_range(env):
+    """``env.set_gripper`` 收 ``[0, 1]`` 的**开合度**（bool 仍兼容；域与自描述 ``gripper_range`` 同源）。
+
+    0 = 闭合 / 1 = 张开；回执 ``open`` 回显生效的开合度，agent 才能确认「让它合到什么程度」落地了。
+    """
+    service, _node, adapter, _leases, _commands = env
+    result = service.call("env.set_gripper", kwargs={"arm": "right", "open": 0.3, "settle": False})
+    action, layout = adapter.rollout_calls[-1]
+    assert layout == "joint+gripper"  # 仍是一条命令：关节目标 + 夹爪同一拍
+    assert list(joints_of(action)) == pytest.approx(list(default_qpos()))  # 关节目标不动
+    assert list(grippers_of(action)) == pytest.approx([0.25, 0.3])  # 只有右夹爪动，且是半开
+    assert result["open"] == pytest.approx(0.3)
+
+    service.call("env.set_gripper", kwargs={"arm": "left", "open": 1.0, "settle": False})
+    left, right = list(grippers_of(adapter.rollout_calls[-1][0]))
+    assert left == pytest.approx(1.0)  # 只动点名的臂
+    assert right == pytest.approx(float(default_gripper()[1]))  # 另一臂仍是基座值
+
+
+def test_set_gripper_rejects_openness_outside_unit_range(env):
+    """开合度越界 / 非数值 → ``kind=argument`` 且**不下发任何动作**（不静默限幅成 0 / 1）。"""
+    service, _node, adapter, _leases, _commands = env
+    for value in (1.5, -0.1, "half", None, float("nan")):
+        with pytest.raises(RpentError) as excinfo:
+            service.call("env.set_gripper", kwargs={"open": value})
+        assert excinfo.value.kind == "argument" and "open" in str(excinfo.value)
+    assert adapter.rollout_calls == []  # 一次都没动机器人
 
 
 def test_set_gripper_bases_on_joint_target_not_measured_joints():
@@ -1133,6 +1160,7 @@ def test_env_meta_exposes_lease_and_settle_contract():
         "timeout_s": 5.0,
         "max_timeout_s": 90.0,  # 逐次覆盖的上限（客户端 HTTP 超时 120s）
         "target_wait_s": 1.0,  # 增量下发后等「命令落地」的上限（pose_target 跃迁）
+        "dwell_s": 0.3,  # 判到位后再多等一小段才回执（回读可能领先物理）
         "image_source": "native",
         "dry_run": False,  # 启动自检：dry-run 的节点会回 sent: false / reached: null
         "action_layout": None,
@@ -1503,8 +1531,45 @@ def test_settle_per_call_override_rejects_bad_type():
     assert excinfo.value.kind == "invalid_params" and "settle" in str(excinfo.value)
 
 
+def test_settle_dwells_after_reaching():
+    """判到位后再**多等一小段**（``dwell_s``）才回执：回读领先物理时「命令生效」≠「动作完成」。"""
+    service, _adapter = delta_service(track=True, track_step=0.005, settle={"dwell_s": 0.2})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is True
+    assert result["settle_dwell_s"] == pytest.approx(0.2)
+    assert result["elapsed_s"] >= 0.2  # 判到位那一刻之后还有 dwell（elapsed 含它）
+
+
+def test_settle_dwell_defaults_to_deployment_value():
+    """``settle`` 没写 ``dwell_s`` → 取 ``SettleConfig`` 兜底（0.3s）：不写配置也有「等一小会」的行为。"""
+    service, _adapter = delta_service(track=True, track_step=0.005)
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is True and result["settle_dwell_s"] == pytest.approx(0.3)
+    assert result["elapsed_s"] >= 0.3
+
+
+def test_settle_dwell_can_be_disabled_per_call():
+    """逐次 ``settle={"dwell_s": 0}`` 关掉额外等待（流式 / 自己轮询观测的场景）。"""
+    service, _adapter = delta_service(track=True, track_step=0.005, settle={"dwell_s": 0.0})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is True and result["settle_dwell_s"] == 0.0
+    assert result["elapsed_s"] < 0.3
+
+
+def test_settle_dwell_applies_only_when_reached():
+    """只有「判到位」才 dwell：超时 / 停滞不额外等（失败已经花了时间，白等只会让 agent 更慢看到失败）。"""
+    service, _adapter = delta_service(settle={"dwell_s": 1.0, "stall_s": 10.0, "timeout_s": 0.05})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is False and result["timeout"] is True
+    assert result["settle_dwell_s"] == pytest.approx(1.0)  # 生效值照回（agent 能看出配置）
+    assert result["elapsed_s"] < 1.0  # 但没真花这 1s
+
+
 def test_set_gripper_waits_for_gripper_to_close():
-    """``set_gripper`` 也等到位：状态向量（``observations/qpos``）的夹爪槽走到目标值。"""
+    """``set_gripper`` 也等到位：状态向量（``observations/qpos``）的夹爪槽走到目标值。
+
+    开合度也一样等（不是只对 ``open`` / ``close`` 两个端点生效）。
+    """
     open_frames = [make_obs(qpos=default_qpos(), gripper=[1.0, 1.0], pose=default_pose())]
     closed_frames = [make_obs(qpos=default_qpos(), gripper=[0.0, 0.0], pose=default_pose()) for _ in range(20)]
 
@@ -1512,6 +1577,13 @@ def test_set_gripper_waits_for_gripper_to_close():
     result = service.call("env.set_gripper", kwargs={"open": False})
     assert result["reached"] is True and result["final_err"] <= 0.05
     assert result["target"][6] == pytest.approx(0.0) and result["target"][13] == pytest.approx(0.0)
+
+    half_frames = [make_obs(qpos=default_qpos(), gripper=[1.0, 1.0], pose=default_pose())]
+    half_frames += [make_obs(qpos=default_qpos(), gripper=[0.4, 0.4], pose=default_pose()) for _ in range(20)]
+    service, _adapter = settle_service(frames=half_frames)
+    result = service.call("env.set_gripper", kwargs={"open": 0.4})
+    assert result["reached"] is True and result["final_err"] <= 0.05
+    assert result["target"][6] == pytest.approx(0.4) and result["target"][13] == pytest.approx(0.4)
 
 
 def test_recover_joint_posture_keeps_grippers():
@@ -1782,9 +1854,7 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     pose = [0.1, 0.2, 0.3, 0.0, np.pi / 2, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
     adapter.pose_target = np.asarray(pose, dtype=np.float32)
 
-    forward = service.call(
-        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0], "settle": False}
-    )
+    forward = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0], "settle": False})
     assert forward["delta_frame"] == "tool" and forward["delta_axes"] == ["forward", "left", "up"]
     assert np.allclose(forward["converted_delta_base"][0], [0.05, 0.0, 0.0], atol=1e-6), "x = 前"
     pushed, layout = adapter.rollout_calls[-1]
@@ -1792,14 +1862,10 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     assert np.allclose(pushed[0:3], [0.05, 0.0, 0.0], atol=1e-6)
     assert np.allclose(pushed[3:6], [0.0, 0.0, 0.0])  # 平移不碰姿态
 
-    up = service.call(
-        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05], "settle": False}
-    )
+    up = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05], "settle": False})
     assert np.allclose(up["converted_delta_base"][0], [0.0, 0.0, 0.05], atol=1e-6), "z = 上"
 
-    left = service.call(
-        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0], "settle": False}
-    )
+    left = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0], "settle": False})
     assert np.allclose(left["converted_delta_base"][0], [0.0, 0.05, 0.0], atol=1e-6), "y = 左"
 
 
@@ -1814,9 +1880,7 @@ def test_rotate_delta_chart_increment_is_exact(env) -> None:
     adapter.pose_target = np.asarray([0.1, 0.2, 0.3, *rpy, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0], dtype=np.float32)
     delta_semantic = [0.0, 0.0, np.radians(20.0)]  # 绕“上”转 20°
 
-    reply = service.call(
-        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False}
-    )
+    reply = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False})
     basis = EgoAxes().basis()  # 语义系 → 法兰系
     exact = rpy_to_matrix(rpy) @ (basis @ rpy_to_matrix(delta_semantic) @ basis.T)
     chart = np.asarray(reply["converted_delta_base"][0], dtype=np.float64)
@@ -1841,14 +1905,10 @@ def test_rotate_delta_identity_target_maps_semantic_axes(env) -> None:
     """
     service, _node, adapter, *_ = env
     adapter.pose_target = rpent_pose_target(default_pose())
-    up = service.call(
-        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1], "settle": False}
-    )
+    up = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1], "settle": False})
     assert np.allclose(up["converted_delta_base"][0], [-0.1, 0.0, 0.0], atol=1e-6)  # 上 = 法兰 -x
     adapter.pose_target = rpent_pose_target(default_pose())  # 假机器人已把上一条增量叠进目标 → 复位
-    left = service.call(
-        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0], "settle": False}
-    )
+    left = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0], "settle": False})
     assert np.allclose(left["converted_delta_base"][0], [0.0, 0.1, 0.0], atol=1e-6)  # 左 = 法兰 +y
 
 
@@ -1903,9 +1963,7 @@ def test_move_to_needs_extrinsics_for_non_world_arm(env) -> None:
     adapter._frame_set = None
     adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
     adapter.pose = np.asarray(default_pose(), dtype=np.float32)
-    left = service.call(
-        "env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False}
-    )
+    left = service.call("env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False})
     assert np.allclose(np.asarray(left["target"])[0:3], [0.15, 0.25, 0.35], atol=1e-6)  # 恒等：原样
     with pytest.raises(RpentError) as excinfo:
         service.call("env.move_to", kwargs={"arm": "right", "target": [0.15, 0.25, 0.35]})

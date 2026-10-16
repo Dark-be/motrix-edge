@@ -57,6 +57,7 @@ from .coerce import (
     as_action_matrix,
     as_float_array,
     decode_jpeg,
+    gripper_openness,
     seconds_until,
     space_value,
     split_arm_and_vector,
@@ -241,6 +242,7 @@ class RpentService:
             "timeout_s": self._settle_config.timeout_s,
             "max_timeout_s": self._settle_config.max_timeout_s,
             "target_wait_s": self._settle_config.target_wait_s,
+            "dwell_s": self._settle_config.dwell_s,
             "image_source": self._image_source,
             "dry_run": self._dry_run,
             "action_layout": self._action_layout or None,
@@ -1032,7 +1034,11 @@ class RpentService:
         return transform_points(invert_transform(self._world_from_base(adapter, arm)), point)
 
     def _set_gripper(self, *args, arm: str | None = None, open: Any = True, settle: Any = None) -> dict:
-        """``env.set_gripper``：夹爪开合 —— 只改夹爪槽，其余维**保持目标**（关节 qpos）。
+        """``env.set_gripper``：夹爪开合**度** —— 只改夹爪槽，其余维**保持目标**（关节 qpos）。
+
+        ``open`` 收 bool（``True`` / ``False`` ≡ 1.0 / 0.0）或 ``[0, 1]`` 的开合度（0 = 闭合，
+        1 = 张开，与自描述 ``gripper_range`` 同域；RPent 侧的 ``+1/-1`` 域由动作块布局换算承担）。
+        越界 / 非数值 → 拒绝（``kind=argument``），不静默限幅。
 
         基座是**目标 qpos**（``observations/action``）而不是实测（见 ``_qpos_base``）：只改夹爪不该
         把手臂目标拉回「实测当前」——那会把 MIT 稳态误差写进目标、并抹掉还没走完的运动。
@@ -1040,6 +1046,7 @@ class RpentService:
         """
         if args:  # RPent 的 dual_franka 形态：set_gripper(arm, open=...)
             arm = args[0] if arm is None else arm
+        wanted = gripper_openness(open)
         self._view.require_adapter()  # 未绑定 adapter：与其余写方法一致地报 state 错
         arms = self._view.arms
         indices = self._arm_indices(arm, arms)
@@ -1051,10 +1058,9 @@ class RpentService:
                 kind="unsupported",
             )
         target = np.array(base, dtype=np.float32, copy=True)
-        wanted = 1.0 if bool(open) else 0.0
         for index in indices:
             target[index * stride + stride - 1] = wanted  # 夹爪槽 = 每臂末位
-        reply = {"ok": True, "arm": arm, "open": bool(open), "source": source, "target": target}
+        reply = {"ok": True, "arm": arm, "open": wanted, "source": source, "target": target}
         return {**reply, **self._send_qpos(target, ActionSpace.JOINT, indices, settle)}
 
     def _step(self, action: Any = None, action_space: str | None = None) -> list:
