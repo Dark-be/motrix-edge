@@ -130,8 +130,8 @@ flowchart LR
 -   **容差分位置 / 姿态两项，且与 facade 同一份取值**：`tol_pos`（米）与 `tol_rot`（弧度）分别比、
     **都**满足才算 `arrived`——与 facade 对 `ActionSpace.POSE` 的 `settle.within()` 同一口径；
     **位姿原语一律如此，含只下发姿态的 `rotate_rel`**。取值与 facade **同源**（`edge.yml` 的
-    `server.rpent.settle` 部署值）：位置 2 cm / 姿态
-    0.2 rad（≈11.5°，按重力前馈后的残余静态误差量级；标定见
+    `server.rpent.settle` 部署值）：位置 4 cm / 姿态
+    0.4 rad（≈23°，按现场 `final_err` 平台值标定；标定见
     [RPent 对接契约](./motrix_edge_rpent_bridge.md)「MIT 力矩控制的容差标定」）。两边取值若不同源，
     同一个动作会出现「`/v1/primitives` 报 `timeout`、`/call` 报 `reached`」的打架。
 -   容差**不得小于残余静态误差量级**：MIT 力矩控制下控制器只有 P/D，未补偿（无前馈 / 参数未标定 /

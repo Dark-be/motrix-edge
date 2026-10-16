@@ -153,10 +153,10 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
     真机联调先对数值、机器人不动；是否 dry-run 可从 `settle.dry_run` 看出。
 -   **到位等待**：写原语（`move_delta` / `rotate_delta` / `set_gripper` / `recover_joint_posture`）
     默认阻塞到「误差 ≤ 容差」/ 超时 / 停滞。**只有部署容差写在 `edge.yml`**（`server.rpent.settle`
-    的 2cm / 0.2rad ≈ 11.5°，按重力前馈后的残余静态误差量级收敛），其余键（`enabled` / `timeout_s` /
+    的 4cm / 0.4rad ≈ 23°，按现场 `final_err` 平台值标定），其余键（`enabled` / `timeout_s` /
     `max_timeout_s` / `stall_s` / `stall_eps` / `poll_s` / `target_wait_s` / `dwell_s`）**缺键即取
-    `rpent/settle.py::SettleConfig` 的兜底**（5s / 90s / 1s / 1e-4 / 0.02s / 1s / 0.3s）——不必写进 yml。
-    **判到位后再 dwell `dwell_s`**（0.3s）才回执：夹爪等量的回读可能领先物理（固件把下发值当反馈），
+    `rpent/settle.py::SettleConfig` 的兜底**（5s / 90s / 1s / 1e-4 / 0.02s / 1s / 0.5s）——不必写进 yml。
+    **判到位后再 dwell `dwell_s`**（0.5s）才回执：夹爪等量的回读可能领先物理（固件把下发值当反馈），
     「判到位」只证明命令生效、不证明动作做完，不等就会让紧随其后的 `dump_state` 拍到还没夹住的那一帧；
     只加在判到位这条路径上，`elapsed_s` 含它，逐次 `settle={"dwell_s": 0}` 关掉。
     回执带 `reached` / `final_err`（+ 分项 `final_err_m` 位置米 /

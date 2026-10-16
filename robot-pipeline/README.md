@@ -99,11 +99,11 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 具体机器人实现（`BaseRobot` 子类）在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册
 （类型名 -> 模块 + 类名）；配置 `robot.type` 即按此自动匹配：
 
-| 注册类型                  | 实现                                                 | 说明                                 |
-| ------------------------- | ---------------------------------------------------- | ------------------------------------ |
-| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）             |
-| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                       |
-| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作 |
+| 注册类型                  | 实现                                                 | 说明                                  |
+| ------------------------- | ---------------------------------------------------- | ------------------------------------- |
+| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）              |
+| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                        |
+| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作  |
 | `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂遥操作（共用档案的左主手+左从臂） |
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
@@ -201,12 +201,14 @@ robot:
 ```yaml
 robot:
     tcp:
-        enabled: true # false（缺省）= 法兰原点
-        offset: [0, 0, 0.1] # TCP 在**法兰系**下的位置（米；法兰 +z 就是工具伸出方向）
+        enabled: true # 出厂：dual piper 开启；false / 无该段 = 法兰原点
+        offset: [0, 0, 0.12] # TCP 在**法兰系**下的位置（米；法兰 +z 就是工具伸出方向）= 12 cm 尖端
         arms: { right: { offset: [0, 0, 0.08] } } # 两臂末端不等长时逐臂覆盖
 ```
 
 -   开启后「往前 5 cm」让**尖端**走 5 cm（`look_at` / `move_delta` 同样作用在尖端）；
+-   出厂值只对得上出厂末端：**换末端 / 换支架必须实测重验 `offset`**（改 `<根>/config/dual_piper.yml`
+    或机器档案），否则位姿全线偏一个常量；
 -   **只允许纯平移**（带旋转的 TCP 会让工具三轴与 `look_at` 的指向轴同时失真）→ 写了 `rpy` 直接报错；
 -   位姿系随 `/v1/discover` 上报（`pose_frame` / `tcp_offset`）：Edge 据此还原法兰（腕相机深度反投影）
     并如实告诉调用方；设计与边界见 `wiki/design/robot_pipeline_tcp.md`。

@@ -38,6 +38,9 @@ _TCP_ARMS = {
     "dual_piper.yml": ("left", "right"),
     "single_piper.yml": ("left",),
 }
+# 出厂**开启** robot.tcp 的机型 → 公共偏移（米，法兰系；法兰 +z = 工具伸出方向）。
+# dual piper 的末端实装长度固定，故默认开启；其余机型没有确定的装配长度 → 不带该段。
+_TCP_SHIPPED_ON = {"dual_piper.yml": (0.0, 0.0, 0.12)}
 
 
 def _load(name: str) -> dict:
@@ -129,11 +132,20 @@ def test_tcp_block_shape_and_resolves():
 
 
 def test_tcp_offset_flag_matches_shipped_defaults():
-    """出厂配置里 TCP **默认关闭**（法兰原点）：开启属于现场按末端实装量出来的值。"""
+    """出厂配置：``dual_piper`` **默认开启**（尖端长度 = 该机型实装），其余机型不带 ``robot.tcp``。
+
+    开启不等于随便开：offset 必须是与末端实装一致的量（dual piper 出厂 12 cm），换了末端 / 支架就得
+    重验并改配置（现场改 ``<根>/config/dual_piper.yml`` 或机器档案，见 robot-pipeline/README.md）。
+    没登记的机型（没有确定的装配长度）不带该段 → 法兰原点。
+    """
     for name in _TCP_ARMS:
         block = _load(name)["robot"].get("tcp")
-        if block is not None:
-            assert block.get("enabled") is False, f"{name} 的 robot.tcp.enabled 出厂应为 false"
+        shipped = _TCP_SHIPPED_ON.get(name)
+        if shipped is None:
+            assert block is None, f"{name} 出厂不该带 robot.tcp（没有确定的装配长度）"
+            continue
+        assert block is not None and block.get("enabled") is True, f"{name} 的 robot.tcp 出厂应为开启"
+        assert tuple(block.get("offset") or ()) == shipped, f"{name} 的 robot.tcp.offset 与出厂尖端长度不符"
 
 
 def test_teleop_block_shape_and_offsets():

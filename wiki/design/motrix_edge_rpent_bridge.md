@@ -301,8 +301,9 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
 `POSE_DIM_PER_ARM = 6`（双臂 `pose_dim() = 12`，每臂 `xyz+rpy`、米/弧度）+
 `get_observation_pose(joint=None)`（与位姿解算
 **同一套运动学**，位姿动作设计文档随位姿动作 MR 合入）+ `get_target_pose()`
-（= `FK(关节段目标)`：增量基准与上位判到位的参考）+ `POSE_FRAME`（与位姿下发同系：piper 缺省为
-`flange`，配了 `robot.tcp` 则由机器人上报 `tcp`——见 [末端 TCP](./robot_pipeline_tcp.md)）。
+（= `FK(关节段目标)`：增量基准与上位判到位的参考）+ `POSE_FRAME`（与位姿下发同系：配了
+`robot.tcp` 则由机器人上报 `tcp`（dual piper 出厂配置已开启），未配则 `flange`——见
+[末端 TCP](./robot_pipeline_tcp.md)）。
 
 **增量原语的基准与到位判定**（MIT 力矩控制下的硬要求）：
 
@@ -349,11 +350,11 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
 
 -   **标定**：下发一个目标、等它停稳，看回执 `final_err_m` / `final_err_rad`（或 `final_err`）的平台值
     ——这与机器人型号 / 当前姿态 / 负载有关，不要照抄别人的数值；
--   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 2 cm / 姿态 0.2 rad ≈ 11.5°）= 重力
-    前馈**已标定接通**后的残余静态误差量级（此前为盖住未补偿的 `τ_g / kp` 曾有意放大到
-    5 cm / 0.4 rad ≈ 23°）；现场仍应按回执 `final_err_m` / `final_err_rad` 的平台值微调，
+-   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 4 cm / 姿态 0.4 rad ≈ 23°）是**按回执
+    `final_err` 的实测平台值**定的，当前取偏松侧（先把整定未完成的残余误差盖住；更早还用过
+    5 cm / 0.4 rad）；现场仍应按 `final_err_m` / `final_err_rad` 的平台值收敛后再收紧，
     宁可先松后紧。**其余键不必写进 yml**：`enabled`（true）/ `timeout_s`（5s）/ `max_timeout_s`（90s）/ `stall_s`（1s）/
-    `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）/ `dwell_s`（0.3s，非标定量——
+    `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）/ `dwell_s`（0.5s，非标定量——
     `edge.yml` 里写同值只是为了让它显式可见）缺键即取 `rpent/settle.py` 的兜底；
 -   **位置与姿态分别比容差**（`pos_tol` 比米、`rot_tol` 比弧度），不把两种量纲混进一个阈值；
 -   **判到位后再 dwell 一小段**（`dwell_s`，缺省与 `edge.yml` 部署值都是 0.3s）：`reached` 成立后

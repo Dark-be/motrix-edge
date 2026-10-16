@@ -1160,7 +1160,7 @@ def test_env_meta_exposes_lease_and_settle_contract():
         "timeout_s": 5.0,
         "max_timeout_s": 90.0,  # 逐次覆盖的上限（客户端 HTTP 超时 120s）
         "target_wait_s": 1.0,  # 增量下发后等「命令落地」的上限（pose_target 跃迁）
-        "dwell_s": 0.3,  # 判到位后再多等一小段才回执（回读可能领先物理）
+        "dwell_s": 0.5,  # 判到位后再多等一小段才回执（回读可能领先物理）
         "image_source": "native",
         "dry_run": False,  # 启动自检：dry-run 的节点会回 sent: false / reached: null
         "action_layout": None,
@@ -1281,7 +1281,7 @@ def test_settle_receipt_reports_per_unit_errors_for_joint_space():
 def test_default_tolerances_absorb_mit_steady_state_error():
     """包内**兜底**容差（位置 1cm / 姿态 0.05rad）能吸收 MIT 的静态误差：0.03 rad 算到位。
 
-    部署值在 ``edge.yml``（当前 2cm / 0.2rad，按重力前馈后的残余静态误差量级收敛）；本用例没给
+    部署值在 ``edge.yml``（当前 4cm / 0.4rad ≈ 23°，按现场 final_err 平台值标定）；本用例没给
     ``server.rpent.settle``，走的就是 ``SettleConfig`` 的兜底值。
 
     底层只有 P/D，未补偿（无前馈 / 参数未标定）时“设定什么关节就是什么关节”不成立——容差小于
@@ -1541,11 +1541,11 @@ def test_settle_dwells_after_reaching():
 
 
 def test_settle_dwell_defaults_to_deployment_value():
-    """``settle`` 没写 ``dwell_s`` → 取 ``SettleConfig`` 兜底（0.3s）：不写配置也有「等一小会」的行为。"""
+    """``settle`` 没写 ``dwell_s`` → 取 ``SettleConfig`` 兜底（0.5s）：不写配置也有「等一小会」的行为。"""
     service, _adapter = delta_service(track=True, track_step=0.005)
     result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
-    assert result["reached"] is True and result["settle_dwell_s"] == pytest.approx(0.3)
-    assert result["elapsed_s"] >= 0.3
+    assert result["reached"] is True and result["settle_dwell_s"] == pytest.approx(0.5)
+    assert result["elapsed_s"] >= 0.5
 
 
 def test_settle_dwell_can_be_disabled_per_call():

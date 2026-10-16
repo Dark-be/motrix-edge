@@ -57,11 +57,14 @@
 ```yaml
 robot:
     tcp:
-        enabled: false # false（缺省）= 法兰原点（现状）；true = 位姿读 / 写都以 TCP 为原点
-        offset: [0.0, 0.0, 0.1] # TCP 在**法兰系**下的位置（米，纯平移）
+        enabled: true # true = 位姿读 / 写都以 TCP 为原点；false / 无该段 = 法兰原点
+        offset: [0.0, 0.0, 0.12] # TCP 在**法兰系**下的位置（米，纯平移；dual piper 出厂值 = 12 cm 尖端）
         arms: {} # 可选：逐臂覆盖（键 = 控制器名 left / right），如 right: {offset: [...]}
 ```
 
+-   **出厂默认**：`dual_piper.yml` **开启**（`offset: [0, 0, 0.12]`，该机型末端的实装长度）；其余机型
+    不带 `robot.tcp` → 法兰原点。开启值写死在出厂配置里 **不等于** 可以不管——**换末端 / 换支架后必须
+    实测重验**（量尖端到法兰的距离改 `offset`），否则整条位姿链统一偏一个常量而现场很难察觉。
 -   逐臂覆盖沿用既有写法（`robot.gravity.arms.<arm>` 的「公共键 + 臂覆盖」，见
     [重力补偿与阻抗控制](./robot_pipeline_impedance.md)）；某臂未覆盖 → 用公共 `offset`。
 -   校验（构造期，失败即报错）：`offset` 必须是 3 个有限数；出现旋转键（`rpy` 等）→ 报错；

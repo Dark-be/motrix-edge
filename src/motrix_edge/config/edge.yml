@@ -22,18 +22,18 @@ server:
   #   lease_id（固定租约；缺省 = 当前活跃租约）/ step_hz（缺省 = 机器人上报的 control_hz）/
   #   action_layout（外部动作块布局，如 rpent/dual_franka）/ dry_run（只转换不下发）/
   #   image_source（native = 原图 | preview = 320x240 缓存）/ settle 的其余键（超时 / 停滞 / 轮询…）。
-  # 下面只留**部署值**：重力前馈（robot.gravity，参数已标定）接通后残余静态误差降到摩擦量级，
-  # 到位容差相应收紧——容差小于残余误差时 reached 永远不成立（每个写原语都走满 stall_s /
-  # timeout_s）；现场按回执 final_err_m / final_err_rad 的平台值再微调，标定见上述文档。
+  # 下面只留**部署值**：容差按回执 final_err_m / final_err_rad 的**实测平台值**标定——容差小于
+  # 残余静态误差时 reached 永远不成立（每个写原语都走满 stall_s / timeout_s）；当前取偏松的
+  # 4cm / 0.4rad ≈ 23°（先把整定未完成的残余误差盖住），现场按平台值收敛后再收紧。标定见上述文档。
   rpent:
     settle:
-      pos_tol: 0.02 # 位置容差（米）＝2cm：与姿态**分别**判定，不把米和弧度混进一个阈值
-      rot_tol: 0.2 # 姿态 / 关节容差（弧度）≈11.5°：重力前馈后的残余静态误差量级
+      pos_tol: 0.04 # 位置容差（米）＝4cm：与姿态**分别**判定，不把米和弧度混进一个阈值
+      rot_tol: 0.4 # 姿态 / 关节容差（弧度）≈23°：现场残余静态误差（含整定未完成部分）量级
       # 判到位后再多等一小段（秒）才回执：夹爪等量的**回读可能领先物理**（有些固件直接把下发值
       # 当反馈，误差一拍就是 0），此时「判到位」只证明命令生效、不证明动作做完，不等就会让
       # RPent 紧接着的 dump_state 拍到还没夹住的那一帧。只加在**判到位**这条路径上（超时 / 停滞
       # 不额外等）；逐次传 settle={"dwell_s": 0} 可关掉。缺键取 rpent/settle.py 的同值兜底。
-      dwell_s: 0.3
+      dwell_s: 0.5
     # 末端（工具）系三轴 ↔ 法兰哪根轴：**装配事实**，随 env.get_env_meta 回显给 agent。
     # 缺省（dual piper 真机实测）：forward=+z（工具伸出方向）/ left=+y / up=-x（法兰 +x 向下）。
     # 换机型 / 换支架后必须重验：`move_delta(delta_xyz=[0, 0, 0.02])` 只动 2 cm，看实际朝哪走。

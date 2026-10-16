@@ -23,7 +23,7 @@ RPent 紧接着的 ``dump_state`` 看到尚未动的那一帧 → planner 以为
 - :func:`wait_for_reached`：轮询观测误差，直到落进容差 / 停滞 / 超时 → 回执；
 - :func:`unreached`：不适用场景（``dry_run`` / 关闭 / 机器人不提供位姿）的 ``reached: null`` 回执。
 
-**判到位后再 dwell 一小段**（``dwell_s``，缺省 0.3s）：``reached`` 成立后 edge **再多等一小段**
+**判到位后再 dwell 一小段**（``dwell_s``，缺省 0.5s）：``reached`` 成立后 edge **再多等一小段**
 才回执。理由是**回读可能领先物理**——夹爪尤其明显（部分固件把下发值直接当反馈，误差一拍就是 0），
 物理上夹爪还在合/开；此时「判到位」只证明**命令已生效**，不证明**动作已完成**，RPent 紧接着的
 ``dump_state`` 会拍到还没夹住的那一帧。dwell 只加在**判到位**这条路径上（超时 / 停滞已经不缺时间，
@@ -32,11 +32,10 @@ RPent 紧接着的 ``dump_state`` 看到尚未动的那一帧 → planner 以为
 **容差按残余静态误差标定**：底层只有 P/D，未补偿（无前馈 / 参数未标定 / 前馈降级）时关节停在
 ``τ_gravity / kp`` 附近、“设定什么关节就是什么关节”并不成立；容差小于残余误差时 ``reached`` 永远
 不成立（每个原语都走满 ``stall_s`` / ``timeout_s``）。**部署值**（``edge.yml`` 的
-``server.rpent.settle`` 只放**需要现场看**的三项：容差位置 2cm / 姿态 0.2rad ≈ 11.5°，
-以及非标定量的 ``dwell_s``）是按 ``robot.gravity`` 重力前馈**已标定接通**后的残余误差量级收敛的
-——此前为盖住未补偿的静态误差曾有意放大到 5cm / 0.4rad ≈ 23°；现场仍应按 ``final_err`` 实测平台
-值微调（其余键**缺键即取下方类默认**，不必写进 yml；标定见
-``wiki/design/motrix_edge_rpent_bridge.md``「MIT 力矩控制的容差标定」）。
+``server.rpent.settle`` 只放**需要现场看**的三项：容差位置 4cm / 姿态 0.4rad ≈ 23°，
+以及非标定量的 ``dwell_s``）是**按回执 ``final_err`` 的实测平台值**定的——当前偏松（先把整定未完成
+的残余误差盖住），现场收敛后再收紧；其余键**缺键即取下方类默认**，不必写进 yml；标定见
+``wiki/design/motrix_edge_rpent_bridge.md``「MIT 力矩控制的容差标定」。
 
 **回执字段**（RPent 按它判成败，勿改名）：``reached`` / ``final_err``（主误差）/ ``final_err_m``
 （位置，米；仅位姿）/ ``final_err_rad``（姿态或关节，弧度）/ ``elapsed_s`` / ``settle_timeout_s``
@@ -63,7 +62,7 @@ class SettleConfig:
     """到位等待参数（字段名与 ``server.rpent.settle`` 一致）。"""
 
     enabled: bool = True
-    # 容差：**部署值在 edge.yml**（重力前馈接通后已收紧到 2cm / 0.2rad）；
+    # 容差：**部署值在 edge.yml**（当前 4cm / 0.4rad ≈ 23°，按现场 final_err 平台值标定）；
     # 下面这两个只是“配置里没写”时的兜底，且故意更紧——宁可判不出到位，也不误报到位。
     pos_tol: float = 0.01  # 米（位置）
     rot_tol: float = 0.05  # 弧度（姿态 / 关节 / 夹爪）
@@ -75,7 +74,7 @@ class SettleConfig:
     target_wait_s: float = 1.0  # 增量下发后等「命令落地」的上限（见 service._pose_target_reference）
     # 判到位后再等一小段才回执（回读领先物理时，命令生效 ≠ 动作完成；见模块 docstring）。
     # 缺省值就是生效值：这是「别让 agent 拍到还没夹住的那一帧」的行为约定，不是现场标定量。
-    dwell_s: float = 0.3
+    dwell_s: float = 0.5
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None = None) -> SettleConfig:
