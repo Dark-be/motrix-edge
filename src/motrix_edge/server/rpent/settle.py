@@ -14,7 +14,8 @@
 
 """rpent.settle —— 到位等待（arrival wait）：参数、判定、回执。
 
-写原语（``move_delta`` / ``rotate_delta`` / ``set_gripper`` / ``recover_joint_posture``）下发后
+写原语（``move_delta`` / ``move_delta_abs`` / ``rotate_delta`` / ``set_gripper`` /
+``recover_joint_posture``）下发后
 edge **阻塞到机器人到位**再回执：``rollout`` 只负责“设目标”，由机器人侧循环限速靠近，立即返回会让
 RPent 紧接着的 ``dump_state`` 看到尚未动的那一帧 → planner 以为命令无效、重试或振荡。
 

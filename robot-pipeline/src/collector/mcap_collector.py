@@ -130,7 +130,8 @@ class ActMcapCollector:
         # ---- 元信息（finish 时写与 mcap 同名 JSON，描述该 mcap）----
         # 跨 episode 保留的字段（start() 时快照进新 episode）：
         self._identity: dict = {}  # 机器人身份（robot_name / robot_type），set_robot_meta() 设置
-        self._pending: dict = {}  # 同步字段（operator / task_name / description ...），set_meta() 设置
+        # 同步字段（operator / task_name / runtime_context / description ...），set_meta() 设置
+        self._pending: dict = {}
         self._state_layout: dict = {}  # 状态 / 目标向量的逐维含义，set_state_layout() 设置
         self._control_layout: dict = {}  # 各执行控制器的控制模式，set_control_layout() 设置
         # 当前 episode 的元信息基线（created_at + identity/pending 快照）
@@ -214,7 +215,7 @@ class ActMcapCollector:
         self._schema_img = self._writer.register_msgdef(TYPE_COMPRESSED_IMAGE, MSG_COMPRESSED_IMAGE)
         self._step_count = 0
         # 本轮元信息基线（finish 写同名 JSON）：created_at = 采集开始时间（ISO 本地）；
-        # identity（robot_name/robot_type）与已同步字段（operator/task_name/...）跨
+        # identity（robot_name/robot_type）与已同步字段（operator/task_name/runtime_context/...）跨
         # episode 保留，在此快照进本轮基线——采集开始前同步的信息不会因新 episode 丢失。
         self._meta = {"created_at": datetime.now().isoformat(timespec="seconds")}
         self._meta.update(self._identity)
@@ -316,7 +317,7 @@ class ActMcapCollector:
 
     # ---- 采集元信息（meta）：写入接口统一为 set_*_meta，读取用 meta property ----
     def set_meta(self, meta: dict) -> None:
-        """设置同步/附加元信息字段（由 adapter ``capture sync`` 同步：operator / task_name 等）。
+        """设置同步/附加元信息字段（由 adapter ``capture sync`` 同步：operator / task_name / runtime_context 等）。
 
         ``pending`` 跨 episode 保留，start() 快照进本轮基线；finish() 写 JSON 时并入。
         ``meta`` 为 None 或空 dict 时安全 no-op。
@@ -340,6 +341,7 @@ class ActMcapCollector:
             "control": self._control_layout.get("arms") or {},
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
+            "runtime_context": self._pending.get("runtime_context"),
             "frames": self._step_count,
             "size_bytes": self._path.stat().st_size if self._path and self._path.exists() else None,
             "duration": self._duration_seconds(),
@@ -369,7 +371,7 @@ class ActMcapCollector:
           （逐维 ``{index, arm, kind, name}``，见 ``set_state_layout()``）；
         - 控制模式：``control_mode``（各执行臂的聚合值，双臂不同时 ``mixed``）/ ``control``
           （逐控制器明细，见 ``set_control_layout()``；主手不记录）；
-        - 同步字段：``operator`` / ``task_name`` 未同步以 null 占位（等待 capture sync）；
+        - 同步字段：``operator`` / ``task_name`` / ``runtime_context`` 未同步以 null 占位（等待 capture sync）；
           其余同步字段（``description`` 等）附加在末尾。
         """
         meta = {
@@ -385,6 +387,7 @@ class ActMcapCollector:
             "control": self._control_layout.get("arms") or {},
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
+            "runtime_context": self._pending.get("runtime_context"),
             "frames": self._step_count,
             "size_bytes": path.stat().st_size,
             "duration": self._duration_seconds(),

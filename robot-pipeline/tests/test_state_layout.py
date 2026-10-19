@@ -460,8 +460,11 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
     instance.set_robot_meta(robot_name="dual_piper_001", robot_type="dual_piper")
     instance.set_state_layout(layout)
+    runtime_context = {"log_path": "/rpent/runs/42/run.log", "model": "rpent-agent-v1"}
+    instance.set_meta({"operator": "张三", "task_name": "桌面整理", "runtime_context": runtime_context})
 
     assert instance.meta["state_space"] == "joint"  # /v1/capture/status 的 meta 同源
+    assert instance.meta["runtime_context"] == runtime_context
     episode = tmp_path / "abc.mcap"
     episode.write_bytes(b"not-a-real-mcap")  # 只验证元信息，不真写 mcap
     meta = json.loads(instance._write_meta_json(episode).read_text(encoding="utf-8"))
@@ -470,6 +473,8 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     assert meta["state_space"] == "joint"
     assert meta["state_dims"] == layout["state_dims"]
     assert meta["action_space"] == "joint" and meta["action_dims"] == layout["action_dims"]
+    assert meta["operator"] == "张三" and meta["task_name"] == "桌面整理"
+    assert meta["runtime_context"] == runtime_context
 
 
 def test_collector_layout_defaults_to_empty(collector, tmp_path):

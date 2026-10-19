@@ -82,7 +82,7 @@ class UploadService:
     _SELECTABLE_STATES = {"ready", "pending", "failed"}
 
     # ---- 元信息 schema：JSON 描述文件的已知字段 → (类型, 描述) -----------------
-    # 类型：str / int / float；类型不符或缺省 → meta 中该字段为 None（不判 invalid）。
+    # 类型：str / int / float / object；类型不符或缺省 → meta 中该字段为 None（不判 invalid）。
     # 新增已知字段只需在此加一行。
     METADATA_SCHEMA: dict[str, tuple[str, str]] = {
         "relative_path": ("str", "相对路径"),
@@ -90,6 +90,7 @@ class UploadService:
         "robot_type": ("str", "机器人类型"),
         "operator": ("str", "采集员"),
         "task_name": ("str", "任务名称"),
+        "runtime_context": ("object", "LLM 数据采集运行时上下文"),
         "frames": ("int", "帧数"),
         "size_bytes": ("int", "数据大小（字节）"),
         "duration": ("float", "时长（秒）"),
@@ -457,7 +458,7 @@ class UploadService:
     def _extract_metadata(cls, content: dict | None) -> tuple[dict, dict]:
         """按 schema 提取结构化字段并归一化类型；未知字段保留在 metadata_unknown。
 
-        - ``meta``：已知字段（类型归一化：int / float / str）；JSON 缺失或类型不符的
+        - ``meta``：已知字段（类型归一化：int / float / str；object 保留 JSON 结构）；JSON 缺失或类型不符的
           schema 字段补 ``None``（可空，不判 invalid），前端可稳定遍历。
         - ``metadata_unknown``：schema 未识别的原始字段（向前兼容新数据）。
         """
@@ -476,6 +477,8 @@ class UploadService:
                     meta[key] = int(value)
                 elif kind == "float":
                     meta[key] = float(value)
+                elif kind == "object":
+                    meta[key] = value if isinstance(value, dict) else None
                 else:
                     meta[key] = str(value)
             except (TypeError, ValueError):

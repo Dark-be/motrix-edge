@@ -105,14 +105,14 @@ flowchart LR
 | `wait`       | `seconds`                                                                                                       | 保持当前目标等待（不新下发）                                                                                                                                                                                                                                                                                                                                                                 | ≤ `max_wait`（缺省 10 s）                                                  |
 | `stop`       | —                                                                                                               | 清目标、保持当前位姿（软停）。与 `abort` 的区别：`stop` 自身就是一个原语（外部主动「停在这里」），`abort` 针对**另一个**已提交的 `primitive_id` 中止（终态 `aborted`）                                                                                                                                                                                                                       | —                                                                          |
 
--   **参考系只有两个，且不给选**：`move_to`（**op 名与 RPent 方法名同名**：`env.move_to`，一套语义两个面共用）/ `look_at` / 坐标查询的输入输出都是 `world`（左臂
+-   **参考系只有两个，且不给选**：`move_to`（**op 名与 RPent 方法名同名**：`env.move_to`，一套语义两个面共用）/ `look_at` / 坐标查询的输入输出，以及 RPent 专用的
+    `env.move_delta_abs` 位移向量，都是 `world`（左臂
     基座帧 = `left_base`；工具内部按 `T_world_base(arm)` 换算到该臂基座系）；`move_rel` /
     `rotate_rel` 的增量都是**末端（工具）系**，且分量是**语义量**（`x` 前 / `y` 左 / `z` 上，0 位时
     与基座系一致——法兰裸轴会随装配变，往下的装配会把“往前”变成给 `-x`）。**没有** `space`
     参数可选参考系（早年有过 `space="base"|"ego"`，已删：相对就该是相对末端）。参考系写进 RPent 工具
-    description（见 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「工具清单」）——**同一份语义两个面
-    共用**
-    （RPent facade 的 `env.*` 方法与这里的 op 名一一对应）。
+    description（见 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「工具清单」）。`move_delta_abs`
+    暂只属于 RPent facade；通用 op 面若需要同能力，再以独立 op 显式加入，不复用 `move_rel` 改语义。
 -   **像素 → 3D 坐标**：`get_object_position`（RPent 面）/ 等价 op 复用 `GET /v1/depth` 的
     `xyz_camera` / `xyz_world`（内参来自 `GET /v1/cameras`、外参来自 `frames` 产物）：不可用时
     **区分**「该像素无深度」/「未标定」/「腕相机缺同拍位姿」，让 agent 知道该换点还是该停稳再取一帧。
@@ -120,7 +120,7 @@ flowchart LR
 -   原语集**按能力协商**：机器人没有夹爪 → 清单里没有 `gripper`；无力控 → 不出现 `press`
     （力控原语留待 Phase C）；
 -   下发通道**复用 `/v1/rollout`**：**绝对**目标（`move_to`）用 `layout="pose"`、**增量**原语
-    （`move_rel` / `rotate_rel`）用 `layout="pose_delta"`（edge → adapter → robot-pipeline），
+    （`move_rel` / `rotate_rel`，以及 RPent `move_delta_abs`）用 `layout="pose_delta"`（edge → adapter → robot-pipeline），
     **robot 侧零新增端点**（两个动作空间随位姿动作 MR 引入）。
 -   增量原语的**基准与到位参考都在机器人侧**：edge 不下发绝对目标，也不缓存基准位姿。
 -   **基座来源单点**：所有「保持当前…」的基座（关节段 / 位姿 / 夹爪槽）都取**目标向量**
@@ -157,7 +157,8 @@ flowchart LR
 `final_err_m` / `final_err_rad` 同口径，agent 据此看出「差在哪一项」）、`elapsed`、`reason`（人读说明）。
 
 `target` 指**本原语下发目标在机器人侧的落点**：`move_to` 是 edge 指定的绝对位姿；
-`move_rel` / `rotate_rel` 是机器人按增量叠加出的目标位姿（读 `observations/pose_action`）。
+`move_rel` / `rotate_rel` / RPent `move_delta_abs` 是机器人按增量叠加出的目标位姿
+（读 `observations/pose_action`）。
 edge **不自己算绝对目标**——理由（稳态误差逐条累积、读-算-写竞态窗口）见
 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「增量原语的基准与到位判定」。
 

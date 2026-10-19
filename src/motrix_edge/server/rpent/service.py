@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -104,6 +105,13 @@ LOOK_AT_KEEPS = (KEEP_TARGET, KEEP_MEASURED)
 #: ``look_at`` 转角超过它就在回执里标 ``large_rotation``（负载 / 线缆风险；不拒绝执行）。
 LARGE_ROTATION_DEG = 60.0
 
+#: ``get_object_position`` 多帧稳健估计的代码兜底；部署可在 ``server.rpent.object_position`` 覆盖。
+OBJECT_POSITION_SAMPLES = 5
+OBJECT_POSITION_MIN_SAMPLES = 3
+OBJECT_POSITION_MAX_FRAMES = 10
+OBJECT_POSITION_OUTLIER_M = 0.03
+OBJECT_POSITION_MAD_SCALE = 3.0
+
 # ---- 服务 --------------------------------------------------------------------
 
 
@@ -152,6 +160,20 @@ class RpentService:
         # 观测图来源：native = 直读 adapter 原图（RPent 内联给模型，小物体要看得清）；
         # preview = 用 FrameManager 的降采样缓存（320x240，省带宽）。
         self._image_source = str(cfg.get("image_source") or "native").strip().lower()
+        object_position = dict(cfg.get("object_position") or {})
+        self._object_position_samples = max(int(object_position.get("samples", OBJECT_POSITION_SAMPLES)), 1)
+        self._object_position_min_samples = min(
+            max(int(object_position.get("min_samples", OBJECT_POSITION_MIN_SAMPLES)), 1),
+            self._object_position_samples,
+        )
+        self._object_position_max_frames = max(
+            int(object_position.get("max_frames", OBJECT_POSITION_MAX_FRAMES)),
+            self._object_position_samples,
+        )
+        timeout_s = object_position.get("timeout_s")
+        self._object_position_timeout_s = None if timeout_s is None else max(float(timeout_s), 0.01)
+        self._object_position_outlier_m = max(float(object_position.get("outlier_m", OBJECT_POSITION_OUTLIER_M)), 0.0)
+        self._object_position_mad_scale = max(float(object_position.get("mad_scale", OBJECT_POSITION_MAD_SCALE)), 0.0)
         settle = dict(cfg.get("settle") or {})
         # 到位容差：**按 MIT 实际稳态误差标定**（底层只有 P/D、**无重力 / 力矩前馈**，容差小于
         # 稳态误差时 `reached` 永远不成立）——edge.yml 只放**部署值**（偏松，先盖住静态误差），
@@ -168,7 +190,10 @@ class RpentService:
             "env.get_object_position": self._get_object_position,
             "env.get_task_language": self._get_task_language,
             "env.reset": self._reset,
+            "env.capture_episode_start": self._capture_episode_start,
+            "env.capture_episode_end": self._capture_episode_end,
             "env.move_delta": self._move_delta,
+            "env.move_delta_abs": self._move_delta_abs,
             "env.rotate_delta": self._rotate_delta,
             "env.move_to": self._move_to,
             "env.look_at": self._look_at,
@@ -316,6 +341,7 @@ class RpentService:
             "ego_axes": self._ego_axes.as_dict(),
             "delta_frame": DELTA_FRAME,
             "delta_axes": ["forward", "left", "up"],
+            "move_delta_abs": {"input_frame": "world", "delta_axes": ["x", "y", "z"]},
             "move_to": {"input_frame": "world"},
             "look_at": {
                 "pointing_axis": self._ego_axes.forward,
@@ -327,7 +353,15 @@ class RpentService:
                 # 非 ``left`` 臂要有外参，否则报 ``uncalibrated``。
                 "world_arm": WORLD_ARM,
             },
-            "object_position": {"input": "normalized u / v", "source": "/v1/depth"},
+            "object_position": {
+                "input": "normalized u / v",
+                "source": "/v1/depth",
+                "sampling": self._object_position_sampling_config(),
+            },
+            "capture_episode": {
+                "session_managed_by_caller": True,
+                "start_required_meta": ["operator", "task_name", "runtime_context"],
+            },
             "lease": self.lease_status(),
             "settle": self.settle_status(),
             **self._camera_payload(),
@@ -588,6 +622,53 @@ class RpentService:
         data = self._invoke_command("robot/reset")
         return {"ok": True, "state": "ready", "states": states, "command": data}
 
+    def _capture_episode_start(
+        self,
+        operator: str | None = None,
+        task_name: str | None = None,
+        runtime_context: dict | None = None,
+        meta: dict | None = None,
+    ) -> dict:
+        """同步 RPent 数采元信息并开始一轮 episode；采集 session 由调用方管理。
+
+        元信息必须在 ``capture/episode/start`` 前通过 ``capture/sync`` 写入，因为 collector
+        会在 start 时快照本轮基线。显式参数覆盖 ``meta`` 中的同名保留字段，避免调用方意外
+        传入两套互相矛盾的采集人 / 任务 / 运行时上下文。
+        """
+        if meta is not None and not isinstance(meta, dict):
+            raise RpentError("capture_episode_start: meta must be an object", kind="argument")
+
+        normalized: dict[str, Any] = {}
+        for key, value in {"operator": operator, "task_name": task_name}.items():
+            if not isinstance(value, str) or not value.strip():
+                raise RpentError(f"capture_episode_start: {key} must be a non-empty string", kind="argument")
+            normalized[key] = value.strip()
+        if not isinstance(runtime_context, dict) or not runtime_context:
+            raise RpentError("capture_episode_start: runtime_context must be a non-empty object", kind="argument")
+        try:
+            json.dumps(runtime_context, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise RpentError(
+                "capture_episode_start: runtime_context must be JSON-serializable", kind="argument"
+            ) from exc
+        normalized["runtime_context"] = runtime_context
+
+        capture_meta = dict(meta or {})
+        capture_meta.update(normalized)
+        if self._dry_run:
+            return {"ok": True, "recording": False, "meta": capture_meta, **self._dry_run_receipt()}
+
+        synced = self._invoke_command("capture/sync", {"meta": capture_meta})
+        started = self._invoke_command("capture/episode/start")
+        return {"ok": True, "recording": True, "meta": capture_meta, "sync": synced, "start": started}
+
+    def _capture_episode_end(self) -> dict:
+        """保存并结束当前 episode；不退出调用方已经进入的采集 session。"""
+        if self._dry_run:
+            return {"ok": True, "recording": False, **self._dry_run_receipt()}
+        ended = self._invoke_command("capture/episode/end")
+        return {"ok": True, "recording": False, "end": ended}
+
     def _recover_joint_posture(self, reason: str = "", return_to_start: bool = True, settle: Any = None) -> dict:
         """``env.recover_joint_posture`` → 关节回 home、**保持各夹爪开合**（与 RPent 工具描述一致）。
 
@@ -683,6 +764,54 @@ class RpentService:
         arm, delta = split_arm_and_vector(args, arm, delta_rpy, "delta_rpy", expected=3)
         return self._delta_tool_frame(arm, delta, what="rotate_delta", offset=3, settle=settle)
 
+    def _move_delta_abs(
+        self,
+        *args,
+        arm: str | None = None,
+        delta_xyz: Any = None,
+        settle: Any = None,
+    ) -> dict:
+        """``env.move_delta_abs``：沿固定 ``world`` 坐标轴平移，姿态保持不变。
+
+        ``delta_xyz`` 是 ``world`` 帧中的位移向量（米），不是绝对目标点；绝对点由
+        :meth:`_move_to` 承担。逐臂只用 ``T_world_base`` 的旋转部分换基：
+        ``d_base = R_world_base.T @ d_world``，平移外参不参与向量换算。换算后仍下发
+        ``pose_delta``，由机器人在关节段目标上同拍叠加，避免把实测稳态误差写回目标。
+        """
+        arm, delta = split_arm_and_vector(args, arm, delta_xyz, "delta_xyz", expected=3)
+        adapter, arms = self._view.require_adapter_with_arms()
+        if not self._view.supports(ActionSpace.POSE_DELTA):
+            raise RpentError(
+                f"adapter does not support {ActionSpace.POSE_DELTA.value} actions; move_delta_abs unavailable "
+                "(robot side must declare pose_delta: 增量叠加在关节段目标上)",
+                kind="unsupported",
+            )
+        indices = self._arm_indices(arm, arms)
+        stride = self._qpos_stride(ActionSpace.POSE_DELTA)
+        vector = np.zeros(stride * max(len(arms), 1), dtype=np.float32)
+        converted: list[np.ndarray] = []
+        delta_world = np.asarray(delta, dtype=np.float64).reshape(3)
+        for index in indices:
+            start = index * stride
+            name = str(arms[index]) if index < len(arms) else ""
+            world_from_base = self._world_from_base(adapter, name)
+            delta_base = world_from_base[:3, :3].T @ delta_world
+            converted.append(delta_base)
+            vector[start : start + 3] = delta_base.astype(np.float32)
+        return self._pose_delta(
+            arm,
+            delta,
+            what="move_delta_abs",
+            settle=settle,
+            vector=vector,
+            extra={
+                "delta_frame": "world",
+                "delta_axes": ["x", "y", "z"],
+                "converted_delta_base": converted,
+                "base_source": SOURCE_TARGET,
+            },
+        )
+
     def _delta_tool_frame(self, arm: str | None, delta: np.ndarray, *, what: str, offset: int, settle: Any) -> dict:
         """语义系增量 → 基座系增量后下发（唯一的增量路径，不再有 ``space`` 开关）。
 
@@ -750,9 +879,9 @@ class RpentService:
         """``env.move_to``：把末端**移到 ``world`` 帧的给定点**（绝对目标，机器人侧 IK 解算）。
 
         ``target`` = ``world``（= 左臂基座，米）下的 xyz；``rpy`` 可选（同样是 ``world`` 帧的末端
-        姿态，不给 = 保持当前目标姿态）。这是**唯一的绝对位移工具**，也是它跟增量工具的分工：
-        增量看末端自己（``move_delta`` / ``rotate_delta``），绝对看 ``world``（``move_to`` /
-        ``look_at`` / ``get_object_position`` 三者同一套坐标系，agent 不用换算）。
+        姿态，不给 = 保持当前目标姿态）。这是**绝对目标点**工具，也是它跟两类增量工具的分工：
+        ``move_delta`` / ``rotate_delta`` 看末端语义轴，``move_delta_abs`` 的增量看 ``world`` 固定轴，
+        ``move_to`` / ``look_at`` / ``get_object_position`` 的目标点则共用 ``world``，agent 不用换算。
 
         内部按 ``T_world_base(arm)`` 换算到该臂基座系（与 ``look_at`` 同一套，见
         ``_point_in_arm_base``）；非左臂未标定 → ``uncalibrated``，不拿错坐标系去动。
@@ -873,19 +1002,107 @@ class RpentService:
                 f"get_object_position: x / y must be **normalized** in [0, 1] (0.5 = 画面中心), got {u} / {v}",
                 kind="argument",
             )
-        body = self._depth.depth(camera=name, u=u, v=v, lease_id=self._resolve_lease_id())
-        available = body.get("xyz_world") is not None
+        started = time.monotonic()
+        timeout_s = self._object_position_timeout()
+        deadline = started + timeout_s
+        revision = self._view.frame_revision()
+        bodies: list[dict] = []
+        candidate_bodies: list[dict] = []
+        world_points: list[np.ndarray] = []
+        camera_points: list[np.ndarray] = []
+        depths: list[float] = []
+        failure_counts: dict[str, int] = {}
+        failure_reasons: dict[str, str] = {}
+        lease_id = self._resolve_lease_id()
+
+        while len(bodies) < self._object_position_max_frames:
+            body = self._depth.depth(camera=name, u=u, v=v, lease_id=lease_id)
+            bodies.append(body)
+            failure = self._object_position_failure(body)
+            if failure is None:
+                candidate_bodies.append(body)
+                world_points.append(np.asarray(body["xyz_world"], dtype=np.float64).reshape(3))
+                camera_points.append(np.asarray(body["xyz_camera"], dtype=np.float64).reshape(3))
+                depths.append(float(body["depth_m"]))
+                if len(world_points) >= self._object_position_samples:
+                    break
+            else:
+                kind, reason = failure
+                failure_counts[kind] = failure_counts.get(kind, 0) + 1
+                failure_reasons[kind] = reason
+
+            current_revision = self._view.frame_revision()
+            if current_revision is not None:
+                revision = current_revision
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if revision is None:  # 兼容旧式 frame manager；生产实现始终走帧版本通知
+                time.sleep(min(self._view.observe_interval(), remaining))
+                continue
+            next_revision = self._view.wait_for_frame_update(revision, remaining)
+            if next_revision <= revision:  # 等不到新帧：不能把同一缓存值冒充多份样本
+                break
+            revision = next_revision
+
+        elapsed_s = time.monotonic() - started
+        body = bodies[-1]
+        rejected_outlier = 0
+        spread_m: float | None = None
+        xyz_world: list[float] | None = None
+        xyz_camera: list[float] | None = None
+        depth_m: float | None = None
         kind: str | None = None
         reason: str | None = None
-        if not body.get("valid") or body.get("depth_m") is None:
-            kind, reason = "no_depth", "该像素没有有效深度（深度原始值 0）——换一个点或换一台相机"
-        elif body.get("xyz_camera") is None:
-            kind, reason = "uncalibrated", "没有可用外参（未标定 / 产物里没有这台相机）"
-        elif not available:
-            kind, reason = (
-                "no_pose",
-                "腕相机的世界坐标要用**同一拍**的臂位姿合成，这一拍没有——先让臂停稳再查",
+        accepted = 0
+
+        if len(world_points) < self._object_position_min_samples:
+            if not world_points and failure_counts:
+                kind = max(failure_counts, key=failure_counts.get)
+                reason = failure_reasons[kind]
+                depth_m = body.get("depth_m")
+                xyz_camera = body.get("xyz_camera")
+            else:
+                kind = "insufficient_samples"
+                reason = f"有效 world 坐标只有 {len(world_points)} 个，至少需要 {self._object_position_min_samples} 个"
+        else:
+            points = np.stack(world_points)
+            center = np.median(points, axis=0)
+            distances = np.linalg.norm(points - center, axis=1)
+            median_distance = float(np.median(distances))
+            mad = float(np.median(np.abs(distances - median_distance)))
+            limit_m = max(
+                self._object_position_outlier_m,
+                median_distance + self._object_position_mad_scale * 1.4826 * mad,
             )
+            inliers = distances <= limit_m + np.finfo(np.float64).eps
+            accepted = int(np.count_nonzero(inliers))
+            rejected_outlier = len(world_points) - accepted
+            if accepted < self._object_position_min_samples:
+                kind = "unstable_depth"
+                reason = f"离群过滤后只剩 {accepted} 个样本，至少需要 {self._object_position_min_samples} 个"
+            else:
+                accepted_world = points[inliers]
+                mean_world = np.mean(accepted_world, axis=0)
+                mean_camera = np.mean(np.stack(camera_points)[inliers], axis=0)
+                xyz_world = self._round_point(mean_world)
+                xyz_camera = self._round_point(mean_camera)
+                depth_m = round(float(np.mean(np.asarray(depths)[inliers])), 6)
+                spread_m = round(float(np.max(np.linalg.norm(accepted_world - mean_world, axis=1))), 6)
+                body = candidate_bodies[-1]
+
+        available = xyz_world is not None
+        sampling = {
+            **self._object_position_sampling_config(timeout_s=timeout_s),
+            "frames_observed": len(bodies),
+            "candidates": len(world_points),
+            "accepted": accepted,
+            "rejected_invalid": len(bodies) - len(world_points),
+            "rejected_outlier": rejected_outlier,
+            "failure_counts": failure_counts,
+            "spread_m": spread_m,
+            "elapsed_s": round(elapsed_s, 6),
+        }
         return {
             "ok": True,
             "available": available,
@@ -896,14 +1113,59 @@ class RpentService:
             "y": v,
             "u_px": body.get("u_px"),
             "v_px": body.get("v_px"),
-            "depth_m": body.get("depth_m"),
-            "valid": body.get("valid"),
-            "xyz_camera": body.get("xyz_camera"),
-            "xyz_world": body.get("xyz_world"),
+            "depth_m": depth_m,
+            "valid": True if available else bool(body.get("valid")),
+            "xyz_camera": xyz_camera,
+            "xyz_world": xyz_world,
             "frame": body.get("frame"),
             "world": body.get("world"),
             "source": "/v1/depth",
+            "sampling": sampling,
         }
+
+    def _object_position_timeout(self) -> float:
+        """多帧查询等待上限：显式配置优先，否则按 Edge 观测缓存刷新周期推导。"""
+        if self._object_position_timeout_s is not None:
+            return self._object_position_timeout_s
+        return max(self._object_position_max_frames * self._view.observe_interval() * 1.5, 0.05)
+
+    def _object_position_sampling_config(self, *, timeout_s: float | None = None) -> dict:
+        """自描述与调用回执共用的采样参数。"""
+        return {
+            "samples": self._object_position_samples,
+            "min_samples": self._object_position_min_samples,
+            "max_frames": self._object_position_max_frames,
+            "timeout_s": self._object_position_timeout() if timeout_s is None else timeout_s,
+            "outlier_m": self._object_position_outlier_m,
+            "mad_scale": self._object_position_mad_scale,
+        }
+
+    @staticmethod
+    def _object_position_failure(body: dict) -> tuple[str, str] | None:
+        """一帧是否可作为 world 坐标候选；不可用时返回稳定的失败分类。"""
+        try:
+            depth_m = float(body.get("depth_m"))
+        except (TypeError, ValueError):
+            depth_m = float("nan")
+        if not body.get("valid") or not np.isfinite(depth_m) or depth_m <= 0:
+            return "no_depth", "该像素没有有效深度（深度原始值 0）——换一个点或换一台相机"
+        if body.get("xyz_camera") is None:
+            return "uncalibrated", "没有可用内参 / 外参（未标定或产物里没有这台相机）"
+        if body.get("xyz_world") is None:
+            return "no_pose", "腕相机的 world 坐标需要同一拍臂位姿——先让臂停稳再查"
+        try:
+            camera = np.asarray(body["xyz_camera"], dtype=np.float64).reshape(-1)
+            world = np.asarray(body["xyz_world"], dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return "invalid_sample", "深度坐标不是有效的三维数值"
+        if camera.size != 3 or world.size != 3 or not np.all(np.isfinite(camera)) or not np.all(np.isfinite(world)):
+            return "invalid_sample", "深度坐标不是有效的三维数值"
+        return None
+
+    @staticmethod
+    def _round_point(values: np.ndarray) -> list[float]:
+        """聚合坐标保留微米级显示精度，避免再次量化掉多帧均值。"""
+        return [round(float(value), 6) for value in values]
 
     def _look_at(
         self,

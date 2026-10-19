@@ -138,6 +138,11 @@ def test_scan_extracts_structured_metadata_fields(tmp_path):
                 "robot_type": "test_robot",
                 "operator": "李四",
                 "task_name": "桌面前移",
+                "runtime_context": {
+                    "log_path": "/rpent/runs/42/run.log",
+                    "model": "rpent-agent-v1",
+                    "session_id": "run-42",
+                },
                 "frames": 110,
                 "size_bytes": 1056419,
                 "duration": 3.6409189701080322,
@@ -157,6 +162,11 @@ def test_scan_extracts_structured_metadata_fields(tmp_path):
     assert meta["robot_type"] == "test_robot"
     assert meta["operator"] == "李四"
     assert meta["task_name"] == "桌面前移"
+    assert meta["runtime_context"] == {
+        "log_path": "/rpent/runs/42/run.log",
+        "model": "rpent-agent-v1",
+        "session_id": "run-42",
+    }
     assert meta["frames"] == 110
     assert isinstance(meta["frames"], int)
     assert meta["size_bytes"] == 1056419

@@ -88,6 +88,23 @@ BASE_CFG = {
 }
 
 
+def test_frame_manager_waits_for_a_new_revision():
+    """多帧消费者按版本等新帧，不会把当前缓存重复计数。"""
+    manager = FrameManager()
+    revision, frame = manager.latest_versioned()
+    assert revision == 0 and frame is None
+    result: list[tuple[int, dict | None]] = []
+    waiter = threading.Thread(target=lambda: result.append(manager.wait_for_update(revision, timeout=0.5)))
+    waiter.start()
+    manager.update({"value": 1})
+    waiter.join(timeout=1.0)
+
+    assert result == [(1, {"value": 1})]
+
+    manager.clear()
+    assert manager.latest_versioned() == (2, None)
+
+
 @pytest.fixture(autouse=True)
 def _no_discover(monkeypatch):
     """server 测试不依赖真实 SDK 进程 / 网络：discover_adapter 视为无进程（返回 None）。

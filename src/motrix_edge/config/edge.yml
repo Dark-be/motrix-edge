@@ -22,6 +22,8 @@ server:
   #   lease_id（固定租约；缺省 = 当前活跃租约）/ step_hz（缺省 = 机器人上报的 control_hz）/
   #   action_layout（外部动作块布局，如 rpent/dual_franka）/ dry_run（只转换不下发）/
   #   image_source（native = 原图 | preview = 320x240 缓存）/ settle 的其余键（超时 / 停滞 / 轮询…）。
+  #   object_position（多帧深度稳健估计：samples / min_samples / max_frames / timeout_s /
+  #   outlier_m / mad_scale；缺省按 node.observe_interval 等新帧，参数见 env.get_env_meta 自描述）。
   # 下面只留**部署值**：容差按回执 final_err_m / final_err_rad 的**实测平台值**标定——容差小于
   # 残余静态误差时 reached 永远不成立（每个写原语都走满 stall_s / timeout_s）；当前取偏松的
   # 4cm / 0.4rad ≈ 23°（先把整定未完成的残余误差盖住），现场按平台值收敛后再收紧。标定见上述文档。

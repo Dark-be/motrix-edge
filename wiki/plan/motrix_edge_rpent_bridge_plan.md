@@ -36,7 +36,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         `{"ok": true, "result"}` / `{"ok": false, "error", "kind", "traceback"}`、**始终 200**；
         NumPy 编解码助手（`__ndarray__` / `__npscalar__`，与 RPent `http_rpc.py` 对称）。
 -   [x] 方法分派：`env.get_env_meta` / `get_observation` / `get_robot_state` /
-        `get_camera_meta` / `reset` / `move_delta` / `rotate_delta` / `set_gripper` /
+        `get_camera_meta` / `reset` / `move_delta` / `move_delta_abs` / `rotate_delta` / `set_gripper` /
         `recover_joint_posture` / `chunk_step` / `step` / `get_task_language` +
         `healthz` + `session.register|close`（no-op）；未知方法 → `ok=false`。`shutdown` 不注册。
 -   [x] `env.get_env_meta` 自描述：`explicit_reset_only: true`、`action_dim`、`action_space(s)`、
@@ -49,7 +49,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         20 维 `xyz + rot6d + 夹爪(±1)` → edge 每臂 `[xyz, rpy, gripper]` 绝对目标，逐帧转换
         （rot6d → 旋转矩阵 → rpy、夹爪域映射、按臂名对齐）；`dry_run` 时只回 `converted`，
         其余下发路径也一律拦住（见下方「`dry_run` 安全修复」）。
--   [x] **到位等待（settle）**：写原语（`move_delta` / `rotate_delta` / `set_gripper` /
+-   [x] **到位等待（settle）**：写原语（`move_delta` / `move_delta_abs` / `rotate_delta` / `set_gripper` /
         `recover_joint_posture`）默认阻塞到「误差 ≤ 容差」/ 超时 / 停顿，回执带
         `reached` / `final_err`（+ 分项 `final_err_m` 位置米 / `final_err_rad` 姿态或关节弧度）/
         `elapsed_s`（+ `stalled` / `timeout` / 生效容差）——外部 agent 靠它判成败，不等就会读到
@@ -77,13 +77,13 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         `get_env_meta` / `get_camera_meta`）免租约，其余与原生面同规则；`lease` / `settle`
         配置回写进 `env.get_env_meta`，让 agent 启动前能自查（RPent eval 连上即 `reset`）；
         `lease` 段另给 `required` / `expires_at` / `expires_in_s`（租约 TTL 要覆盖整轮 run）。
--   [x] 测试（`tests/test_rpent.py`，61 例）：numpy 往返 / 信封（含未知方法与未注入）/
-        租约（免 / 必需 / 失败信封 / `satisfied` = 可用）/ 观测与图像色序 / 四个控制方法与单臂行为 /
+-   [x] 测试（`tests/test_rpent.py`）：numpy 往返 / 信封（含未知方法与未注入）/
+        租约（免 / 必需 / 失败信封 / `satisfied` = 可用）/ 观测与图像色序 / 控制方法与单臂行为 /
         pose_dim = 0 拒绝 / `step` 与 `chunk_step` 的拒拍与计数 / 布局转换（rot6d↔rpy 往返、
         正交化、夹爪域、臂对齐与回填、`dry_run` 不下发、维度与布局名错误分支）/ settle
         （到位 / 停顿 / 超时 / 可逐次覆盖 / 上限封顶 / 容差回执）/ 每臂状态块 /
         `recover_joint_posture` 保夹爪 / 原图与预览回落 / 相机名基名约束 /
-        `dry_run` 拦住四条写原语与 `env.reset` + `_push_qpos` 兜底 + 自描述暴露 dry-run。
+        `dry_run` 拦住五条写原语与 `env.reset` + `_push_qpos` 兜底 + 自描述暴露 dry-run。
 -   [x] 文档：`motrix_edge_server.md` 增 `/call` 小节与端点表行；`motrix_edge_rpent_bridge.md`
         换成已实现形态 + 待对齐项。
 
@@ -107,7 +107,7 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         相对增量改按**末端系**解释后，agent 拿 `get_object_position` 得到的 `world` 点没法直接换算成
         「沿末端该走多少」，于是补了 `env.move_to`（`target` / `rpy` 都是 `world`）。工作空间盒与
         单步上限仍待原语执行器落地时一并评估。
--   [x] **`dry_run` 安全修复**（RPent 侧 review 发现）：把 `dry_run` 检查前移到四条写原语 +
+-   [x] **`dry_run` 安全修复**（RPent 侧 review 发现）：把 `dry_run` 检查前移到五条写原语 +
         `env.reset`（回 `dry_run` / `sent: false` / `reached: null` / `reason`），`_push_qpos`
         兜底报错；修掉模块与 `_settle_action` 两处旧 docstring、`set_gripper` 的 `sent: true`
         自相矛盾；`settle_status()` 增 `dry_run` / `action_layout`（供 agent 启动告警）。
@@ -159,9 +159,17 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         `wrap(rpy(R_cur · basis·ΔR_sem·basisᵀ) - rpy_cur)`——旧写法（共轭 `R·ΔR·Rᵀ` 的 rpy）与机器人侧
         「rpy 逐分量相加」不一致（`pitch=45°` 转 20° 偏 10.7°）。回执 `delta_frame` /
         `converted_delta_base` / `base_source`，窗口竞态交给既有 `base_changed` 检查
+-   [x] `move_delta_abs`：新增固定 `world` 坐标轴下的平移增量；逐臂仅按
+        `T_world_base` 的旋转部分换到臂基座系，再复用 `pose_delta` / settle 路径；非 world 臂缺外参
+        明确报 `uncalibrated`，并补方法注册、自描述与换算测试
+-   [x] `get_object_position` 多帧稳健估计：`FrameManager` 增加帧版本与新帧等待；按观测周期收集多帧，
+        丢弃无效坐标与 3D MAD 离群点后求均值；回执暴露采样统计，并覆盖平均、离群、样本不足测试
+-   [x] RPent 数采回合：新增 `env.capture_episode_start`（必填采集人 / 任务 / LLM 运行时上下文，先
+        `capture/sync` 再 `capture/episode/start`）与 `env.capture_episode_end`；只控制 episode，
+        不进入 / 退出 capture session；`runtime_context` 作为 object 写入采集 JSON 并登记为 upload 已知字段
 -   [x] 几何工具：把「轴对齐到方向的最小旋转」与「末端系增量 → 基座系增量」放进
         `motrix_edge.geometry`（纯 numpy、可离线单测；`rpy` 约定与 `rpent/layout.py` 已验一致）
--   [x] 测试：四个方法各一条 happy path + 失败路径（无深度 / 未标定 / 缺位姿 / IK 拒绝 /
+-   [x] 测试：各方法覆盖 happy path + 失败路径（无深度 / 未标定 / 缺位姿 / IK 拒绝 /
         `base_changed`），几何换算用「已知姿态 → 期望增量」钉住
 -   [ ] 单飞与写方互斥：Phase C 的欠账在实现这四个（尤其 `look_at`）之前最好先补
 
