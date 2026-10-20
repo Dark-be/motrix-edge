@@ -150,12 +150,12 @@ robot:
 
 ### 机型覆盖
 
-| 机型                | 具备深度的相机                 |
-| ------------------- | ------------------------------ |
-| `dual_piper`        | 三路（均 RealsenseSensor）     |
-| `dual_alicia_piper` | `cam_head`（两腕为网络摄像头） |
-| `single_piper`      | 无相机                         |
-| `test_robot`        | `cam_head`（**合成**深度）     |
+| 机型                | 具备深度的相机             |
+| ------------------- | -------------------------- |
+| `dual_piper`        | 三路（均 RealsenseSensor） |
+| `dual_alicia_piper` | 三路（均 RealsenseSensor） |
+| `single_piper`      | 无相机                     |
+| `test_robot`        | `cam_head`（**合成**深度） |
 
 `test_robot` 合成深度（与虚拟彩色帧同尺寸、确定性取值）→ 无硬件也能端到端验证
 「共享内存 → adapter → `/v1/depth`」。

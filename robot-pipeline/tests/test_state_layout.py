@@ -93,9 +93,15 @@ class _FakeArm:
         self.gripper = float(value)
 
 
-@pytest.fixture(scope="module")
-def dual_piper():
-    """导入 robot-pipeline 的 DualPiperRobot。"""
+@pytest.fixture(scope="module", params=("piper", "alicia"))
+def dual_piper(request):
+    """两种主手机型都必须满足相同的执行与数据布局契约。"""
+    if request.param == "alicia":
+        from test_machine_profile import _stub_hardware_sdks as stub_all_hardware
+
+        stub_all_hardware()
+        module = _load("robot.dual_alicia_piper_robot")
+        return types.SimpleNamespace(DualPiperRobot=module.DualAliciaPiperRobot)
     return _load("robot.dual_piper_robot")
 
 
@@ -228,17 +234,36 @@ def test_collector_consumes_standard_observation(dual_piper, collector, tmp_path
     """真采集器 + robot 契约观测：episode 要真的写进帧（回归：融在 server 层时这里是 0 帧）。"""
     pytest.importorskip("mcap_ros2", reason="robot-pipeline 侧依赖（mcap），宿主机 / 容器可能未装")
 
+    from unittest.mock import Mock
+
     robot = _robot(dual_piper, grippers=(0.4, 0.6))
+    robot.sensors = {
+        name: Mock(
+            pixel_format="raw", get_information=Mock(return_value={"color": np.zeros((480, 640, 3), dtype=np.uint8)})
+        )
+        for name in robot.IMAGE_NAMES
+    }
     instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
+    instance.set_state_layout(robot.state_layout())
     instance.start()
     for _ in range(2):
         robot.motion_state = robot.sample_state()
-        instance.collect(robot.standard_observation())
+        instance.collect(robot.standard_observation(robot.build_observation()))
     path = instance.finish()
 
     assert path is not None and path.exists()
     meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     assert meta["frames"] == 2  # 每拍都真的落了帧（不是 0）
+    assert meta["state_dims"] == robot.state_layout()["state_dims"]
+    assert meta["action_dims"] == robot.state_layout()["action_dims"]
+    from mcap.reader import make_reader
+
+    with path.open("rb") as stream:
+        messages = list(make_reader(stream).iter_messages())
+    assert sum(channel.topic == "observations/qpos" for _, channel, _ in messages) == 2
+    assert sum(channel.topic == "action" for _, channel, _ in messages) == 2
+    for name in robot.IMAGE_NAMES:
+        assert sum(channel.topic == f"observations/images/{name}" for _, channel, _ in messages) == 2
 
 
 def test_robot_rejects_short_joint_block(dual_piper):
@@ -669,3 +694,39 @@ def test_env_control_layout_follows_connect_time_gravity(
 
     assert env._collector.meta["control_mode"] == "mit+gravity"
     assert env._collector.meta["control"]["left_arm"]["gravity"]["active"] is True
+
+
+def test_dual_hardware_connection_and_gripper_deadzone(dual_piper):
+    from unittest.mock import Mock
+
+    robot = _robot(dual_piper)
+    robot.controllers = {name: Mock() for name in robot.controllers}
+    robot.sensors = {name: Mock() for name in robot.sensors}
+    robot.connect()
+    for arm in robot.ARM_NAMES:
+        name = robot.MASTER_CONTROLLERS[arm]
+        kwargs = {"port": robot.ports[name]}
+        if robot.PORT_KINDS[name] == "can":
+            kwargs["role"] = "leader"
+        robot.controllers[name].connect.assert_called_once_with(**kwargs)
+        robot._controller_for_arm(arm).connect.assert_called_once_with(port=robot.ports[arm], gravity=None)
+    for name, sensor in robot.sensors.items():
+        kwargs = {"device": robot.camera_devices[name], "pixel_format": "jpg"}
+        if robot.CAMERA_KINDS[name] == "realsense":
+            kwargs["enable_depth"] = name in robot.depth_cameras
+        sensor.connect.assert_called_once_with(**kwargs)
+    robot._apply_commands(np.zeros(12), np.array([0.1, 0.7]))
+    robot.controllers["left_arm"].set_gripper.assert_called_once_with(0.0)
+    robot.controllers["right_arm"].set_gripper.assert_called_once_with(0.7)
+    robot.disconnect()
+    assert robot.ready is False
+
+
+def test_dual_pose_roundtrip_with_tcp(dual_piper):
+    robot = _robot(dual_piper)
+    robot.set_tcp(True, [0, 0, 0.12])
+    joints = np.array([0, 0.1, 0, 0, 0, 0] * 2, dtype=float)
+    pose = robot.get_observation_pose(joints)
+    assert pose.shape == (12,) and np.isfinite(pose).all()
+    solved = robot._solve_pose(pose, joints)
+    np.testing.assert_allclose(robot.get_observation_pose(solved), pose, atol=1e-4)

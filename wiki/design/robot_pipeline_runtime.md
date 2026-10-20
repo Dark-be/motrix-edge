@@ -39,6 +39,20 @@ flowchart LR
 -   **观测线程**：消费采集指令 → `robot.build_observation()`（缓存状态 + 本拍相机帧）→ 帧钩子
     `on_frame`（server 据此发布共享内存）→ 采集落盘。
 
+## 双臂 Piper 机型的一致性
+
+`dual_piper` 与 `dual_alicia_piper` 使用同一套 Piper 执行臂行为：关节 / 夹爪下发（含夹爪死区）、
+FK / IK、TCP 位姿、遥操作目标和标准观测均以 `DualPiperRobot` 为单点；Alicia 机型继承该实现，
+只定制主手装配与连接。两者通过相同 env / collector 产出同布局的 MCAP 与 JSON 元信息。
+
+硬件差异仅限主手：Alicia 主手走串口及其 SDK 关节映射，Piper 主手走 CAN leader；
+两种机型均使用三路 RealSense，相机与深度能力完全一致。Alicia 的主手读数已映射到 Piper 关节空间，
+共用的位姿跟随表示映射后的 Piper FK，不表示 Alicia 主手的物理末端位姿。
+
+两份机型配置的执行、TCP、遥操作与采集参数保持一致，身份、保存目录、主手端口按
+机型保留。现场主从零位、TCP 长度及逐臂重力标定通过机器档案覆盖；已存在的运行目录整份配置
+优先于包内示例，部署时需同步这些参数。
+
 ## 线程职责
 
 | 线程     | 频率             | 唯一写者                                                         | 消费队列           | 每拍动作                                       |

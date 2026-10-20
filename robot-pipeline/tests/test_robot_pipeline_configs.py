@@ -29,18 +29,19 @@ import yaml
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "src" / "config"
 _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
 # 需要「帧头跳过」配置的机型（遥操作系统；其余机型保留代码缺省 HEAD_SKIP_DEFAULTS）
-_HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml")
+_HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
 # 声明深度观测的机型（见 wiki/design/robot_pipeline_depth.md）
 _DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
 # 机型 → 臂名（校验 ``robot.tcp.arms`` 的键名用；与机器人类的 ``ARM_NAMES`` 一致）
 _TCP_ARMS = {
     "test_robot.yml": ("left", "right"),
     "dual_piper.yml": ("left", "right"),
+    "dual_alicia_piper.yml": ("left", "right"),
     "single_piper.yml": ("left",),
 }
 # 出厂**开启** robot.tcp 的机型 → 公共偏移（米，法兰系；法兰 +z = 工具伸出方向）。
 # dual piper 的末端实装长度固定，故默认开启；其余机型没有确定的装配长度 → 不带该段。
-_TCP_SHIPPED_ON = {"dual_piper.yml": (0.0, 0.0, 0.12)}
+_TCP_SHIPPED_ON = {name: (0.0, 0.0, 0.12) for name in ("dual_piper.yml", "dual_alicia_piper.yml")}
 
 
 def _load(name: str) -> dict:
@@ -132,7 +133,7 @@ def test_tcp_block_shape_and_resolves():
 
 
 def test_tcp_offset_flag_matches_shipped_defaults():
-    """出厂配置：``dual_piper`` **默认开启**（尖端长度 = 该机型实装），其余机型不带 ``robot.tcp``。
+    """出厂配置：两种双臂 Piper 机型 **默认开启**（尖端长度 = 该机型实装），其余机型不带 ``robot.tcp``。
 
     开启不等于随便开：offset 必须是与末端实装一致的量（dual piper 出厂 12 cm），换了末端 / 支架就得
     重验并改配置（现场改 ``<根>/config/dual_piper.yml`` 或机器档案，见 robot-pipeline/README.md）。
@@ -209,3 +210,15 @@ def test_robot_type_is_registered(name):
     if not registered:
         pytest.skip("未解析到 ROBOT_REGISTRY")
     assert _load(name)["robot"]["type"] in registered, f"{name} 的 robot.type 不是已注册机型"
+
+
+def test_dual_piper_variants_share_execution_and_capture_defaults():
+    piper = _load("dual_piper.yml")
+    alicia = _load("dual_alicia_piper.yml")
+    for key in ("step_rad", "init_joint", "init_gripper", "gravity", "tcp", "teleop", "depth", "cameras"):
+        assert alicia["robot"][key] == piper["robot"][key], key
+    assert {k: v for k, v in alicia["collector"].items() if k != "save_dir"} == {
+        k: v for k, v in piper["collector"].items() if k != "save_dir"
+    }
+    for arm in ("left", "right"):
+        assert alicia["robot"]["ports"][arm] == piper["robot"]["ports"][arm]

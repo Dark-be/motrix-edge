@@ -187,9 +187,8 @@ robot:
 示例里都不放**现场值**，也不放**占位值**（假序列号只会把错误推迟到 SDK「找不到设备」）；未知
 键名 → `WARNING`（帮助发现拼写错误）。
 键名分别是实现里的 `PORT_ROLES` 与 `IMAGE_NAMES`（见 `src/robot/dual_piper_robot.py`、
-`dual_alicia_piper_robot.py` 与 `single_piper_robot.py`）。相机值随机型不同：**RealSense 机型
-（`dual_piper_robot`）三路都是 RealSense 序列号**；Alicia 机型（`dual_alicia_piper_robot`）
-的腕相机是 V4L2 设备节点。
+`dual_alicia_piper_robot.py` 与 `single_piper_robot.py`）。两种双臂机型（`dual_piper_robot` /
+`dual_alicia_piper_robot`）三路均为 RealSense，相机配置均填写序列号。
 
 这些值**每台机器不同** → 写进**实际配置目录** `<根>/config/`（包内 yml 只是零现场值的示例），有两种落点（见下节）。
 
@@ -509,8 +508,8 @@ robot:
 ## 遥操作
 
 -   `single_piper`：Leader 主臂（读取）+ Follower 从臂（执行），同构映射；
--   `dual_piper` / `dual_alicia_piper`：master 主手（alicia）+ slave 从手（piper），
-    左 → 左、右 → 右。
+-   `dual_piper`：Piper CAN 主手 + Piper 从臂，左 → 左、右 → 右；
+-   `dual_alicia_piper`：仅主手换为 Alicia 串口示教臂，其余执行臂、三路 RealSense 与采集行为同 `dual_piper`。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
 跟随（`robot.step_rad`）；遥操作默认关闭。HTTP 的 `mode` 仍只选择映射模式：
