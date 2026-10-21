@@ -26,6 +26,7 @@
 import cv2
 import numpy as np
 from utils.data_handler import debug_print  # noqa: E402
+from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
 from robot.base_robot import BaseRobot, CartesianActionError
 from robot.controller.test_arm_controller import TestArmController  # noqa: E402
@@ -207,5 +208,13 @@ class TestRobot(BaseRobot):
             decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
             if decoded is None:
                 raise RuntimeError(f"TestRobot.get_observation_frames: 相机 {name} JPEG 解码失败")
-            frames.append({"color": decoded[:, :, ::-1], "depth": info.get("depth")})  # BGR → RGB
+            frames.append(
+                {
+                    "color": decoded[:, :, ::-1],
+                    "depth": info.get("depth"),
+                    KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
+                    KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
+                    KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
+                }
+            )  # BGR → RGB
         return frames

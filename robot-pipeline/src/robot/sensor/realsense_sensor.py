@@ -12,12 +12,14 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+import math
 import time
 
 import cv2
 import numpy as np
 import pyrealsense2 as rs
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
 from .sensor import Sensor
 
@@ -85,6 +87,10 @@ class RealsenseSensor(Sensor):
         if device_idx is None:
             raise RuntimeError(f"Could not find camera with serial number {serial}")
 
+        # Use SDK clock conversion so camera and joint samples share the Unix clock.
+        for sensor in self.devices[device_idx].query_sensors():
+            if sensor.supports(rs.option.global_time_enabled):
+                sensor.set_option(rs.option.global_time_enabled, 1)
         self.pipeline = rs.pipeline()
         self.config = rs.config()
 
@@ -145,14 +151,48 @@ class RealsenseSensor(Sensor):
             }
         return info
 
+    @staticmethod
+    def _frame_time(frame, fallback_ns):
+        """Return Unix ns and provenance; never treat a device-relative clock as Unix."""
+        metadata = {"source": "host_capture_start"}
+        try:
+            domain = frame.get_frame_timestamp_domain()
+            stamp_ms = float(frame.get_timestamp())
+            metadata.update(timestamp_domain=str(domain), frame_timestamp_ms=stamp_ms)
+            for name in ("frame_timestamp", "sensor_timestamp", "actual_exposure"):
+                field = getattr(rs.frame_metadata_value, name)
+                try:
+                    if frame.supports_frame_metadata(field):
+                        metadata[name + "_us"] = int(frame.get_frame_metadata(field))
+                except RuntimeError:
+                    continue
+            if domain in (rs.timestamp_domain.global_time, rs.timestamp_domain.system_time):
+                if math.isfinite(stamp_ms) and stamp_ms > 0:
+                    metadata["source"] = str(domain)
+                    return round(stamp_ms * 1_000_000), metadata
+        except RuntimeError:
+            # Metadata/time availability depends on device, firmware and host driver.
+            pass
+        return fallback_ns, metadata
+
     def get_information(self):
         """读取完整观测（color 恒取；depth 仅 enable_depth=True 时取），不做 collect_info 过滤。
 
         深度开启且对齐时先 ``rs.align(color)`` 再取两帧：``depth[v, u]`` 与 ``color[v, u]``
         对应同一物理点（同一帧组，同拍）。
         """
-        image = {}
+        image = {KEY_TIMESTAMP_NS: time.time_ns()}
         frame = self.pipeline.wait_for_frames()
+        # Read original frames before alignment, which changes image geometry.
+        times, metadata = {}, {}
+        for stream in ("color", "depth") if self.enable_depth else ("color",):
+            source_frame = getattr(frame, f"get_{stream}_frame")()
+            if not source_frame:
+                raise RuntimeError(f"Failed to get {stream} frame.")
+            times[stream], metadata[stream] = self._frame_time(source_frame, image[KEY_TIMESTAMP_NS])
+        image[KEY_TIMESTAMP_NS] = times["color"]
+        image[KEY_TIMESTAMPS_NS] = times
+        image[KEY_TIMESTAMP_METADATA] = metadata
         if self.align is not None:
             frame = self.align.process(frame)
 

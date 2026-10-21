@@ -29,6 +29,7 @@
 import cv2
 import numpy as np
 from utils.data_handler import debug_print  # noqa: E402
+from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
 from robot.base_robot import BaseRobot, CartesianActionError
 from robot.controller.piper_controller import PiperController  # noqa: E402
@@ -253,7 +254,15 @@ class DualPiperRobot(BaseRobot):
                     debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
                     decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
                 decoded = decoded[:, :, ::-1]  # BGR → RGB
-            frames.append({"color": decoded, "depth": info.get("depth")})
+            frames.append(
+                {
+                    "color": decoded,
+                    "depth": info.get("depth"),
+                    KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
+                    KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
+                    KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
+                }
+            )
         return frames
 
     def _read_teleop_joint(self) -> np.ndarray | None:

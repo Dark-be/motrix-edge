@@ -12,8 +12,11 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+import time
+
 import cv2
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMP_NS
 
 from .sensor import Sensor
 
@@ -108,7 +111,7 @@ class Cv2Sensor(Sensor):
 
     def get_information(self):
         """读取一帧：color 为 JPEG bytes（jpg）或 RGB ndarray（raw）；无帧返回 None。"""
-        image = {}
+        image = {KEY_TIMESTAMP_NS: time.time_ns()}
         if self.cap is None or not self.cap.isOpened():
             image["color"] = None
             debug_print(self.name, "Camera not opened", "ERROR")

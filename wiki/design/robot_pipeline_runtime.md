@@ -94,7 +94,7 @@ FK / IK、TCP 位姿、遥操作目标和标准观测均以 `DualPiperRobot` 为
 ## 观测组装（单点定义在 BaseRobot）
 
 `BaseRobot` 持有原始观测键常量（`KEY_JOINT` / `KEY_GRIPPER` / `KEY_POSE` / 对应 `*_ACTION`）与两个**取数
-钩子**（子类实现，返回原始数据，不含契约键 / 时间戳）：
+钩子**（子类实现，返回原始数据；相机帧附带采样时间戳）：
 
 | 钩子                       | 实现方       | 取数内容                                                     | 所属线程 |
 | -------------------------- | ------------ | ------------------------------------------------------------ | -------- |
@@ -120,12 +120,30 @@ FK / IK、TCP 位姿、遥操作目标和标准观测均以 `DualPiperRobot` 为
 ⚠️ 相机取帧会阻塞，**控制线程不得调用取相机的方法**（`capture_frames` / `get_observation` /
 `build_observation`）；机械臂读取只在控制线程，观测线程只读 `motion_state` 快照。
 
-⚠️ 观测里的 `timestamp` 由**观测线程**在 `build_observation()` 打点（**观测拍取帧之前**的时刻），
-**不是**控制拍的采样时刻——`motion_state`（qpos / action）来自上一个控制拍，与该时刻的偏移
-**有界**（≤ `1/HZ` ≈ 33ms）但**逐帧小幅波动**（控制 / 观测是两条独立限速循环，线程唤醒抖动
-逐帧不同；控制拍超时会让「最近一个控制拍」跳档）。故对 `dt` 与 episode 时长（末帧 − 首帧）
-无影响；但下游（mcap → ACT / LeRobot 转换）**不要按固定滞后做时间平移校正**，需要严格对齐时
-须知该滞后并非定值。
+### 逐话题采样时间
+
+RealSense 启动时对支持的 sensor 开启 SDK `global_time_enabled`，彩色 / 深度分别读取原始帧的
+`get_timestamp()`，在空间对齐、编解码之前保留时间。`global_time` 是映射到 Unix 主机时钟的
+硬件帧时间（读出 / 传输起点，并非曝光中点），`system_time` 是 SDK 主机到达时间，两者均可用于
+MCAP。仍为 `hardware_clock` 或时间不可用时回退取帧前的 `time.time_ns()`，禁止将设备启动以来的
+相对时间直接写为 Unix 时间。SDK 毫秒浮点值转换为整数纳秒并不提高硬件的实际精度。
+[SDK 时间定义](https://github.com/realsenseai/librealsense/blob/master/include/librealsense2/hpp/rs_frame.hpp)
+区分硬件帧时间、曝光中点 `sensor_timestamp` 和曝光时长 `actual_exposure`；
+原始帧时间、时钟域及可用曝光元数据随 `timestamp_metadata` 保留在观测中（不新增 MCAP 话题）。
+
+其他 sensor 在取帧前记录 Unix 纳秒 `timestamp_ns`；RealSense 的逐流时间额外通过
+`timestamps_ns`（color / depth）传递。关节状态在控制线程读取 joint / gripper 之前打点，
+目标向量在读取 target 前另行打点；FK 派生位姿沿用对应状态 / 目标的时间。
+关节时间表示主机采样调用起点，不是编码器硬件时间。
+
+标准观测额外携带 `timestamps_ns`，键为完整观测 / 话题名（如 `observations/qpos`、`action`、
+`observations/images/cam_head`），值为整数纳秒。组装与图像编解码保持这些时间不变；运动状态与相机
+时间映射合并到同一份观测，不改原有数值 / 图像布局。旧的帧级 `timestamp` 仅保留兼容用途。
+
+MCAP 每条消息的 `log_time` 和 `publish_time` 使用本话题的采样时间，图片 `header.stamp` 与之
+完全一致；不重新打点、不把不同话题强制对齐。旧调用方缺少某话题时间时才回退帧级 `timestamp`，
+再缺则回退写入时墙钟。显式提供的非法纳秒时间直接拒绝。episode 时长取已写话题时间的最大值减最小值。
+共享内存布局与深度不落 MCAP 的约定不变；本次逐话题时间用于机器人侧采集链路。
 
 ## 采集观测（`observations/qpos` / `pose` / `pose_action`）+ 目标向量 `action`
 
