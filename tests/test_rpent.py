@@ -448,6 +448,7 @@ def test_healthz_and_self_description_are_lease_free():
     assert service.call("healthz") == {"status": "ok"}
     assert "env.move_abs" in service.methods
     assert "env.move_joint_delta" in service.methods
+    assert "env.move_joint_abs" in service.methods
     meta = service.call("env.get_env_meta")
     assert meta["explicit_reset_only"] is True  # RPent dual_franka client 的硬要求
     assert meta["action_dim"] == 14 and meta["arms"] == ["left", "right"]
@@ -473,6 +474,7 @@ def test_observation_and_writes_require_lease():
         ("env.set_gripper", {"open": True}),
         ("env.move_abs", {"target": [0.2, 0, 0.3]}),
         ("env.move_joint_delta", {"delta_joint": [0] * 6}),
+        ("env.move_joint_abs", {"target_joint": [0] * 6}),
     ]:
         with pytest.raises(RpentError) as excinfo:
             service.call(method, kwargs=kwargs)
@@ -2240,6 +2242,7 @@ def test_env_meta_describes_delta_frame_and_look_at(client) -> None:
     assert meta["move_delta_abs"] == {"input_frame": "world", "delta_axes": ["x", "y", "z"]}
     assert meta["move_to"]["input_frame"] == "world"
     assert meta["move_abs"] == meta["move_to"]
+    assert meta["move_joint_abs"] == {"unit": "rad", "joint_dim_per_arm": 6, "mode": "absolute"}
     assert meta["move_joint_delta"] == {"unit": "rad", "joint_dim_per_arm": 6, "base": "target"}
     assert meta["look_at"]["roll"] == 0.0 and meta["look_at"]["input_frame"] == "world"
     assert meta["object_position"]["input"] == "normalized u / v"
@@ -2396,3 +2399,68 @@ def test_joint_delta_rejects_invalid_settle_before_send(joint_delta_env):
     with pytest.raises(RpentError):
         service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6, "settle": {"typo": 1}})
     assert adapter.rollout_calls == []
+
+
+@pytest.mark.parametrize("arm", ["left", "right", None])
+def test_joint_abs_sets_selected_joints_without_grippers(env, monkeypatch, arm):
+    service, _, adapter, *_ = env
+    frame = make_obs(qpos=np.zeros(12), action=np.full(12, 0.8), gripper=[0.1, 0.2], cameras=())
+    frame[KEY_ACTION][[6, 13]] = [0.9, 0.9]  # 夹爪未到位不应阻塞关节原语
+    monkeypatch.setattr(service._view, "frame", lambda: frame)
+    selected = ["left", "right"] if arm is None else [arm]
+    before = frame[KEY_ACTION].copy()
+    calls = []
+
+    def rollout(action, layout=None, arms=None):
+        assert layout == "joint" and arms == selected
+        values = np.asarray(action).reshape(len(arms), 6)
+        calls.append(values.copy())
+        for row, name in enumerate(arms):
+            start = adapter.ARM_NAMES.index(name) * 7
+            frame[KEY_ACTION][start : start + 6] = values[row]
+            frame[KEY_QPOS][start : start + 6] = values[row]
+        return True
+
+    monkeypatch.setattr(adapter, "rollout", rollout)
+    target = [0, 0.1, 0.2, 0.3, 0.4, -0.1]
+    result = service.call("env.move_joint_abs", kwargs={"arm": arm, "target_joint": target, "settle": {"dwell_s": 0}})
+    assert result["reached"] is True and result["arms"] == selected
+    assert result["target_source"] == "requested" and len(calls) == 1
+    for index, name in enumerate(adapter.ARM_NAMES):
+        expected = target if name in selected else before[index * 7 : index * 7 + 6]
+        np.testing.assert_allclose(frame[KEY_ACTION][index * 7 : index * 7 + 6], expected)
+    np.testing.assert_allclose(frame[KEY_ACTION][[6, 13]], before[[6, 13]])
+
+
+@pytest.mark.parametrize(
+    "target", [None, [0] * 5, [0] * 7, [[0] * 6], [float("nan")] * 6, [float("inf")] * 6, [1e40] * 6, ["bad"] * 6]
+)
+def test_joint_abs_rejects_bad_target(env, target):
+    service, _, adapter, *_ = env
+    with pytest.raises(RpentError) as exc:
+        service.call("env.move_joint_abs", kwargs={"target_joint": target})
+    assert exc.value.kind == "argument" and adapter.rollout_calls == []
+
+
+def test_joint_abs_dry_run_and_validation_before_send(env):
+    service, _, adapter, *_ = env
+    service._dry_run = True
+    result = service.call("env.move_joint_abs", kwargs={"arm": "right", "target_joint": [0.1] * 6})
+    assert result["sent"] is False and result["reached"] is None
+    np.testing.assert_allclose(result["target"], [0.1] * 6)
+    for kwargs in ({"arm": "unknown"}, {"settle": {"typo": 1}}):
+        with pytest.raises(RpentError):
+            service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6, **kwargs})
+    assert adapter.rollout_calls == []
+
+
+def test_joint_abs_refusal_and_unsupported(env, monkeypatch):
+    service, _, adapter, *_ = env
+    monkeypatch.setattr(adapter, "rollout", lambda *args, **kwargs: False)
+    with pytest.raises(RpentError) as exc:
+        service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6})
+    assert exc.value.kind == "state"
+    adapter.ACTION_SPACES = (ActionSpace.POSE,)
+    with pytest.raises(RpentError) as exc:
+        service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6})
+    assert exc.value.kind == "unsupported"

@@ -58,6 +58,7 @@ http://<edge>:8000` 后，agent 的 `move_delta` / `move_delta_abs` / `rotate_de
 | `env.reset`                                             | 复位（dual-Franka 要求**显式复位**语义）         |
 | `env.capture_episode_start` / `env.capture_episode_end` | 同步采集 meta 后开轮 / 保存并关轮                |
 | `env.move_delta` / `env.rotate_delta`                   | 末端语义轴下的相对位移 / 相对姿态                |
+| `env.move_joint_abs`                                    | 绝对关节角目标（弧度，只修改所选臂的关节）       |
 | `env.move_joint_delta`                                  | 逐关节角增量（弧度，机器人目标为基准，不动夹爪） |
 | `env.move_abs` / `env.move_to`                          | `world` 坐标系下的绝对末端位姿                   |
 | `env.move_delta_abs`                                    | `world` 固定坐标轴下的相对平移                   |
@@ -483,6 +484,15 @@ edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成
 -   **坐标系换算**：逐臂按 `T_world_base(arm)` 换算（与 `look_at` 同一套）；左臂恒等，非左臂缺外参 →
     `kind=uncalibrated`（不拿错坐标系去动）；回执 `target_base` 给出换算后的点供核对；
 -   **回执**：`action_space="pose"` / `target`（下发的绝对位姿）/ `base_source` / + `settle` 那套。
+
+#### `move_joint_abs(target_joint, *, arm=None, settle=None)`
+
+设置绝对关节角目标：`target_joint` 为 j1…jN 的有限弧度值（Piper 为 6 维），
+`arm` 指定启用臂；省略时对全部启用臂应用同一组目标。零值表示关节零位，不表示保持。
+通过 `layout="joint"` 和显式 `arms` 下发，只写所选臂的关节段，其他臂及夹爪不变；
+无需位姿观测、外参或 IK。复用机器人侧限速及限位。
+回执 `arms` 表示作用域，`target` 按该顺序拼接关节目标（不含夹爪），`target_source="requested"`。
+到位判断只比较所选关节实测值与请求目标，直接相减而不做角度 wrap；遵循租约、dry-run 和 settle。
 
 #### `move_joint_delta(delta_joint, *, arm=None, settle=None)`
 

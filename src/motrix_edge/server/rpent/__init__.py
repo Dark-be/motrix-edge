@@ -49,6 +49,7 @@
 | ``env.reset``                                     | 命令通道 ``robot/reset``（含租约与回执）     |
 | ``env.capture_episode_start`` / ``end``           | 同步 meta 后开始 / 保存一轮（不管理 capture session） |
 | ``env.move_delta`` / ``env.rotate_delta``         | 末端语义轴增量 → ``adapter.rollout(pose_delta)`` |
+| ``env.move_joint_abs``                           | 绝对关节目标 → ``adapter.rollout(joint, arms=...)``（不动夹爪） |
 | ``env.move_joint_delta``                         | 关节角增量 → ``adapter.rollout(joint_delta)``（不动夹爪） |
 | ``env.move_abs`` / ``env.move_to``                | ``world`` 绝对末端位姿 → ``adapter.rollout(pose)`` |
 | ``env.move_delta_abs``                            | ``world`` 轴平移增量 → ``adapter.rollout(pose_delta)`` |

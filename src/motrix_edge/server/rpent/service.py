@@ -194,6 +194,7 @@ class RpentService:
             "env.capture_episode_end": self._capture_episode_end,
             "env.move_delta": self._move_delta,
             "env.move_joint_delta": self._move_joint_delta,
+            "env.move_joint_abs": self._move_joint_abs,
             "env.move_delta_abs": self._move_delta_abs,
             "env.rotate_delta": self._rotate_delta,
             "env.move_to": self._move_to,
@@ -344,6 +345,11 @@ class RpentService:
             "delta_frame": DELTA_FRAME,
             "delta_axes": ["forward", "left", "up"],
             "move_delta_abs": {"input_frame": "world", "delta_axes": ["x", "y", "z"]},
+            "move_joint_abs": {
+                "unit": "rad",
+                "joint_dim_per_arm": view.value_dim(ActionSpace.JOINT),
+                "mode": "absolute",
+            },
             "move_joint_delta": {
                 "unit": "rad",
                 "joint_dim_per_arm": view.value_dim(ActionSpace.JOINT),
@@ -876,6 +882,71 @@ class RpentService:
             },
         )
 
+    def _move_joint_abs(self, target_joint: Any = None, *, arm: str | None = None, settle: Any = None) -> dict:
+        """设置所选臂的绝对关节目标；只下发关节段，不读取或覆盖其他臂与夹爪目标。"""
+        adapter, arms = self._view.require_adapter_with_arms()
+        width = self._view.value_dim(ActionSpace.JOINT)
+        if not self._view.supports(ActionSpace.JOINT) or width <= 0 or not arms:
+            raise RpentError("move_joint_abs requires joint capability and named arms", kind="unsupported")
+        target = self._joint_vector(target_joint, width, "target_joint")
+        indices = self._arm_indices(arm, arms)
+        config = self._settle_config.with_override(settle)
+        selected = [arms[index] for index in indices]
+        command = np.tile(target, len(indices))
+        reply = {
+            "ok": True,
+            "arm": arm,
+            "arms": selected,
+            "action_space": ActionSpace.JOINT.value,
+            "target": command,
+            "target_source": "requested",
+            "states": self._state_vector(self._view.frame()),
+        }
+        if self._dry_run:
+            return {**reply, **self._dry_run_receipt()}
+        try:
+            sent = adapter.rollout(command, layout="joint", arms=selected) is not False
+        except ValueError as exc:
+            raise RpentError(str(exc), kind="argument") from exc
+        if not sent:
+            raise RpentError("robot refused the action (teleop / human takeover in progress)", kind="state")
+        stride = width + 1
+        slots = np.array([index * stride + joint for index in indices for joint in range(width)])
+        reference = np.zeros(len(arms) * stride)
+        reference[slots] = command
+        return {**reply, "sent": True, **self._wait_joint_target(reference, slots, config)}
+
+    @staticmethod
+    def _joint_vector(values: Any, width: int, name: str) -> np.ndarray:
+        """校验可传给 float32 控制链路的一维关节向量（弧度）。"""
+        try:
+            vector = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise RpentError(f"{name} must be a finite joint vector in radians", kind="argument") from exc
+        if (
+            vector.shape != (width,)
+            or not np.all(np.isfinite(vector))
+            or np.any(np.abs(vector) > np.finfo(np.float32).max)
+        ):
+            raise RpentError(f"{name} must contain exactly {width} finite radians", kind="argument")
+        return vector
+
+    def _wait_joint_target(self, reference: np.ndarray, slots: np.ndarray, config: SettleConfig) -> dict:
+        """只比较所选臂关节的直接误差，夹爪与其他臂不参与到位判断。"""
+
+        def errors():
+            current = self._qpos(ActionSpace.JOINT, frame=self._view.frame())
+            if current is None or not np.all(np.isfinite(current[slots])):
+                return None
+            error = float(np.max(np.abs(reference[slots] - current[slots])))
+            return error, None, error
+
+        return (
+            wait_for_reached(errors, space=ActionSpace.JOINT, config=config)
+            if config.enabled
+            else unreached("settle disabled")
+        )
+
     def _move_joint_delta(self, delta_joint: Any = None, *, arm: str | None = None, settle: Any = None) -> dict:
         """逐关节弧度增量；机器人侧叠加目标，夹爪与未选臂保持不变。"""
         _adapter, arms = self._view.require_adapter_with_arms()
@@ -884,16 +955,7 @@ class RpentService:
             raise RpentError("move_joint_delta requires joint_delta capability", kind="unsupported")
         if self._view.value_dim(ActionSpace.JOINT_DELTA) != width:
             raise RpentError("joint_delta dimensions must match joint dimensions", kind="unsupported")
-        try:
-            delta = np.asarray(delta_joint, dtype=np.float64)
-        except (TypeError, ValueError) as exc:
-            raise RpentError("delta_joint must be a finite joint vector in radians", kind="argument") from exc
-        if (
-            delta.shape != (width,)
-            or not np.all(np.isfinite(delta))
-            or np.any(np.abs(delta) > np.finfo(np.float32).max)
-        ):
-            raise RpentError(f"delta_joint must contain exactly {width} finite radians", kind="argument")
+        delta = self._joint_vector(delta_joint, width, "delta_joint")
         indices = self._arm_indices(arm, arms)
         config = self._settle_config.with_override(settle)  # 参数错误须在下发前拒绝
         stride = width + 1
@@ -942,18 +1004,7 @@ class RpentService:
                     }
                 time.sleep(config.poll_s)
 
-        def errors():
-            current = self._qpos(ActionSpace.JOINT, frame=self._view.frame())
-            if current is None or not np.all(np.isfinite(current[slots])):
-                return None
-            error = float(np.max(np.abs(reference[slots] - current[slots])))
-            return error, None, error
-
-        arrival = (
-            wait_for_reached(errors, space=ActionSpace.JOINT, config=config)
-            if config.enabled
-            else unreached("settle disabled")
-        )
+        arrival = self._wait_joint_target(reference, slots, config)
         return {**reply, "target": reference, "target_source": "action", **flags, **arrival}
 
     def _move_to(
