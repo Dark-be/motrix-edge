@@ -190,13 +190,20 @@ class RpentService:
             "env.get_object_position": self._get_object_position,
             "env.get_task_language": self._get_task_language,
             "env.reset": self._reset,
+            "env.reset_home": self._reset,
             "env.capture_episode_start": self._capture_episode_start,
             "env.capture_episode_end": self._capture_episode_end,
             "env.move_delta": self._move_delta,
+            "env.translate_tool": self._move_delta,
             "env.move_joint_delta": self._move_joint_delta,
+            "env.offset_joints": self._move_joint_delta,
             "env.move_joint_abs": self._move_joint_abs,
+            "env.set_joint_positions": self._move_joint_abs,
             "env.move_delta_abs": self._move_delta_abs,
+            "env.translate_world": self._move_delta_abs,
             "env.rotate_delta": self._rotate_delta,
+            "env.rotate_tool": self._rotate_delta,
+            "env.rotate_world": self._rotate_world,
             "env.move_to": self._move_to,
             "env.move_abs": self._move_to,  # 同一绝对位姿语义，共用校验 / 坐标转换 / 到位等待
             "env.look_at": self._look_at,
@@ -316,7 +323,7 @@ class RpentService:
         arms = view.arms
         pose_dim = view.value_dim(ActionSpace.POSE)
         qpos_stride = self._qpos_stride(ActionSpace.JOINT)
-        return {
+        meta = {
             "ok": True,
             "edge": {"adapter_name": view.adapter_name, "adapter_type": view.adapter_type, "node_state": view.state},
             "explicit_reset_only": True,
@@ -345,6 +352,8 @@ class RpentService:
             "delta_frame": DELTA_FRAME,
             "delta_axes": ["forward", "left", "up"],
             "move_delta_abs": {"input_frame": "world", "delta_axes": ["x", "y", "z"]},
+            "rotate_tool": {"input_frame": "tool", "delta_axes": ["forward", "left", "up"], "unit": "rad"},
+            "rotate_world": {"input_frame": "world", "delta_axes": ["x", "y", "z"], "unit": "rad"},
             "move_joint_abs": {
                 "unit": "rad",
                 "joint_dim_per_arm": view.value_dim(ActionSpace.JOINT),
@@ -380,6 +389,11 @@ class RpentService:
             "settle": self.settle_status(),
             **self._camera_payload(),
         }
+        meta["translate_tool"] = {"input_frame": "tool", "delta_axes": ["forward", "left", "up"], "unit": "m"}
+        meta["translate_world"] = {**meta["move_delta_abs"], "unit": "m"}
+        meta["set_joint_positions"] = meta["move_joint_abs"]
+        meta["offset_joints"] = meta["move_joint_delta"]
+        return meta
 
     def _camera_payload(self) -> dict:
         """相机段（``cameras`` / ``agent_observation`` / 观测映射）—— ``get_env_meta`` 与
@@ -777,6 +791,54 @@ class RpentService:
         """
         arm, delta = split_arm_and_vector(args, arm, delta_rpy, "delta_rpy", expected=3)
         return self._delta_tool_frame(arm, delta, what="rotate_delta", offset=3, settle=settle)
+
+    def _rotate_world(
+        self,
+        *args,
+        arm: str | None = None,
+        delta_rpy: Any = None,
+        settle: Any = None,
+    ) -> dict:
+        """绕固定 world 轴旋转，保持当前目标作用点位置（TCP / 法兰）。
+
+        world 旋转左乘当前朝向；下发的是换到各臂基座系后的 RPY chart 差，
+        由机器人叠加到目标。多轴输入按 Rz(dz) @ Ry(dy) @ Rx(dx) 组合。
+        """
+        arm, delta = split_arm_and_vector(args, arm, delta_rpy, "delta_rpy", expected=3)
+        if not np.all(np.isfinite(delta)):
+            raise RpentError("delta_rpy must contain finite angles", kind="argument")
+        adapter, arms = self._view.require_adapter_with_arms()
+        if not self._view.supports(ActionSpace.POSE_DELTA):
+            raise RpentError("rotate_world requires pose_delta capability", kind="unsupported")
+        indices = self._arm_indices(arm, arms)
+        stride = self._qpos_stride(ActionSpace.POSE)
+        snapshot = self._qpos(ActionSpace.POSE, frame=self._view.frame(), source=SOURCE_TARGET)
+        vector = np.zeros(stride * max(len(arms), 1), dtype=np.float32)
+        converted: list[np.ndarray] = []
+        rotation_world = rpy_to_matrix(delta)
+        for index in indices:
+            start = index * stride
+            rpy = None if snapshot is None else snapshot[start + 3 : start + 6]
+            if rpy is None or not np.all(np.isfinite(rpy)):
+                raise RpentError("rotate_world requires target orientation (observations/pose_action)", kind="state")
+            world_from_base = self._world_from_base(adapter, arms[index])[:3, :3]
+            composed = world_from_base.T @ rotation_world @ world_from_base @ rpy_to_matrix(rpy)
+            step = wrap_angles(matrix_to_rpy(composed) - rpy)
+            converted.append(step)
+            vector[start + 3 : start + 6] = step
+        return self._pose_delta(
+            arm,
+            delta,
+            what="rotate_world",
+            settle=settle,
+            vector=vector,
+            extra={
+                "delta_frame": "world",
+                "delta_axes": ["x", "y", "z"],
+                "converted_delta_base": converted,
+                "base_source": SOURCE_TARGET,
+            },
+        )
 
     def _move_delta_abs(
         self,

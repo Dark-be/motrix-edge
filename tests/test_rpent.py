@@ -2116,7 +2116,8 @@ def test_move_delta_abs_needs_extrinsics_for_non_world_arm(env) -> None:
     assert excinfo.value.kind == "uncalibrated"
 
 
-def test_rotate_delta_chart_increment_is_exact(env) -> None:
+@pytest.mark.parametrize("method", ["env.rotate_delta", "env.rotate_tool"])
+def test_rotate_delta_chart_increment_is_exact(env, method) -> None:
     """绕语义轴转：换基后的旋转必须与矩阵复合**精确一致**（不是一阶近似）。
 
     机器人把 rpy 逐分量相加，而我们算的是矩阵复合——共轭写法（``matrix_to_rpy(R·ΔR·Rᵀ)``）相加后
@@ -2127,7 +2128,7 @@ def test_rotate_delta_chart_increment_is_exact(env) -> None:
     adapter.pose_target = np.asarray([0.1, 0.2, 0.3, *rpy, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0], dtype=np.float32)
     delta_semantic = [0.0, 0.0, np.radians(20.0)]  # 绕“上”转 20°
 
-    reply = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False})
+    reply = service.call(method, kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False})
     basis = EgoAxes().basis()  # 语义系 → 法兰系
     exact = rpy_to_matrix(rpy) @ (basis @ rpy_to_matrix(delta_semantic) @ basis.T)
     chart = np.asarray(reply["converted_delta_base"][0], dtype=np.float64)
@@ -2464,3 +2465,108 @@ def test_joint_abs_refusal_and_unsupported(env, monkeypatch):
     with pytest.raises(RpentError) as exc:
         service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6})
     assert exc.value.kind == "unsupported"
+
+
+@pytest.mark.parametrize("arm", ["left", "right", None])
+@pytest.mark.parametrize("pitch", [0.6, np.radians(89), -0.8])
+def test_rotate_world_composes_in_world_and_keeps_position(env, arm, pitch):
+    service, _node, adapter, *_ = env
+    frames = anchored_frames((0.4, -0.6, 0.2))
+    frames.arms["right"][:3, :3] = rpy_to_matrix([0.3, -0.4, 1.1])
+    adapter._frame_set = frames
+    before = np.array([[0.1, 0.2, 0.3, 0.4, pitch, 3.1], [0.4, 0.5, 0.6, -0.5, pitch, -1.2]], dtype=np.float32)
+    adapter.pose_target = before.flatten().copy()
+    delta = [0.12, -0.08, 0.2]
+    reply = service.call("env.rotate_world", kwargs={"arm": arm, "delta_rpy": delta, "settle": False})
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose_delta"
+    assert np.allclose(pushed.reshape(2, 6)[:, :3], 0)
+    after = adapter.pose_target.reshape(2, 6)
+    assert np.allclose(after[:, :3], before[:, :3])
+    for index, name in enumerate(adapter.ARM_NAMES):
+        if arm is not None and name != arm:
+            assert np.array_equal(after[index], before[index])
+            continue
+        base = np.eye(3) if name == "left" else frames.arms[name][:3, :3]
+        expected_world = rpy_to_matrix(delta) @ base @ rpy_to_matrix(before[index, 3:])
+        assert np.allclose(base @ rpy_to_matrix(after[index, 3:]), expected_world, atol=1e-6)
+    assert reply["delta_frame"] == "world"
+    assert reply["delta_axes"] == ["x", "y", "z"]
+
+
+@pytest.mark.parametrize(
+    "failure,kind", [("pose", "state"), ("frames", "uncalibrated"), ("capability", "unsupported"), ("lease", "lease")]
+)
+def test_rotate_world_rejects_missing_prerequisites(env, failure, kind):
+    service, node, adapter, _leases, commands = env
+    adapter._frame_set = anchored_frames((0, 0, 0))
+    if failure == "pose":
+        adapter.pose_target = None
+    elif failure == "frames":
+        adapter._frame_set = None
+    elif failure == "capability":
+        adapter.ACTION_SPACES = (ActionSpace.JOINT,)
+    else:
+        service = RpentService(node, commands, leases=LeaseManager(), base_cfg=BASE_CFG)
+    with pytest.raises(RpentError) as exc:
+        service.call("env.rotate_world", kwargs={"arm": "right", "delta_rpy": [0, 0, 0.1]})
+    assert exc.value.kind == kind
+    assert adapter.rollout_calls == []
+
+
+@pytest.mark.parametrize("method", ["env.rotate_world", "env.rotate_tool"])
+def test_explicit_rotation_dry_run_and_discovery(env, method):
+    _service, node, adapter, leases, commands = env
+    service = RpentService(node, commands, leases=leases, base_cfg={"server": {"rpent": {"dry_run": True}}})
+    assert method in service.methods
+    meta = service.call("env.get_env_meta")[method.removeprefix("env.")]
+    assert meta["input_frame"] == method.removeprefix("env.rotate_")
+    assert meta["unit"] == "rad"
+    result = service.call(method, kwargs={"arm": "left", "delta_rpy": [0.1, 0, 0]})
+    assert result["dry_run"] and result["sent"] is False and result["reached"] is None
+    assert adapter.rollout_calls == []
+
+
+@pytest.mark.parametrize("delta", [[0, 0], [0, float("nan"), 0], [0, 0, float("inf")]])
+def test_rotate_world_rejects_invalid_delta(env, delta):
+    service, _node, adapter, *_ = env
+    with pytest.raises(RpentError):
+        service.call("env.rotate_world", kwargs={"arm": "left", "delta_rpy": delta})
+    assert adapter.rollout_calls == []
+
+
+@pytest.mark.parametrize("method,frame", [("env.translate_tool", "tool"), ("env.translate_world", "world")])
+def test_canonical_translation_preserves_delta_contract(env, method, frame):
+    service, _node, adapter, *_ = env
+    adapter.pose_target = np.array([0.1, 0.2, 0.3, 0.2, -0.4, 0.6, 0.4, 0.5, 0.6, 0, 0, 0], dtype=np.float32)
+    before = adapter.pose_target.copy()
+    delta = np.array([0.01, -0.02, 0.03])
+    reply = service.call(method, kwargs={"arm": "left", "delta_xyz": delta, "settle": False})
+    expected = delta if frame == "world" else rpy_to_matrix(before[3:6]) @ EgoAxes().basis() @ delta
+    assert reply["delta_frame"] == frame
+    assert np.allclose(adapter.pose_target[:3], before[:3] + expected)
+    assert np.allclose(adapter.pose_target[3:], before[3:])
+    assert service.call("env.get_env_meta")[method.removeprefix("env.")]["unit"] == "m"
+
+
+@pytest.mark.parametrize(
+    "canonical,legacy,kwargs",
+    [
+        ("env.set_joint_positions", "env.move_joint_abs", {"target_joint": [0.1] * 6, "arm": "left", "settle": False}),
+        ("env.offset_joints", "env.move_joint_delta", {"delta_joint": [0.0] * 6, "arm": "left", "settle": False}),
+        ("env.reset_home", "env.reset", {}),
+    ],
+)
+def test_canonical_joint_and_reset_dispatch_matches_legacy(env, canonical, legacy, kwargs):
+    service, *_ = env
+    service._dry_run = True
+    if canonical == "env.offset_joints":
+        with pytest.raises(RpentError) as exc:
+            service.call(canonical, kwargs=kwargs)
+        assert exc.value.kind == "unsupported"
+    else:
+        result = service.call(canonical, kwargs=kwargs)
+        assert result["ok"] and result["sent"] is False
+        if canonical == "env.set_joint_positions":
+            assert result["arms"] == ["left"]
+            assert np.allclose(result["target"], [0.1] * 6)
