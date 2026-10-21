@@ -193,9 +193,11 @@ class RpentService:
             "env.capture_episode_start": self._capture_episode_start,
             "env.capture_episode_end": self._capture_episode_end,
             "env.move_delta": self._move_delta,
+            "env.move_joint_delta": self._move_joint_delta,
             "env.move_delta_abs": self._move_delta_abs,
             "env.rotate_delta": self._rotate_delta,
             "env.move_to": self._move_to,
+            "env.move_abs": self._move_to,  # 同一绝对位姿语义，共用校验 / 坐标转换 / 到位等待
             "env.look_at": self._look_at,
             "env.set_gripper": self._set_gripper,
             "env.recover_joint_posture": self._recover_joint_posture,
@@ -342,7 +344,13 @@ class RpentService:
             "delta_frame": DELTA_FRAME,
             "delta_axes": ["forward", "left", "up"],
             "move_delta_abs": {"input_frame": "world", "delta_axes": ["x", "y", "z"]},
+            "move_joint_delta": {
+                "unit": "rad",
+                "joint_dim_per_arm": view.value_dim(ActionSpace.JOINT),
+                "base": "target",
+            },
             "move_to": {"input_frame": "world"},
+            "move_abs": {"input_frame": "world"},
             "look_at": {
                 "pointing_axis": self._ego_axes.forward,
                 "roll": ROLL_FREE,
@@ -868,6 +876,86 @@ class RpentService:
             },
         )
 
+    def _move_joint_delta(self, delta_joint: Any = None, *, arm: str | None = None, settle: Any = None) -> dict:
+        """逐关节弧度增量；机器人侧叠加目标，夹爪与未选臂保持不变。"""
+        _adapter, arms = self._view.require_adapter_with_arms()
+        width = self._view.value_dim(ActionSpace.JOINT)
+        if not self._view.supports(ActionSpace.JOINT_DELTA) or width <= 0:
+            raise RpentError("move_joint_delta requires joint_delta capability", kind="unsupported")
+        if self._view.value_dim(ActionSpace.JOINT_DELTA) != width:
+            raise RpentError("joint_delta dimensions must match joint dimensions", kind="unsupported")
+        try:
+            delta = np.asarray(delta_joint, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise RpentError("delta_joint must be a finite joint vector in radians", kind="argument") from exc
+        if (
+            delta.shape != (width,)
+            or not np.all(np.isfinite(delta))
+            or np.any(np.abs(delta) > np.finfo(np.float32).max)
+        ):
+            raise RpentError(f"delta_joint must contain exactly {width} finite radians", kind="argument")
+        indices = self._arm_indices(arm, arms)
+        config = self._settle_config.with_override(settle)  # 参数错误须在下发前拒绝
+        stride = width + 1
+        count = max(len(arms), 1)
+        vector = np.zeros(count * stride, dtype=np.float64)
+        slots = np.array([index * stride + joint for index in indices for joint in range(width)])
+        for index in indices:
+            vector[index * stride : index * stride + width] = delta
+        frame = self._view.frame()
+        before = self._qpos(ActionSpace.JOINT, frame=frame, source=SOURCE_TARGET)
+        if before is not None and not np.all(np.isfinite(before[slots])):
+            before = None
+        predicted = None if before is None else before.astype(np.float64) + vector
+        reply = {
+            "ok": True,
+            "arm": arm,
+            "delta_joint": delta,
+            "action_space": ActionSpace.JOINT_DELTA.value,
+            "target": predicted,
+            "target_source": "predicted" if predicted is not None else None,
+            "states": self._state_vector(frame),
+        }
+        if self._dry_run:
+            return {**reply, **self._dry_run_receipt()}
+        sent = self._push_qpos(vector, ActionSpace.JOINT_DELTA, with_gripper=False)
+        reply["sent"] = sent
+        if before is None:
+            return {**reply, **unreached("robot publishes no joint target action", no_joint_target=True)}
+
+        reference = before
+        flags = {}
+        if np.any(delta != 0):
+            deadline = time.monotonic() + max(config.target_wait_s, config.poll_s)
+            while True:
+                current = self._qpos(ActionSpace.JOINT, frame=self._view.frame(), source=SOURCE_TARGET)
+                if current is not None and np.all(np.isfinite(current[slots])):
+                    if not np.allclose(current[slots], before[slots], atol=1e-9, rtol=0):
+                        reference = current
+                        if np.max(np.abs(current[slots] - predicted[slots])) > config.rot_tol:
+                            flags["base_changed"] = True
+                        break
+                if time.monotonic() >= deadline:
+                    return {
+                        **reply,
+                        **unreached("joint target did not change within settle.target_wait_s", not_applied=True),
+                    }
+                time.sleep(config.poll_s)
+
+        def errors():
+            current = self._qpos(ActionSpace.JOINT, frame=self._view.frame())
+            if current is None or not np.all(np.isfinite(current[slots])):
+                return None
+            error = float(np.max(np.abs(reference[slots] - current[slots])))
+            return error, None, error
+
+        arrival = (
+            wait_for_reached(errors, space=ActionSpace.JOINT, config=config)
+            if config.enabled
+            else unreached("settle disabled")
+        )
+        return {**reply, "target": reference, "target_source": "action", **flags, **arrival}
+
     def _move_to(
         self,
         *args,
@@ -876,7 +964,7 @@ class RpentService:
         rpy: Any = None,
         settle: Any = None,
     ) -> dict:
-        """``env.move_to``：把末端**移到 ``world`` 帧的给定点**（绝对目标，机器人侧 IK 解算）。
+        """``env.move_to`` / ``env.move_abs``：把末端**移到 ``world`` 帧的给定点**（绝对目标，机器人侧 IK 解算）。
 
         ``target`` = ``world``（= 左臂基座，米）下的 xyz；``rpy`` 可选（同样是 ``world`` 帧的末端
         姿态，不给 = 保持当前目标姿态）。这是**绝对目标点**工具，也是它跟两类增量工具的分工：

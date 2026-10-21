@@ -50,19 +50,21 @@ http://<edge>:8000` 后，agent 的 `move_delta` / `move_delta_abs` / `rotate_de
 
 `env.*` 方法集（`env_facade_base` 基础 + franka 系扩展）：
 
-| 方法                                                    | 语义                                     |
-| ------------------------------------------------------- | ---------------------------------------- |
-| `env.get_env_meta`                                      | 启动自描述（能力 / 维度 / 相机）         |
-| `env.get_observation` / `env.get_robot_state`           | 当前观测（含 `states`）/ 机器人状态      |
-| `env.get_camera_meta`                                   | 相机名与规格                             |
-| `env.reset`                                             | 复位（dual-Franka 要求**显式复位**语义） |
-| `env.capture_episode_start` / `env.capture_episode_end` | 同步采集 meta 后开轮 / 保存并关轮        |
-| `env.move_delta` / `env.rotate_delta`                   | 末端语义轴下的相对位移 / 相对姿态        |
-| `env.move_delta_abs`                                    | `world` 固定坐标轴下的相对平移           |
-| `env.set_gripper`                                       | 夹爪开合度（`open`：bool 或 `[0, 1]`）   |
-| `env.recover_joint_posture`                             | 关节复位（可保持已夹持物体）             |
-| `env.chunk_step` / `env.step`                           | 执行动作块 / 单步                        |
-| `env.get_task_language` / `env.render_camera`           | 任务语言描述 / 取相机帧                  |
+| 方法                                                    | 语义                                             |
+| ------------------------------------------------------- | ------------------------------------------------ |
+| `env.get_env_meta`                                      | 启动自描述（能力 / 维度 / 相机）                 |
+| `env.get_observation` / `env.get_robot_state`           | 当前观测（含 `states`）/ 机器人状态              |
+| `env.get_camera_meta`                                   | 相机名与规格                                     |
+| `env.reset`                                             | 复位（dual-Franka 要求**显式复位**语义）         |
+| `env.capture_episode_start` / `env.capture_episode_end` | 同步采集 meta 后开轮 / 保存并关轮                |
+| `env.move_delta` / `env.rotate_delta`                   | 末端语义轴下的相对位移 / 相对姿态                |
+| `env.move_joint_delta`                                  | 逐关节角增量（弧度，机器人目标为基准，不动夹爪） |
+| `env.move_abs` / `env.move_to`                          | `world` 坐标系下的绝对末端位姿                   |
+| `env.move_delta_abs`                                    | `world` 固定坐标轴下的相对平移                   |
+| `env.set_gripper`                                       | 夹爪开合度（`open`：bool 或 `[0, 1]`）           |
+| `env.recover_joint_posture`                             | 关节复位（可保持已夹持物体）                     |
+| `env.chunk_step` / `env.step`                           | 执行动作块 / 单步                                |
+| `env.get_task_language` / `env.render_camera`           | 任务语言描述 / 取相机帧                          |
 
 模型侧另有一套 `vla.predict(obs, options) -> actions`（`BaseVLAFacade` 注册、`BaseVLAClient`
 调用），语义 = 「给定观测出一段动作块」——**不属于本文的对接范围**（见下节）。
@@ -260,12 +262,12 @@ robots/motrix_edge/
 
 #### B. 绝对动作
 
-| 工具名                  | edge 方法                   | 参数                                                                 | 回执里必须读的字段                                                            |
-| ----------------------- | --------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `reset_home`            | `env.reset`                 | —                                                                    | `states`（机器人回 home，**夹爪也回 home**；不恢复桌面场景）                  |
-| `recover_joint_posture` | `env.recover_joint_posture` | `reason`                                                             | `reached` / `gripper_preserved`                                               |
-| `look_at`（**新增**）   | `env.look_at`               | `target`[3]（`world`，米）/ `arm?` / `keep?` / `settle?`             | `reached` / `turned_deg` / `final_err_rad` / `base_source` / `large_rotation` |
-| `move_to`（**新增**）   | `env.move_to`               | `target`[3]（`world`，米）/ `rpy?`[3]（`world`）/ `arm?` / `settle?` | `reached` / `target_base` / `base_source` / `final_err`                       |
+| 工具名                  | edge 方法                      | 参数                                                                 | 回执里必须读的字段                                                            |
+| ----------------------- | ------------------------------ | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `reset_home`            | `env.reset`                    | —                                                                    | `states`（机器人回 home，**夹爪也回 home**；不恢复桌面场景）                  |
+| `recover_joint_posture` | `env.recover_joint_posture`    | `reason`                                                             | `reached` / `gripper_preserved`                                               |
+| `look_at`（**新增**）   | `env.look_at`                  | `target`[3]（`world`，米）/ `arm?` / `keep?` / `settle?`             | `reached` / `turned_deg` / `final_err_rad` / `base_source` / `large_rotation` |
+| `move_abs` / `move_to`  | `env.move_abs` / `env.move_to` | `target`[3]（`world`，米）/ `rpy?`[3]（`world`）/ `arm?` / `settle?` | `reached` / `target_base` / `base_source` / `final_err`                       |
 
 #### C. 末端系增量动作（分量是语义量：`x` 前 / `y` 左 / `z` 上）
 
@@ -466,15 +468,32 @@ edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成
     `reached=false`；此时正确做法是先 `move_delta` 挪一点再 `look_at`，而不是原地重试；
 -   **下发**：绝对 `pose` 目标（机器人侧 IK 解算），走与 `move_delta` 同一套 `settle` 判到位。
 
-#### `move_to(target, *, arm=None, rpy=None, settle=None)`
+#### `move_abs(target, *, arm=None, rpy=None, settle=None)` / `move_to`
 
--   **语义**：把末端**移到 `world` 帧的给定点**（绝对目标，机器人侧 IK）——**唯一的绝对目标点工具**，
+`env.move_abs` 与 `env.move_to` 是同一绝对位姿操作的两个入口，参数、返回值及执行链路一致。
+`target` 为三个位置值（米），`rpy` 为三个姿态角（弧度，`R = Rz(yaw) Ry(pitch) Rx(roll)`），
+均相对于 `world`（左臂基座）；作用点由机器人当前 `pose_frame` 决定（TCP 或法兰）。
+例如 `env.move_abs(target=[0.25, 0.1, 0.3], rpy=[0, 0, 0], arm="left")`。
+此入口同样要求租约，遵循 dry-run 与到位等待设置；能力清单和 `get_env_meta` 均声明该入口。
+
+-   **语义**：把末端**移到 `world` 帧的给定点**（绝对目标，机器人侧 IK）——两个入口共用此语义，
     与 `get_object_position` / `look_at` 共用 `world`（agent 不需要自己换算坐标系）；
 -   **`rpy` 可选**：同样是 `world` 帧的末端姿态（不给 = 保持当前**目标**姿态）；换算按
     `R_base = R_base_world · R_world`；
 -   **坐标系换算**：逐臂按 `T_world_base(arm)` 换算（与 `look_at` 同一套）；左臂恒等，非左臂缺外参 →
     `kind=uncalibrated`（不拿错坐标系去动）；回执 `target_base` 给出换算后的点供核对；
 -   **回执**：`action_space="pose"` / `target`（下发的绝对位姿）/ `base_source` / + `settle` 那套。
+
+#### `move_joint_delta(delta_joint, *, arm=None, settle=None)`
+
+-   `delta_joint` 为每臂关节数个有限弧度增量，按 j1…jN 排列；Piper 为 6 维，零表示该关节目标不变。
+    `arm` 指定启用臂，省略则对全部启用臂应用同一组增量。
+-   直接下发 `joint_delta`，由机器人基于当前关节目标原子叠加并执行既有限速与限位；不经 IK，
+    不重发夹爪目标。机器人不支持该空间时返回 `unsupported`。
+-   回执预测值来自 `action`；下发后等待所选臂的关节目标变化，再以实际发布的目标等待到位。
+    无目标观测或目标未变化时 `reached=null`，分别标记 `no_joint_target` / `not_applied`；
+    目标与预测不符时标记 `base_changed`。零增量不等待目标变化。夹爪与其他臂不参与到位判断。
+-   遵循租约、dry-run 及 `settle` 配置。关节误差直接相减（不对有限行程关节做角度 wrap）。
 
 #### `move_delta_abs(delta_xyz, *, arm=None, settle=None)`
 

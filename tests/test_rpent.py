@@ -446,6 +446,8 @@ def test_healthz_and_self_description_are_lease_free():
     service = RpentService(node, StubCommands(), leases=LeaseManager(), base_cfg=BASE_CFG)
 
     assert service.call("healthz") == {"status": "ok"}
+    assert "env.move_abs" in service.methods
+    assert "env.move_joint_delta" in service.methods
     meta = service.call("env.get_env_meta")
     assert meta["explicit_reset_only"] is True  # RPent dual_franka client 的硬要求
     assert meta["action_dim"] == 14 and meta["arms"] == ["left", "right"]
@@ -465,7 +467,13 @@ def test_observation_and_writes_require_lease():
     node = FakeNode(adapter, make_obs(qpos=default_qpos(), pose=default_pose()))
     service = RpentService(node, StubCommands(), leases=LeaseManager(), base_cfg=BASE_CFG)
 
-    for method, kwargs in [("env.get_observation", {}), ("env.reset", {}), ("env.set_gripper", {"open": True})]:
+    for method, kwargs in [
+        ("env.get_observation", {}),
+        ("env.reset", {}),
+        ("env.set_gripper", {"open": True}),
+        ("env.move_abs", {"target": [0.2, 0, 0.3]}),
+        ("env.move_joint_delta", {"delta_joint": [0] * 6}),
+    ]:
         with pytest.raises(RpentError) as excinfo:
             service.call(method, kwargs=kwargs)
         assert excinfo.value.kind == "lease" and "lease" in str(excinfo.value)
@@ -1309,6 +1317,7 @@ def test_dry_run_never_sends_write_primitives_or_reset():
 
     move = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
     move_abs = service.call("env.move_delta_abs", kwargs={"arm": "left", "delta_xyz": [0.02, 0.0, 0.0]})
+    absolute_pose = service.call("env.move_abs", kwargs={"arm": "left", "target": [0.2, 0, 0.3], "rpy": [0, 0, 0]})
     rotate = service.call("env.rotate_delta", kwargs={"delta_rpy": [0.0, 0.0, 0.1]})
     gripper = service.call("env.set_gripper", kwargs={"open": False})
     recover = service.call("env.recover_joint_posture", kwargs={"reason": "slip"})
@@ -1323,7 +1332,7 @@ def test_dry_run_never_sends_write_primitives_or_reset():
     )
     capture_end = service.call("env.capture_episode_end")
 
-    for receipt in (move, move_abs, rotate, gripper, recover, reset, capture_start, capture_end):
+    for receipt in (move, move_abs, absolute_pose, rotate, gripper, recover, reset, capture_start, capture_end):
         assert receipt["dry_run"] is True and receipt["sent"] is False
         assert receipt["reached"] is None and receipt["reason"] == "dry_run"
     assert capture_start["recording"] is False
@@ -2157,7 +2166,8 @@ def test_delta_needs_target_pose_for_conversion(env) -> None:
     assert excinfo.value.kind == "state"
 
 
-def test_move_to_sends_absolute_pose_from_world_point(env) -> None:
+@pytest.mark.parametrize("method", ("env.move_to", "env.move_abs"))
+def test_move_to_sends_absolute_pose_from_world_point(env, method) -> None:
     """``move_to``：`target` 是 ``world`` 点 → 换算到该臂基座系后发**绝对** ``pose``。"""
     service, _node, adapter, *_ = env
     offset = (-0.0005, -0.6416, 0.0)
@@ -2167,7 +2177,7 @@ def test_move_to_sends_absolute_pose_from_world_point(env) -> None:
     adapter.pose = np.asarray(pose, dtype=np.float32)  # 冻结实测（否则假件每拍朝目标挪一步）
     target_world = [0.2, 1.0, 0.35]
 
-    reply = service.call("env.move_to", kwargs={"arm": "right", "target": target_world, "settle": False})
+    reply = service.call(method, kwargs={"arm": "right", "target": target_world, "settle": False})
 
     pushed, layout = adapter.rollout_calls[-1]
     assert layout == "pose", "move_to 下发绝对位姿（机器人侧 IK）"
@@ -2178,7 +2188,8 @@ def test_move_to_sends_absolute_pose_from_world_point(env) -> None:
     assert np.allclose(reply["target_base"][0], np.asarray(target_world) - np.asarray(offset))
 
 
-def test_move_to_converts_world_rpy_into_the_arm_base(env) -> None:
+@pytest.mark.parametrize("method", ("env.move_to", "env.move_abs"))
+def test_move_to_converts_world_rpy_into_the_arm_base(env, method) -> None:
     """给了 ``rpy``（同样是 ``world`` 帧）→ 按 ``R_base = R_base_world · R_world`` 换算。"""
     service, _node, adapter, *_ = env
     adapter._frame_set = anchored_frames((0.0, -0.6416, 0.0))  # 旋转=I → 姿态换算也是恒等
@@ -2186,33 +2197,35 @@ def test_move_to_converts_world_rpy_into_the_arm_base(env) -> None:
     adapter.pose = np.asarray(default_pose(), dtype=np.float32)
     rpy_world = [0.0, 0.0, 0.3]
     service.call(
-        "env.move_to",
+        method,
         kwargs={"arm": "right", "target": [0.2, 1.0, 0.35], "rpy": rpy_world, "settle": False},
     )
     pushed, _space = adapter.rollout_calls[-1]
     assert np.allclose(pushed[9:12], rpy_world, atol=1e-6)
 
 
-def test_move_to_needs_extrinsics_for_non_world_arm(env) -> None:
+@pytest.mark.parametrize("method", ("env.move_to", "env.move_abs"))
+def test_move_to_needs_extrinsics_for_non_world_arm(env, method) -> None:
     """未标定：左臂照旧（``world`` 的定义就是它的基座），其余臂报 ``uncalibrated``。"""
     service, _node, adapter, *_ = env
     adapter._frame_set = None
     adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
     adapter.pose = np.asarray(default_pose(), dtype=np.float32)
-    left = service.call("env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False})
+    left = service.call(method, kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False})
     assert np.allclose(np.asarray(left["target"])[0:3], [0.15, 0.25, 0.35], atol=1e-6)  # 恒等：原样
     with pytest.raises(RpentError) as excinfo:
-        service.call("env.move_to", kwargs={"arm": "right", "target": [0.15, 0.25, 0.35]})
+        service.call(method, kwargs={"arm": "right", "target": [0.15, 0.25, 0.35]})
     assert excinfo.value.kind == "uncalibrated"
 
 
-def test_move_to_rejects_bad_target(env) -> None:
+@pytest.mark.parametrize("method", ("env.move_to", "env.move_abs"))
+def test_move_to_rejects_bad_target(env, method) -> None:
     service, *_ = env
     with pytest.raises(RpentError) as excinfo:
-        service.call("env.move_to", kwargs={"target": [0.1, 0.2]})
+        service.call(method, kwargs={"target": [0.1, 0.2]})
     assert excinfo.value.kind == "argument"
     with pytest.raises(RpentError) as excinfo:
-        service.call("env.move_to", kwargs={"target": [0.1, 0.2, 0.3], "rpy": [0.0, 0.1]})
+        service.call(method, kwargs={"target": [0.1, 0.2, 0.3], "rpy": [0.0, 0.1]})
     assert excinfo.value.kind == "argument"
 
 
@@ -2226,6 +2239,8 @@ def test_env_meta_describes_delta_frame_and_look_at(client) -> None:
     assert meta["delta_axes"] == ["forward", "left", "up"]  # delta 分量语义 = x 前 / y 左 / z 上
     assert meta["move_delta_abs"] == {"input_frame": "world", "delta_axes": ["x", "y", "z"]}
     assert meta["move_to"]["input_frame"] == "world"
+    assert meta["move_abs"] == meta["move_to"]
+    assert meta["move_joint_delta"] == {"unit": "rad", "joint_dim_per_arm": 6, "base": "target"}
     assert meta["look_at"]["roll"] == 0.0 and meta["look_at"]["input_frame"] == "world"
     assert meta["object_position"]["input"] == "normalized u / v"
     assert meta["object_position"]["sampling"] == {
@@ -2250,3 +2265,134 @@ def test_env_meta_reports_tcp_offset_when_reported(env) -> None:
     meta = service.call("env.get_env_meta")
     assert meta["pose_frame"] == "tcp"
     assert meta["tcp_offset"] == {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.08]}
+
+
+@pytest.fixture
+def joint_delta_env(env, monkeypatch):
+    service, node, adapter, leases, commands = env
+    adapter.ACTION_SPACES = (*adapter.ACTION_SPACES, ActionSpace.JOINT_DELTA)
+    adapter.ACTION_DIM_PER_ARM = {**adapter.ACTION_DIM_PER_ARM, "joint_delta": 6}
+    frame = make_obs(qpos=np.zeros(12), action=np.full(12, 0.2), gripper=[0.8, 0.9], cameras=())
+    # 夹爪尚未到位；关节原语不得受夹爪误差影响。
+    frame[KEY_QPOS][6] = 0.1
+    monkeypatch.setattr(service._view, "frame", lambda: frame)
+
+    def rollout(action, layout=None):
+        values = np.asarray(action)
+        assert layout == "joint_delta" and values.shape == (12,)
+        adapter.rollout_calls.append((values.copy(), layout))
+        if adapter.refuse:
+            return False
+        if adapter.apply_delta:
+            frame[KEY_ACTION].reshape(2, 7)[:, :6] += values.reshape(2, 6)
+            frame[KEY_QPOS].reshape(2, 7)[:, :6] = frame[KEY_ACTION].reshape(2, 7)[:, :6]
+        return True
+
+    monkeypatch.setattr(adapter, "rollout", rollout)
+    return service, adapter, frame
+
+
+@pytest.mark.parametrize("arm", ["left", "right", None])
+def test_joint_delta_uses_target_and_preserves_grippers(joint_delta_env, arm):
+    service, adapter, frame = joint_delta_env
+    before = frame[KEY_ACTION].copy()
+    reply = service.call(
+        "env.move_joint_delta", kwargs={"arm": arm, "delta_joint": [0, 0, 0, 0, 0, 0.1], "settle": {"dwell_s": 0}}
+    )
+    expected = np.zeros((2, 6))
+    for index in [0, 1] if arm is None else [0 if arm == "left" else 1]:
+        expected[index, 5] = 0.1
+    np.testing.assert_allclose(adapter.rollout_calls[-1][0], expected.ravel())
+    np.testing.assert_allclose(frame[KEY_ACTION].reshape(2, 7)[:, :6], before.reshape(2, 7)[:, :6] + expected)
+    np.testing.assert_array_equal(frame[KEY_ACTION][[6, 13]], before[[6, 13]])
+    assert reply["reached"] is True and reply["target_source"] == "action"
+
+
+@pytest.mark.parametrize(
+    "delta", [None, [0] * 5, [0] * 7, [[0] * 6], [0, 0, 0, 0, 0, float("nan")], [float("inf")] * 6, ["x"] * 6]
+)
+def test_joint_delta_rejects_bad_input(joint_delta_env, delta):
+    service, adapter, _ = joint_delta_env
+    with pytest.raises(RpentError) as exc:
+        service.call("env.move_joint_delta", kwargs={"delta_joint": delta})
+    assert exc.value.kind == "argument"
+    assert adapter.rollout_calls == []
+
+
+def test_joint_delta_missing_capability(env):
+    service, _, adapter, *_ = env
+    with pytest.raises(RpentError) as exc:
+        service.call("env.move_joint_delta", kwargs={"delta_joint": [0] * 6})
+    assert exc.value.kind == "unsupported" and adapter.rollout_calls == []
+
+
+def test_joint_delta_dry_run_and_unknown_arm(joint_delta_env):
+    service, adapter, frame = joint_delta_env
+    service._dry_run = True
+    reply = service.call("env.move_joint_delta", kwargs={"arm": "left", "delta_joint": [0.1] * 6})
+    assert reply["sent"] is False and reply["reached"] is None
+    np.testing.assert_allclose(reply["target"][:6], frame[KEY_ACTION][:6] + 0.1)
+    with pytest.raises(RpentError):
+        service.call("env.move_joint_delta", kwargs={"arm": "unknown", "delta_joint": [0] * 6})
+    assert adapter.rollout_calls == []
+
+
+def test_joint_delta_not_applied_and_zero_delta(joint_delta_env):
+    service, adapter, _ = joint_delta_env
+    adapter.apply_delta = False
+    reply = service.call(
+        "env.move_joint_delta", kwargs={"arm": "left", "delta_joint": [0.1] * 6, "settle": {"target_wait_s": 0}}
+    )
+    assert reply["not_applied"] is True and reply["reached"] is None
+    zero = service.call("env.move_joint_delta", kwargs={"delta_joint": [0] * 6, "settle": False})
+    assert zero["target_source"] == "action" and "not_applied" not in zero
+
+
+def test_joint_delta_missing_target_and_refusal(joint_delta_env):
+    service, adapter, frame = joint_delta_env
+    adapter.refuse = True
+    with pytest.raises(RpentError) as exc:
+        service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6})
+    assert exc.value.kind == "state"
+    adapter.refuse = False
+    adapter.apply_delta = False
+    del frame[KEY_ACTION]
+    reply = service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6})
+    assert reply["no_joint_target"] is True and reply["reached"] is None
+
+
+def test_joint_delta_wait_ignores_other_arm_and_gripper_changes(joint_delta_env, monkeypatch):
+    service, adapter, frame = joint_delta_env
+
+    def rollout(action, layout=None):
+        frame[KEY_ACTION][7] += 0.1  # 其他臂目标变化不应冒充本次指令已落地
+        frame[KEY_ACTION][6] = 0.5
+        return True
+
+    monkeypatch.setattr(adapter, "rollout", rollout)
+    reply = service.call(
+        "env.move_joint_delta", kwargs={"arm": "left", "delta_joint": [0.1] * 6, "settle": {"target_wait_s": 0}}
+    )
+    assert reply["not_applied"] is True
+
+
+def test_joint_delta_reports_changed_target(joint_delta_env, monkeypatch):
+    service, adapter, frame = joint_delta_env
+    original = adapter.rollout
+
+    def rollout(action, layout=None):
+        original(action, layout)
+        frame[KEY_ACTION][0] += 0.2
+        return True
+
+    monkeypatch.setattr(adapter, "rollout", rollout)
+    reply = service.call("env.move_joint_delta", kwargs={"arm": "left", "delta_joint": [0.1] * 6, "settle": False})
+    assert reply["base_changed"] is True
+    np.testing.assert_array_equal(reply["target"], frame[KEY_ACTION])
+
+
+def test_joint_delta_rejects_invalid_settle_before_send(joint_delta_env):
+    service, adapter, _ = joint_delta_env
+    with pytest.raises(RpentError):
+        service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6, "settle": {"typo": 1}})
+    assert adapter.rollout_calls == []
