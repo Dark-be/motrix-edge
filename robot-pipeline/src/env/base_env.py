@@ -48,7 +48,8 @@ env 收到启动遥操作请求后，robot就会进入遥操作模式，robot会
 import queue
 import threading
 import time
-from collections import deque
+import uuid
+from collections import OrderedDict, deque
 
 import numpy as np
 from collector import get_collector
@@ -88,6 +89,11 @@ class BaseEnv:
         self.standard_observation = {}
         # 命令队列：HTTP 线程入队，各自由唯一消费者线程取出执行（组件单写者）。
         # ⚠️ FIFO 只保证队列内顺序：两条队列生效时机不同（≤1/HZ vs ≤1/OBS_HZ），跨队列顺序不保证。
+        self._motion_lock = threading.Lock()
+        self._motion_commands = OrderedDict()
+        self._motion_instance = uuid.uuid4().hex
+        self._motion_revision = 0
+        self._motion_snapshot = None
         self.commands: queue.Queue = queue.Queue()  # 运动指令（控制线程消费，≤1/HZ 生效）
         self.capture_commands: queue.Queue = queue.Queue()  # 采集指令（观测线程消费，≤1/OBS_HZ 生效）
 
@@ -133,10 +139,13 @@ class BaseEnv:
         self._slow_observe_warn_t = 0.0  # 观测慢帧告警上次输出时刻（限流，秒）
 
     # ---- 控制方法（HTTP 线程调用：只入队，不直接碰 robot / collector；由消费者线程执行）---------
-    def robot_reset(self):
+    def robot_reset(self, *, command_id=None):
         """程序复位到 home（非阻塞）：入队，由控制线程执行。"""
         debug_print(self.robot.name, "HTTP 收到命令: reset（复位到 home）", "INFO")
-        self.commands.put(("reset", None))
+        if command_id is None:
+            self.commands.put(("reset", None))
+            return None
+        return self._queue_motion(command_id, ("reset",), "reset", command_id)
 
     def _check_payload(self, action, *, layout=None, arms=None) -> None:
         """同步校验一条下发（HTTP 线程即时反馈，**不触碰 robot 状态**）。
@@ -157,7 +166,7 @@ class BaseEnv:
         debug_print(self.robot.name, f"HTTP 收到命令: execute dim={len(flat_action)} layout={layout}", "INFO")
         self.commands.put(("execute", (flat_action, layout, arms)))
 
-    def robot_rollout(self, flat_action, *, layout=None, arms=None):
+    def robot_rollout(self, flat_action, *, layout=None, arms=None, command_id=None):
         """推理闭环：入队，由控制线程执行（同步校验 + **遥操作中同步拒绝**）。
 
         **遥操作（人工接管，不分模式）进行中** → 抛 ``TakeoverActiveError``（server 映射 HTTP 409）：
@@ -169,7 +178,56 @@ class BaseEnv:
         if self.robot.teleop_enabled:
             raise TakeoverActiveError("teleop (human takeover) active: rollout refused")
         debug_print(self.robot.name, f"HTTP 收到命令: rollout dim={len(flat_action)} layout={layout}", "INFO")
-        self.commands.put(("rollout", (flat_action, layout, arms)))
+        if command_id is None:
+            self.commands.put(("rollout", (flat_action, layout, arms)))
+            return None
+        fingerprint = (tuple(float(v) for v in flat_action), layout, None if arms is None else tuple(arms))
+        return self._queue_motion(command_id, fingerprint, "rollout", (list(flat_action), layout, arms, command_id))
+
+    def _queue_motion(self, command_id, fingerprint, command, payload):
+        with self._motion_lock:
+            previous = self._motion_commands.get(command_id)
+            if previous is not None:
+                if previous["fingerprint"] != fingerprint:
+                    raise ValueError("command_id reused with different action")
+                return {k: v for k, v in previous.items() if k != "fingerprint"}
+            if len(self._motion_commands) >= 256:
+                terminal = next(
+                    (key for key, value in self._motion_commands.items() if value["execution_status"] != "queued"), None
+                )
+                if terminal is None:
+                    raise ValueError("motion command queue capacity exceeded")
+                del self._motion_commands[terminal]
+            receipt = {
+                "command_id": command_id,
+                "instance_id": self._motion_instance,
+                "execution_status": "queued",
+                "fingerprint": fingerprint,
+            }
+            self._motion_commands[command_id] = receipt
+            self.commands.put((command, payload))
+            return {k: v for k, v in receipt.items() if k != "fingerprint"}
+
+    def motion_command(self, command_id):
+        """Return a copy of the bounded, per-command execution receipt."""
+        with self._motion_lock:
+            value = self._motion_commands.get(command_id)
+            return None if value is None else {k: v for k, v in value.items() if k != "fingerprint"}
+
+    def _finish_motion_command(self, command_id, status, error=None):
+        if command_id is None:
+            return
+        with self._motion_lock:
+            self._motion_commands[command_id].update(
+                execution_status=status, motion_revision=self._motion_revision, error=error
+            )
+
+    def motion_snapshot(self):
+        """Read the last control sample without calling hardware or cameras."""
+        snapshot = self._motion_snapshot
+        if snapshot is None:
+            return None
+        return {**snapshot, "sample_age_s": max(0.0, time.monotonic() - snapshot["sample_monotonic"])}
 
     def robot_safe_stop(self):
         """安全停止（软停：停发指令并保持位姿、不断电；幂等、失败安全）：入队，由控制线程执行。"""
@@ -477,6 +535,7 @@ class BaseEnv:
                 cmd, payload = self.commands.get_nowait()
             except queue.Empty:
                 break
+            command_id = payload if cmd == "reset" else payload[3] if cmd == "rollout" and len(payload) == 4 else None
             try:
                 if cmd == "reset":
                     self.robot.reset()
@@ -484,10 +543,12 @@ class BaseEnv:
                     action, layout, arms = payload
                     self.robot.execute(action, layout=layout, arms=arms)
                 elif cmd == "rollout":
-                    action, layout, arms = payload
+                    action, layout, arms = payload[:3]
                     if not self.robot.rollout(action, layout=layout, arms=arms):
                         # 遥操作中：推理让位（预期状态，只记日志，不置 last_error / 不影响 health）
                         debug_print(self.robot.name, "rollout ignored: teleop (human takeover) active.", "WARNING")
+                        self._finish_motion_command(command_id, "rejected", "human takeover")
+                        continue
                 elif cmd == "safe_stop":
                     self.robot.safe_stop()
                 elif cmd == "teleop":
@@ -503,11 +564,18 @@ class BaseEnv:
                         )  # 缺省 absolute（兼容旧调用方）
                 else:
                     debug_print(self.robot.name, f"unknown command '{cmd}' ignored", "WARNING")
+                    continue
+                self._motion_revision += 1
+                self._finish_motion_command(command_id, "applied")
             except ValueError as exc:
+                self._finish_motion_command(command_id, "rejected", str(exc))
                 # 命令被拒（动作空间不支持 / 笛卡尔目标不可达）：目标未更新，机械臂保持原动作
                 debug_print(self.robot.name, f"command '{cmd}' rejected: {exc} (target unchanged)", "WARNING")
             except Exception as exc:  # noqa: BLE001 单条命令失败不阻断其余
                 # 存字符串：health 的 detail 是 str 字段，存异常对象会在序列化时丢成 {}
+                # A driver may fail after a partial write; invalidate any earlier arrival wait.
+                self._motion_revision += 1
+                self._finish_motion_command(command_id, "failed", str(exc))
                 self.last_error = f"command '{cmd}' failed: {exc}"
                 debug_print(self.robot.name, f"command '{cmd}' failed: {exc}", "ERROR")
 
@@ -544,7 +612,17 @@ class BaseEnv:
         """
         self._drain_commands()
         self.robot.step()
-        self.robot.sample_state()
+        sampled_at = time.monotonic()
+        state = self.robot.sample_state()
+        if state is not None:
+            self._motion_snapshot = {
+                "instance_id": self._motion_instance,
+                "motion_revision": self._motion_revision,
+                "sample_seq": self.robot.seq,
+                "sample_monotonic": sampled_at,
+                "teleop": bool(self.robot.teleop_enabled),
+                "observation": self.robot.standard_observation(state),
+            }
 
     def step_observe(self):
         """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 契约观测 → 帧回调 → 采集落盘。

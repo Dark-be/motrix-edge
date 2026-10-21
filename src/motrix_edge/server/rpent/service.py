@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any
 
 import numpy as np
@@ -77,7 +78,15 @@ from .layout import (
     rpy_to_matrix,
 )
 from .node_view import EdgeNodeView
-from .settle import SettleConfig, unreached, wait_for_reached
+from .settle import MotionSample, SettleConfig, unreached, wait_for_reached
+
+
+class _MotionIncomplete(Exception):
+    """A dispatched motion cannot be verified; carry its receipt back to the caller."""
+
+
+_motion_receipt: ContextVar[dict | None] = ContextVar("rpent_motion_receipt", default=None)
+_motion_config: ContextVar[SettleConfig | None] = ContextVar("rpent_motion_config", default=None)
 
 #: 观测来源：**基座**取目标（写原语的「发到哪」），**到位判定 / 状态回报**取实测（「到了没」）。
 SOURCE_TARGET = "target"
@@ -232,7 +241,24 @@ class RpentService:
         debug_print("rpent", f"{method} [session={session_id or '-'}]", "DEBUG")
         if method not in self.LEASE_FREE_METHODS:
             self._require_lease()
-        return handler(*tuple(args or ()), **dict(kwargs or {}))
+        params = dict(kwargs or {})
+        config = self._settle_config.with_override(params.get("settle"))
+        receipt_token = _motion_receipt.set(None)
+        config_token = _motion_config.set(config)
+        try:
+            try:
+                result = handler(*tuple(args or ()), **params)
+            except _MotionIncomplete as exc:
+                result = {"ok": False, **unreached(str(exc))}
+            if method == "env.set_gripper" and isinstance(result, dict):
+                result.setdefault("grasp_status", "unknown")
+            receipt = _motion_receipt.get()
+            if receipt is not None and isinstance(result, dict):
+                result.update(receipt)
+            return result
+        finally:
+            _motion_receipt.reset(receipt_token)
+            _motion_config.reset(config_token)
 
     # ---- 租约 ---------------------------------------------------------------
 
@@ -274,6 +300,9 @@ class RpentService:
             "enabled": self._settle_config.enabled,
             "pos_tol_m": self._settle_config.pos_tol,
             "rot_tol_rad": self._settle_config.rot_tol,
+            "joint_tol_rad": self._settle_config.joint_tol,
+            "gripper_tol": self._settle_config.gripper_tol,
+            "max_sample_age_s": self._settle_config.max_sample_age_s,
             "timeout_s": self._settle_config.timeout_s,
             "max_timeout_s": self._settle_config.max_timeout_s,
             "target_wait_s": self._settle_config.target_wait_s,
@@ -640,15 +669,27 @@ class RpentService:
     # ---- 控制（转发到既有路径）-----------------------------------------------
 
     def _reset(self) -> dict:
-        """``env.reset`` → 命令通道 ``robot/reset``（经 ``CommandService``，含租约与回执）。
-
-        ``dry_run`` 下**不打命令通道**：同样不下发任何动作（否则“不动机器人”的承诺在 reset 上就不成立）。
-        """
+        """Reset through the ID-tracked control queue, then wait for fresh home feedback."""
         states = self._state_vector(self._view.frame())
         if self._dry_run:
             return {"ok": True, "state": "dry_run", "states": states, **self._dry_run_receipt()}
-        data = self._invoke_command("robot/reset")
-        return {"ok": True, "state": "ready", "states": states, "command": data}
+        command_id = uuid.uuid4().hex
+        _motion_receipt.set({"command_id": command_id, "execution_status": "unconfirmed"})
+        try:
+            response = self._view.require_adapter().submit_reset(command_id=command_id)
+            self._await_motion_receipt(response)
+        except _MotionIncomplete:
+            raise
+        except Exception as exc:
+            raise _MotionIncomplete(f"reset confirmation unavailable: {exc}") from exc
+        config = _motion_config.get() or self._settle_config
+        reference = self._confirmed_target(ActionSpace.JOINT, config)
+        arrival = (
+            self._settle_action(reference, self._arm_indices(None, self._view.arms), ActionSpace.JOINT)
+            if reference is not None
+            else unreached("reset target unavailable")
+        )
+        return {"ok": True, "state": "ready", "states": states, **arrival}
 
     def _capture_episode_start(
         self,
@@ -716,15 +757,14 @@ class RpentService:
         reply = {"ok": True, "reason": str(reason or ""), "return_to_start": bool(return_to_start)}
         target, source = self._recover_target(arms, frame)
         if target is None:  # 无关节 home 声明：只能退回整体复位（含夹爪），回执如实标注
-            if not self._dry_run:  # dry_run 下连 reset 也不打
-                adapter.reset()
+            reset_result = self._reset()
             return {
                 **reply,
                 "fallback": "adapter.reset()",
                 "gripper_preserved": False,
                 "source": source,
                 "states": self._state_vector(frame),
-                **(self._dry_run_receipt() if self._dry_run else {}),
+                **reset_result,
             }
         reply = {
             **reply,
@@ -966,12 +1006,7 @@ class RpentService:
         }
         if self._dry_run:
             return {**reply, **self._dry_run_receipt()}
-        try:
-            sent = adapter.rollout(command, layout="joint", arms=selected) is not False
-        except ValueError as exc:
-            raise RpentError(str(exc), kind="argument") from exc
-        if not sent:
-            raise RpentError("robot refused the action (teleop / human takeover in progress)", kind="state")
+        self._dispatch_motion(command, layout="joint", arms=selected)
         stride = width + 1
         slots = np.array([index * stride + joint for index in indices for joint in range(width)])
         reference = np.zeros(len(arms) * stride)
@@ -996,15 +1031,15 @@ class RpentService:
     def _wait_joint_target(self, reference: np.ndarray, slots: np.ndarray, config: SettleConfig) -> dict:
         """只比较所选臂关节的直接误差，夹爪与其他臂不参与到位判断。"""
 
-        def errors():
-            current = self._qpos(ActionSpace.JOINT, frame=self._view.frame())
+        def errors(frame):
+            current = self._qpos(ActionSpace.JOINT, frame=frame)
             if current is None or not np.all(np.isfinite(current[slots])):
                 return None
             error = float(np.max(np.abs(reference[slots] - current[slots])))
             return error, None, error
 
         return (
-            wait_for_reached(errors, space=ActionSpace.JOINT, config=config)
+            wait_for_reached(lambda: self._motion_sample(errors), space=ActionSpace.JOINT, config=config)
             if config.enabled
             else unreached("settle disabled")
         )
@@ -1044,27 +1079,12 @@ class RpentService:
             return {**reply, **self._dry_run_receipt()}
         sent = self._push_qpos(vector, ActionSpace.JOINT_DELTA, with_gripper=False)
         reply["sent"] = sent
-        if before is None:
+        reference = self._confirmed_target(ActionSpace.JOINT, config)
+        if reference is None:
             return {**reply, **unreached("robot publishes no joint target action", no_joint_target=True)}
-
-        reference = before
         flags = {}
-        if np.any(delta != 0):
-            deadline = time.monotonic() + max(config.target_wait_s, config.poll_s)
-            while True:
-                current = self._qpos(ActionSpace.JOINT, frame=self._view.frame(), source=SOURCE_TARGET)
-                if current is not None and np.all(np.isfinite(current[slots])):
-                    if not np.allclose(current[slots], before[slots], atol=1e-9, rtol=0):
-                        reference = current
-                        if np.max(np.abs(current[slots] - predicted[slots])) > config.rot_tol:
-                            flags["base_changed"] = True
-                        break
-                if time.monotonic() >= deadline:
-                    return {
-                        **reply,
-                        **unreached("joint target did not change within settle.target_wait_s", not_applied=True),
-                    }
-                time.sleep(config.poll_s)
+        if predicted is not None and np.max(np.abs(reference[slots] - predicted[slots])) > config.joint_tol:
+            flags["base_changed"] = True
 
         arrival = self._wait_joint_target(reference, slots, config)
         return {**reply, "target": reference, "target_source": "action", **flags, **arrival}
@@ -1497,34 +1517,33 @@ class RpentService:
         return transform_points(invert_transform(self._world_from_base(adapter, arm)), point)
 
     def _set_gripper(self, *args, arm: str | None = None, open: Any = True, settle: Any = None) -> dict:
-        """``env.set_gripper``：夹爪开合**度** —— 只改夹爪槽，其余维**保持目标**（关节 qpos）。
-
-        ``open`` 收 bool（``True`` / ``False`` ≡ 1.0 / 0.0）或 ``[0, 1]`` 的开合度（0 = 闭合，
-        1 = 张开，与自描述 ``gripper_range`` 同域；RPent 侧的 ``+1/-1`` 域由动作块布局换算承担）。
-        越界 / 非数值 → 拒绝（``kind=argument``），不静默限幅。
-
-        基座是**目标 qpos**（``observations/action``）而不是实测（见 ``_qpos_base``）：只改夹爪不该
-        把手臂目标拉回「实测当前」——那会把 MIT 稳态误差写进目标、并抹掉还没走完的运动。
-        回执 ``source`` 标注基座实际来源（``target`` / ``measured``）。
-        """
-        if args:  # RPent 的 dual_franka 形态：set_gripper(arm, open=...)
+        """Send only the selected grippers. Opening feedback does not establish a grasp."""
+        if args:
             arm = args[0] if arm is None else arm
         wanted = gripper_openness(open)
-        self._view.require_adapter()  # 未绑定 adapter：与其余写方法一致地报 state 错
+        self._view.require_adapter()
         arms = self._view.arms
         indices = self._arm_indices(arm, arms)
-        stride = self._qpos_stride(ActionSpace.JOINT)
-        base, source = self._qpos_base(ActionSpace.JOINT, self._view.frame())
-        if base is None:
-            raise RpentError(
-                "no joint qpos in observations (read observations/action or observations/qpos)",
-                kind="unsupported",
-            )
-        target = np.array(base, dtype=np.float32, copy=True)
-        for index in indices:
-            target[index * stride + stride - 1] = wanted  # 夹爪槽 = 每臂末位
-        reply = {"ok": True, "arm": arm, "open": wanted, "source": source, "target": target}
-        return {**reply, **self._send_qpos(target, ActionSpace.JOINT, indices, settle)}
+        config = self._settle_config.with_override(settle)
+        target = np.full(len(indices), wanted, dtype=np.float32)
+        reply = {"ok": True, "arm": arm, "open": wanted, "target": target, "grasp_status": "unknown"}
+        if self._dry_run:
+            return {**reply, **self._dry_run_receipt()}
+        self._dispatch_motion(target, layout="gripper", arms=[arms[i] for i in indices] if arms else None)
+
+        def errors(frame):
+            current = self._gripper_slots(frame, max(len(arms), 1))
+            if current is None or not np.all(np.isfinite(current[indices])):
+                return None
+            error = float(np.max(np.abs(current[indices] - wanted)))
+            return error, None, error
+
+        arrival = (
+            wait_for_reached(lambda: self._motion_sample(errors), space=ActionSpace.GRIPPER, config=config)
+            if config.enabled
+            else unreached("settle disabled")
+        )
+        return {**reply, "sent": True, **arrival}
 
     def _step(self, action: Any = None, action_space: str | None = None) -> list:
         """``env.step``：单帧动作 → 返回 gym 形态 5 元组 ``[obs, reward, terminated, truncated, info]``。
@@ -1543,7 +1562,8 @@ class RpentService:
                 "converted": row,
             }
             return [self._observation_payload(), 0.0, False, False, info]
-        self._push_qpos(row, space)
+        if not self._push_qpos(row, space, allow_refusal=True):
+            raise RpentError("robot refused the action", kind="state")
         return [self._observation_payload(), 0.0, False, False, {"action_space": space.value}]
 
     def _chunk_step(
@@ -1680,36 +1700,17 @@ class RpentService:
     def _pose_target_reference(
         self, before: np.ndarray | None, predicted: np.ndarray | None, override: Any = None
     ) -> tuple[np.ndarray | None, dict]:
-        """等 ``observations/pose_action`` 从下发前快照跃迁 → ``(参考目标, 标志)``。
-
-        为什么需要：增量下发走命令队列（异步）、观测按观察频率发布，故「下发返回」不等于「目标已
-        改」——不等就会拿**旧目标**当参考，把「实测本就在旧目标附近」误判成到位。
-
-        标志：``no_pose_target``（机器人不发布目标位姿，无法判定）/ ``not_applied``（超出
-        ``settle.target_wait_s`` 仍未跃迁）/ ``base_changed``（跃迁后的目标与「快照 + 增量」不符
-        ——基准被第三方改动，回执如实标注）。增量为 0 时不等跃迁（本就在目标上）。
-        """
-        if before is None:
-            return None, {"no_pose_target": True, "reason": "robot publishes no observations/pose_action"}
-        self._view.require_adapter()  # 未绑定 adapter → state 错（与其余路径一致）
-        stride = self._qpos_stride(ActionSpace.POSE)
-        if predicted is not None and not self._pose_values_differ(predicted, before, stride):
-            return before, {}  # 增量恒为 0：目标未变，直接拿快照当参考
+        """Use the target sampled after this exact command was applied, including zero deltas."""
         config = self._settle_config.with_override(override)
-        deadline = time.monotonic() + max(config.target_wait_s, config.poll_s)
-        while True:
-            current = self._qpos(ActionSpace.POSE, frame=self._view.frame(), source=SOURCE_TARGET)
-            if current is not None and self._pose_values_differ(current, before, stride):
-                flags: dict = {}
-                if predicted is not None and self._pose_targets_differ_beyond(current, predicted, stride, config):
-                    flags["base_changed"] = True
-                return current, flags
-            if time.monotonic() >= deadline:
-                return None, {
-                    "not_applied": True,
-                    "reason": "robot target pose did not move within settle.target_wait_s",
-                }
-            time.sleep(config.poll_s)
+        current = self._confirmed_target(ActionSpace.POSE, config)
+        if current is None:
+            return None, {"no_pose_target": True, "reason": "robot publishes no observations/pose_action"}
+        flags = {}
+        if predicted is not None and self._pose_targets_differ_beyond(
+            current, predicted, self._qpos_stride(ActionSpace.POSE), config
+        ):
+            flags["base_changed"] = True
+        return current, flags
 
     @staticmethod
     def _pose_values_differ(left: np.ndarray | None, right: np.ndarray | None, per_arm: int) -> bool:
@@ -1765,17 +1766,24 @@ class RpentService:
             self._view.require_adapter()  # 未绑定 adapter → state 错
             if self._view.value_dim(ActionSpace.POSE) <= 0:
                 return unreached("robot reports no end-effector pose (observations/pose)")
-        return wait_for_reached(lambda: self._settle_errors(target, indices, space), space=space, config=config)
+        return wait_for_reached(
+            lambda: self._motion_sample(
+                lambda frame: self._settle_errors(target, indices, space, frame=frame),
+                gripper_target=(target, indices) if space is ActionSpace.JOINT else None,
+            ),
+            space=space,
+            config=config,
+        )
 
     def _settle_errors(
-        self, target: np.ndarray, indices: list[int], space: ActionSpace
+        self, target: np.ndarray, indices: list[int], space: ActionSpace, *, frame: dict | None = None
     ) -> tuple[float, float | None, float | None] | None:
         """当前观测与目标的误差 → ``(主误差, 位置误差, 姿态/关节误差)``；无帧 → ``None``。
 
         - ``pose``：位置误差 = ``‖Δxyz‖``（米）、姿态误差 = ``‖Δrpy‖``（弧度；逐臂取最差），
           主误差 = 两者较大者（只用于回执展示与停滞追踪，**到位判定分项比**，见
           :meth:`~motrix_edge.server.rpent.settle.SettleConfig.within`）；
-        - 关节：主误差 = 姿态误差 = 逐维最大 ``|Δq|``（含夹爪那一维）；位置误差为 ``None``。
+        - 关节：主误差 = 姿态误差 = 逐关节最大 ``|Δq|``（夹爪单独使用开合度容差）；位置误差为 ``None``。
 
         当前值走 :meth:`_qpos`（每轮询都取当前帧的**实测** qpos，含夹爪槽）且**每次轮询取当前帧**，
         所以 MIT 的稳态误差会被如实计入，不会把「下发过目标」当成「已到位」。
@@ -1783,8 +1791,8 @@ class RpentService:
         self._view.require_adapter()  # 未绑定 adapter → state 错
         stride = self._qpos_stride(space)
         source = space if space is ActionSpace.POSE else ActionSpace.JOINT
-        current = self._qpos(source, frame=self._view.frame())
-        if current is None or stride <= 0:
+        current = self._qpos(source, frame=self._view.frame() if frame is None else frame)
+        if current is None or stride <= 0 or not np.all(np.isfinite(current)) or not np.all(np.isfinite(target)):
             return None
         if source is ActionSpace.POSE:
             value_dim = self._view.value_dim(ActionSpace.POSE)
@@ -1802,8 +1810,8 @@ class RpentService:
             return max(pos_err, rot_err), pos_err, rot_err
         worst = 0.0
         for index in indices:
-            observed = current[index * stride : (index + 1) * stride]
-            wanted = target[index * stride : (index + 1) * stride]
+            observed = current[index * stride : (index + 1) * stride - 1]
+            wanted = target[index * stride : (index + 1) * stride - 1]
             if observed.size != wanted.size:
                 return None
             worst = max(worst, float(np.max(np.abs(wanted - observed))))
@@ -1875,12 +1883,103 @@ class RpentService:
         else:
             layout, action = space.value, blocks[:, : stride - 1].reshape(-1).copy()
         try:
-            sent = adapter.rollout(action, layout=layout) is not False
+            sent = (
+                adapter.rollout(action, layout=layout) is not False
+                if allow_refusal
+                else self._dispatch_motion(action, layout=layout)
+            )
         except ValueError as exc:  # 维度 / 布局不符：不静默补齐
             raise RpentError(str(exc), kind="argument") from exc
         if not sent and not allow_refusal:
             raise RpentError("robot refused the action (teleop / human takeover in progress)", kind="state")
         return sent
+
+    def _dispatch_motion(self, action, *, layout, arms=None) -> bool:
+        """Distinguish transport acceptance from control-thread application by command ID."""
+        adapter = self._view.require_adapter()
+        command_id = uuid.uuid4().hex
+        receipt = {"command_id": command_id, "execution_status": "unconfirmed"}
+        _motion_receipt.set(receipt)
+        try:
+            response = adapter.submit_motion(action, command_id=command_id, layout=layout, arms=arms)
+            self._await_motion_receipt(response)
+        except ValueError as exc:
+            raise RpentError(str(exc), kind="argument") from exc
+        except _MotionIncomplete:
+            raise
+        except Exception as exc:
+            # Submission may have reached the robot. Never retry a delta with a new ID here.
+            raise _MotionIncomplete(f"motion confirmation unavailable: {exc}") from exc
+        return True
+
+    def _await_motion_receipt(self, response):
+        adapter = self._view.require_adapter()
+        config = _motion_config.get() or self._settle_config
+        receipt = _motion_receipt.get()
+        command_id = receipt["command_id"]
+        deadline = time.monotonic() + config.target_wait_s
+        while True:
+            if response is None or response.get("command_id") != command_id:
+                raise _MotionIncomplete("matching command receipt unavailable; do not blindly retry")
+            receipt.update(response)
+            status = receipt.get("execution_status")
+            if status == "applied" and receipt.get("instance_id") and isinstance(receipt.get("motion_revision"), int):
+                return
+            if status != "queued":
+                raise _MotionIncomplete(f"motion {status}: {receipt.get('error') or 'application not confirmed'}")
+            if time.monotonic() >= deadline:
+                receipt["execution_status"] = "unconfirmed"
+                raise _MotionIncomplete("command application timed out; queued motion may still execute")
+            time.sleep(config.poll_s)
+            response = adapter.motion_command(command_id)
+
+    def _confirmed_snapshot(self):
+        receipt = _motion_receipt.get()
+        if receipt is None or receipt.get("execution_status") != "applied":
+            raise _MotionIncomplete("motion application not confirmed")
+        try:
+            snapshot = self._view.require_adapter().motion_snapshot()
+        except Exception as exc:
+            raise _MotionIncomplete(f"motion observation unavailable: {exc}") from exc
+        if snapshot is None:
+            return None
+        if snapshot.get("instance_id") != receipt["instance_id"] or snapshot.get("teleop"):
+            raise _MotionIncomplete("robot restarted or human takeover interrupted motion")
+        revision = snapshot.get("motion_revision", -1)
+        if revision > receipt["motion_revision"]:
+            raise _MotionIncomplete("motion superseded by another command")
+        if revision < receipt["motion_revision"]:
+            return None
+        return snapshot
+
+    def _confirmed_target(self, space, config):
+        deadline = time.monotonic() + config.target_wait_s
+        while True:
+            snapshot = self._confirmed_snapshot()
+            if snapshot is not None and 0 <= snapshot.get("sample_age_s", float("inf")) <= config.max_sample_age_s:
+                target = self._qpos(space, frame=snapshot["observation"], source=SOURCE_TARGET)
+                return target if target is not None and np.all(np.isfinite(target)) else None
+            if time.monotonic() >= deadline:
+                raise _MotionIncomplete("fresh applied-command target unavailable")
+            time.sleep(config.poll_s)
+
+    def _motion_sample(self, errors, *, gripper_target=None):
+        snapshot = self._confirmed_snapshot()
+        if snapshot is None:
+            return None
+        values = errors(snapshot["observation"])
+        if values is None or not all(v is None or np.isfinite(v) for v in values):
+            return None
+        opening_error = None
+        if gripper_target is not None:
+            target, indices = gripper_target
+            stride = self._qpos_stride(ActionSpace.JOINT)
+            slots = [index * stride + stride - 1 for index in indices]
+            current = self._qpos(ActionSpace.JOINT, frame=snapshot["observation"])
+            if current is None or not np.all(np.isfinite(current[slots])):
+                return None
+            opening_error = float(np.max(np.abs(target[slots] - current[slots])))
+        return MotionSample(values, snapshot["sample_seq"], snapshot["sample_age_s"], opening_error)
 
     def _dry_run_receipt(self) -> dict:
         """``dry_run`` 统一回执：明确「没下发、没到位」（自描述里也能看出节点在 dry-run）。"""

@@ -39,6 +39,8 @@ Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 /
 整数标度，由机器人进程换算）。数值明显离谱（量纲写错）时记 ERROR，不把可疑数据喂给策略。
 """
 
+import time
+
 import cv2
 import httpx2
 import numpy as np
@@ -392,6 +394,51 @@ class HttpShmAdapter(RobotAdapter):
         if arms_out is not None:
             body[FIELD_ARMS] = arms_out
         return self._post_rollout(PATH_ROLLOUT, body)
+
+    def submit_reset(self, *, command_id: str) -> dict:
+        response = self._client().post(PATH_RESET, json={"command_id": command_id})
+        response.raise_for_status()
+        return response.json()
+
+    def submit_motion(self, action, *, command_id: str, layout: str, arms: list[str] | None = None) -> dict:
+        """Queue a primitive with an ID; HTTP acceptance does not imply application."""
+        target, selected = self._expand_layout(action, "rollout", layout, arms)
+        body = {
+            FIELD_ACTION: target.tolist(),
+            FIELD_LAYOUT: self.layout_name(self.parse_layout(layout)),
+            "command_id": command_id,
+        }
+        if selected is not None:
+            body[FIELD_ARMS] = selected
+        response = self._client().post(PATH_ROLLOUT, json=body)
+        if response.status_code == 409:
+            return {"command_id": command_id, "execution_status": "rejected", "error": "human takeover"}
+        response.raise_for_status()
+        return response.json()
+
+    def motion_command(self, command_id: str) -> dict | None:
+        response = self._client().get(f"/v1/motion/commands/{command_id}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def motion_snapshot(self) -> dict | None:
+        started = time.monotonic()
+        response = self._client().get("/v1/motion/state")
+        if response.status_code in (404, 503):
+            return None
+        response.raise_for_status()
+        snapshot = response.json()
+        snapshot["sample_age_s"] += time.monotonic() - started
+        observation = dict(snapshot.get("observation") or {})
+        for key in (KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION):
+            if key in observation:
+                observation[key] = self._select_arm_segments(observation[key], self.state_dim_per_arm())
+        for key in (KEY_POSE, KEY_POSE_ACTION):
+            if key in observation:
+                observation[key] = self._select_arm_segments(observation[key], self.effective_pose_dim_per_arm())
+        return {**snapshot, "observation": observation}
 
     def _post_rollout(self, path: str, body: dict) -> bool:
         """下发一条推理动作并解释回执：409（遥操作 / 人工接管中）→ ``False``（推理让位）。

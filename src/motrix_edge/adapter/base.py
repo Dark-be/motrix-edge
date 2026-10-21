@@ -755,6 +755,27 @@ class RobotAdapter(ABC):
         """
         raise NotImplementedError
 
+    def submit_reset(self, *, command_id: str) -> dict:
+        """Legacy adapters cannot prove when an asynchronous reset was applied."""
+        self.reset()
+        return {"command_id": command_id, "execution_status": "unconfirmed"}
+
+    def submit_motion(self, action: Action, *, command_id: str, layout: str, arms: list[str] | None = None) -> dict:
+        """Legacy adapters cannot prove application; report unconfirmed explicitly."""
+        kwargs = {"layout": layout}
+        if arms is not None:
+            kwargs["arms"] = arms
+        sent = self.rollout(action, **kwargs) is not False
+        return {"command_id": command_id, "execution_status": "unconfirmed" if sent else "rejected"}
+
+    def motion_command(self, command_id: str) -> dict | None:
+        """Query tracked application when supported by the adapter."""
+        return None
+
+    def motion_snapshot(self) -> dict | None:
+        """Return a fresh, identified control sample without camera data."""
+        return None
+
     # ---- 动作空间校验（子类在 execute / rollout 内调用）------------------------
     @classmethod
     def normalize_action_space(cls, action_space: ActionSpace | str | None) -> ActionSpace:

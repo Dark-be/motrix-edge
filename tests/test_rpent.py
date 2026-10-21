@@ -181,18 +181,54 @@ class FakeAdapter(RobotAdapter):
     def execute(self, action) -> None:
         pass
 
-    def rollout(self, action, layout=None) -> bool:
+    def rollout(self, action, layout=None, arms=None) -> bool:
         """镜像真实现：``layout`` 声明每臂块内的段序列（**一条命令**、逐臂块解析、同一拍落地）。"""
         layout = str(layout or ActionSpace.JOINT.value)
         vector = np.asarray(action, dtype=np.float32).reshape(-1)
         parts = [self.normalize_action_space(part) for part in layout.split("+")]
         expected = sum(self.action_dim_for(space) for space in parts)
+        if arms is not None:
+            expected = expected // len(self.ARM_NAMES) * len(arms)
         if vector.size != expected:  # 镜像真实现：维度不符 → 拒绝（不静默补齐）
             raise ValueError(f"rollout {layout} action dim {vector.size} != {expected}")
         if parts == [ActionSpace.POSE_DELTA] and not self.refuse and self.apply_delta:
             self._apply_pose_delta(vector)  # 机器人侧行为：增量叠在自己的目标上（不是实测）
         self.rollout_calls.append((vector.copy(), layout))
         return not self.refuse  # True = 已下发；False = 遥操作中拒拍
+
+    def submit_motion(self, action, *, command_id, layout, arms=None):
+        kwargs = {"layout": layout}
+        if arms is not None:
+            kwargs["arms"] = arms
+        sent = self.rollout(action, **kwargs)
+        self.motion_revision = getattr(self, "motion_revision", 0) + 1
+        return {
+            "command_id": command_id,
+            "instance_id": "test",
+            "motion_revision": self.motion_revision,
+            "execution_status": "applied" if sent and self.apply_delta else "rejected",
+        }
+
+    def submit_reset(self, *, command_id):
+        self.reset()
+        self.motion_revision = getattr(self, "motion_revision", 0) + 1
+        return {
+            "command_id": command_id,
+            "instance_id": "test",
+            "motion_revision": self.motion_revision,
+            "execution_status": "applied",
+        }
+
+    def motion_snapshot(self):
+        self.sample_seq = getattr(self, "sample_seq", 0) + 1
+        frame = self.motion_frame() if hasattr(self, "motion_frame") else self.observation_frame()
+        return {
+            "instance_id": "test",
+            "motion_revision": self.motion_revision,
+            "sample_seq": self.sample_seq,
+            "sample_age_s": 0.0,
+            "observation": frame,
+        }
 
     def _apply_pose_delta(self, values: np.ndarray) -> None:
         """增量叠加在**自己的目标位姿**上（每臂 chart 相加；基准是目标，不是实测）。"""
@@ -249,6 +285,7 @@ class FakeFrameManager:
 class FakeNode:
     def __init__(self, adapter: FakeAdapter, obs: dict | None = None):
         self.adapter = adapter
+        adapter.test_node = self
         self.adapter_name = "Test Robot"
         self.adapter_type = "test_robot"
         # 不给 obs → 帧从适配器状态渲染（默认：与 make_obs(default_qpos/pose/gripper) 同值）
@@ -374,6 +411,23 @@ def install_lease(leases: LeaseManager, lease_id: str = "ls_rpent_1") -> str:
         )
     )
     return lease_id
+
+
+@pytest.fixture(autouse=True)
+def motion_test_source(monkeypatch):
+    original = RpentService.__init__
+    from motrix_edge.server.rpent.service import _motion_receipt
+
+    token = _motion_receipt.set(None)
+
+    def init(service, node, *args, **kwargs):
+        original(service, node, *args, **kwargs)
+        if isinstance(node.adapter, FakeAdapter):
+            node.adapter.motion_frame = lambda: service._view.frame()
+
+    monkeypatch.setattr(RpentService, "__init__", init)
+    yield
+    _motion_receipt.reset(token)
 
 
 @pytest.fixture
@@ -535,32 +589,24 @@ def test_task_language_reads_infer_session_prompt(env):
 # ---------------------------------------------------------------------------
 
 
-def test_reset_goes_through_command_service(env):
-    """``env.reset`` 走命令通道 ``robot/reset``（同一条路，含租约透传）。"""
-    service, _node, _adapter, _leases, commands = env
+def test_reset_uses_robot_execution_receipt(env):
+    service, _, adapter, _, commands = env
     result = service.call("env.reset")
-    assert result["ok"] is True and np.allclose(result["states"], rpent_state())
-    assert commands.calls == [
-        {
-            "command_id": commands.calls[0]["command_id"],
-            "lease_id": "ls_rpent_1",
-            "capability": "robot/reset",
-            "params": {},
-            "source": "rpent",  # 来源标记（仅日志 / 排障）
-        }
-    ]
-    assert commands.calls[0]["command_id"].startswith("rpent-")
+    assert result["execution_status"] == "applied" and result["command_id"]
+    assert result["reached"] is True and adapter.reset_calls == 1
+    assert commands.calls == []
 
 
-def test_reset_reports_rejected_receipt_as_error():
-    adapter = FakeAdapter()
-    node = FakeNode(adapter, make_obs(qpos=default_qpos()))
-    leases = LeaseManager()
-    install_lease(leases)
-    service = RpentService(node, StubCommands(status="rejected", error="robot busy"), leases=leases, base_cfg=BASE_CFG)
-    with pytest.raises(RpentError) as excinfo:
-        service.call("env.reset")
-    assert "robot busy" in str(excinfo.value) and excinfo.value.kind == "state"
+def test_reset_reports_rejected_receipt(env, monkeypatch):
+    service, _, adapter, *_ = env
+    monkeypatch.setattr(
+        adapter,
+        "submit_reset",
+        lambda command_id: {"command_id": command_id, "execution_status": "rejected", "error": "robot busy"},
+    )
+    result = service.call("env.reset")
+    assert result["reached"] is None and result["execution_status"] == "rejected"
+    assert "robot busy" in result["reason"]
 
 
 def test_capture_episode_start_syncs_meta_before_start_and_end_only_closes_episode(env):
@@ -726,38 +772,31 @@ def test_move_delta_never_falls_back_to_observed_pose_base():
     assert adapter.rollout_calls == []  # 没有下发任何动作
 
 
-def test_set_gripper_only_changes_gripper(env):
-    """``env.set_gripper``：关节段原样重发（保持当前姿态），夹爪同拍落地（``joint+gripper``）。"""
-    service, _node, adapter, _leases, _commands = env
-    service.call("env.set_gripper", kwargs={"arm": "right", "open": False, "settle": False})
-    action, layout = adapter.rollout_calls[-1]
-    assert layout == "joint+gripper"  # 一条命令：关节目标 + 夹爪同一拍
-    assert joints_of(action) == pytest.approx(list(default_qpos()))  # 关节目标不动
-    assert list(grippers_of(action)) == pytest.approx([0.25, 0.0])  # 只改右夹爪（闭合）
+def test_set_gripper_only_changes_gripper(env, monkeypatch):
+    service, _, adapter, *_ = env
+    calls = []
+    original = adapter.rollout
 
+    def rollout(action, *, layout, arms):
+        calls.append(arms)
+        return original(action, layout=layout, arms=arms)
+
+    monkeypatch.setattr(adapter, "rollout", rollout)
+    result = service.call("env.set_gripper", kwargs={"arm": "right", "open": False, "settle": False})
+    action, layout = adapter.rollout_calls[-1]
+    assert layout == "gripper" and list(action) == [0.0] and calls[-1] == ["right"]
+    assert result["grasp_status"] == "unknown"
     service.call("env.set_gripper", kwargs={"open": True, "settle": False})
     action, layout = adapter.rollout_calls[-1]
-    assert layout == "joint+gripper"
-    assert list(grippers_of(action)) == pytest.approx([1.0, 1.0])
+    assert layout == "gripper" and list(action) == [1.0, 1.0] and calls[-1] == ["left", "right"]
 
 
 def test_set_gripper_accepts_openness_in_unit_range(env):
-    """``env.set_gripper`` 收 ``[0, 1]`` 的**开合度**（bool 仍兼容；域与自描述 ``gripper_range`` 同源）。
-
-    0 = 闭合 / 1 = 张开；回执 ``open`` 回显生效的开合度，agent 才能确认「让它合到什么程度」落地了。
-    """
-    service, _node, adapter, _leases, _commands = env
+    service, _, adapter, *_ = env
     result = service.call("env.set_gripper", kwargs={"arm": "right", "open": 0.3, "settle": False})
     action, layout = adapter.rollout_calls[-1]
-    assert layout == "joint+gripper"  # 仍是一条命令：关节目标 + 夹爪同一拍
-    assert list(joints_of(action)) == pytest.approx(list(default_qpos()))  # 关节目标不动
-    assert list(grippers_of(action)) == pytest.approx([0.25, 0.3])  # 只有右夹爪动，且是半开
+    assert layout == "gripper" and list(action) == pytest.approx([0.3])
     assert result["open"] == pytest.approx(0.3)
-
-    service.call("env.set_gripper", kwargs={"arm": "left", "open": 1.0, "settle": False})
-    left, right = list(grippers_of(adapter.rollout_calls[-1][0]))
-    assert left == pytest.approx(1.0)  # 只动点名的臂
-    assert right == pytest.approx(float(default_gripper()[1]))  # 另一臂仍是基座值
 
 
 def test_set_gripper_rejects_openness_outside_unit_range(env):
@@ -770,33 +809,22 @@ def test_set_gripper_rejects_openness_outside_unit_range(env):
     assert adapter.rollout_calls == []  # 一次都没动机器人
 
 
-def test_set_gripper_bases_on_joint_target_not_measured_joints():
-    """``env.set_gripper`` 的基座是 ``action``（**关节段目标**），不是实测 qpos。
-
-    底层是 MIT 力矩控制，实测关节恒落后目标一个稳态误差（``τ_gravity / kp``）：拿实测当基座，
-    连「只改夹爪」都会把这次的稳态误差写进新目标，并在手臂还在执行上一条目标时把它拽回实测值
-    ——逐个原语累积成显著偏差。
-    """
-    measured = default_qpos()  # 实测关节（落后目标）
-    commanded = default_qpos() + 0.2  # 上一条指令目标（手臂仍在往这里走）
-    frames = [make_obs(qpos=measured, action=commanded, pose=default_pose())]
-    service, adapter = settle_service(frames=frames)
-    result = service.call("env.set_gripper", kwargs={"arm": "right", "open": False})
+def test_set_gripper_never_rewrites_moving_joint_target():
+    frame = make_obs(qpos=default_qpos(), action=default_qpos() + 0.2, pose=default_pose())
+    before = frame[KEY_ACTION].copy()
+    service, adapter = settle_service(frames=[frame])
+    service.call("env.set_gripper", kwargs={"arm": "right", "open": False})
     action, layout = adapter.rollout_calls[-1]
-    assert layout == "joint+gripper"
-    assert list(joints_of(action)) == pytest.approx(list(commanded))  # 目标原样保留，没被拉回实测
-    assert result["source"] == "target"
+    assert layout == "gripper" and list(action) == [0.0]
+    np.testing.assert_array_equal(frame[KEY_ACTION], before)
 
 
-def test_set_gripper_falls_back_to_qpos_base_without_target():
-    """机器人没发布 ``action``（从未下发过指令）→ 退实测 qpos，回执 ``source`` 标注。"""
-    frames = [make_obs(qpos=default_qpos(), pose=default_pose())]
-    service, adapter = settle_service(frames=frames)
-    result = service.call("env.set_gripper", kwargs={"open": True})
+def test_set_gripper_does_not_require_joint_feedback():
+    service, adapter = settle_service(frames=[{}])
+    result = service.call("env.set_gripper", kwargs={"open": True, "settle": False})
     action, layout = adapter.rollout_calls[-1]
-    assert layout == "joint+gripper"
-    assert list(joints_of(action)) == pytest.approx(list(default_qpos()))
-    assert result["source"] == "measured"
+    assert layout == "gripper" and list(action) == [1.0, 1.0]
+    assert result["execution_status"] == "applied" and result["grasp_status"] == "unknown"
 
 
 def test_set_gripper_unknown_arm_is_rejected(env):
@@ -978,6 +1006,7 @@ def delta_service(*, track: bool = False, track_step: float = 0.05, settle: dict
             "timeout_s": 0.05,
             "stall_s": 0.02,
             "poll_s": 0.001,
+            "dwell_s": 0,
             **(settle or {}),
         }
     }
@@ -1225,6 +1254,7 @@ def settle_service(*, frames, pose_dim: int = 6, settle: dict | None = None, com
             "timeout_s": 0.05,
             "stall_s": 0.02,
             "poll_s": 0.001,
+            "dwell_s": 0,
             **(settle or {}),
         }
     }
@@ -1269,6 +1299,9 @@ def test_env_meta_exposes_lease_and_settle_contract():
         "enabled": True,
         "pos_tol_m": 0.01,  # 兜底值（配置未给 server.rpent.settle 时生效；部署值见 edge.yml）
         "rot_tol_rad": 0.05,
+        "joint_tol_rad": 0.05,
+        "gripper_tol": 0.05,
+        "max_sample_age_s": 0.5,
         "timeout_s": 5.0,
         "max_timeout_s": 90.0,  # 逐次覆盖的上限（客户端 HTTP 超时 120s）
         "target_wait_s": 1.0,  # 增量下发后等「命令落地」的上限（pose_target 跃迁）
@@ -1338,7 +1371,7 @@ def test_dry_run_never_sends_write_primitives_or_reset():
         assert receipt["dry_run"] is True and receipt["sent"] is False
         assert receipt["reached"] is None and receipt["reason"] == "dry_run"
     assert capture_start["recording"] is False
-    assert move["target"].shape == (14,) and gripper["target"].shape == (14,)  # 数值仍可核对
+    assert move["target"].shape == (14,) and gripper["target"].shape == (2,)  # 数值仍可核对
     assert adapter.rollout_calls == [] and adapter.reset_calls == 0  # 一帧都没下发
     assert commands.calls == []  # env.reset 也没打命令通道
 
@@ -1386,6 +1419,7 @@ def test_settle_judges_position_and_rotation_separately():
     target[0] += 0.002  # 位置差 2mm ≤ pos_tol 5mm
     target[3] += 0.03  # 姿态差 0.03 rad ≤ rot_tol 0.05
 
+    service._dispatch_motion(np.zeros(2), layout="gripper")
     receipt = service._settle_action(target, [0, 1], ActionSpace.POSE)
     assert receipt["reached"] is True
     assert receipt["final_err_m"] == pytest.approx(0.002, abs=1e-5)
@@ -1396,6 +1430,7 @@ def test_settle_judges_position_and_rotation_separately():
 def test_settle_receipt_reports_per_unit_errors_for_joint_space():
     """关节空间只回 ``final_err_rad``（``final_err_m`` 为 None）：不拿位置量纲去比关节。"""
     service, _adapter = settle_service(frames=[make_obs(qpos=default_qpos(), pose=default_pose())] * 20)
+    service._dispatch_motion(np.zeros(2), layout="gripper")
     receipt = service._settle_action(rpent_state(default_qpos() + 0.001), [0, 1], ActionSpace.JOINT)
 
     assert receipt["final_err_m"] is None
@@ -1415,6 +1450,7 @@ def test_default_tolerances_absorb_mit_steady_state_error():
     node = FakeNode(adapter, make_obs(qpos=default_qpos(), pose=default_pose()))
     service = RpentService(node, StubCommands(), leases=LeaseManager(), base_cfg=BASE_CFG)
 
+    service._dispatch_motion(np.zeros(2), layout="gripper")
     receipt = service._settle_action(rpent_state(default_qpos() + 0.03), [0, 1], ActionSpace.JOINT)
     assert receipt["reached"] is True and "stalled" not in receipt
     status = service.settle_status()
@@ -1571,8 +1607,8 @@ def test_move_delta_reports_not_applied_when_target_never_moves():
 
     result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
 
-    assert result["reached"] is None and result["not_applied"] is True
-    assert result["target_source"] == "predicted"  # 只回预测值，不谎报这是机器人的目标
+    assert result["reached"] is None and result["execution_status"] == "rejected"
+    assert result["command_id"] and result["ok"] is False
 
 
 def test_move_delta_flags_base_changed_when_target_moves_elsewhere():
@@ -1616,6 +1652,7 @@ def test_settle_reports_null_when_robot_has_no_pose():
         frames=[make_obs(qpos=default_qpos())] * 20, pose_dim=0, settle={"enabled": True}
     )
     target = np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    service._dispatch_motion(np.zeros(2), layout="gripper")
     receipt = service._settle_action(target, [0, 1], ActionSpace.POSE)
     assert receipt["reached"] is None and "observations/pose" in receipt["reason"]
 
@@ -1657,7 +1694,7 @@ def test_settle_per_call_override_rejects_bad_type():
 
 def test_settle_dwells_after_reaching():
     """判到位后再**多等一小段**（``dwell_s``）才回执：回读领先物理时「命令生效」≠「动作完成」。"""
-    service, _adapter = delta_service(track=True, track_step=0.005, settle={"dwell_s": 0.2})
+    service, _adapter = delta_service(track=True, track_step=0.005, settle={"dwell_s": 0.2, "timeout_s": 1})
     result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
     assert result["reached"] is True
     assert result["settle_dwell_s"] == pytest.approx(0.2)
@@ -1666,7 +1703,11 @@ def test_settle_dwells_after_reaching():
 
 def test_settle_dwell_defaults_to_deployment_value():
     """``settle`` 没写 ``dwell_s`` → 取 ``SettleConfig`` 兜底（0.5s）：不写配置也有「等一小会」的行为。"""
-    service, _adapter = delta_service(track=True, track_step=0.005)
+    from motrix_edge.server.rpent.settle import SettleConfig
+
+    service, _adapter = delta_service(
+        track=True, track_step=0.005, settle={"dwell_s": SettleConfig().dwell_s, "timeout_s": 1}
+    )
     result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
     assert result["reached"] is True and result["settle_dwell_s"] == pytest.approx(0.5)
     assert result["elapsed_s"] >= 0.5
@@ -1700,14 +1741,14 @@ def test_set_gripper_waits_for_gripper_to_close():
     service, _adapter = settle_service(frames=open_frames + closed_frames)
     result = service.call("env.set_gripper", kwargs={"open": False})
     assert result["reached"] is True and result["final_err"] <= 0.05
-    assert result["target"][6] == pytest.approx(0.0) and result["target"][13] == pytest.approx(0.0)
+    assert result["target"][0] == pytest.approx(0.0) and result["target"][1] == pytest.approx(0.0)
 
     half_frames = [make_obs(qpos=default_qpos(), gripper=[1.0, 1.0], pose=default_pose())]
     half_frames += [make_obs(qpos=default_qpos(), gripper=[0.4, 0.4], pose=default_pose()) for _ in range(20)]
     service, _adapter = settle_service(frames=half_frames)
     result = service.call("env.set_gripper", kwargs={"open": 0.4})
     assert result["reached"] is True and result["final_err"] <= 0.05
-    assert result["target"][6] == pytest.approx(0.4) and result["target"][13] == pytest.approx(0.4)
+    assert result["target"][0] == pytest.approx(0.4) and result["target"][1] == pytest.approx(0.4)
 
 
 def test_recover_joint_posture_keeps_grippers():
@@ -2347,7 +2388,8 @@ def test_joint_delta_not_applied_and_zero_delta(joint_delta_env):
     reply = service.call(
         "env.move_joint_delta", kwargs={"arm": "left", "delta_joint": [0.1] * 6, "settle": {"target_wait_s": 0}}
     )
-    assert reply["not_applied"] is True and reply["reached"] is None
+    assert reply["execution_status"] == "rejected" and reply["reached"] is None
+    adapter.apply_delta = True
     zero = service.call("env.move_joint_delta", kwargs={"delta_joint": [0] * 6, "settle": False})
     assert zero["target_source"] == "action" and "not_applied" not in zero
 
@@ -2355,11 +2397,15 @@ def test_joint_delta_not_applied_and_zero_delta(joint_delta_env):
 def test_joint_delta_missing_target_and_refusal(joint_delta_env):
     service, adapter, frame = joint_delta_env
     adapter.refuse = True
-    with pytest.raises(RpentError) as exc:
-        service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6})
-    assert exc.value.kind == "state"
+    result = service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6})
+    assert result["execution_status"] == "rejected" and result["reached"] is None
     adapter.refuse = False
-    adapter.apply_delta = False
+    adapter.apply_delta = True
+
+    def rollout_without_target(*args, **kwargs):
+        return True
+
+    adapter.rollout = rollout_without_target
     del frame[KEY_ACTION]
     reply = service.call("env.move_joint_delta", kwargs={"delta_joint": [0.1] * 6})
     assert reply["no_joint_target"] is True and reply["reached"] is None
@@ -2373,11 +2419,15 @@ def test_joint_delta_wait_ignores_other_arm_and_gripper_changes(joint_delta_env,
         frame[KEY_ACTION][6] = 0.5
         return True
 
-    monkeypatch.setattr(adapter, "rollout", rollout)
+    def submit(action, *, command_id, **kwargs):
+        rollout(action)
+        return {"command_id": command_id, "execution_status": "queued"}
+
+    monkeypatch.setattr(adapter, "submit_motion", submit)
     reply = service.call(
         "env.move_joint_delta", kwargs={"arm": "left", "delta_joint": [0.1] * 6, "settle": {"target_wait_s": 0}}
     )
-    assert reply["not_applied"] is True
+    assert reply["execution_status"] == "unconfirmed" and reply["reached"] is None
 
 
 def test_joint_delta_reports_changed_target(joint_delta_env, monkeypatch):
@@ -2458,9 +2508,8 @@ def test_joint_abs_dry_run_and_validation_before_send(env):
 def test_joint_abs_refusal_and_unsupported(env, monkeypatch):
     service, _, adapter, *_ = env
     monkeypatch.setattr(adapter, "rollout", lambda *args, **kwargs: False)
-    with pytest.raises(RpentError) as exc:
-        service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6})
-    assert exc.value.kind == "state"
+    result = service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6})
+    assert result["execution_status"] == "rejected" and result["reached"] is None
     adapter.ACTION_SPACES = (ActionSpace.POSE,)
     with pytest.raises(RpentError) as exc:
         service.call("env.move_joint_abs", kwargs={"target_joint": [0] * 6})
@@ -2570,3 +2619,52 @@ def test_canonical_joint_and_reset_dispatch_matches_legacy(env, canonical, legac
         if canonical == "env.set_joint_positions":
             assert result["arms"] == ["left"]
             assert np.allclose(result["target"], [0.1] * 6)
+
+
+def test_legacy_adapter_acceptance_is_unconfirmed(env, monkeypatch):
+    service, _, adapter, *_ = env
+    monkeypatch.setattr(adapter, "submit_motion", RobotAdapter.submit_motion.__get__(adapter))
+    result = service.call("env.translate_tool", kwargs={"delta_xyz": [0, 0, 0]})
+    assert result["execution_status"] == "unconfirmed" and result["reached"] is None
+    assert len(adapter.rollout_calls) == 1  # no retry, even for a zero delta
+
+
+@pytest.mark.parametrize("mode", ["wrong_id", "superseded", "restarted", "teleop", "queued"])
+def test_command_confirmation_rejects_unrelated_or_interrupted_motion(env, monkeypatch, mode):
+    service, _, adapter, *_ = env
+    original = adapter.submit_motion
+
+    def submit(action, **kwargs):
+        receipt = original(action, **kwargs)
+        if mode == "wrong_id":
+            receipt["command_id"] = "someone-else"
+        if mode == "queued":
+            receipt["execution_status"] = "queued"
+        return receipt
+
+    monkeypatch.setattr(adapter, "submit_motion", submit)
+    snapshot = adapter.motion_snapshot
+
+    def sample():
+        value = snapshot()
+        if mode == "superseded":
+            value["motion_revision"] += 1
+        if mode == "restarted":
+            value["instance_id"] = "new-process"
+        if mode == "teleop":
+            value["teleop"] = True
+        return value
+
+    monkeypatch.setattr(adapter, "motion_snapshot", sample)
+    result = service.call("env.translate_tool", kwargs={"delta_xyz": [0, 0, 0], "settle": {"target_wait_s": 0}})
+    assert result["ok"] is False and result["reached"] is None and result["command_id"]
+    assert len(adapter.rollout_calls) == 1
+
+
+def test_gripper_feedback_ignores_joint_error_and_never_confirms_grasp():
+    frame = make_obs(qpos=np.full(12, 2), gripper=[0.0, 0.9], action=np.zeros(12), cameras=())
+    service, adapter = settle_service(frames=[frame])
+    result = service.call("env.set_gripper", kwargs={"arm": "left", "open": False})
+    assert result["reached"] is True and result["grasp_status"] == "unknown"
+    assert result["final_err_opening"] == 0 and "final_err_rad" not in result
+    assert adapter.rollout_calls[-1][1] == "gripper"

@@ -226,3 +226,108 @@ def test_http_action_request_rejects_legacy_action_space_key(env_module):
     with pytest.raises(ValidationError):
         models.ActionRequest(action=[0.0] * 7, action_space="pose")
     assert models.ActionRequest(action=[0.0] * 7, layout="pose").layout == "pose"  # 新键正常
+
+
+def test_tracked_motion_is_idempotent_and_confirmed_by_control_thread(env_module):
+    env, robot = _env(env_module)
+    calls = []
+    robot.rollout = lambda action, **kwargs: calls.append(action) or True
+    kwargs = dict(layout="joint+gripper", arms=["right"], command_id="motion-1")
+    queued = env.robot_rollout([0.0] * 7, **kwargs)
+    assert queued["execution_status"] == "queued"
+    assert env.robot_rollout([0.0] * 7, **kwargs) == queued
+    assert env.commands.qsize() == 1
+    env._drain_commands()
+    applied = env.motion_command("motion-1")
+    assert applied["execution_status"] == "applied" and applied["motion_revision"] == 1
+    assert env.robot_rollout([0.0] * 7, **kwargs) == applied
+    assert env.commands.empty() and len(calls) == 1
+    with pytest.raises(ValueError, match="reused"):
+        env.robot_rollout([0.1] * 7, **kwargs)
+    assert env.motion_command("missing") is None
+
+
+@pytest.mark.parametrize(
+    "outcome,status",
+    [(False, "rejected"), (ValueError("IK failed"), "rejected"), (RuntimeError("driver failed"), "failed")],
+)
+def test_control_thread_failure_is_not_an_applied_motion(env_module, outcome, status):
+    env, robot = _env(env_module)
+
+    def rollout(*args, **kwargs):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    robot.rollout = rollout
+    env.robot_rollout([0.0] * 7, layout="joint+gripper", arms=["right"], command_id="failed-1")
+    env._drain_commands()
+    receipt = env.motion_command("failed-1")
+    assert receipt["execution_status"] == status
+    assert receipt["motion_revision"] == (1 if status == "failed" else 0)
+    assert receipt["error"]
+
+
+def test_control_snapshot_freezes_without_new_sampling_and_reset_is_tracked(env_module, monkeypatch):
+    env, robot = _env(env_module)
+    now = [10.0]
+    monkeypatch.setattr(env_module.time, "monotonic", lambda: now[0])
+    robot.seq = 0
+    robot.step = lambda: None
+    robot.reset = lambda: None
+
+    def sample():
+        robot.seq += 1
+        return {"value": robot.seq}
+
+    robot.sample_state = sample
+    robot.standard_observation = lambda state: {"observations/qpos": [state["value"]]}
+    env.robot_reset(command_id="reset-1")
+    env.step_control()
+    first = env.motion_snapshot()
+    assert first["sample_seq"] == 1 and first["motion_revision"] == 1
+    assert env.motion_command("reset-1")["execution_status"] == "applied"
+    now[0] += 2
+    assert env.motion_snapshot()["sample_age_s"] == 2
+    assert env.motion_snapshot()["sample_seq"] == 1
+    env.step_control()
+    assert env.motion_snapshot()["sample_seq"] == 2 and env.motion_snapshot()["sample_age_s"] == 0
+
+
+def test_motion_http_receipts_distinguish_queue_and_application(env_module):
+    from fastapi.testclient import TestClient
+
+    server = importlib.import_module("server.contract_server")
+    env, robot = _env(env_module)
+    robot.ready = True
+    robot.rollout = lambda *args, **kwargs: True
+    robot.reset = lambda: None
+    client = TestClient(server.create_app(env))  # no lifespan/hardware threads
+    body = {"action": [0.0] * 7, "layout": "joint+gripper", "arms": ["right"], "command_id": "http-1"}
+    assert client.post("/v1/rollout", json=body).json()["execution_status"] == "queued"
+    assert client.get("/v1/motion/commands/http-1").json()["execution_status"] == "queued"
+    env._drain_commands()
+    receipt = client.get("/v1/motion/commands/http-1").json()
+    assert receipt["execution_status"] == "applied"
+    assert client.post("/v1/rollout", json=body).json()["motion_revision"] == receipt["motion_revision"]
+    assert env.commands.empty()
+    assert client.get("/v1/motion/commands/missing").status_code == 404
+    assert client.get("/v1/motion/state").status_code == 503
+    assert client.post("/v1/reset", json={"command_id": "reset-http"}).json()["execution_status"] == "queued"
+    assert client.post("/v1/execute", json=body).status_code == 422
+    client.close()
+
+
+def test_motion_receipt_capacity_preserves_pending_commands(env_module):
+    env, robot = _env(env_module)
+    robot.rollout = lambda *args, **kwargs: True
+    kwargs = dict(layout="joint+gripper", arms=["right"])
+    for index in range(256):
+        env.robot_rollout([0.0] * 7, command_id=f"cmd-{index}", **kwargs)
+    with pytest.raises(ValueError, match="capacity"):
+        env.robot_rollout([0.0] * 7, command_id="extra", **kwargs)
+    assert env.commands.qsize() == 256
+    env._drain_commands()
+    env.robot_rollout([0.0] * 7, command_id="extra", **kwargs)
+    assert env.motion_command("cmd-0") is None
+    assert env.motion_command("cmd-1")["execution_status"] == "applied"

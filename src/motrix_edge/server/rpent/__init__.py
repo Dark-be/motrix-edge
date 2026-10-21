@@ -53,7 +53,7 @@
 | ``env.move_joint_delta``                         | 关节角增量 → ``adapter.rollout(joint_delta)``（不动夹爪） |
 | ``env.move_abs`` / ``env.move_to``                | ``world`` 绝对末端位姿 → ``adapter.rollout(pose)`` |
 | ``env.move_delta_abs``                            | ``world`` 轴平移增量 → ``adapter.rollout(pose_delta)`` |
-| ``env.set_gripper``                               | ``adapter.rollout(joint)``（基座取关节段目标，其余维不变） |
+| ``env.set_gripper``                               | ``adapter.submit_motion(gripper, arms=...)``（仅所选夹爪） |
 | ``env.recover_joint_posture``                     | 关节回 home（``HOME["joint"]``）+ 保持夹爪 |
 | ``env.step`` / ``env.chunk_step``                 | 逐帧 ``adapter.rollout(...)``（按控制频率节奏） |
 | ``env.get_task_language``                         | 推理会话的 prompt（无会话 → ``None``）       |

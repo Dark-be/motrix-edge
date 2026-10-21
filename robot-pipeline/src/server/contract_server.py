@@ -254,7 +254,13 @@ _DEFAULT_HOST = "0.0.0.0"  # 对齐 Edge 侧 adapter.SDK_HOST
 _DEFAULT_PORT = 8090  # 对齐 Edge 侧 adapter.SDK_URL
 
 
+class MotionResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    command_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
 class ActionRequest(BaseModel):
+    command_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     model_config = ConfigDict(extra="forbid")  # 旧键（如 action_space）显式 422，不静默按 joint 解释
 
     action: list[float] = Field(
@@ -551,17 +557,19 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 
     # ---------------------------------------------------------------- 指令
     @app.post(PATH_RESET)
-    def reset():
+    def reset(req: MotionResetRequest | None = None):
         """程序复位到 home（非阻塞）：与 execute 一样只修改唯一目标。"""
         _require_ready()
         try:
-            env.robot_reset()
+            receipt = env.robot_reset(command_id=req.command_id) if req else env.robot_reset()
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(e))
-        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED, **(receipt or {})}
 
     def _apply_commands(req: ActionRequest) -> dict:
         _require_ready()
+        if req.command_id is not None:
+            raise HTTPException(status_code=422, detail="command_id is supported by rollout, not raw execute")
         try:
             env.robot_execute(req.action, layout=req.layout, arms=req.arms)
         except ValueError as e:
@@ -586,12 +594,42 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         """
         _require_ready()
         try:
-            env.robot_rollout(req.action, layout=req.layout, arms=req.arms)
+            receipt = (
+                env.robot_rollout(req.action, layout=req.layout, arms=req.arms, command_id=req.command_id)
+                if req.command_id
+                else env.robot_rollout(req.action, layout=req.layout, arms=req.arms)
+            )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except TakeoverActiveError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
-        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED, **(receipt or {})}
+
+    @app.get("/v1/motion/commands/{command_id}")
+    def motion_command(command_id: str):
+        receipt = env.motion_command(command_id)
+        if receipt is None:
+            raise HTTPException(status_code=404, detail="unknown or expired command_id")
+        return receipt
+
+    @app.get("/v1/motion/state")
+    def motion_state():
+        snapshot = env.motion_snapshot()
+        if snapshot is None:
+            raise HTTPException(status_code=503, detail="motion sample unavailable")
+
+        def json_value(value):
+            if isinstance(value, np.ndarray):
+                return json_value(value.tolist())
+            if isinstance(value, (list, tuple)):
+                return [json_value(item) for item in value]
+            if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+                return None
+            if isinstance(value, dict):
+                return {key: json_value(item) for key, item in value.items()}
+            return value
+
+        return json_value(snapshot)
 
     @app.post(PATH_TELEOP)
     def teleop(req: TeleopRequest):
