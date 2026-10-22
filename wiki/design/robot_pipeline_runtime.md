@@ -110,7 +110,9 @@ FK / IK、TCP 位姿、遥操作目标和标准观测均以 `DualPiperRobot` 为
 -   `capture_frames()`（观测线程）：调 `get_observation_frames()`，组装为
     `observations/images/<cam_name>`（恒有）与 `observations/depth/<cam_name>`（仅**生效的
     深度相机**且本拍确实拿到深度时）——深度与彩色**同拍同源**（同一次取帧，见
-    [深度观测](./robot_pipeline_depth.md)）。
+    [深度观测](./robot_pipeline_depth.md)）。彩色帧在内存中统一为 **RGB uint8 原始数组**
+    （RealSense 原生 bgr8 直出，不在 sensor / robot 层预编码）；JPEG 只在 MCAP 落盘时由
+    collector 编码一次——预编码会让观测线程每拍白跑一遍编码 + 解码，且多一代画质损失。
 -   `build_observation()`（观测线程）：`motion_state` + 本拍相机帧，并写入帧时刻 `timestamp`
     （**本线程打点**，观测拍取帧之前）；`motion_state` 为空（控制线程尚未采到第一拍）时返回
     `None`，该拍不出观测，下一拍重试。

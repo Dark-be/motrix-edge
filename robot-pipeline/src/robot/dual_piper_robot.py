@@ -210,7 +210,9 @@ class DualPiperRobot(BaseRobot):
         for name in self.IMAGE_NAMES:
             self.sensors[name].connect(
                 device=self.camera_devices[name],
-                pixel_format="jpg",
+                # RealSense 硬件色彩流本身就是 BGR8：用 raw 直接得到 ndarray，
+                # 避免 sensor 先 JPEG 编码、get_observation_frames 再解码回来（每路每拍白跑一遍编解码）。
+                pixel_format="raw",
                 enable_depth=name in self.depth_cameras,  # 只有生效的深度相机开深度流
             )
         debug_print(self.name, "Setup sensors done", "INFO")

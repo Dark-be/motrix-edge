@@ -204,7 +204,9 @@ class RealsenseSensor(Sensor):
             # 不需要转换为 BGR 格式，因为 RealSense 输出的已经是 BGR
             image["color"] = cv2.imencode(".jpg", tmp_img)[1]
         else:
-            image["color"] = tmp_img[:, :, ::-1]  # BGR → RGB
+            # BGR → RGB；ascontiguousarray 同时保证内存归本拍所有（tmp_img 是 SDK 帧缓冲视图，
+            # 下一次同一 pipeline 取帧就会复用），消费方拿到的是可安全跨函数传递的连续数组。
+            image["color"] = np.ascontiguousarray(tmp_img[:, :, ::-1])
 
         if self.enable_depth:
             depth_frame = frame.get_depth_frame()
