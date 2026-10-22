@@ -1517,7 +1517,7 @@ class RpentService:
         return transform_points(invert_transform(self._world_from_base(adapter, arm)), point)
 
     def _set_gripper(self, *args, arm: str | None = None, open: Any = True, settle: Any = None) -> dict:
-        """Send only the selected grippers. Opening feedback does not establish a grasp."""
+        """Send selected grippers; classify a settled closing gap using the rig threshold."""
         if args:
             arm = args[0] if arm is None else arm
         wanted = gripper_openness(open)
@@ -1543,7 +1543,35 @@ class RpentService:
             if config.enabled
             else unreached("settle disabled")
         )
-        return {**reply, "sent": True, **arrival}
+        grasp = (
+            self._grasp_from_opening_gap(indices, config) if arrival.get("stalled") or arrival.get("reached") else {}
+        )
+        return {**reply, "sent": True, **arrival, **grasp}
+
+    def _grasp_from_opening_gap(self, indices: list[int], config: SettleConfig) -> dict:
+        """A stopped closing gap > 0.02 is the operator's grasp heuristic, not arrival."""
+        snapshot = self._confirmed_snapshot()
+        if snapshot is None or not 0 <= snapshot.get("sample_age_s", float("inf")) <= config.max_sample_age_s:
+            return {}
+        count = max(len(self._view.arms), 1)
+        frame = snapshot["observation"]
+        actual = self._gripper_slots(frame, count)
+        action = self._gripper_slots(frame, count, source=SOURCE_TARGET)
+        if actual is None or action is None:
+            return {}
+        actual, action = actual[indices], action[indices]
+        if not np.all(np.isfinite(actual)) or not np.all(np.isfinite(action)):
+            return {}
+        gaps = actual.astype(np.float64) - action.astype(np.float64)
+        # Readback is float32; treat its numerical noise at the strict boundary as equality.
+        grasped = (gaps > 0.02) & ~np.isclose(gaps, 0.02, rtol=0, atol=1e-7)
+        names = self._view.arms or ["gripper"]
+        return {
+            "grasp_status": "grasped" if np.all(grasped) else "unknown",
+            "grasp_status_by_arm": {names[i]: "grasped" if yes else "unknown" for i, yes in zip(indices, grasped)},
+            "grasp_opening_gap": gaps,
+            "grasp_gap_threshold": 0.02,
+        }
 
     def _step(self, action: Any = None, action_space: str | None = None) -> list:
         """``env.step``：单帧动作 → 返回 gym 形态 5 元组 ``[obs, reward, terminated, truncated, info]``。

@@ -2668,3 +2668,60 @@ def test_gripper_feedback_ignores_joint_error_and_never_confirms_grasp():
     assert result["reached"] is True and result["grasp_status"] == "unknown"
     assert result["final_err_opening"] == 0 and "final_err_rad" not in result
     assert adapter.rollout_calls[-1][1] == "gripper"
+
+
+@pytest.mark.parametrize(
+    "actual,target,status",
+    [
+        (0.35, 0.0, "grasped"),
+        (0.5, 0.25, "grasped"),
+        (0.02, 0.0, "unknown"),
+        (0.52, 0.5, "unknown"),
+        (0.019, 0.0, "unknown"),
+        (0.03, 0.0, "grasped"),
+        (0.0, 0.8, "unknown"),
+    ],
+)
+def test_gripper_grasp_uses_strict_signed_action_gap_after_settling(actual, target, status):
+    frame = make_obs(qpos=default_qpos(), gripper=[actual, 1.0], cameras=())
+    frame[KEY_ACTION] = rpent_state(default_qpos(), [target, 1.0])
+    service, _ = settle_service(frames=[frame])
+    result = service.call("env.set_gripper", kwargs={"arm": "left", "open": target})
+    assert result.get("stalled") or result["reached"]
+    assert result["grasp_gap_threshold"] == 0.02
+    assert result["grasp_status"] == status
+    assert result["grasp_status_by_arm"] == {"left": status}
+    assert result["grasp_opening_gap"][0] == pytest.approx(actual - target)
+
+
+def test_gripper_grasp_does_not_use_transient_gap_or_unsettled_commands():
+    frame = make_obs(qpos=default_qpos(), gripper=[0.5, 1.0], cameras=())
+    frame[KEY_ACTION] = rpent_state(default_qpos(), [0.0, 1.0])
+    for settle in (False, {"stall_s": 10, "timeout_s": 0.001}):
+        service, _ = settle_service(frames=[frame])
+        result = service.call("env.set_gripper", kwargs={"arm": "left", "open": 0, "settle": settle})
+        assert result["grasp_status"] == "unknown"
+
+
+def test_multiarm_grasp_requires_each_selected_gripper_to_qualify():
+    frame = make_obs(qpos=default_qpos(), gripper=[0.5, 0.01], cameras=())
+    frame[KEY_ACTION] = rpent_state(default_qpos(), [0.0, 0.0])
+    service, _ = settle_service(frames=[frame])
+    result = service.call("env.set_gripper", kwargs={"open": 0})
+    assert result["grasp_status"] == "unknown"
+    assert result["grasp_status_by_arm"] == {"left": "grasped", "right": "unknown"}
+
+
+def test_gripper_grasp_requires_fresh_finite_feedback():
+    for actual in (float("nan"), 0.5):
+        frame = make_obs(qpos=default_qpos(), gripper=[actual, 1.0], cameras=())
+        frame[KEY_ACTION] = rpent_state(default_qpos(), [0.0, 1.0])
+        service, adapter = settle_service(frames=[frame])
+        original = adapter.motion_snapshot
+
+        def stale_snapshot():
+            return {**original(), "sample_age_s": 2}
+
+        adapter.motion_snapshot = stale_snapshot
+        result = service.call("env.set_gripper", kwargs={"arm": "left", "open": 0})
+        assert result["grasp_status"] == "unknown" and result["reached"] is False
