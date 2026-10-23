@@ -136,30 +136,31 @@ def test_dimensions_are_derived_from_arm_layout(dual_piper):
 
     assert (dual_piper.DualPiperRobot.joint_dim(), dual_piper.DualPiperRobot.pose_dim()) == (12, 12)
     assert dual_piper.DualPiperRobot.gripper_dim() == 2
-    assert (single_piper.SinglePiperRobot.joint_dim(), single_piper.SinglePiperRobot.pose_dim()) == (6, 0)
+    assert (single_piper.SinglePiperRobot.joint_dim(), single_piper.SinglePiperRobot.pose_dim()) == (6, 6)
     assert single_piper.SinglePiperRobot.gripper_dim() == 1
-    assert single_piper.SinglePiperRobot.ARM_NAMES == ("left",)
+    assert single_piper.SinglePiperRobot.ARM_NAMES == ("right",)
     assert not ({"QPOS", "POSE", "GRIPPER"} & vars(dual_piper.DualPiperRobot).keys())
 
 
-def test_single_piper_selects_left_pair_from_dual_machine_profile():
-    """同一机器档案可含双臂完整接线；单臂机型只装配左主手与左从臂。"""
+def test_single_piper_selects_cross_pair_from_dual_machine_profile():
+    """同一机器档案可含双臂完整接线；单臂机型只装配左主手与右从臂。"""
     single_piper = _load("robot.single_piper_robot")
     robot = single_piper.SinglePiperRobot(
         robot_config={
             "init_joint": [0.0] * 6,
+            "cameras": _DEVICES["cameras"],
             "init_gripper": [1.0],
             "ports": {"left_master": "m_left", "right_master": "m_right", "left": "left", "right": "right"},
             "teleop": {"joint_offset": {"left": [0.1] * 6, "right": [0.2] * 6}},
         }
     )
 
-    assert robot.ports == {"left_master": "m_left", "left": "left"}
-    assert set(robot.controllers) == {"left_master", "left_arm"}
+    assert robot.ports == {"left_master": "m_left", "right": "right"}
+    assert set(robot.controllers) == {"left_master", "right_arm"}
     assert robot.controllers["left_master"].name == "left_master"
-    assert robot.controllers["left_arm"].name == "left"
-    assert robot.state_arms() == ["left"]
-    assert robot.teleop_joint_offset.tolist() == pytest.approx([0.1] * 6)
+    assert robot.controllers["right_arm"].name == "right"
+    assert robot.state_arms() == ["right"]
+    assert robot.teleop_joint_offset.tolist() == pytest.approx([0.2] * 6)
 
 
 def test_single_piper_teleop_gripper_reads_left_master():
@@ -167,8 +168,9 @@ def test_single_piper_teleop_gripper_reads_left_master():
     robot = single_piper.SinglePiperRobot(
         robot_config={
             "init_joint": [0.0] * 6,
+            "cameras": _DEVICES["cameras"],
             "init_gripper": [1.0],
-            "ports": {"left_master": "m_left", "left": "left"},
+            "ports": {"left_master": "m_left", "right": "right"},
         }
     )
     robot.controllers["left_master"] = _FakeArm(gripper=0.35)
@@ -730,3 +732,125 @@ def test_dual_pose_roundtrip_with_tcp(dual_piper):
     assert pose.shape == (12,) and np.isfinite(pose).all()
     solved = robot._solve_pose(pose, joints)
     np.testing.assert_allclose(robot.get_observation_pose(solved), pose, atol=1e-4)
+
+
+def test_single_piper_connects_only_surviving_hardware(monkeypatch):
+    from unittest.mock import Mock
+
+    module = _load("robot.dual_piper_robot")
+    single = _load("robot.single_piper_robot")
+    monkeypatch.setattr(module, "PiperController", lambda name: Mock(name=name))
+    monkeypatch.setattr(module, "RealsenseSensor", lambda name: Mock(name=name))
+    robot = single.SinglePiperRobot(
+        {
+            **_DEVICES,
+            "tcp": {
+                "enabled": True,
+                "offset": [0, 0, 0.12],
+                "arms": {"left": {"offset": [0, 0, 0.1]}, "right": {"offset": [0, 0, 0.2]}},
+            },
+            "depth": {"cameras": list(_DEVICES["cameras"])},
+            "leader_firmware": "v189",
+            "follower_firmware": "v188",
+        }
+    )
+    robot.connect()
+    assert set(robot.controllers) == {"left_master", "right_arm"}
+    assert set(robot.sensors) == {"cam_head", "cam_right_wrist"}
+    robot.controllers["left_master"].connect.assert_called_once_with(port="can0", role="leader", firmware="v189")
+    robot.controllers["right_arm"].connect.assert_called_once_with(port="can3", gravity=None, firmware="v188")
+    for name, sensor in robot.sensors.items():
+        sensor.connect.assert_called_once_with(device=_DEVICES["cameras"][name], pixel_format="raw", enable_depth=True)
+    assert list(robot.tcp_offsets) == ["right"]
+    assert robot.tcp_offsets["right"].tolist() == [0, 0, 0.2]
+    robot.disconnect()
+    for device in (*robot.controllers.values(), *robot.sensors.values()):
+        device.disconnect.assert_called_once()
+
+
+def test_single_piper_teleop_capture_and_deadzone():
+    single = _load("robot.single_piper_robot")
+    robot = single.SinglePiperRobot({**_DEVICES, "step_rad": 1.0})
+    robot.controllers = {"left_master": _FakeArm([0.1] * 6, 0.1), "right_arm": _FakeArm([0.0] * 6, 1.0)}
+    robot.enable_teleop()
+    robot.step()
+    assert robot.controllers["right_arm"].joint.tolist() == pytest.approx([0.1] * 6)
+    assert robot.controllers["right_arm"].gripper == 0.0
+    robot.motion_state = robot.sample_state()
+    obs = robot.standard_observation()
+    assert obs[KEY_QPOS].shape == (7,)
+    assert obs[KEY_ACTION].shape == (7,)
+    assert obs[KEY_POSE].shape == (6,)
+    assert {item["arm"] for item in robot.state_layout()["state_dims"]} == {"right"}
+
+
+def test_single_piper_camera_frames_keep_order_and_timestamps():
+    from unittest.mock import Mock
+
+    from utils.observation_time import KEY_TIMESTAMP_NS
+
+    single = _load("robot.single_piper_robot")
+    robot = single.SinglePiperRobot(_DEVICES)
+    for index, name in enumerate(robot.IMAGE_NAMES):
+        robot.sensors[name] = Mock(pixel_format="raw")
+        robot.sensors[name].get_information.return_value = {
+            "color": np.full((2, 2, 3), index, dtype=np.uint8),
+            "depth": np.full((2, 2), index + 10, dtype=np.uint16),
+            KEY_TIMESTAMP_NS: 100 + index,
+        }
+    frames = robot.get_observation_frames()
+    assert [frame[KEY_TIMESTAMP_NS] for frame in frames] == [100, 101]
+    assert [frame["depth"][0, 0] for frame in frames] == [10, 11]
+    assert [frame["color"][0, 0, 0] for frame in frames] == [0, 1]
+    for sensor in robot.sensors.values():
+        sensor.get_information.assert_called_once()
+
+
+@pytest.mark.parametrize("section, key", [("ports", "rihgt"), ("cameras", "cam_rihgt_wrist")])
+def test_single_piper_requires_surviving_devices(section, key):
+    single = _load("robot.single_piper_robot")
+    config = {name: dict(values) for name, values in _DEVICES.items()}
+    required = "right" if section == "ports" else "cam_right_wrist"
+    config[section][key] = config[section].pop(required)
+    with pytest.raises(ValueError):
+        single.SinglePiperRobot(config)
+
+
+def test_single_piper_pose_and_takeover_use_right_arm_targets():
+    single = _load("robot.single_piper_robot")
+    robot = single.SinglePiperRobot({**_DEVICES, "tcp": {"enabled": True, "offset": [0, 0, 0.12]}})
+    robot.controllers = {
+        "left_master": _FakeArm([0.4] * 6, 0.5),
+        "right_arm": _FakeArm(robot.init_joint, 1.0),
+    }
+    robot.reset()
+    robot.step()
+    pose = robot.get_pose_action()
+    robot.execute(np.concatenate([pose, [0.6]]), layout="pose+gripper", arms=["right"])
+    np.testing.assert_allclose(robot.get_pose_action(), pose, atol=1e-5)
+    robot.execute(np.zeros(6), layout="pose_delta", arms=["right"])
+    np.testing.assert_allclose(robot.get_pose_action(), pose, atol=1e-5)
+    robot.step()
+    before = robot.joint_command.copy()
+    robot.enable_teleop(mode="delta")
+    robot.step()
+    np.testing.assert_allclose(robot.joint_target, before)
+    assert robot.rollout(np.zeros(6)) is False
+    robot.controllers["left_master"].joint += 0.02
+    robot.step()
+    np.testing.assert_allclose(robot.joint_target, before + 0.02, atol=1e-7)
+    robot.safe_stop()
+    assert not robot.teleop_enabled
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"depth": {"cameras": ["cam_rihgt_wrist"]}},
+        {"tcp": {"enabled": True, "offset": [0, 0, 0.12], "arms": {"rihgt": {"offset": [0, 0, 0.1]}}}},
+    ],
+)
+def test_single_piper_rejects_unknown_profile_resources(config):
+    single = _load("robot.single_piper_robot")
+    with pytest.raises(ValueError):
+        single.SinglePiperRobot({**_DEVICES, **config})

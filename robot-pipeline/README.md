@@ -99,12 +99,12 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 具体机器人实现（`BaseRobot` 子类）在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册
 （类型名 -> 模块 + 类名）；配置 `robot.type` 即按此自动匹配：
 
-| 注册类型                  | 实现                                                 | 说明                                  |
-| ------------------------- | ---------------------------------------------------- | ------------------------------------- |
-| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）              |
-| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                        |
-| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作  |
-| `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂遥操作（共用档案的左主手+左从臂） |
+| 注册类型                  | 实现                                                 | 说明                                            |
+| ------------------------- | ---------------------------------------------------- | ----------------------------------------------- |
+| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）                        |
+| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                                  |
+| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作            |
+| `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂遥操作（共用档案的左主手+右从臂，两路相机） |
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
 `INFO_LEVEL`（日志级别 DEBUG / INFO / ERROR，robot server 启动时读）、`server`（监听
@@ -253,8 +253,18 @@ can:
     `config` 行给出实际读到的文件（本地副本 / 包内示例），`machine` 行给出实际用的档案
     （如 `pc16（档案 …/pc16.yml）` / `pc16（无档案 → 按机型默认）`），`robot` 行给出类型与接线
     摘要，`collect` 行给出**绝对**落盘目录（相对路径按启动时 cwd 解析）。
--   **单臂复用**：`single_piper` 直接使用同一档案里的 `left_master / left`，右侧端口与相机信息
+-   **单臂复用**：`single_piper` 直接使用同一档案里的 `left_master / right` 和 `cam_head / cam_right_wrist`，其余设备信息
     保留但不装配；无需再维护 `leader / follower` 同义键或第二份机器档案。
+
+故障后使用同一机器档案切换机型（先停止原双臂进程）：
+
+```bash
+bash scripts/start.sh single_piper --machine pc16
+```
+
+单臂动作与状态为右臂 7 维，默认保存到 `data/single_piper`。若现场存在旧的
+`config/single_piper.yml`，需同步新增的相机、TCP、深度和遥操作配置；机器档案继续复用。
+跨侧主从的零位差按 `robot.teleop.joint_offset.right` 核验。
 
 ### 一键生成：`scripts/setup_robot.sh`
 

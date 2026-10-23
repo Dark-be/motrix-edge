@@ -296,7 +296,7 @@ def test_fallback_when_no_discovered():
 
 def test_robot_adapters_lists_entry_points():
     names = {t for t, _, _ in robot_adapters()}
-    assert names >= {"test_robot", "dual_piper"}
+    assert names >= {"test_robot", "dual_piper", "single_piper"}
 
 
 def test_get_adapter_with_required_capability():
@@ -308,7 +308,7 @@ def test_get_adapter_with_required_capability():
 
 
 def test_robot_adapters_filters_by_capability():
-    expected = {"test_robot", "dual_piper"}
+    expected = {"test_robot", "dual_piper", "single_piper"}
     assert expected <= {t for t, _, _ in robot_adapters(AdapterCapability.CAPTURE)}
     assert expected <= {t for t, _, _ in robot_adapters(AdapterCapability.EXECUTE)}
     assert expected <= {t for t, _, _ in robot_adapters(AdapterCapability.STREAMING)}

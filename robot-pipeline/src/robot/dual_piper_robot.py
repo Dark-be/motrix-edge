@@ -58,6 +58,8 @@ class DualPiperRobot(BaseRobot):
     SHM_NAME = "dual_piper_obs"
     # 硬件接线（值必填、只在配置里给：robot.ports / robot.cameras）
     PORT_ROLES = ("left_master", "right_master", "left", "right")  # 主手 / 从臂端口
+    PROFILE_PORT_ROLES: tuple[str, ...] = ()
+    PROFILE_CAMERA_NAMES: tuple[str, ...] = ()
     PORT_KINDS = {role: "can" for role in PORT_ROLES}  # 均为 CAN 接口名
 
     ARM_NAMES = ("left", "right")
@@ -79,15 +81,11 @@ class DualPiperRobot(BaseRobot):
         super().__init__(robot_config)
         # 位姿解算参数（robot.cartesian.ik，可选）
         self.ik_config = dict((self.robot_config.get("cartesian") or {}).get("ik") or {})
-        self.ports = self._required_devices("ports", self.PORT_ROLES)
-        self.camera_devices = self._required_devices("cameras", self.IMAGE_NAMES)
+        self.ports = self._required_devices("ports", self.PORT_ROLES, known_keys=self.PROFILE_PORT_ROLES)
+        self.camera_devices = self._required_devices("cameras", self.IMAGE_NAMES, known_keys=self.PROFILE_CAMERA_NAMES)
         # 主手只读（遥操作输入）；左/右臂执行；三路 RealSense 按序列号区分
-        self.controllers: dict = {
-            "left_arm": PiperController("left"),
-            "right_arm": PiperController("right"),
-            "left_master": PiperController("left_master"),
-            "right_master": PiperController("right_master"),
-        }
+        self.controllers: dict = {self.ARM_CONTROLLERS[arm]: PiperController(arm) for arm in self.ARM_NAMES}
+        self.controllers.update({name: PiperController(name) for name in self.MASTER_CONTROLLERS.values()})
         self.sensors: dict = {name: RealsenseSensor(name) for name in self.IMAGE_NAMES}
         self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条）
 
@@ -205,7 +203,15 @@ class DualPiperRobot(BaseRobot):
         # 重力前馈只装在执行臂（主手只读）
         gravity = self.robot_config.get("gravity")
         for arm in self.ARM_NAMES:
-            self._controller_for_arm(arm).connect(port=self.ports[arm], gravity=gravity)
+            self._controller_for_arm(arm).connect(
+                port=self.ports[arm],
+                gravity=gravity,
+                **(
+                    {"firmware": self.robot_config["follower_firmware"]}
+                    if "follower_firmware" in self.robot_config
+                    else {}
+                ),
+            )
         debug_print(self.name, "Setup controllers done", "INFO")
         for name in self.IMAGE_NAMES:
             self.sensors[name].connect(
@@ -222,7 +228,13 @@ class DualPiperRobot(BaseRobot):
         """连接只读 Piper 主手；其他主手机型覆盖此硬件接入点。"""
         for arm in self.ARM_NAMES:
             master_name = self.MASTER_CONTROLLERS[arm]
-            self._master_controller_for_arm(arm).connect(port=self.ports[master_name], role="leader")
+            self._master_controller_for_arm(arm).connect(
+                port=self.ports[master_name],
+                role="leader",
+                **(
+                    {"firmware": self.robot_config["leader_firmware"]} if "leader_firmware" in self.robot_config else {}
+                ),
+            )
 
     def disconnect(self):
         """断开 master/slave 控制器与相机（幂等，重复调用安全）。"""
