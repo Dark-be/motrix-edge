@@ -37,6 +37,16 @@ class TestArmController(ArmController):
 
     def __init__(self, name="test_arm"):
         super().__init__(name)
+        self.step_rad = 0.05
+
+    @property
+    def control_detail(self) -> dict:
+        return {
+            "mode": "test",
+            "ctrl_mode": "test",
+            "role": "follower",
+            "step_rad": self.step_rad,
+        }
 
     # ---- 虚拟运动学（**静态**，与 PiperController 同形：上层只拿「位姿 ↔ 关节」的结果）--------
     @staticmethod

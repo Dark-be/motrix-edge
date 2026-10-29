@@ -102,7 +102,7 @@ class InferEnterRequest(BaseModel):
 
     ``config`` 为**该策略的配置项**（如需端点的策略含端点项 ``host`` / ``port``，即 openpi /
     lerobot-act；openpi → prompt；
-    lerobot-act → pretrained_name_or_path / device / actions_per_chunk），见
+    lerobot-remote → deployment / semantics / chunk_merge），见
     ``policy.POLICY_CONFIG_ITEMS``；前端按 ``/v1/health`` 的 ``policy_config_items``
     （或在会话内按 ``GET /v1/infers`` 的 ``policy_config.items``）动态渲染表单，提交时随本字段下发。
     """

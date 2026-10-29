@@ -117,7 +117,7 @@ class BaseRobot:
         self._validate_dimensions()
         self.robot_config = dict(robot_config or {})
         self.name = str(self.robot_config.get("name", self.NAME))
-        self.step_rad = float(self.robot_config.get("step_rad", 0.1))  # 每拍最大关节增量（rad）
+        self.step_rad = float(self.robot_config.get("step_rad", 0.05))  # 每拍最大关节增量（rad）
         self.ready = False
         self.last_error = None
 

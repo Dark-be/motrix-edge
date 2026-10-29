@@ -41,3 +41,4 @@ webrtc）。纯前端、零后端改动。功能完整落地后删除本文档�
 -   [x] 采集 / 推理 / 手动 / 调试页复用 3D 场景；实测 qpos 用实色臂，Robot `action` 用蓝色半透明臂
 -   [x] 策略 schema 增加 `options`，layout 类配置由通用表单渲染为固定候选下拉并在后端校验
 -   [x] `/v1/preview` 与数值观测卡展示 Robot 显式提供的逐臂 `qpos_err`
+-   [x] 采集开始门禁：`operator` / `task_name` 两项选择并同步后才允许开始录制；缺失时按钮置灰并提示原因

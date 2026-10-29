@@ -144,28 +144,33 @@ def test_health_returns_identity_and_version():
     assert "adapters" in body and "robots" in body["adapters"]
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-remote"]
     # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 预热门控 warmup_required
     # + 动作布局 action_layout）
     by_type = {p["type"]: p for p in body["adapters"]["policies"]}
     assert [item["key"] for item in by_type["openpi"]["config_items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]
-    assert [item["key"] for item in by_type["lerobot-act"]["config_items"]] == [
+    assert [item["key"] for item in by_type["lerobot-remote"]["config_items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
+        "deployment",
+        "semantics",
         "observation_layout",
-        "pretrained_name_or_path",
-        "device",
-        "actions_per_chunk",
-        "image_size",
+        "mode",
+        "chunk_merge",
+        "encoding",
+        "jpeg_quality",
+        "expected_artifact",
     ]
 
 
@@ -175,7 +180,7 @@ def test_health_without_node_returns_empty_robot():
     body = client.get("/v1/health").json()
     assert body["robot"] == {"name": None, "type": None}
     assert body["adapters"]["robots"] == []
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-remote"]
 
 
 def test_adapters_info_returns_capabilities():
@@ -430,7 +435,7 @@ class FakeInferSession:
         self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
         self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
         self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
-        self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-act=False 不门控）
+        self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-remote=False 不门控）
         # 会话使用的策略类型（决定配置项 schema）；缺省取配置 policy.type
         self.policy_config_type = policy_type or BASE_CFG.get("policy", {}).get("type", "openpi")
         self._rtc_params = {"enabled": True, "suffix_len": 10}  # RTC 参数（infer rtc set 可改）
@@ -1944,12 +1949,14 @@ def test_infers_status_exposes_policy_config():
     assert [item["key"] for item in cfg["items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
     assert [item["runtime"] for item in cfg["items"]] == [
+        False,
         False,
         False,
         False,
@@ -1987,11 +1994,11 @@ def test_infers_config_sets_policy_config():
     assert r.json()["policy_config"]["missing"] == []
     assert r.json()["policy_config"]["values"]["prompt"] == "把零件放好"
     assert r.json()["deferred"] == []  # prompt 是 runtime=True：立即生效，无延后项
-    # 非本策略的配置项（lerobot-act 的模型路径）→ 400（不静默写入）
+    # 非本策略的配置项（lerobot-remote 的 deployment）→ 400（不静默写入）
     bad = client.post(
         "/v1/infers/config",
         headers={"X-Lease-Id": lease},
-        json={"config": {"pretrained_name_or_path": "/tmp/x"}},
+        json={"config": {"deployment": "press_three_buttons"}},
     )
     assert bad.status_code == 400
     assert "unknown openpi config key" in bad.json()["detail"]
@@ -2047,30 +2054,30 @@ def test_infers_enter_config_applies_endpoint():
 
 
 def test_infers_enter_applies_policy_config():
-    """POST /v1/infers 携带 config：进入会话前写入策略配置项（lerobot-act 的模型路径运行时给定）。"""
+    """POST /v1/infers 携带 config：进入会话前写入策略配置项（lerobot-remote 的部署名运行时给定）。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
     r = client.post(
         "/v1/infers",
         headers={"X-Lease-Id": lease},
-        json={"policy_type": "lerobot-act", "config": {"pretrained_name_or_path": "/tmp/pretrained_model"}},
+        json={"policy_type": "lerobot-remote", "config": {"deployment": "press_three_buttons"}},
     )
     assert r.status_code == 200
-    assert BASE_CFG["policy"]["pretrained_name_or_path"] == "/tmp/pretrained_model"
-    assert node.session.policy_config_type == "lerobot-act"  # 会话按所选策略渲染配置项
-    # 会话内设置非本策略的配置项（lerobot-act 无 prompt）→ 400
+    assert BASE_CFG["policy"]["deployment"] == "press_three_buttons"
+    assert node.session.policy_config_type == "lerobot-remote"  # 会话按所选策略渲染配置项
+    # 会话内设置非本策略的配置项（lerobot-remote 无 prompt）→ 400
     bad_key = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}})
     assert bad_key.status_code == 400
-    assert "unknown lerobot-act config key" in bad_key.json()["detail"]
+    assert "unknown lerobot-remote config key" in bad_key.json()["detail"]
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
     # 进入会话前下发非法键 → 400（且不进入会话）
     bad = client.post(
-        "/v1/infers", headers={"X-Lease-Id": lease}, json={"policy_type": "lerobot-act", "config": {"prompt": "x"}}
+        "/v1/infers", headers={"X-Lease-Id": lease}, json={"policy_type": "lerobot-remote", "config": {"prompt": "x"}}
     )
     assert bad.status_code == 400
-    assert "unknown lerobot-act config key" in bad.json()["detail"]
+    assert "unknown lerobot-remote config key" in bad.json()["detail"]
     assert node.session is None  # 校验失败不进入会话
 
 
@@ -2079,10 +2086,10 @@ def test_infers_config_available_before_session():
     node = FakeNode()
     client = make_infers_client(node)
     assert client.get("/v1/infers").json()["policy_config"]["policy_type"] == "openpi"
-    BASE_CFG["policy"] = {"type": "lerobot-act", "pretrained_name_or_path": "/tmp/m", "device": "cuda"}
+    BASE_CFG["policy"] = {"type": "lerobot-remote", "deployment": "d", "semantics": "s"}
     cfg = client.get("/v1/infers").json()["policy_config"]
-    assert cfg["policy_type"] == "lerobot-act"
-    assert cfg["requires_model_path"] is True
+    assert cfg["policy_type"] == "lerobot-remote"
+    assert cfg["requires_model_path"] is False  # 模型在服务端，端上不再指定 checkpoint 路径
     assert cfg["missing"] == []
 
 

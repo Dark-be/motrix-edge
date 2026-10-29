@@ -47,15 +47,19 @@ def _cfg(**policy):
 
 
 def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
-    """清单顺序 = 端点项（host / port）+ 公共项（warmup_required / action_layout）+ 策略自身项。"""
+    """清单顺序 = 端点项（host / port / endpoint）+ 公共项（warmup_required / action_layout）+ 策略自身项。"""
     keys = [item["key"] for item in policy_config_items(schema_policy)]
-    assert keys == ["host", "port", "warmup_required", "action_layout", "model", "device"]
+    assert keys == ["host", "port", "endpoint", "warmup_required", "action_layout", "model", "device"]
 
 
 def test_endpoint_items_lead_every_policy_schema():
-    """端点项（host / port）排在**每个**注册策略清单的最前两项（策略都连 TCP 端点）。"""
+    """端点项（host / port / endpoint）排在**每个**注册策略清单的最前几项（策略都连 TCP 端点）。"""
     for policy_type in policy_pkg.POLICY_REGISTRY:
-        assert [item["key"] for item in policy_config_items(policy_type)][:2] == ["host", "port"]
+        assert [item["key"] for item in policy_config_items(policy_type)][:3] == [
+            "host",
+            "port",
+            "endpoint",
+        ]
 
 
 def test_runtime_keys_only_include_hot_reloadable(schema_policy):
@@ -70,13 +74,14 @@ def test_prompt_item_is_multiline():
 
 
 def test_layout_items_expose_and_enforce_fixed_options():
-    common = {item["key"]: item for item in policy_config_items("lerobot-act")}
+    common = {item["key"]: item for item in policy_config_items("lerobot-remote")}
     assert common["observation_layout"]["options"] == ["qpos", "qpos+qpos_err"]
     assert "joint_delta" in common["action_layout"]["options"]
     cfg = {"policy": {}}
-    assert set_policy_config(cfg, "lerobot-act", {"action_layout": "joint_delta"}) == {"action_layout": "joint_delta"}
+    written = set_policy_config(cfg, "lerobot-remote", {"action_layout": "joint_delta"})
+    assert written == {"action_layout": "joint_delta"}
     with pytest.raises(ValueError, match="action_layout must be one of"):
-        set_policy_config(cfg, "lerobot-act", {"action_layout": "not-a-layout"})
+        set_policy_config(cfg, "lerobot-remote", {"action_layout": "not-a-layout"})
 
 
 def test_status_reports_values_and_missing_required(schema_policy):

@@ -19,11 +19,11 @@
 ``_reply`` / ``state``）：
 
 - **config 面**：``infer config`` / ``infer config set <json>`` / ``infer model`` /
-  ``infer model set <path>`` —— 按当前策略 schema 校验后写内存态 ``base_cfg["policy"]``
+  ``infer model set <deployment>`` —— 按当前策略 schema 校验后写内存态 ``base_cfg["policy"]``
   （不写回 yaml）；``runtime=True`` 的键同时应用到运行中的策略客户端（下一请求生效），其余进
   回执 ``deferred`` 提示需退出会话重进；
 - **prompt 门控**：语言条件策略（``policy.requires_prompt``，如 openpi）在推理 / 开录前 prompt
-  必须非空（prompt 同时是录制 episode 的 ``task_name``）；非语言条件策略（lerobot-act）不参与门控。
+  必须非空（prompt 同时是录制 episode 的 ``task_name``）；非语言条件策略（lerobot-remote）不参与门控。
 
 单一事实来源 = 内存态 ``base_cfg["policy"]["prompt"]``；策略客户端的 ``prompt`` 只是运行时镜像。
 """

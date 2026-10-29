@@ -296,7 +296,7 @@ def test_fallback_when_no_discovered():
 
 def test_robot_adapters_lists_entry_points():
     names = {t for t, _, _ in robot_adapters()}
-    assert names >= {"test_robot", "dual_piper", "single_piper"}
+    assert names >= {"test_robot", "dual_piper", "single_piper", "simulation_piper"}
 
 
 def test_get_adapter_with_required_capability():
@@ -737,3 +737,13 @@ def test_adapter_config_current_without_adapter_is_rejected():
     assert replies[0].status == "rejected"
     assert replies[0].code == ErrorCode.CONFLICT
     assert "not bound" in replies[0].error
+
+
+def test_simulation_adapter_declares_only_supported_capabilities():
+    adapter = get_adapter(DiscoveredRobot(name="simulation", type="simulation_piper"))
+    assert adapter.action_dims == {"joint": 6, "gripper": 1}
+    assert adapter.images == ["cam_head", "cam_right_wrist"]
+    assert not adapter.capabilities.capabilities[AdapterCapability.CAPTURE]
+    assert adapter.effective_pose_dim_per_arm() == 0
+    assert adapter.DEPTH_CAMERAS == ()
+    assert "simulation_piper" not in {name for name, _, _ in robot_adapters(AdapterCapability.CAPTURE)}

@@ -7,6 +7,11 @@
 （`infer_chunk`）；动作块缓存 / 三元切分 / 时序平滑 / 异步预取统一由 `motrix_edge.rtc`
 负责（见 [RTC 动作块管理](./motrix_edge_rtc.md)）。
 
+> **迁移（2026-10）**：旧 `lerobot-act`（lerobot `async_inference` gRPC，`policy/lerobot_act` +
+> vendored `services_pb2`）已**移除**，改为 `lerobot-remote`：直连新版 `lerobot-policy-server`
+> 的 **zenoh v1 协议**（discovery → admission → 观测/动作一问一答）。模型/块长/特征契约由服务端
+> deployment 声明，端上只按 `capabilities` 对齐；块缓存/切分/预取仍由 `motrix_edge.rtc` 负责。
+
 **各策略相对独立**：每个策略自己的 **wire 契约**（消息键、观测组装）、**图像约定**
 （尺寸与几何、相机名）、**块长协商**、**超时**都由该策略目录内的代码与文档定义，互不牵连；
 共用层只提供边缘观测键与图像原语（见下）。
@@ -32,31 +37,36 @@ policy/
 ├── openpi/
 │   ├── client.py   # OpenPIClient：websocket + openpi 官方 flat 契约
 │   └── contract.py # openpi 官方 wire 助手（键、观测组装、图像预处理、响应解析）
-├── lerobot_act/
-│   └── client.py   # LerobotActClient：lerobot AsyncInference gRPC（流式动作块）
+├── lerobot_remote/
+│   └── client.py   # LerobotRemoteClient：lerobot zenoh 远程推理（v1 协议，lerobot-policy-server）
 └── （LLM 不走策略路径：它是外部 agent，edge 只提供原语接口，见 motrix_edge_primitives.md）
 
 transport/          # 传输层（与策略解耦，见 motrix_edge/transport/）
 ├── ws.py           # WsTransport：msgpack-over-websocket（openpi）
-├── grpc.py         # AsyncInferenceGrpcTransport：lerobot AsyncInference gRPC
 ├── base.py         # BaseTransport：connect / close / connected / endpoint
 └── msgpack_numpy.py
+
+src/lerobot/        # vendored 新版 lerobot 子集（Apache-2.0）：
+                    #   remote_inference/{protocol,codec,client,chunk_contract}.py
+                    #   transport/zenoh.py、policies/chunk.py、inference/{contracts,chunk_settings,
+                    #   execution,factory}.py
+                    # lerobot-remote 的 zenoh 传输与 wire 由它提供（替代旧 async_inference gRPC）。
 ```
 
 ## BasePolicyClient
 
-| 成员                                     | 语义                                                                                                                |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `connected`                              | 是否已连上推理节点（委托传输层）                                                                                    |
-| `connect()` / `ensure_connected()`       | 显式连接 / 惰性连接                                                                                                 |
-| `prepare(observation)`                   | 可选预热（下发策略指令 / 触发服务端加载模型）；无实现 → no-op                                                       |
-| `bind_adapter(action_dim, camera_names)` | 会话进入时绑定 adapter 运行时布局（启用相机等），策略据此过滤下发内容                                               |
-| `infer_chunk(observation, index=None)`   | **策略唯一职责**：真实请求一次推理，返回 `ActionChunk`（含首步绝对步号）                                            |
-| `observed_chunk_len`                     | **块长**（最近一次服务端返回的步数；lerobot-act 连接前先用请求值 `actions_per_chunk` 兜底），rtc 据此校准块长上限 H |
-| `reset()` / `disconnect()`               | 复位策略状态 / 断开连接（幂等）                                                                                     |
-| `requires_prompt` / `prompt`             | 是否语言条件策略 + 当前文本指令（仅语言条件策略使用）                                                               |
+| 成员                                     | 语义                                                                                                                   |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `connected`                              | 是否已连上推理节点（委托传输层）                                                                                       |
+| `connect()` / `ensure_connected()`       | 显式连接 / 惰性连接                                                                                                    |
+| `prepare(observation)`                   | 可选预热（下发策略指令 / 触发服务端加载模型）；无实现 → no-op                                                          |
+| `bind_adapter(action_dim, camera_names)` | 会话进入时绑定 adapter 运行时布局（启用相机等），策略据此过滤下发内容                                                  |
+| `infer_chunk(observation, index=None)`   | **策略唯一职责**：真实请求一次推理，返回 `ActionChunk`（含首步绝对步号）                                               |
+| `observed_chunk_len`                     | **块长**（最近一次服务端返回的步数；lerobot-remote 直接取服务端声明的 `caps.execution_steps`），rtc 据此校准块长上限 H |
+| `reset()` / `disconnect()`               | 复位策略状态 / 断开连接（幂等）                                                                                        |
+| `requires_prompt` / `prompt`             | 是否语言条件策略 + 当前文本指令（仅语言条件策略使用）                                                                  |
 
-`index` = rtc 传入的**绝对步号**：需要按步号组织请求的策略（lerobot-act 的
+`index` = rtc 传入的**绝对步号**：按步号组织请求的策略（lerobot-remote 用它作 `start_index`，
 `TimedObservation.timestep`）使用；openpi 忽略它，只用于回填 `start_index`。
 
 ## 传输层（motrix_edge.transport）
@@ -67,25 +77,25 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
     响应，**单次限时**（`request_timeout`，默认 60s）；超时 / 连接异常 / 服务端以**文本帧**
     回错误（官方服务端发完 traceback 即断连）→ **关闭连接**并抛出原异常，`connected` 置
     False，由会话重连（避免复用连接造成响应错位 / 误报在线）。
--   `AsyncInferenceGrpcTransport`（lerobot-act 用）：建立 channel 并等 READY（`connect_timeout`
-    ，默认 5s），暴露 gRPC `stub`；具体 RPC 语义由策略客户端组合。
+-   `lerobot-remote` **不使用本包**：它的 zenoh 传输（`ZenohTransport`）与 wire 一起由 vendored
+    `src/lerobot/` 提供（见下）。
 
 ### 可选依赖（pyproject extras）
 
 两个客户端各引入一组额外第三方依赖，故以**可选面**分发（`uv sync --extra <名>`）；核心
 `import motrix_edge` **不触碰**它们（`transport/ws.py` / `transport/grpc.py` 均为惰性导入）：
 
-| 可选面    | 传输 / 客户端                               | 引入的依赖               |
-| --------- | ------------------------------------------- | ------------------------ |
-| `openpi`  | `WsTransport` + openpi                      | `websockets` / `msgpack` |
-| `lerobot` | `AsyncInferenceGrpcTransport` + lerobot-act | `grpcio` / `torch`       |
-| `all`     | 以上全部                                    | —                        |
+| 可选面    | 传输 / 客户端                                   | 引入的依赖                                                      |
+| --------- | ----------------------------------------------- | --------------------------------------------------------------- |
+| `openpi`  | `WsTransport` + openpi                          | `websockets` / `msgpack`                                        |
+| `lerobot` | vendored `src/lerobot`（zenoh）+ lerobot-remote | `eclipse-zenoh` / `msgpack` / `torch`（CPU） / `pillow`（可选） |
+| `all`     | 以上全部                                        | —                                                               |
 
 未装对应可选面时，`connect()` 在导入依赖处抛 `ModuleNotFoundError` → 该 `policy.type` 进会话
 失败，其余功能不受影响（WebRTC 同理，见
 [motrix_edge_frame_webrtc.md](motrix_edge_frame_webrtc.md)）。测试侧由 `tests/conftest.py`
 按依赖可导入性决定收集：`test_ws_transport` / `test_transport_target` / `test_infer_point` /
-`test_webrtc` / `test_lerobot_act_client` 这五个**整文件**依赖的，缺依赖时不收集；
+`test_webrtc` / `test_lerobot_remote_client` 这五个**整文件**依赖的，缺依赖时不收集；
 `tests/test_policy.py` 里只有部分用例依赖 openpi，用 `@pytest.mark.optional("openpi")` 跳过。
 
 ## 共用契约层（contract.py）
@@ -103,16 +113,18 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
 
 ### 汇总
 
-|                 | `OpenPIClient`                                   | `LerobotActClient`                                        |
-| --------------- | ------------------------------------------------ | --------------------------------------------------------- | --- | ------------ | -------- | -------- | --- | -------------------- | ------ | ---------------------------------- |
-| 注册类型        | `openpi`                                         | `lerobot-act`                                             |
-| 传输            | websocket（msgpack-numpy）                       | gRPC（lerobot AsyncInference）                            |
-| 观测 wire       | `{"state", "images", "prompt"?}`（官方 flat）    | pickle(`TimedObservation`) → 分块 `SendObservations`      |
-| 响应 wire       | `{"actions": [H, dim]}`                          | `list[TimedAction]`（`[K, dim]` + `timestep`）            |
-| 图像尺寸 / 几何 | `image_size`（默认 224×224）**letterbox**        | `image_size`（默认 224×224）**letterbox**                 |
-| 相机名          | 边缘名，或服务端 metadata 声明的 `cameras`       | 边缘名 → `rename_cameras` → **checkpoint 训练名**         |
-| 块长            | **实测**（`observed_chunk_len`）→ rtc 校准上限 H | `actions_per_chunk`（请求上界，实测块长以服务端返回为准） |
-| 文本指令        | **必需**（`requires_prompt = True`）             | 不使用（ACT 非语言条件）                                  |     | 输出动作语义 | 关节空间 | 关节空间 |     | 连接后需重发策略指令 | 不涉及 | **是**（`Ready` 会重置服务端会话） |
+|                  | `OpenPIClient`                                   | `LerobotRemoteClient`                                |
+| ---------------- | ------------------------------------------------ | ---------------------------------------------------- |
+| 注册类型         | `openpi`                                         | `lerobot-remote`                                     |
+| 传输             | websocket（msgpack-numpy）                       | zenoh（`lerobot/inference/v1`）                      |
+| 观测 wire        | `{"state", "images", "prompt"?}`（官方 flat）    | msgpack 信封（按服务端声明的特征名 + 图像编码）      |
+| 响应 wire        | `{"actions": [H, dim]}`                          | `canonical_actions[H, A]`（float32）                 |
+| 图像尺寸 / 几何  | `image_size`（默认 224×224）**letterbox**        | 服务端 `caps.features[i].shape`，端侧 **letterbox**  |
+| 相机名           | 边缘名，或服务端 metadata 声明的 `cameras`       | **服务端特征名**（短名自动匹配 / `camera_map` 覆盖） |
+| 块长             | **实测**（`observed_chunk_len`）→ rtc 校准上限 H | 服务端声明 `caps.execution_steps`                    |
+| 文本指令         | **必需**（`requires_prompt = True`）             | 不使用（ACT 非语言条件；`task` 可空）                |
+| 输出动作语义     | 关节空间                                         | 关节空间（由 `action_layout` 声明）                  |
+| 连接后需重发策略 | 不涉及                                           | admission 每连接一次（重连需重新 admit）             |
 
 ### 图像约定（两个策略一致）
 
@@ -123,10 +135,10 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
     inference 几何差异——这是「发符合训练集的观测」这条隐含契约的一部分；
 -   openpi 侧：官方服务端 / 训练管线本身就用 `image_tools.resize_with_pad`（同样是
     letterbox），客户端先缩到 224 使服务端那次缩放成为 no-op（省带宽且不变形）；
--   lerobot-act 侧：gRPC 协议**不声明任何尺寸**，服务端会把收到的图 `interpolate`（拉伸）
-    到 checkpoint 的 `image.features` 形状——客户端发的尺寸与训练一致时该步为 no-op；
--   尺寸是**每策略独立配置项** `policy.image_size`（默认 224，可用 `infer config set` 在会话
-    内改；openpi 还会被 `bind_adapter` 的相机集与 metadata 声明的 `cameras` 影响下发内容）。
+-   lerobot-remote 侧：图像尺寸由**服务端声明**（`caps.features[i].shape` = checkpoint 训练分辨率），
+    端侧 letterbox 到该尺寸后服务端不再缩放，几何与训练管线一致；
+-   尺寸只有 openpi 是**配置项** `policy.image_size`（默认 224，可用 `infer config set` 在会话内改）；
+    lerobot-remote **不在端上配置尺寸**，一律取服务端声明。
 
 ### OpenPIClient（openpi）
 
@@ -163,64 +175,43 @@ server → client: {"actions": [horizon, dim], ...}      # 附带 state / policy
     = **上传前的压缩目标**：等于模型输入尺寸时模型那次是 no-op，不等于时只是白传带宽
     （模型会再 letterbox：不变形、不报错）。
 
-### LerobotActClient（lerobot-act）
+### LerobotRemoteClient（lerobot-remote）
 
-与 **lerobot 官方 `AsyncInference` gRPC 服务端**（`lerobot.async_inference.policy_server`）
-互通，wire 语义与官方 `RobotClient` 一致：
+与**新版 lerobot 的 zenoh 远程推理**（`lerobot-policy-server`，协议 `lerobot/inference/v1`）互通。
+wire 语义与官方客户端 `lerobot.remote_inference.RemoteClient` 一致（vendored 在 `src/lerobot/`）：
 
 ```
-connect()  →  Ready(Empty)                     # 服务端据此重置会话状态（清空 policy）
-（首次 infer / prepare 时）→ SendPolicyInstructions(pickle(RemotePolicyConfig)，含模型路径与 features)
-每次 infer_chunk(index) → SendObservations(pickle(TimedObservation) 分块流式，must_go=True)
-                        → GetActions(Empty) 轮询，取回该观测的整块 list[TimedAction]
+connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
+（首次 infer / prepare）
+            →  admit(features=server caps, action_feature, semantics, action_interval, mode)
+每次 infer_chunk(index) →  publish(观测 + 请求元数据) → 等待 /act 回复 → canonical_actions[H, A]
 ```
 
--   **协议没有 metadata**：`services.proto` 里没有 metadata RPC，官方客户端也没有这个概念。
-    因此 `server_metadata` 是**本地声明**（协议 / 策略类型），供会话与前端展示；布局契约
-    （图像尺寸、相机名、state 维数、动作块长）**全部存在于 checkpoint 内**，只能靠配置与实测
-    对齐——这正是上面「图像约定」与「块长兜底」存在的原因。
--   **观测组装**：`lerobot_features`（随 `SendPolicyInstructions` 下发）由客户端按当前观测
-    声明，格式与官方 `hw_to_dataset_features(..., use_video=False)` 同形：
-    `observation.state`（`dtype=float32` + `shape`；`observation_layout=qpos` 时名字为
-    `[qpos_i]`，`qpos+qpos_err` 时为 `[qpos_i..., qpos_err_i...]`）与
-    `observation.images.<相机名>`（`dtype=image` + `shape` + `names`，HWC）。服务端
-    `build_dataset_frame` 按这些名字取值，并**用客户端声明的相机名去索引 checkpoint 的
-    `image.features`**，故相机名必须等于训练时的名字（`rename_cameras` 负责改名；`image_cameras`
-    用于只下发策略需要的相机，多给的相机在服务端会 KeyError）。
--   **时序约束**：`Ready` 会重置服务端会话（清空已加载的 policy），故策略指令必须在
-    `Ready` 之后下发、且**每次重连都要重发**（客户端在 `connect()` / `disconnect()` 重置该状态，
-    未握手即下发直接报错，避免静默失效）。
--   **块长**：`actions_per_chunk` 是**请求上界**（服务端返回 `chunk[:actions_per_chunk]`），真实
-    块长 = `min(checkpoint chunk, actions_per_chunk)`，以服务端实际返回为准并回填
-    `observed_chunk_len`。
--   **轮询与失败**：`GetActions` 空响应表示服务端尚未推理完（或没有观测），客户端**节流重试**
-    （0.02s）直到 `get_actions_timeout`；拿到首个非空块即返回（**不做步号门控**，与官方
-    `RobotClient` 一致），整体过期的块交由 rtc 统一丢弃并计 `stale_chunks`。
--   超时：`connect_timeout`（5s，`Ready`）、`policy_setup_timeout`（300s，加载模型）、
-    `observation_timeout`（10s，上传观测）、`get_actions_timeout`（10s，等待动作块；
-    须大于服务端单次推理耗时）。
--   **vendored lerobot**：proto / wire 数据类与分块工具裁剪自 lerobot 官方仓库，放在
-    `src/lerobot/`（Apache-2.0，独立于 `motrix_edge` 包；`ruff.toml` 的 `extend-exclude`
-    排除 lint / format）。升级：替换对应文件 → 用 dev 依赖 `grpcio-tools` 重新生成
-    `transport/services_pb2{,_grpc}.py` → 跑 `tests/test_lerobot_act_client.py`。
-    ⚠️ `npm run add-header` 会把 Apache-2.0 头换成 Motphys 专有头，跑完需
-    `git checkout -- src/lerobot` 还原。
--   **运行时依赖**：服务端动作载荷是 `torch.Tensor`（pickle 反序列化需要 torch），edge 侧固定
-    用 **CPU 版**（`pyproject.toml` 的 `torch==…+cpu` + 官方 CPU 源，不拉 CUDA / `nvidia-*`）。
--   **`actions_per_chunk` / `image_size` 的真实语义**（对照官方实现，别按名字想当然）：
-    -   `actions_per_chunk`：官方契约参数（`RemotePolicyConfig.actions_per_chunk`，官方客户端 CLI
-        同名）。服务端只**截断**模型原生块 —— `chunk[:, :actions_per_chunk, :]`
-        （`async_inference/policy_server.py`）。所以它是**请求上界**：超过模型原生块长时"有多少给
-        多少"，不补齐、不重采样；含义 = 客户端一次要多少步（步数 ÷ 控制频率 = 一次推理能撑多久，
-        RTC 的预取提前量按它算）。
-    -   `image_size`：官方客户端**没有**这个概念 —— 客户端按相机原分辨率上传，服务端按
-        **checkpoint** 的 `policy.config.image_features` 形状做 `F.interpolate(mode="bilinear")`
-        **拉伸**到模型输入尺寸（`helpers.resize_robot_observation_image`），既不裁剪、也不
-        letterbox；客户端在 `SendPolicyInstructions` 里声明的 `features.shape` 只用于组装
-        `observation.state` / 相机键名与「观测是否相似」的去重比较，**不决定** resize 目标。
-        因此 `image_size` 是**端侧上传前的预处理目标**（省带宽 / 省端侧算力），**不改变模型输入
-        尺寸**，须与训练分辨率一致：edge 侧 letterbox 保证「原图 → 目标尺寸」这一步不拉伸，几何
-        与训练管线一致（两侧同为 224×224 时，服务端那次 interpolate 是 no-op）。
+-   **契约来自服务端**：`capabilities` 声明了 features（名称/形状/语义）、`action_feature`、
+    `action_interval`、执行模式与块长（`execution_steps` = 一次返回的步数）。端上**直接采用**
+    `caps.action_interval` 完成 admission（频率必须与之一致，否则被拒）；图像尺寸也取自
+    `caps.features[i].shape`，端侧 letterbox 到该尺寸（与训练分辨率一致，不拉伸）。
+-   **相机名必须等于服务端特征名**（如 `observation.images.piper_0_cam_head`）。缺省按**短名
+    后缀**自动匹配（`cam_head` → `..._cam_head`）；匹配不唯一 / 匹配不到时报错，可用 yaml 的
+    `policy.camera_map`（端上相机名 → 服务端特征名）显式指定。**相机名单一事实来源**仍是
+    adapter 的 `enabled_cameras`（`bind_adapter` 传入，只在其范围内匹配）。
+-   **state**：按 `observation_layout` 组装（`qpos` / `qpos+qpos_err`），维度必须等于服务端声明
+    的 state 特征形状；顺序即服务端 `names` 声明的分量顺序。
+-   **块与调度**：服务端只返回**一块**整块（`mode=chunk`，`chunk_merge=append`）；块缓存 / 三元
+    切分 / 过渡 / 预取仍由 `motrix_edge.rtc` 负责。`start_index` = 请求的绝对步号，rtc 据此跳过
+    过期步。`observed_chunk_len` 直接取 `caps.execution_steps`（服务端声明，非猜测）。
+-   **错误可见**：admission 失败（相机/state/频率/语义不符）在 `prepare`（`infer connect`）阶段
+    直接抛出清晰错误；推理失败抛协议错误，不会静默返回空块。
+-   **vendored lerobot**：`src/lerobot/`（Apache-2.0）只保留 wire 所需子集——
+    `remote_inference/{protocol,codec,client,chunk_contract}`、`transport/zenoh.py`、
+    `policies/{chunk,rtc}`、`inference/{contracts,chunk_settings,execution,factory}`。
+    为 Python 3.10 做了两处适配：`enum.StrEnum`（3.11+）改由 `lerobot.utils.compat` 提供；
+    `class BoundedSubscriber[T]`（PEP 695）改为 `Generic[T]`。`PIL` 改为**懒加载**（仅
+    `encoding=jpeg` 需要）。
+    升级：替换对应文件并保留上述三处适配 → 跑 `tests/test_lerobot_remote_client.py`。
+    ⚠️ `npm run add-header` 会把 Apache-2.0 头换成 Motphys 专有头，跑完需 `git checkout -- src/lerobot`。
+-   **运行时依赖**：`eclipse-zenoh`（传输）+ `msgpack`（wire）+ `torch`（动作载荷是
+    `torch.Tensor`，edge 侧固定 CPU 版）+ 可选 `pillow`（jpeg 编码）。
 
 ## 配置项（POLICY_CONFIG_ITEMS）
 
@@ -229,21 +220,21 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 缺省 `joint`）。它们也是**会话级**配置
 （`runtime: False`：进入会话时读取，会话内改需退出重进），**没有专用命令**——同一个键只有一套规则。
 
-| 策略          | 专有配置项                                                                                                                                 |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `openpi`      | `prompt`（必填，语言指令）、`image_size`（默认 224）                                                                                       |
-| `lerobot-act` | `observation_layout`（`qpos` / `qpos+qpos_err`）、`pretrained_name_or_path`（必填）、`device`（默认 cpu）、`actions_per_chunk`（默认 50）、`image_size`（默认 224） |
+| 策略             | 专有配置项                                                                                                                                                                                                     |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openpi`         | `prompt`（必填，语言指令）、`image_size`（默认 224）                                                                                                                                                           |
+| `lerobot-remote` | `deployment`（必填）、`semantics`（必填）、`observation_layout`（`qpos` / `qpos+qpos_err`）、`mode`（chunk）、`chunk_merge`（append / aligned）、`encoding`（raw / jpeg）、`jpeg_quality`、`expected_artifact` |
 
 -   清单由 `policy_config_items(policy_type)` 提供（CLI `infer config`、前端表单、HTTP
     `/v1/infers/config` 同一来源）；`runtime_keys` 由 `runtime` 派生。
 -   枚举项在 schema 中声明 `options`：前端据此渲染下拉框，后端按同一候选集合校验；当前用于
-    `action_layout` 与 lerobot-act 的 `observation_layout`，避免自由文本产生无效搭配。
+    `action_layout` 与 lerobot-remote 的 `observation_layout`，避免自由文本产生无效搭配。
 -   长文本项（`prompt` / `system_prompt`）带 `multiline: true`：前端渲染**多行 textarea**
     （占满整行、可拖拽调高），键名不在前端硬编码。
 -   **`runtime`（会话内改能否立即生效）按「配置何时下发给服务端」划分**，不是按客户端能不能读：
     -   `openpi`（每请求独立，无握手状态）：`prompt` / `image_size` 在每次 `infer_chunk` **现读**
         → 会话内改立即生效（`runtime: True`）；
-    -   `lerobot-act`（握手级）：`observation_layout` / `pretrained_name_or_path` / `device` / `actions_per_chunk` /
+    -   `lerobot-remote`（会话级）：`deployment` / `semantics` / `mode` / `chunk_merge` / `encoding` /
         `image_size` 只在 `Ready` 之后的 `SendPolicyInstructions` 里随 `RemotePolicyConfig`
         下发一次（服务端据此加载 checkpoint、定动作块长），会话内改**不重发、不生效** → 标
         `runtime: False`，**退出会话重进才生效**（前端据 `runtime_keys` 在会话内禁用这些输入框，
@@ -267,25 +258,25 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 
 ### 每项配置的真实作用（谁在什么时候用它）
 
-| 键                          | 使用者               | 作用                                                                                        |
-| --------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
-| `host` / `port`             | 客户端传输层         | 推理节点端点（连接目标）；进入会话时固化（改需退出重进）                                    |
-| `warmup_required`           | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
-| `action_layout`             | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                     |
-| `observation_layout`        | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                         |
-| `prompt`（openpi）          | 服务端（每帧）       | 语言条件：帧里带就用帧里的，缺了才由 checkpoint 的 `default_prompt` 兜底，随后逐帧 tokenize |
-| `image_size`（openpi）      | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |
-| `image_size`（lerobot-act） | **客户端**           | 同上（端侧 letterbox 压缩），但 lerobot 服务端**只拉伸不兜底** → 必须与训练分辨率一致       |
-| `pretrained_name_or_path`   | 服务端               | 加载哪个 checkpoint（握手时下发）                                                           |
-| `device`                    | 服务端               | checkpoint 跑在哪块设备（握手时下发）                                                       |
-| `actions_per_chunk`         | 服务端               | 模型原生动作块的**截断上界** `chunk[:, :K, :]`（不补齐、不重采样；握手时下发）              |
+| 键                         | 使用者               | 作用                                                                                        |
+| -------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
+| `host` / `port`            | 客户端传输层         | 推理节点端点（连接目标）；进入会话时固化（改需退出重进）                                    |
+| `warmup_required`          | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
+| `action_layout`            | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                       |
+| `observation_layout`       | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                           |
+| `prompt`（openpi）         | 服务端（每帧）       | 语言条件：帧里带就用帧里的，缺了才由 checkpoint 的 `default_prompt` 兜底，随后逐帧 tokenize |
+| `image_size`（openpi）     | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |
+| `deployment` / `semantics` | 服务端 + 客户端      | 选中服务端部署并校验动作语义（两端必须逐字一致）                                            |
+| `camera_map`               | 客户端               | 端上相机名 → 服务端特征名的显式映射（缺省按短名后缀自动匹配）                               |
+| `device`                   | 服务端               | checkpoint 跑在哪块设备（握手时下发）                                                       |
+| `caps.execution_steps`     | 服务端               | 一次推理返回的步数（服务端 deployment YAML 的 `n_action_steps` / 模型块长），端上只读       |
 
 要点：**两个策略的 `image_size` 都只是"客户端压缩带宽用的目标尺寸"，不是"告诉模型用多大输入"** ——
 模型输入尺寸由 checkpoint 决定：
 
 -   openpi：模型端 `Observation.from_dict` 发现帧里的尺寸 ≠ checkpoint 的 `IMAGE_RESOLUTION`
     时会自己 `image_tools.resize_with_pad`（letterbox）补一次 → 客户端尺寸只影响带宽；
--   lerobot-act：服务端 `helpers.resize_robot_observation_image` 用 `F.interpolate(bilinear)`
+-   lerobot-remote：图像尺寸由服务端 `caps.features` 声明，端侧 letterbox 后服务端不再缩放
     **拉伸**到 checkpoint 尺寸，**没有 letterbox 兜底** → 客户端尺寸直接决定几何（故须与训练
     分辨率一致）。
 
@@ -303,22 +294,22 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 | 设置端点             | `infer config set '{"host":"10.0.0.9","port":9000}'`（HTTP：`POST /v1/infers/config`，会话内；或 `POST /v1/infers` 的 `config`，进入会话时） |
 | 连接 + 预热          | `infer connect`（HTTP：`POST /v1/infers/connect`，须已在推理会话）                                                                           |
 
-`host` / `port` **非必填**：`openpi` / `lerobot-act`
+`host` / `port` / `endpoint` **非必填**：`openpi` / `lerobot-remote`
 未配置端点会在连接时报错，前端据「host 已填 + port 合法」门控「进入推理」按钮。
 
 ### 预热（推理但不上真机）
 
-`connect()` → `prepare(obs)`（lerobot-act 下发策略指令、服务端加载 checkpoint；openpi 发一帧并
+`connect()` → `prepare(obs)`（lerobot-remote 完成 admission 占会话并校验契约；openpi 发一帧并
 丢弃）→ 如果本连接还没真正取到过块（`policy.chunk_seen`，lerobot-act 的
 `actions_per_chunk` 只是请求值，不能当实测）再 `infer_chunk(obs)` 取一块**丢弃**。全程**不调用
 `adapter.rollout`**，故真机不动；取到的那一块同时给出实测块长（`observed_chunk_len` → RTC 校准）。
-`chunk_seen` 是**连接级**状态：重连后由客户端复位（lerobot-act 在 `_forget_policy` 里），否则新连接
+`chunk_seen` 是**连接级**状态：重连后由客户端复位（lerobot-remote 在 `connect()` 里），否则新连接
 的预热会误判成已取过块、跳过那次真正取块。
 
 -   **门控**：`warmup_required`（公共配置项，同 schema / 同通道，会话级）缺省 true = 未预热时
     `infer rollout` rejected 409（不惰性自连）；置 false = 允许 rollout 惰性自连（脚本 / 联调）。
     **预热进行中一律 409**（与 `warmup_required` 无关）：策略客户端的契约是「可跨线程调用，同一时刻
-    至多一个请求」（`rtc/manager.py`）——预热线程与 rollout 并发会破坏 ws 的一问一答 / lerobot-act
+    至多一个请求」（`rtc/manager.py`）——预热线程与 rollout 并发会破坏 ws / zenoh 的一问一答
     的单飞取块，并并发 `adapter.observe()`。预热期间允许的其它命令（`infer config` /
     `infer rtc` / 录制 / status）都**不发起策略请求**，因此不在此限。
 -   **异步**：预热可能持续几十秒～几分钟（加载 checkpoint / 首帧推理），占住会话循环就会把急停、
@@ -331,7 +322,7 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
     保持 false（可重新预热）。预热期间 `infer config` / `capture meta` 等普通命令
     照旧响应。
 -   **闩锁绑定在连接上**：`warmed_up` 是「本**连接**已预热」——连接一断（推理服务端重启 / 链路断开），
-    服务端会话与已加载模型都不再可信（lerobot-act 重连后会重发策略指令、**重新加载 checkpoint**），
+    服务端会话不再可信（lerobot-remote 重连后**重新 admission**，重新占用会话），
     故把 `warmed_up` 自动失效并记下 `warmup_error`（连接丢失）；此时 `infer connect` **不再**被幂等
     短路，重新预热即可恢复；未重新预热前 `infer rollout` 仍 409，不会退回「惰性重连 + 首块内联等
     模型加载」那条路。

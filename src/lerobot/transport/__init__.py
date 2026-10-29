@@ -11,10 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-gRPC transport for lerobot async inference（vendored 裁剪版）。
 
-模块不主动导入 grpc（懒加载，避免导入 motrix_edge 时缺 grpc 依赖报错）：
-需要时 ``from lerobot.transport.services_pb2_grpc import AsyncInferenceStub``
-（该模块顶层才 import grpc）。
+"""Zenoh transport for lerobot remote inference（vendored 裁剪版）。
+
+导入本命名空间不会导入 ``zenoh``：``zenoh.py`` 内部懒加载，只有真正 ``open()`` 时才
+``require_package('eclipse-zenoh', ...)``。
 """
+
+from .zenoh import (
+    BoundedQueryable,
+    BoundedSubscriber,
+    PendingQuery,
+    PresenceEvent,
+    PresenceToken,
+    QueryCancelled,
+    TransportError,
+    ZenohConfig,
+    ZenohTransport,
+)
+
+__all__ = [
+    "BoundedQueryable",
+    "BoundedSubscriber",
+    "PendingQuery",
+    "PresenceEvent",
+    "PresenceToken",
+    "QueryCancelled",
+    "TransportError",
+    "ZenohConfig",
+    "ZenohTransport",
+]

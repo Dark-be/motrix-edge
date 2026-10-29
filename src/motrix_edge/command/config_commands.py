@@ -228,12 +228,12 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
     """策略配置命令族：``infer config`` / ``infer config set <json>`` /
     ``infer model`` / ``infer model set <path>``。
 
-    每个策略有自己的独立配置项（prompt / 模型路径 / 设备 / 块长…）+ **端点项**（推理端点
-    host / port，`group="endpoint"`、会话级；**仅需端点的策略**有：openpi / lerobot-act），见
+    每个策略有自己的独立配置项（prompt / deployment / 块拼接…）+ **端点项**（推理端点
+    host / port / endpoint，`group="endpoint"`、会话级；openpi / lerobot-remote），见
     ``policy.POLICY_CONFIG_ITEMS``：
     ``infer config`` 返回清单 + 当前值 + 缺失必填项；``infer config set <json>`` 按当前策略 schema
-    校验并写入（可部分）；``infer model(set)`` 是 ``pretrained_name_or_path`` 这个内置项的
-    **快捷命令**（同一校验与写入路径）。
+    校验并写入（可部分）；``infer model(set)`` 是 **远端部署名** ``deployment``（lerobot-remote）
+    的快捷命令（同一校验与写入路径；模型本身在服务端，端上不再指定 checkpoint 路径）。
 
     配置写入内存态 ``base_cfg["policy"]``（**不写回 yaml**），下次 ``session run infer`` 生效；
     会话内由 InferSession 额外写入运行中的策略客户端（下一请求生效）。节点主循环（非任务态）
@@ -243,18 +243,18 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
     policy_type = validate_policy_type(policy_type or base_cfg.get("policy", {}).get("type", "openpi"))
     if cmd.name == CMD_INFER_CONFIG:  # 查询：配置项清单 + 当前值 + 缺失必填项
         return ok_result(policy_config=policy_config_status(base_cfg, policy_type))
-    if cmd.name == CMD_INFER_MODEL:  # 查询模型路径（lerobot 类策略）
+    if cmd.name == CMD_INFER_MODEL:  # 查询远端部署名（lerobot-remote）
         return ok_result(
             policy_type=policy_type,
-            pretrained_name_or_path=base_cfg.get("policy", {}).get("pretrained_name_or_path"),
+            deployment=base_cfg.get("policy", {}).get("deployment"),
         )
     if cmd.name == CMD_INFER_CONFIG_SET:
         try:
             params = parse_meta(cmd.params.get("json"), what="infer config set")
         except ValueError as exc:
             return CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
-    elif cmd.name == CMD_INFER_MODEL_SET:  # 快捷：模型路径（lerobot 类策略）
-        params = {"pretrained_name_or_path": cmd.params.get("path")}
+    elif cmd.name == CMD_INFER_MODEL_SET:  # 快捷：远端部署名（lerobot-remote）
+        params = {"deployment": cmd.params.get("path")}
     else:
         return CommandResult(
             status="rejected", error=f"unsupported policy config command: {cmd.name}", code=ErrorCode.INVALID_ARGUMENT

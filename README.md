@@ -98,12 +98,12 @@ npm run format    # ruff format + prettier
 
 核心依赖之外，**引入额外第三方依赖**的策略客户端 / 服务拆成可选面（`uv sync --extra <名>`）：
 
-| 可选面    | 内容                                       | 引入的依赖                      |
-| --------- | ------------------------------------------ | ------------------------------- |
-| `openpi`  | openpi 策略客户端（WS + msgpack 一问一答） | `websockets` / `msgpack`        |
-| `lerobot` | lerobot-act 策略客户端（gRPC 流式）        | `grpcio` / `torch`（约 690 MB） |
-| `webrtc`  | WebRTC 观测推流（浏览器实时预览）          | `aiortc`                        |
-| `all`     | 以上全部                                   | —                               |
+| 可选面    | 内容                                       | 引入的依赖                                       |
+| --------- | ------------------------------------------ | ------------------------------------------------ |
+| `openpi`  | openpi 策略客户端（WS + msgpack 一问一答） | `websockets` / `msgpack`                         |
+| `lerobot` | lerobot-remote 策略客户端（Zenoh）         | `eclipse-zenoh` / `msgpack` / `torch` / `pillow` |
+| `webrtc`  | WebRTC 观测推流（浏览器实时预览）          | `aiortc`                                         |
+| `all`     | 以上全部                                   | —                                                |
 
 ```bash
 uv sync --extra all      # 实机部署 / 联调通常需要全部
@@ -120,8 +120,8 @@ uv sync --extra webrtc   # 只补 WebRTC 预览
 对应的测试文件在依赖缺失时**不收集**（pytest 头部会列出被跳过的文件），因此不带可选面跑
 测试只覆盖核心面。
 
-未装 `lerobot` 时 `policy.type: lerobot-act` 不可用（服务端动作载荷是 `torch.Tensor`，反序列化
-需 torch）；未装 `webrtc` 时 `/v1/webrtc/offer` 回 501，其余控制面不受影响。
+未装 `lerobot` 时 `policy.type: lerobot-remote` 不可用（远程推理需要 Zenoh、msgpack 和 torch；
+JPEG 编码还需要 Pillow）；未装 `webrtc` 时 `/v1/webrtc/offer` 回 501，其余控制面不受影响。
 
 ### 本机变量（`.env`）
 
@@ -152,3 +152,7 @@ cp .env.example .env
 ## 开发
 
 提交前依次执行：`npm run format` → `uv run ruff check .` → `uv run pytest`。
+
+## 仿真机器人进程
+
+[simulation-pipeline](simulation-pipeline/README.md) 是独立 Python 3.11 子项目，通过与 robot-pipeline 相同的 HTTP / 共享内存契约接入 Edge，支持外部 MotrixGen 场景的关节、夹爪控制及双相机 RGB 预览。首版不提供采集或训练奖励。

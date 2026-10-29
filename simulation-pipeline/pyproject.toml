@@ -1,0 +1,28 @@
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "motrix-simulation-pipeline"
+version = "0.1.0"
+description = "Configurable simulation robot process for Motrix Edge"
+requires-python = ">=3.11,<3.14"
+readme = "README.md"
+dependencies = ["motrix-edge", "motrix-gen[motrix-assets]==0.1.1.dev127968", "numpy>=1.26.4", "msgspec>=0.21.1"]
+
+[project.scripts]
+motrix-simulation-pipeline = "motrix_simulation_pipeline.__main__:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.uv]
+prerelease = "allow"
+
+[tool.uv.sources]
+motrix-edge = {path = "..", editable = true}
+motrix-gen = {index = "motphys"}
+
+[[tool.uv.index]]
+name = "motphys"
+url = "http://pypi.mp/simple"
