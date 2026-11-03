@@ -23,6 +23,7 @@ from motrix_edge.errors import ServiceError
 
 from .app import create_app
 from .command import CommandService
+from .rpent import RpentError, RpentService
 from .schemas import CommandRequest, CommandResponse
 
 __all__ = [
@@ -32,4 +33,6 @@ __all__ = [
     "ServiceError",
     "CommandError",
     "CommandService",
+    "RpentError",
+    "RpentService",
 ]

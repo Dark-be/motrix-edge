@@ -2,9 +2,9 @@
 
 ## 摘要
 
-robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关节直连从臂 target，用于示教采集）
-与**增量接管**（推理即将失败时人工接管：以接管瞬间的主 / 从位姿为锚点，只把主臂**相对锚点的
-增量**叠加到从臂 target）。两者共用同一条链路——读主臂 → 写 `target_action` → `step_rad`
+robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关节直连从臂 target，用于示教采集，
+对外命令 `robot teach`）与**增量接管**（推理即将失败时人工接管：以接管瞬间的主 / 从位姿为锚点，
+只把主臂**相对锚点的增量**叠加到从臂 target，对外命令 `robot takeover`）。两者共用同一条链路——读主臂 → 写 `target_action` → `step_rad`
 限速逼近——差异全部收敛在 `BaseRobot` 的映射函数里，机器人子类只实现「读主臂读数」这一个
 钩子 `_get_teleop_target()`。
 
@@ -22,12 +22,29 @@ robot-pipeline 的遥操作有两种映射模式：**绝对映射**（主臂关�
 
 ## 模式与映射
 
-| 模式                    | 从臂 target                             | 用途                                 |
-| ----------------------- | --------------------------------------- | ------------------------------------ |
-| `absolute`（缺省）      | `master_now`（主臂绝对读数直连）        | 示教采集（主从同构、位姿已对齐）     |
-| `delta`（**人工接管**） | `slave_ref + (master_now − master_ref)` | 推理中人工接管，从臂动作连续、无突变 |
+| 模式               | 从臂 target                             | 用途（对外叫法）                   | 语义化命令       |
+| ------------------ | --------------------------------------- | ---------------------------------- | ---------------- |
+| `absolute`（缺省） | `master_now`（主臂绝对读数直连）        | 示教采集（主从同构、位姿已对齐）   | `robot teach`    |
+| `delta`            | `slave_ref + (master_now − master_ref)` | 推理中人工接管，从臂动作连续不突变 | `robot takeover` |
 
 > 两种模式都算「人工接管」（`rollout` 一律被拒，见下文）；差别只在从臂 target 的算法。
+
+### 两个用途与命令别名
+
+| 命令                           | 等价底层调用                      | 用途                 |
+| ------------------------------ | --------------------------------- | -------------------- |
+| `robot teach <true\|false>`    | `robot teleop <enabled> absolute` | 示教采集（主臂直连） |
+| `robot takeover <true\|false>` | `robot teleop <enabled> delta`    | 人工接管（锚点增量） |
+
+-   **命名口径**：_遥操作（teleop）= 人工接管控制权_（一个开关，开启期间 `rollout` 一律被拒）；
+    `absolute` / `delta` 只是**映射算法**，对外分别叫「示教」与「接管」。状态里
+    `teleop` + `teleop_mode` 即这两层（见 `/v1/adapters` / console「程控 / 遥操作（示教）/ 人工接管（增量）」）。
+-   `robot teleop <true|false> [absolute|delta]` 是**底层命令**：模式可选、缺省 `absolute`
+    （保持旧调用方与 `/v1/teleop {enabled}` 行为不变）；两个别名**不接受** `mode` 参数
+    （模式由命令名唯一决定，显式传 → `rejected`）。
+-   单点：命令名 → 模式在 `command/params.py::teleop_mode_for`（词表 `TELEOP_COMMAND_MODES`），
+    三个命令共用 `command/config_commands.py::apply_teleop`（node 与会话同一实现）；
+    命令名集合 `command/naming.py::TELEOP_COMMANDS`。
 
 -   **覆盖范围**：关节与夹爪是**同一套语义**——`QPOS` 扁平向量逐元素增量
     （夹爪 target = 夹爪锚点 + 夹爪增量）。因此映射函数无需知道 action 布局，子类的
@@ -95,12 +112,22 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
 -   **遥操作 vs 程控优先级**：遥操作期间**仅** `rollout` 被拒（推理让位）；`execute` / `reset` /
     `safe_stop` 仍是程控 / 安全优先，执行即结束遥操作（见「遥操作期间的推理下发」）。
 -   **交回模型**：`robot teleop false` 后第一拍 `rollout` 的 target 是模型当前输出，
-    与人工位姿的差由 `step_rad` 逐拍拉过去。是否加「交回时机 / 缓慢过渡」（如 RTC 过渡、
-    等待模型动作与当前位姿足够接近再交回）待定。
+    与人工位姿的差由 `step_rad` 逐拍拉过去。其中「模型当前输出」由会话侧保证：**接管开始即
+    `rtc.reset()`**（丢弃未执行的块与在途请求，按世代作废），所以交回后第一块是拿**当时**
+    观测现算的——接管前预取的块（机械臂已被带离原轨迹）不会在交回时被执行；暂停
+    （`infer rollout stop`）同理。是否加「交回时机 / 缓慢过渡」（等待模型动作与当前位姿
+    足够接近再交回）待定，见 `motrix_edge_rtc.md`。
 -   **接管期间的数据**：接管与推理共用同一条 `action` 轨迹，采集到的 `action` 因此连续；
-    是否在 episode 里标记接管区间（元信息字段）待定。
+    是否在 episode 里标记接管区间（元信息字段）待定。**帧头跳过**已实现
+    （`collector.skip_until_motion`，见 [robot-pipeline 运行时](./robot_pipeline_runtime.md)）：
+    capture 开始后主臂未出现有效移动前不记录，避免每轮 episode 头部都带一段「还没开始动」的静止帧。
 -   **主臂读不到期间被人工移动**：恢复读数后增量会跳变，但从臂仍受 `step_rad` 限速保护
     （单拍 ≤ `step_rad`），不会飞车。
+-   **主臂读数不可用（`None` / 读取异常）**：本拍**不刷新 target**（保持原值，不突变），只累计
+    `teleop_read_failures` + **同一原因限流告警**；**不置 `last_error`**——接管中读不到主臂是预期
+    状态（人还没接上 / 瞬时抖动），不能让 `/v1/health` 变不健康（否则一次 CAN 抖动会被 Edge
+    当成硬件故障）。读取异常与 `None` 走同一条路径（`_refresh_teleop_target` 统一 try/except），
+    不会冒出 `step()`。
 -   **单臂布局**：`step()` 目前硬编码双臂切片（`action[6:12]` / `action[12:]`），
     `SinglePiperRobot` 跑到 `step()` 会 IndexError——单臂接入遥操作前需按类常量泛化布局。
 -   **接管前的对齐由人工完成**：主臂**不可被程序驱动**（Piper leader 模式只读），因此不提供

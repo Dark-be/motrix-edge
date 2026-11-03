@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""server/meta —— 采集元信息选项（``config/capture.yml`` 的 ``meta`` 段）。
+"""server/meta —— 采集元信息选项（``capture.yml`` 的 ``meta`` 段）。
 
 配置级、**有意不经命令总线**：选项管理是纯本地配置，经总线就得等节点主循环取命令（submit
 最长 5s，且节点 ERROR 时会拒绝），直连 store 才能在任何节点状态下立即生效。CLI 侧继续走

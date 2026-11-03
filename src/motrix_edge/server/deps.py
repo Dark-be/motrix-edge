@@ -22,7 +22,7 @@ routes/*（HTTP 映射）→ deps.Services（本模块）→ controllers（域�
                                               ↘ CommandBus → node / session（唯一副作用路径）
 ```
 
-controllers（``meta`` / ``preview`` / ``webrtc``）只依赖 node / bus / store，
+controllers（``meta`` / ``preview`` / ``webrtc`` / ``rpent``）只依赖 node / bus / store，
 **不依赖 FastAPI**；机器人 / 节点 / 会话动作的唯一命令入口是 ``CommandService``（REST 动作端点与
 ``/v1/commands`` 共用），租约、上传与采集元信息等资源写入由各自 controller 负责。FastAPI 只出现
 在 ``app.py``（装配 + 中间件）与 ``routes/*``（入参 / 出参映射），故本模块也不依赖它。
@@ -46,7 +46,8 @@ class Services:
 
     ``identity`` / ``leases`` / ``uploads`` 总是有值（缺省按 base_cfg 自建）；
     其余由调用方（``__main__`` 或测试）注入：``node`` 供只读快照，``commands`` 是
-    **唯一命令写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` 各自对应一个协议面。
+    **唯一命令写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` /
+    ``rpent`` 各自对应一个协议面。
     """
 
     identity: Identity

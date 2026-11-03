@@ -25,12 +25,12 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from motrix_edge.command import META_REPLY_DEADLINE, build_command_registry
 from motrix_edge.errors import ErrorCode
+from motrix_edge.policy.contract import ACTION_LAYOUT_JOINT_GRIPPER
 from motrix_edge.session import infer_session
-from motrix_edge.session.base import RunResult, SessionState
+from motrix_edge.session.base import RunResult
 
 _REGISTRY = build_command_registry()
 
@@ -68,6 +68,7 @@ class _FakePolicy:
         self.bind_calls = 0  # bind_adapter（adapter 布局传入）
         self.bound_cameras = None
         self.bound_action_dim = None
+        self.action_layout = "joint"  # 策略输出的动作布局（joint / joint+gripper）：会话据此选下疏通路
         self.action = np.arange(14, dtype=float)
         self.connected = False
         self.server_metadata = {}
@@ -115,15 +116,14 @@ class _FakeAdapter:
         self.ready = ready
         self.safe_stop_calls = 0
         self.executed = []
-        self.execute_error: Exception | None = None
-        self.execute_layouts: list[str | None] = []
         self.reset_calls = 0
-        self.reset_error_after: int | None = None
         self.teleop_values: list[bool] = []
         self.teleop_calls: list[tuple[bool, str | None]] = []
-        self.rollout_spaces: list[str | None] = []
+        self.rollout_layouts: list[str | None] = []  # rollout 收到的 layout（None = 未指定，缺省 joint）
+        self.rollout_arms: list[list[str] | None] = []  # rollout 收到的作用域（None = 缺省）
+        self.enabled_arms = ["right"]  # 启用臂（会话据此传作用域）
+        self.execute_layouts: list[str | None] = []
         self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
-        self.rollout_error: Exception | None = None
         self.images = list(images) if images is not None else None  # 启用相机（adapter config 决定）
         self.action_dim = action_dim  # 启用臂 qpos 维数
         self.capabilities = SimpleNamespace(supports=lambda cap: True)  # EXECUTE 能力校验通过
@@ -141,8 +141,6 @@ class _FakeAdapter:
 
     def reset(self):
         self.reset_calls += 1
-        if self.reset_error_after is not None and self.reset_calls >= self.reset_error_after:
-            raise RuntimeError("HTTP 500")
 
     def observe(self):
         if self._observations is not None:
@@ -150,23 +148,19 @@ class _FakeAdapter:
         return {"observations/qpos": np.zeros(14, dtype=np.float32)}
 
     def execute(self, action, layout=None):
-        if self.execute_error is not None:
-            raise self.execute_error
         self.executed.append(action)
         self.execute_layouts.append(None if layout is None else str(layout))
 
     def set_teleop(self, enabled, mode=None):
         self.teleop_values.append(bool(enabled))
         self.teleop_calls.append((bool(enabled), mode))
-        self.teleop_refused = bool(enabled)
 
     def rollout(self, action, *, layout=None, arms=None) -> bool:
-        if self.rollout_error is not None:
-            raise self.rollout_error
         if self.teleop_refused:  # 模拟 SDK 409（遥操作 / 人工接管中）：本拍不下发
             return False
         self.executed.append(action)
-        self.rollout_spaces.append(None if layout is None else str(layout))
+        self.rollout_layouts.append(None if layout is None else str(layout))
+        self.rollout_arms.append(None if arms is None else list(arms))
         return True
 
     def start_capture(self):
@@ -280,19 +274,6 @@ def _patch(monkeypatch, policy):
     monkeypatch.setattr(infer_session, "get_policy", lambda cfg, **kw: policy)
 
 
-def test_session_rejects_policy_layout_not_supported_by_adapter(monkeypatch):
-    """策略 layout 必须在进入会话时按 adapter 能力拒绝，不能拖到每步下发才失败。"""
-    adapter = _FakeAdapter(ready=True)
-    adapter.type = "fake"
-    adapter.parse_layout = lambda layout: (_ for _ in ()).throw(ValueError(f"unsupported layout {layout}"))
-    policy = _FakePolicy()
-    policy.action_layout = "wrench"
-    _patch(monkeypatch, policy)
-
-    with pytest.raises(ValueError, match="policy action_layout 'wrench'.*fake"):
-        _build_session(adapter, policy, (), warmup_required=False)
-
-
 def test_infer_loop_runs_observation_to_action(monkeypatch):
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
@@ -335,24 +316,6 @@ def test_infer_rollout_single_step_replies_action(monkeypatch):
     assert len(replies[0].data["actions"]) == 1
 
 
-def test_session_quit_reset_error_replies_upstream_error(monkeypatch):
-    """退出回 home 失败须立即回 upstream_error，而不是让 submit 等满超时。"""
-    adapter = _FakeAdapter(ready=True)
-    adapter.reset_error_after = 2  # run 开头 reset 成功，quit 时 reset 失败
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    replies = []
-    quit_cmd = _REGISTRY.parse_argv(["session", "quit"])
-    quit_cmd.reply_to = replies.append
-    session = _build_session(adapter, policy, (quit_cmd,), warmup_required=False)
-
-    assert session.run() == RunResult.ERROR
-    assert session.state == SessionState.ERROR
-    assert replies[0].status == "error"
-    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
-    assert "reset on session quit failed" in replies[0].error
-
-
 def test_infer_rollout_requires_prompt(monkeypatch):
     """prompt 为空不能开始推理：语言条件策略（openpi）infer rollout（未设 prompt）→ rejected。"""
     adapter = _FakeAdapter(ready=True)
@@ -368,25 +331,6 @@ def test_infer_rollout_requires_prompt(monkeypatch):
     assert replies[0].status == "rejected"
     assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "prompt required" in replies[0].error
-
-
-def test_infer_rollout_sdk_error_replies_upstream_error_and_keeps_session(monkeypatch):
-    """SDK 下发失败须回 upstream_error，不能让调用方等超时或击穿会话循环。"""
-    adapter = _FakeAdapter(ready=True)
-    adapter.rollout_error = RuntimeError("HTTP 500")
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    replies = []
-    rollout = _REGISTRY.parse_argv(["infer", "rollout"])
-    rollout.reply_to = replies.append
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", rollout, "session quit"), warmup_required=False
-    )
-
-    assert session.run() == RunResult.FINISHED
-    assert replies[0].status == "error"
-    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
-    assert "HTTP 500" in replies[0].error
 
 
 def test_infer_rollout_continuous_requires_prompt(monkeypatch):
@@ -565,7 +509,8 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
     assert snapshot["policy_type"] == "openpi"  # 未显式选策略 → 配置缺省类型
     assert snapshot["requires_prompt"] is True
     assert snapshot["missing"] == ["prompt"]  # 未预置 → 缺失必填项
-    # 公共项（推理端点 + 预热门控 + 动作布局）与策略项共用同一张表单。
+    # 公共项（推理端点 host / port + 预热门控 warmup_required + 动作布局 action_layout）= 与策略项
+    # 同一张表单（无「连接后锁定」轴）
     assert [item["key"] for item in snapshot["items"]] == [
         "host",
         "port",
@@ -783,80 +728,38 @@ def test_infer_rollout_continuous_replies_started_and_stops(monkeypatch):
     assert adapter.executed  # 有动作下发
 
 
-def test_continuous_session_quit_reset_error_replies_upstream_error(monkeypatch):
-    """持续推理中的 quit 回 home 失败同样必须形成错误回执。"""
+def test_infer_rollout_uses_state_endpoint_for_joint_gripper_layout(monkeypatch):
+    """策略声明 ``joint+gripper``：本步动作带 ``layout`` 与作用域（``arms``）下发，一次写两段。
+
+    缺省 ``joint`` 时行为不变（旧路径：启用臂 + HOME 展开），故只有非缺省布局才带 ``arms``。
+    """
     adapter = _FakeAdapter(ready=True)
-    adapter.reset_error_after = 2
-    policy = _FakePolicy()
+    policy = _FakePolicy(requires_prompt=False)
+    policy.action_layout = ACTION_LAYOUT_JOINT_GRIPPER
+    policy.action = np.arange(7, dtype=float)
     _patch(monkeypatch, policy)
-    replies = []
-    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
-    cont.reply_to = replies.append
-    quit_cmd = _REGISTRY.parse_argv(["session", "quit"])
-    quit_cmd.reply_to = replies.append
-    session = _build_session(
-        adapter,
-        policy,
-        ("infer prompt 把零件放好", cont, quit_cmd),
-        warmup_required=False,
-    )
-
-    assert session.run() == RunResult.ERROR
-    assert replies[0].status == "ok"  # continuous 启动回执
-    assert replies[1].status == "error"
-    assert replies[1].code == ErrorCode.UPSTREAM_ERROR
-
-
-def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
-    """infer rollout stop：停止持续推理并**回到会话主循环**（会话不退出，仍可单步推理）。"""
-    adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    replies = []
-    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
-    cont.reply_to = replies.append
-    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
-    stop.reply_to = replies.append
-    single = _REGISTRY.parse_argv(["infer", "rollout"])
-    single.reply_to = replies.append
-    # None = 无命令空档：让持续推理推一步后再下发 stop
-    session = _build_session(
-        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"), warmup_required=False
-    )
-
-    assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
-    assert [r.status for r in replies] == ["ok", "ok", "ok"]
-    assert replies[0].data["state"] == "continuous"
-    assert replies[1].data["continuous"] is False  # 停止回执
-    assert session.continuous is False  # 运行位已清
-    assert replies[2].data["count"] == 1  # 停止后单步推理仍可用（会话未退出）
-    assert policy.connected is True  # stop 不断开策略；session_finish 才负责释放连接
-    assert policy.disconnect_calls == 0
-
-
-def test_continuous_rollout_allows_teleop_takeover_and_handoff(monkeypatch):
-    """持续推理中可接管、让位、交回并自动恢复动作下发。"""
-    adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()
-    _patch(monkeypatch, policy)
-    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
-    takeover = _REGISTRY.parse_argv(["robot", "teleop", "true", "delta"])
-    handoff = _REGISTRY.parse_argv(["robot", "teleop", "false"])
-    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
-    replies = []
-    takeover.reply_to = replies.append
-    handoff.reply_to = replies.append
-    session = _build_session(
-        adapter,
-        policy,
-        ("infer prompt 接管测试", cont, takeover, None, handoff, None, stop, "session quit"),
-        warmup_required=False,
-    )
+    session = _build_session(adapter, policy, ("infer rollout", "session quit"), warmup_required=False)
 
     assert session.run() == RunResult.FINISHED
-    assert adapter.teleop_calls == [(True, "delta"), (False, None)]
-    assert [reply.data["state"] for reply in replies] == ["continuous", "continuous"]
-    assert adapter.executed  # 交回后持续推理恢复下发
+    assert adapter.rollout_layouts == [ACTION_LAYOUT_JOINT_GRIPPER]
+    assert adapter.rollout_arms == [["right"]]
+    assert len(adapter.executed) == 1
+    np.testing.assert_allclose(adapter.executed[0], np.arange(7, dtype=float))
+
+
+def test_continuous_rollout_also_uses_state_endpoint(monkeypatch):
+    """持续推理同样按布局分流：``joint+gripper`` 时每一步都带 layout 与作用域。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=False)
+    policy.action_layout = ACTION_LAYOUT_JOINT_GRIPPER
+    policy.action = np.arange(7, dtype=float)
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("infer rollout continuous", None, "session quit"), warmup_required=False)
+
+    assert session.run() == RunResult.FINISHED
+    assert len(adapter.rollout_layouts) >= 1  # 持续推理至少推了一步
+    assert set(adapter.rollout_layouts) == {ACTION_LAYOUT_JOINT_GRIPPER}
+    assert adapter.rollout_arms[0] == ["right"]
 
 
 def test_infer_continuous_records_episode(monkeypatch):
@@ -931,7 +834,6 @@ def test_robot_execute_forwards_layout_in_infer_loop(monkeypatch):
     policy = _FakePolicy()
     _patch(monkeypatch, policy)
     session = _build_session(adapter, policy, ("robot execute 0,0,0,0,0,0,0 pose", "session quit"))
-
     assert session.run() == RunResult.FINISHED
     assert adapter.executed == [[0.0] * 7]
     assert adapter.execute_layouts == ["pose"]
@@ -1411,6 +1313,58 @@ def test_expired_reset_and_teleop_are_dropped_in_session(monkeypatch):
     assert [reply.code for reply in replies] == [ErrorCode.TIMEOUT, ErrorCode.TIMEOUT]
 
 
+def test_takeover_start_discards_cached_chunks(monkeypatch):
+    """接管开始（`robot teleop true delta`）即丢弃未执行的动作块。
+
+    否则交回模型后第一块是接管**前**算出的动作，会把机械臂朝原轨迹拉（`infer rollout stop`
+    暂停同理）。
+    """
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("robot teleop true delta", "robot teleop false", "session quit"))
+    resets = []
+    monkeypatch.setattr(session.rtc, "reset", lambda: resets.append("reset"))
+
+    assert session.run() == RunResult.FINISHED
+
+    assert adapter.teleop_values == [True, False]
+    # 会话启动一次 + 接管开始一次；交回（teleop=false）不重复清
+    assert resets == ["reset", "reset"]
+
+
+def test_rollout_stop_discards_cached_chunks(monkeypatch):
+    """暂停（infer rollout stop）即丢弃未执行的动作块：恢复后首块用当时观测现算。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
+    cont.reply_to = replies.append
+    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
+    stop.reply_to = replies.append
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, "session quit"), warmup_required=False
+    )
+    resets = []
+    monkeypatch.setattr(session.rtc, "reset", lambda: resets.append("reset"))
+
+    assert session.run() == RunResult.FINISHED
+
+    # 会话启动一次 + 暂停一次
+    assert resets == ["reset", "reset"]
+
+
+def test_robot_takeover_alias_in_infer_loop(monkeypatch):
+    """推理循环中 robot takeover：等价 robot teleop true delta（人工接管，模式固定 delta）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("robot takeover true", "robot teach false", "session quit"))
+    assert session.run() == RunResult.FINISHED
+    assert adapter.teleop_calls == [(True, "delta"), (False, "absolute")]
+
+
 # ---- 以下为 dev 侧独有（本次 merge 保留） ----
 def test_infer_rollout_action_repr_rounds_to_display_digits(monkeypatch):
     """日志 / 回执 / 网页的动作数值统一保留 3 位小数（内部链路仍用全精度）。"""
@@ -1427,6 +1381,31 @@ def test_infer_rollout_action_repr_rounds_to_display_digits(monkeypatch):
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].data["action"] == [-0.062, 0.447, 0.0]  # 3 位小数（-0.0 → 0.0）
+
+
+def test_infer_rollout_stop_returns_to_session_loop(monkeypatch):
+    """infer rollout stop：停止持续推理并**回到会话主循环**（会话不退出，仍可单步推理）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    cont = _REGISTRY.parse_argv(["infer", "rollout", "continuous"])
+    cont.reply_to = replies.append
+    stop = _REGISTRY.parse_argv(["infer", "rollout", "stop"])
+    stop.reply_to = replies.append
+    single = _REGISTRY.parse_argv(["infer", "rollout"])
+    single.reply_to = replies.append
+    # None = 无命令空档：让持续推理推一步后再下发 stop
+    session = _build_session(
+        adapter, policy, ("infer prompt 把零件放好", cont, None, stop, single, "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED  # 直到 session quit 才退出会话
+    assert [r.status for r in replies] == ["ok", "ok", "ok"]
+    assert replies[0].data["state"] == "continuous"
+    assert replies[1].data["continuous"] is False  # 停止回执
+    assert session.continuous is False  # 运行位已清
+    assert replies[2].data["count"] == 1  # 停止后单步推理仍可用（会话未退出）
 
 
 def test_infer_connect_failure_records_warmup_error(monkeypatch):

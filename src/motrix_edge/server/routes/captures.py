@@ -86,7 +86,7 @@ def build_router(services: Services) -> APIRouter:
 
     @router.get("/v1/captures/meta")
     def captures_meta():
-        """采集元信息选项（config/capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
+        """采集元信息选项（capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
         return _meta().list()
 
     @router.post("/v1/captures/meta")

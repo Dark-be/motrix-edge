@@ -28,13 +28,12 @@ from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
+    apply_teleop,
     expired_command_result,
     handle_capture_meta,
     ok_result,
-    parse_bool,
     parse_layout,
     parse_qpos,
-    parse_teleop_mode,
     reject_legacy_action_space,
 )
 from motrix_edge.errors import ErrorCode
@@ -97,7 +96,7 @@ class BaseSession:
         self.frame_manager = frame_manager or FrameManager()  # 观测帧缓存（preview / WebRTC 消费）
         # 节点级 active adapter（注入，生命周期归节点）：会话只引用，不持有 / 不释放
         self.adapter = adapter
-        # 采集元信息选项存储（config/capture.yml）：capture meta 配置命令任务态读写；
+        # 采集元信息选项存储（capture.yml）：capture meta 配置命令任务态读写；
         # 进程内单实例——节点注入同一份（与 /v1/captures/meta 共用同一把锁）；
         # 缺省 None 表示会话自行按需创建，测试可注入临时 store。
         self.capture_meta_store = capture_meta_store or CaptureMetaStore()
@@ -208,30 +207,34 @@ class BaseSession:
             return
         self._reply(cmd, ok_result(state="ready", action=round_floats(qpos), layout=layout))
 
-    def _set_teleop(self, cmd, state: str = "ready") -> None:
-        """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。
+    def _set_teleop(self, cmd, state: str = "ready") -> tuple[bool, str | None]:
+        """遥操作 / 人工接管的统一入口（``robot teleop`` | ``robot teach`` | ``robot takeover``）。
 
-        ``mode=delta`` = 人工接管（接管瞬间主 / 从位姿为锚点，只叠加主臂增量）；遥操作开启
-        期间轮机侧会拒绝 ``rollout``（推理让位，见 `/v1/rollout` 契约）。
+        模式：``robot teach`` → ``absolute``（示教）、``robot takeover`` → ``delta``（人工接管，
+        接管瞬间主 / 从位姿为锚点、只叠加主臂增量）；``robot teleop`` 用可选 ``mode``（缺省
+        ``absolute``）。遥操作开启期间机器人侧会拒绝 ``rollout``（推理让位，见
+        `wiki/design/robot_pipeline_teleop.md`）。
         参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop 与模式）。
+
+        返回 ``(enabled, mode)`` 供子类复用（如推理会话据此丢弃未执行的动作块）；参数非法时
+        回执 rejected 并返回 ``(False, None)``。
         """
         if self._reject_expired_control(cmd, "teleop"):
-            return
+            return False, None
         try:
-            enabled = parse_bool(cmd.params.get("enabled"))
-            mode = parse_teleop_mode(cmd.params.get("mode"))
-            self.adapter.set_teleop(enabled, mode)
+            enabled, mode = apply_teleop(self.adapter, cmd)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
-            return
+            return False, None
         except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话或持续推理
             debug_print(self.name, f"teleop command failed: {exc}", "WARNING")
             self._reply(
                 cmd,
                 CommandResult(status="error", error=f"teleop command failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
             )
-            return
+            return False, None
         self._reply(cmd, ok_result(state=state, teleop=enabled, mode=mode if enabled else None))
+        return enabled, mode
 
     def _reset_robot(self, cmd, state: str = "ready") -> None:
         """robot reset：截止时间已过则丢弃，否则复位并回执。"""

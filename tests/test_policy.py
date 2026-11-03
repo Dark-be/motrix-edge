@@ -81,6 +81,7 @@ class _FakeTransport:
         return {"actions": np.ones((self.horizon, self.dim), dtype=np.float32)}
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_connect_without_action_horizon_metadata():
     """官方服务端 metadata 不提供 action_horizon（原生 openpi 常态）也能连上，不再报错。
 
@@ -99,6 +100,7 @@ def test_openpi_connect_without_action_horizon_metadata():
     assert client.server_metadata == {}
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_exposes_server_metadata():
     from motrix_edge.policy.openpi.client import OpenPIClient
 
@@ -112,6 +114,7 @@ def test_openpi_exposes_server_metadata():
     assert client.server_metadata == {}
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_adopts_server_declared_cameras():
     """服务端 metadata 声明相机清单（openpi piper 分支的 ``policy_metadata.cameras``）时以它为准：
     服务端按这些名字取图（多送没用、少送报错），所以下发过滤要跟它一致——且与「先 connect 还是
@@ -156,6 +159,7 @@ def test_openpi_adopts_server_declared_cameras():
     client3.disconnect()
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_image_size_is_read_live():
     """image_size **每次请求现读**：会话内 ``infer config set image_size`` 下一块立即按新尺寸下发。
 
@@ -242,6 +246,7 @@ def test_set_policy_config_clears_empty_and_rejects_non_integer():
     assert cfg["policy"]["port"] == 9000
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_prepare_is_noop_without_connection_or_observation():
     """``prepare`` 契约（两个策略客户端一致）：未连接 / 无观测 → no-op，不抛错也不发请求。"""
     from motrix_edge.policy.openpi.client import OpenPIClient
@@ -255,6 +260,7 @@ def test_openpi_prepare_is_noop_without_connection_or_observation():
     assert transport.calls == 0
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_observed_chunk_len_from_first_chunk():
     """块长以**实测**为准（服务端不一定声明）：预热那一块测出 16 步 → ``observed_chunk_len=16``
     （RTC 据此兜底校准块长上限 H）；配置不管，实测多长就多长。
@@ -279,6 +285,7 @@ def test_openpi_observed_chunk_len_from_first_chunk():
     client2.disconnect()
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_infer_chunk_returns_raw_chunk():
     """OpenPIClient.infer_chunk：每次调用真实请求一次，返回**原始动作块**（不做缓存 / 切片）。
 
@@ -310,6 +317,7 @@ def _jpeg_bytes(rgb):
     return buf.tobytes()
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_sends_official_flat_observation():
     """OpenPIClient 按官方 flat 契约组装观测：state=qpos、图像为 uint8 数组（非 jpeg bytes）、
     相机集来自 bind_adapter（adapter 启用的相机名，非 edge.yml）、rename_cameras 改名、
@@ -352,6 +360,7 @@ def test_openpi_sends_official_flat_observation():
         assert img.shape == (16, 16, 3)  # uint8 HWC（非 jpeg bytes）
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_camera_layout_comes_from_bind_adapter_not_config():
     """openpi **不读 edge.yml 的相机名**：仅 bind_adapter 决定要下发的相机（未绑定 = 透传全部）。"""
     from motrix_edge.policy.openpi.client import OpenPIClient
@@ -374,6 +383,7 @@ def test_openpi_camera_layout_comes_from_bind_adapter_not_config():
     assert set(transport.last_payload[OPENPI_KEY_IMAGES]) == {"cam_head"}
 
 
+@pytest.mark.optional("openpi")
 def test_openpi_prompt_dynamic_per_request():
     """prompt 运行时动态可换（会话侧 set policy.prompt 后，下一请求携带新文本）。"""
     from motrix_edge.policy.openpi.client import OpenPIClient
@@ -414,6 +424,7 @@ def test_get_policy_unknown_type():
         get_policy({"policy": {"type": "nonexistent"}})
 
 
+@pytest.mark.optional("openpi")
 def test_get_policy_default_openpi():
     policy = get_policy({})
     assert policy.__class__.__name__ == "OpenPIClient"
