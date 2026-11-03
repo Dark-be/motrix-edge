@@ -11,7 +11,8 @@ OAuth 回调；Console 使用每台 Edge 独立的共享密钥签署用户身份
 
 -   飞书只登记一个稳定回调地址，属于固定 Console 域名。
 -   浏览器只持有 Console 的 HttpOnly Cookie，不把飞书 token 或代理签名密钥暴露给 JavaScript。
--   Edge 地址只能来自服务端静态注册表；浏览器不能提交任意代理目标，避免 SSRF。
+-   Edge 地址只能来自服务端静态注册表；浏览器不能提交任意代理目标，避免 SSRF。固定可信局域网可
+    为单台设备显式启用 `trustedNetwork`，不配置 HMAC，但必须用网络 ACL 限制 Edge 入口。
 -   Console 不取代 Edge 租约和状态机；受控请求仍携带原 `X-Lease-Id`，Edge 作最终校验。
 -   Console 只在已登录后代理 Edge API；代理时附加签名身份，但不信任浏览器提交的 `operator`。
 -   首版代理普通 HTTP API 与 WebRTC offer 信令；WebRTC 媒体仍由浏览器和 Edge 直接协商。
@@ -67,6 +68,15 @@ auth:
 ```
 
 Console 与该 Edge 的两个环境变量值必须相同。
+
+### 可信局域网模式
+
+实验室固定 IP 设备可在单条静态注册项设置 `"trustedNetwork": true` 并省略 `sharedSecretEnv`。该模式
+仍要求浏览器先登录飞书，且 Console 在转发 `POST /v1/captures/sync` 前删除浏览器提交的
+`operator` / `operator_identity` / `capture_context`，用服务端登录 Session 重建采集身份。但是 Edge
+不再能独立验证请求是否来自 Console，因此部署必须通过主机防火墙、交换机 ACL 或隔离管理网保证 Edge
+控制端口只接受 Console 主机。`trustedNetwork` 与 `sharedSecretEnv` 互斥；非固定可信网络必须使用
+HMAC 模式。
 
 ## 签名契约
 

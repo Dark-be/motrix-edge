@@ -3,8 +3,9 @@
 ## 摘要
 
 固定部署的 Motrix Console 通过飞书 OAuth 识别采集员。飞书凭证只保存在 Console 内存会话中，
-浏览器仅持有 Console 的不透明 HttpOnly Cookie；Console 代理到动态 Edge 时用每台设备的共享密钥
-签署身份，Edge 验签并覆盖 `operator` / `operator_identity`，再校验登录主体与租约主体一致。
+浏览器仅持有 Console 的不透明 HttpOnly Cookie。HMAC 模式由 Console 签署身份、Edge 验签并覆盖
+`operator` / `operator_identity`；固定可信局域网模式则由 Console 在转发前覆盖身份，Edge 只接受受限
+管理网入口。
 完整拓扑见 [Motrix Console BFF](./motrix_console_bff.md)。Edge 自带 OAuth 仅保留为单机调试兼容面。
 
 ## 目标与边界
@@ -28,13 +29,17 @@
 
 ## 采集同步
 
-分布式认证启用后，Console 代理的 `POST /v1/captures/sync` 依次执行：
+HMAC 模式下，Console 代理的 `POST /v1/captures/sync` 依次执行：
 
 1. Console 校验登录 Cookie，并对方法 / 路径 / body hash / 用户 / 时间 / nonce 作 HMAC 签名；
 2. Edge 验证时间窗、签名与 nonce 未重放；
 3. Edge 校验 `X-Lease-Id` 对应活跃租约；
 4. 要求租约 `holder_subject_id` 等于签名用户的 `subject`；
 5. 删除调用方提交的身份字段，注入可信身份和审计上下文，再走现有 `capture sync` 命令。
+
+固定可信局域网模式不配置 HMAC：Console 校验登录 Cookie 后先删除 body 中的身份字段，再从服务端
+Session 注入操作员身份并转发；Edge 仍校验租约 ID，但不能独立证明身份来源。该模式只允许用于静态 IP
+白名单，并必须在网络层把 Edge 控制端口限制为 Console 主机或可信管理网。
 
 同步必须发生在 `capture episode start` 之前，因为机器人进程在开始录制时快照本轮元信息。
 
@@ -69,8 +74,7 @@
 ## 配置与部署
 
 飞书 App ID / Secret 位于固定主机环境变量，OAuth URI 与 Edge 注册表位于
-`console/console.config.json`，不再分发到 Edge。Console 与每台
-Edge 配置同一份设备级共享密钥：Console 注册表通过 `shared_secret_env` 读取，Edge 通过
-`auth.console_proxy.shared_secret_env` 读取。生产环境必须使用 HTTPS 与 Secure Cookie，并限制 Edge
-的网络入口只接受 Console 或可信管理网。`edge.yml.auth.feishu` 缺省关闭，仅用于浏览器、前端和 Edge
-确实同机的单机调试。
+`console/console.config.json`，不再分发到 Edge。HMAC 设备通过双方的 `shared_secret_env` 配置同一份
+设备级共享密钥；固定可信局域网设备显式写 `trustedNetwork: true`，不保存设备系统密码或代理密钥。
+生产环境必须使用 HTTPS 与 Secure Cookie，并限制 Edge 网络入口。`edge.yml.auth.feishu` 缺省关闭，
+仅用于浏览器、前端和 Edge 确实同机的单机调试。
