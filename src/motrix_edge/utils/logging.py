@@ -26,7 +26,7 @@ from uvicorn.config import LOGGING_CONFIG
 from motrix_edge.utils.data_handler import file_log_enabled
 
 
-def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
+def uvicorn_log_config(log_file: str, file_enabled: bool | None = None, quiet_startup: bool = False) -> dict:
     """构建 uvicorn 日志配置（经 ``uvicorn.Config(log_config=...)`` 生效）。
 
     ``file_enabled`` 缺省读 ``MOTRIX_EDGE_LOG_FILE``（与 ``debug_print`` 同一开关，**缺省关闭**）：
@@ -36,6 +36,10 @@ def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
     - 关闭（缺省）：HTTP access **丢弃**（NullHandler）——不写文件、不占终端
       （防长期运行刷屏 / 塞满磁盘）；uvicorn 启动 / 错误日志仍走默认终端 handler
       （不写文件）——端口占用 bind 失败、uvicorn 内部异常在终端可见，排障不丢现场。
+
+    ``quiet_startup``（终端已打启动卡片时置位）：把 uvicorn 的**启动 INFO** 降到 WARNING——
+    “Started server process” / “Uvicorn running on …” 与卡片里的服务地址重复；WARNING 以上的
+    排障信息（如端口被占用）照常输出。
 
     注意：不能手动 ``logger.addHandler`` —— uvicorn 启动 ``configure_logging()``
     会 ``dictConfig`` 覆盖已有 handler；必须经 ``log_config`` 传入。
@@ -48,7 +52,7 @@ def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
         # uvicorn（启动 / 错误）保留默认终端 handler，不写文件。
         cfg["handlers"]["null"] = {"class": "logging.NullHandler"}
         cfg["loggers"]["uvicorn.access"]["handlers"] = ["null"]
-        return cfg
+        return _apply_startup_level(cfg, quiet_startup)
     # 纯文本文件 formatter（默认 formatter 带 ANSI 颜色，不适合文件）
     cfg["formatters"]["file"] = {
         "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -68,6 +72,13 @@ def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
     handlers = cfg["loggers"]["uvicorn"]["handlers"]
     if "file" not in handlers:
         handlers.append("file")
+    return _apply_startup_level(cfg, quiet_startup)
+
+
+def _apply_startup_level(cfg: dict, quiet_startup: bool) -> dict:
+    """``quiet_startup`` → 把 uvicorn 的启动 INFO 降到 WARNING（服务地址已由启动卡片给出）。"""
+    if quiet_startup:
+        cfg["loggers"]["uvicorn.error"]["level"] = "WARNING"
     return cfg
 
 

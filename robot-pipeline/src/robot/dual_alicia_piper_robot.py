@@ -51,9 +51,13 @@ class DualAliciaPiperRobot(BaseRobot):
     GRIPPER = 2  # slave 从臂：每臂 1 夹爪（gripper 空间）
     IMAGE_NAMES = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
+    # 头部 = RealSense（序列号）；腕部 = USB 相机（V4L2 稳定软链 /dev/v4l/by-id/*）
+    CAMERA_KINDS = {"cam_head": "realsense", "cam_left_wrist": "v4l2", "cam_right_wrist": "v4l2"}
     SHM_NAME = "dual_piper_obs"
     # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports / robot.cameras）----
     PORT_ROLES = ("left_master", "right_master", "left", "right")  # 控制器端口（主手 / 从臂）
+    # Alicia 示教臂 = USB 串口（/dev/serial/by-id/*）；Piper 从臂 = CAN 接口名
+    PORT_KINDS = {"left_master": "serial", "right_master": "serial", "left": "can", "right": "can"}
 
     def __init__(self, robot_config: dict | None = None):
         super().__init__(robot_config)
@@ -85,8 +89,10 @@ class DualAliciaPiperRobot(BaseRobot):
         """
         self.controllers["left_master"].connect(port=self.ports["left_master"])
         self.controllers["right_master"].connect(port=self.ports["right_master"])
-        self.controllers["left_arm"].connect(port=self.ports["left"])
-        self.controllers["right_arm"].connect(port=self.ports["right"])
+        # 重力前馈只装在**执行**臂（Alicia 从手）：主手只读，不会被 set_joint 下发
+        gravity = self.robot_config.get("gravity")
+        self.controllers["left_arm"].connect(port=self.ports["left"], gravity=gravity)
+        self.controllers["right_arm"].connect(port=self.ports["right"], gravity=gravity)
         debug_print(self.name, "Setup controllers done", "INFO")
         self.sensors["cam_head"].connect(device=self.camera_devices["cam_head"], pixel_format="jpg")
         self.sensors["cam_left_wrist"].connect(device=self.camera_devices["cam_left_wrist"], pixel_format="jpg")
