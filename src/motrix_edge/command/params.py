@@ -21,7 +21,7 @@
 
 import json
 
-from motrix_edge.adapter.http_contract import TELEOP_MODES
+from motrix_edge.adapter.http_contract import ACTION_SPACES, TELEOP_MODES, VALUE_LAYOUT_JOINT
 
 
 def parse_qpos(raw) -> list[float]:
@@ -42,6 +42,33 @@ def parse_qpos(raw) -> list[float]:
         return [float(tok) for tok in tokens]
     except ValueError:
         raise ValueError(f"invalid qpos: {raw!r}") from None
+
+
+def parse_layout(raw) -> str:
+    """解析 ``robot execute`` 的可选布局参数（``layout``）→ ``joint`` / ``pose``。
+
+    缺失 / 空 → ``joint``（不发该参数 = 关节空间，与只用 ``<qpos>`` 的旧调用方等价）；
+    取值只做**词表**校验（``http_contract.ACTION_SPACES``，与 ``/v1/execute`` 契约同源）；
+    "本适配器是否支持该布局" 由 ``adapter.parse_layout`` 判（不在 ``ACTION_SPACES`` →
+    ``ValueError``）；非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+    """
+    text = str("" if raw is None else raw).strip().lower()
+    if not text:
+        return VALUE_LAYOUT_JOINT
+    if text not in ACTION_SPACES:
+        raise ValueError(f"invalid layout: {raw!r} (expect {'|'.join(ACTION_SPACES)})")
+    return text
+
+
+def reject_legacy_action_space(params) -> None:
+    """旧键 ``action_space`` 已改名为 ``layout``：**显式拒绝**，不静默按 ``joint`` 解释。
+
+    ``joint`` / ``pose`` / ``pose_delta`` 的**扁平维度相同**，只凭维度校验发现不了「名字丢了」
+    （见 ``wiki/design/robot_pipeline_cartesian.md``）：旧调用方发 ``action_space=pose`` 时
+    若走缺省，位姿数会被当关节角执行——动错机器人，所以宁可拒绝这一条命令。
+    """
+    if params and "action_space" in params:
+        raise ValueError("action_space is renamed to layout")
 
 
 def parse_bool(raw) -> bool:

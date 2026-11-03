@@ -14,13 +14,13 @@
 
 """共享内存观测契约测试（真实 /dev/shm）—— 陈旧检测与写者重启后重新 attach。
 
-覆盖：正常读帧、写者停更时**不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach、
-位姿区（pose_dim > 0 时布局 v3 且读到 ``pose``；= 0 时与 v2 兼容且无 ``pose`` 键）。
+覆盖：正常读帧（qpos 状态向量 + action 目标向量 + images）、写者停更时
+**不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach、位姿区（``pose_dim > 0``
+时额外给 ``pose`` 与 ``pose_target``；= 0 时两者都不占区且无对应键）、版本不符拒绝 attach。
 """
 
 import time
 import uuid
-from multiprocessing import shared_memory
 
 import numpy as np
 import pytest
@@ -31,30 +31,9 @@ _IMAGE_SIZE = (4, 3)  # (width, height)
 _IMAGE_COUNT = 1
 _QPOS_DIM = 2
 _ACTION_DIM = 2
-_POSE_DIM = 6  # 位姿区（v3）；0 = 不启用（v2 兼容）
+_POSE_DIM = 6  # 位姿区（双臂量级）；0 = 本机不提供位姿
+_EXPECTED_VERSION = 6
 _STALE = 0.05  # 测试用陈旧阈值（秒）
-
-# MR 前的真实 v2 header。新字段只能追加，不能改变这些字段的 offset。
-_LEGACY_V2_HEADER = np.dtype(
-    [
-        ("magic", "<i8"),
-        ("version", "<i8"),
-        ("frame_seq", "<i8"),
-        ("timestamp", "<f8"),
-        ("image_count", "<i8"),
-        ("image_height", "<i8"),
-        ("image_width", "<i8"),
-        ("image_channels", "<i8"),
-        ("qpos_dim", "<i8"),
-        ("qpos_offset", "<i8"),
-        ("action_dim", "<i8"),
-        ("action_offset", "<i8"),
-        ("image_data_offset", "<i8"),
-        ("image_data_size", "<i8"),
-        ("running", "<i8"),
-        ("capturing", "<i8"),
-    ]
-)
 
 
 def _new_name() -> str:
@@ -78,100 +57,63 @@ def _make_writer(name: str, pose_dim: int = 0) -> ObsShmWriter:
         qpos_dim=_QPOS_DIM,
         action_dim=_ACTION_DIM,
         pose_dim=pose_dim,
+        pose_target_dim=pose_dim,  # 目标位姿随实测位姿同生共死（机器人侧契约）
     )
 
 
 def test_pose_region_roundtrip():
-    """pose_dim > 0：布局升到 v3，读者拿到位姿（与 qpos / action 同一帧）。"""
+    """pose_dim > 0：读者拿到实测位姿与**目标位姿**（与 qpos / action 同一帧）。"""
     name = _new_name()
     writer = _make_writer(name, pose_dim=_POSE_DIM)
     reader = ObsShmReader(name)
     try:
         assert reader.pose_dim == _POSE_DIM
+        assert reader.pose_target_dim == _POSE_DIM
         writer.write(
             np.full(_QPOS_DIM, 1, dtype="<f8"),
             np.full(_ACTION_DIM, 2, dtype="<f8"),
             [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
             pose=np.arange(_POSE_DIM, dtype="<f8"),
+            pose_target=np.arange(_POSE_DIM, dtype="<f8") + 10.0,
         )
         frame = reader.read()
         assert frame is not None
         assert frame["pose"].tolist() == [0, 1, 2, 3, 4, 5]
+        assert frame["pose_target"].tolist() == [10, 11, 12, 13, 14, 15]
     finally:
         reader.close()
         writer.close()
         writer.unlink()
 
 
-def test_pose_dim_zero_keeps_v2_layout():
-    """pose_dim = 0：不占位姿区（版本保持 v2），读数不含 ``pose`` 键（向后兼容）。"""
+def test_pose_dim_zero_keeps_no_pose_region():
+    """pose_dim = 0：不占位姿区，读数不含 ``pose`` / ``pose_target`` 键（本机不提供位姿）。"""
     name = _new_name()
     writer = _make_writer(name)
     reader = ObsShmReader(name)
     try:
-        assert reader.pose_dim == 0
+        assert reader.pose_dim == 0 and reader.pose_target_dim == 0
         _write(writer, 5)
         frame = reader.read()
-        assert frame is not None and "pose" not in frame
+        assert frame is not None and "pose" not in frame and "pose_target" not in frame
     finally:
         reader.close()
         writer.close()
         writer.unlink()
 
 
-def test_reader_accepts_legacy_v2_header_without_misreading_offsets():
-    """新 reader 可读取 MR 前的 v2 writer；新增 header 字段不能移动旧字段。"""
+def test_version_mismatch_is_rejected():
+    """版本不符（如还在跑旧版机器人进程）→ 拒绝 attach，报错说明需同步升级。"""
     name = _new_name()
-    qpos_offset = _LEGACY_V2_HEADER.itemsize
-    action_offset = qpos_offset + _QPOS_DIM * 8
-    image_offset = action_offset + _ACTION_DIM * 8
-    image_bytes = _IMAGE_COUNT * _IMAGE_SIZE[1] * _IMAGE_SIZE[0] * 3
-    shm = shared_memory.SharedMemory(name=name, create=True, size=image_offset + image_bytes)
-    header = np.ndarray((), dtype=_LEGACY_V2_HEADER, buffer=shm.buf)
-    header["magic"] = 0x4D4F544F4E474F
-    header["version"] = 2
-    header["frame_seq"] = 1
-    header["timestamp"] = time.time()
-    header["image_count"] = _IMAGE_COUNT
-    header["image_height"] = _IMAGE_SIZE[1]
-    header["image_width"] = _IMAGE_SIZE[0]
-    header["image_channels"] = 3
-    header["qpos_dim"] = _QPOS_DIM
-    header["qpos_offset"] = qpos_offset
-    header["action_dim"] = _ACTION_DIM
-    header["action_offset"] = action_offset
-    header["image_data_offset"] = image_offset
-    header["image_data_size"] = image_bytes
-    header["running"] = 1
-    header["capturing"] = 0
-    np.ndarray((_QPOS_DIM,), dtype="<f8", buffer=shm.buf, offset=qpos_offset)[:] = [1, 2]
-    np.ndarray((_ACTION_DIM,), dtype="<f8", buffer=shm.buf, offset=action_offset)[:] = [3, 4]
-    np.ndarray((_IMAGE_COUNT, _IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1", buffer=shm.buf, offset=image_offset)[
-        :
-    ] = 5
-
-    reader = ObsShmReader(name)
+    writer = _make_writer(name)
     try:
-        frame = reader.read()
-        assert reader.pose_dim == 0
-        assert frame is not None
-        assert frame["qpos"].tolist() == [1, 2]
-        assert frame["action"].tolist() == [3, 4]
-        assert "pose" not in frame
-        assert reader.running is True
-    finally:
+        assert int(writer._header["version"]) == _EXPECTED_VERSION
+        writer._header["version"] = _EXPECTED_VERSION - 1  # 冒充旧版进程写的段
+        with pytest.raises(ValueError, match="version"):
+            ObsShmReader(name)
+        writer._header["version"] = _EXPECTED_VERSION  # 版本回正 → 正常 attach
+        reader = ObsShmReader(name)
         reader.close()
-        shm.close()
-        shm.unlink()
-
-
-def test_pose_writer_requires_pose_every_frame():
-    """启用 pose 区后缺 pose 必须拒绝，不能发布混合新 qpos / 旧 pose 的帧。"""
-    name = _new_name()
-    writer = _make_writer(name, pose_dim=_POSE_DIM)
-    try:
-        with pytest.raises(ValueError, match="pose is required"):
-            _write(writer, 1)
     finally:
         writer.close()
         writer.unlink()

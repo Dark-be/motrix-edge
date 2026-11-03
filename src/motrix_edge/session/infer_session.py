@@ -57,6 +57,7 @@ from motrix_edge.policy import (
     policy_config_runtime_keys,
     validate_policy_type,
 )
+from motrix_edge.policy.contract import ACTION_LAYOUT_JOINT
 from motrix_edge.rtc import build_rtc
 from motrix_edge.utils.data_handler import debug_print, round_floats
 
@@ -100,6 +101,7 @@ class InferSession(BaseSession):
         # 运行时策略选择：session run infer 携带 policy_type（HTTP / 命令）；由节点校验
         self.policy_type = policy_type
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
+        self._validate_policy_layout()
         # 会话创建即应用内存态已预置的配置项：如 prompt（进入会话前经 `infer prompt` /
         # POST /v1/infers body 的 config 预置）；不声明该项的策略无此入口（no-op）。
         self._apply_prompt(self.policy_config.get("prompt"))
@@ -148,6 +150,18 @@ class InferSession(BaseSession):
             f"Policy config: {self.policy_config} (type={self.policy_type})",
             "INFO",
         )
+
+    def _validate_policy_layout(self) -> None:
+        """进入会话时即按当前 adapter 能力校验策略输出布局，避免运行到真机下发才失败。"""
+        layout = getattr(self.policy, "action_layout", ACTION_LAYOUT_JOINT)
+        parse_layout = getattr(self.adapter, "parse_layout", None)
+        if not callable(parse_layout):  # 第三方/测试 adapter 未提供布局自省时保留兼容
+            return
+        try:
+            parse_layout(layout)
+        except ValueError as exc:
+            adapter_type = getattr(self.adapter, "type", type(self.adapter).__name__)
+            raise ValueError(f"policy action_layout {layout!r} is not supported by adapter {adapter_type!r}") from exc
 
     @property
     def connected(self) -> bool:
@@ -752,7 +766,7 @@ class InferSession(BaseSession):
             return
         if action is not None:
             try:
-                accepted = self.adapter.rollout(action)
+                accepted = self._rollout(action)
             except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话
                 self._reply_upstream_error(cmd, "rollout", exc)
                 return
@@ -905,7 +919,7 @@ class InferSession(BaseSession):
             if action is not None:
                 # 遥操作（人工接管）中 SDK 拒绝本拍（409，adapter 已限流日志）：继续下一拍，
                 # 遥操作关闭（robot teleop false）后自动恢复下发。
-                self.adapter.rollout(action)
+                self._rollout(action)
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
 
     def _quit_session(self, cmd, success_message: str) -> RunResult:
@@ -921,6 +935,23 @@ class InferSession(BaseSession):
         self._record_exit(cmd)  # 成功退出仍由 node 在 READY 状态落定后补发回执
         debug_print(self.name, success_message, "INFO")
         return RunResult.FINISHED
+
+    def _rollout(self, action) -> bool:
+        """按策略声明的动作布局下发本步动作（返回是否已下发）。
+
+        - ``joint``（缺省）：每臂 6 关节角 → :meth:`RobotAdapter.rollout`（夹爪另经 ``gripper`` 空间，
+          未启用臂补 home）；
+        - ``joint_gripper``：每臂「6 关节角 + 1 夹爪」→ :meth:`RobotAdapter.rollout` 带
+          ``layout="joint+gripper"`` + ``arms`` **一次**下发所选臂（未选臂不补 home，关节与夹爪同一
+          控制拍落地）。
+
+        布局取值与语义见 ``motrix_edge.policy.contract``；返回 ``False`` = 本拍被拒（遥操作中）。
+        """
+        layout = getattr(self.policy, "action_layout", ACTION_LAYOUT_JOINT)
+        if layout == ACTION_LAYOUT_JOINT:
+            return self.adapter.rollout(action)
+        arms = list(getattr(self.adapter, "enabled_arms", []) or []) or None
+        return self.adapter.rollout(action, layout=layout, arms=arms)
 
     @staticmethod
     def _action_repr(action):

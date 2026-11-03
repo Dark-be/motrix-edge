@@ -36,6 +36,8 @@ from motrix_edge.adapter import test_adapter as test_adapter_mod
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
     KEY_ACTION,
+    KEY_POSE,
+    KEY_POSE_TARGET,
     KEY_QPOS,
     AdapterCapability,
     DiscoveredRobot,
@@ -44,7 +46,9 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_ARMS,
     FIELD_DETAIL,
+    FIELD_LAYOUT,
     FIELD_OK,
     FIELD_TELEOP_ENABLED,
     FIELD_TELEOP_MODE,
@@ -54,6 +58,7 @@ from motrix_edge.adapter.http_contract import (
     PATH_EXECUTE,
     PATH_HEALTH,
     PATH_RESET,
+    PATH_ROLLOUT,
     PATH_TELEOP,
 )
 from motrix_edge.errors import ErrorCode
@@ -176,7 +181,9 @@ def test_adapter_details_lists_all_registered():
     assert "id" not in info and "name" not in info  # id / name 非静态列表项
     assert info["available"] is True
     caps = info["capabilities"]
-    assert caps["action_dim"] == 14
+    assert caps["action_dim"] == 12  # 兼容字段 = 关节空间维度（双臂 6 × 2）
+    assert caps["action_dims"] == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+    assert caps["action_spaces"] == ["joint", "pose", "pose_delta", "gripper"]  # 控制台据此开放四空间直控
     assert caps["image_names"] == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert caps["capabilities"]["capture"] is True
     assert caps["capabilities"]["execute"] is True
@@ -203,8 +210,9 @@ def test_get_adapter_parameterized_by_discovered():
     assert adapter.name == "Test Robot"  # 身份来自 discover（name 展示 / type 实例化）
     assert adapter.type == "test_robot"
     # 能力与连接参数来自类级常量（不随 discover 传输）
-    assert adapter.action_dim == 14
-    assert adapter.enabled_images == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
+    assert adapter.action_dim == 12
+    assert adapter.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+    assert adapter.images == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert adapter.sdk_url == "http://127.0.0.1:8090"
     assert adapter.shm_name == "test_robot_obs"
 
@@ -225,13 +233,14 @@ def test_get_adapter_unknown_type_raises():
 def test_capabilities_declares_action_dim_and_observation_keys():
     adapter = get_adapter(make_discovered())
     caps = adapter.capabilities
-    assert caps.action_dim == 14
-    # 本 MR 只建立动作空间 / pose 契约；机器人侧 IK 和 pose producer 未落地前不得宣告支持。
-    assert caps.action_spaces == ["joint"]
-    assert caps.pose_dim == 0
+    assert caps.action_dim == 12
+    assert caps.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+    assert caps.action_spaces == ["joint", "pose", "pose_delta", "gripper"]  # 关节 + 位姿（绝对/增量）+ 夹爪
     assert caps.observation_keys == [
         KEY_QPOS,
         KEY_ACTION,
+        KEY_POSE,
+        KEY_POSE_TARGET,
         f"{CAMERA_PREFIX}cam_head",
         f"{CAMERA_PREFIX}cam_left_wrist",
         f"{CAMERA_PREFIX}cam_right_wrist",
@@ -256,8 +265,8 @@ def test_fallback_when_no_discovered():
     assert adapter.name == "test_robot"
     assert adapter.capabilities.robot_model_id == "test-robot"
     assert adapter.capabilities.robot_model_version == "0.0.0"
-    assert adapter.action_dim == 14
-    assert adapter.enabled_images == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
+    assert adapter.action_dim == 12
+    assert adapter.images == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert adapter.sdk_url == "http://127.0.0.1:8090"
 
 
@@ -295,7 +304,7 @@ class _FakeHttp:
         self.posts.append((url, json))
 
         def raise_for_status():
-            if self.status_code >= 400:
+            if self.status_code is not None and self.status_code >= 400:
                 raise RuntimeError(f"HTTP {self.status_code}")
 
         return SimpleNamespace(status_code=self.status_code, raise_for_status=raise_for_status)
@@ -311,8 +320,8 @@ def _exec_adapter():
 def test_execute_validates_dimension_before_sending():
     """execute：维度不符 → 抛 ValueError（不发送 HTTP）。"""
     adapter = _exec_adapter()
-    with pytest.raises(ValueError, match="execute action dim"):
-        adapter.execute([0.0] * 5)  # 5 != action_dim 14
+    with pytest.raises(ValueError, match="execute joint action dim"):
+        adapter.execute([0.0] * 5)  # 5 != joint 空间维度 12
     assert adapter._http.posts == []  # 未发送
 
 
@@ -325,7 +334,7 @@ def test_execute_sends_after_dimension_check():
     assert len(adapter._http.posts) == 1
     url, body = adapter._http.posts[0]
     assert url == PATH_EXECUTE
-    assert body == {FIELD_ACTION: qpos}
+    assert body == {FIELD_ACTION: qpos, FIELD_LAYOUT: "joint"}
 
 
 def test_reset_and_execute_raise_when_sdk_rejects():
@@ -429,7 +438,7 @@ def test_health_keeps_teleop_mirror_for_legacy_sdk_response():
 def test_rollout_returns_true_on_accepted():
     """rollout：SDK 接受（200）→ True（本拍已下发）。"""
     adapter = _exec_adapter()
-    assert adapter.rollout([0.0] * 14) is True
+    assert adapter.rollout([0.0] * 12) is True
     assert adapter.rollout_calls == 1
     assert adapter.rollout_refused_calls == 0
 
@@ -438,14 +447,14 @@ def test_rollout_returns_false_when_sdk_refuses_teleop():
     """rollout：SDK 返回 409（遥操作 / 人工接管中）→ False，计数与日志限流位翻转。"""
     adapter = _exec_adapter()
     adapter._http = _FakeHttp(status_code=409)  # SDK 拒绝（遥操作中推理让位）
-    assert adapter.rollout([0.0] * 14) is False
-    assert adapter.rollout([0.0] * 14) is False
+    assert adapter.rollout([0.0] * 12) is False
+    assert adapter.rollout([0.0] * 12) is False
     assert adapter.rollout_calls == 2
     assert adapter.rollout_refused_calls == 2
     assert adapter._rollout_refused_logged is True  # 日志只在进入拒绝时记一条
 
-    adapter._http = _FakeHttp(status_code=200)  # 遥操作结束：恢复下发
-    assert adapter.rollout([0.0] * 14) is True
+    adapter._http = _FakeHttp(status_code=None)  # 遥操作结束：恢复下发
+    assert adapter.rollout([0.0] * 12) is True
     assert adapter._rollout_refused_logged is False
 
 
@@ -455,7 +464,47 @@ def test_rollout_raises_for_unexpected_http_error():
     adapter._http = _FakeHttp(status_code=500)
 
     with pytest.raises(RuntimeError, match="HTTP 500"):
-        adapter.rollout([0.0] * 14)
+        adapter.rollout([0.0] * 12)
+
+
+# ---- layout="joint+gripper"（按臂子集：关节 + 夹爪一次写入所选臂）------------------
+
+
+def test_rollout_layout_forwards_selected_arms_and_gripper():
+    """layout="joint+gripper" + arms：一次提交所选臂的「6 关节 + 1 夹爪」，走 /v1/rollout（带 arms）。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["right"])
+    action = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+
+    assert adapter.rollout(action, layout="joint+gripper", arms=["right"]) is True
+    assert adapter.rollout_calls == 1
+    assert adapter._http.posts == [
+        (PATH_ROLLOUT, {FIELD_ACTION: action, FIELD_LAYOUT: "joint+gripper", FIELD_ARMS: ["right"]})
+    ]
+
+
+def test_rollout_layout_rejects_wrong_dimension_before_sending():
+    """layout="joint+gripper" + arms：维度 / 有限性不符 → ValueError（**不发送** HTTP）。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["right"])
+
+    with pytest.raises(ValueError, match="action dim"):
+        adapter.rollout([0.0] * 6, layout="joint+gripper", arms=["right"])  # 单臂 = 6 关节 + 1 夹爪 = 7
+    with pytest.raises(ValueError, match="action dim"):
+        adapter.rollout([0.0] * 6 + [float("nan")], layout="joint+gripper", arms=["right"])
+    assert adapter._http.posts == []  # 一次都没发
+
+
+def test_rollout_layout_returns_false_when_sdk_refuses_teleop():
+    """layout + arms 的 rollout：SDK 409（遥操作中）→ False（同一套让位语义 / 计数 / 限流标志）。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["right"])
+    adapter._http = _FakeHttp(status_code=409)
+
+    assert adapter.rollout([0.0] * 7, layout="joint+gripper", arms=["right"]) is False
+    assert adapter.rollout_calls == 1
+    assert adapter.rollout_refused_calls == 1
+    assert adapter._rollout_refused_logged is True
 
 
 # ---- capture episode（采集回合控制）------------------------------------------
@@ -485,59 +534,70 @@ def test_capture_commands_raise_when_sdk_rejects():
 
 
 # ---------------------------------------------------------------------------
-# configure（RobotAdapter 基类能力）：启用臂 / 相机（home 由类常量 HOME_QPOS 定义）—— 通用、无实机
+# configure（RobotAdapter 基类能力）：启用臂 / 相机（home 由类常量 HOME 按空间定义）—— 通用、无实机
 # ---------------------------------------------------------------------------
 
 
 def test_configure_default_enables_all_arms():
-    """缺省（不配置）：启用全部臂，action_dim = 14，动作直发。"""
+    """缺省（不配置）：启用全部臂，action_dims = {joint:12, pose:12, gripper:2}，动作直发。"""
     adapter = test_adapter_mod.TestRobotAdapter()
     assert adapter.enabled_arms == ["left", "right"]
-    assert adapter.action_dim == 14
-    assert adapter.capabilities.action_dim == 14
+    assert adapter.action_dim == 12
+    assert adapter.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+    assert adapter.capabilities.action_dim == 12
 
 
 def test_configure_right_arm_changes_dim_and_expands():
-    """只启用右臂：action_dim=7；execute 7 维动作展开回 14 维，左臂 home 填充。"""
+    """只启用右臂：关节维度 6；execute 6 维动作展开回 12 维，左臂 home 填充。"""
     adapter = _exec_adapter()
     adapter.configure(enabled_arms=["right"])
     assert adapter.enabled_arms == ["right"]
-    assert adapter.action_dim == 7
-    assert adapter.capabilities.action_dim == 7
+    assert adapter.action_dim == 6
+    assert adapter.action_dims == {"joint": 6, "pose": 6, "pose_delta": 6, "gripper": 1}
+    assert adapter.capabilities.action_dim == 6
 
-    adapter.execute(np.arange(7, dtype=np.float64))
-    expected = [0.0] * 7 + list(range(7))  # 左臂 home（0），右臂动作 [7:14]
+    adapter.execute(np.arange(6, dtype=np.float64))
+    expected = [0.0] * 6 + list(np.arange(6, dtype=np.float64))  # 左臂 home（0），右臂动作
     assert adapter.executed == [expected]
-    assert adapter._http.posts == [(PATH_EXECUTE, {FIELD_ACTION: expected})]
-    # 维度校验：7 维之外拒绝（不发送）
-    with pytest.raises(ValueError, match="execute action dim"):
-        adapter.execute([0.0] * 14)
+    assert adapter._http.posts == [(PATH_EXECUTE, {FIELD_ACTION: expected, FIELD_LAYOUT: "joint"})]
+    # 维度校验：6 维之外拒绝（不发送）
+    with pytest.raises(ValueError, match="execute joint action dim"):
+        adapter.execute([0.0] * 12)
     assert len(adapter._http.posts) == 1
 
 
 def test_configure_left_arm_expands_with_home():
-    """只启用左臂：动作放 [0:7]，右臂用类常量 HOME_QPOS 填充。"""
+    """只启用左臂：动作放 [0:6]，右臂用类常量 HOME['joint'] 填充。"""
     adapter = _exec_adapter()
     adapter.configure(enabled_arms=["left"])
-    adapter.execute(np.ones(7))
-    # TestRobotAdapter 缺省 HOME_QPOS = 全 0
-    assert adapter.executed == [[1.0] * 7 + [0.0] * 7]  # 左臂 1.0，右臂 home 0.0
+    adapter.execute(np.ones(6))
+    # TestRobotAdapter 缺省 HOME["joint"] = 全 0
+    assert adapter.executed == [[1.0] * 6 + [0.0] * 6]
 
 
-def test_configure_both_arms_keeps_14_dim_passthrough():
-    """全臂启用：action_dim=14，动作直发（home 不影响全启用）。"""
+def test_configure_both_arms_keeps_full_dim_passthrough():
+    """全臂启用：动作直发（home 不影响全启用）。"""
     adapter = _exec_adapter()
     adapter.configure(enabled_arms=["left", "right"])
-    assert adapter.action_dim == 14
-    adapter.execute(np.arange(14, dtype=np.float64))
-    assert adapter.executed == [list(np.arange(14, dtype=np.float64))]
+    assert adapter.action_dim == 12
+    adapter.execute(np.arange(12, dtype=np.float64))
+    assert adapter.executed == [list(np.arange(12, dtype=np.float64))]
+
+
+def test_gripper_space_expands_with_gripper_home():
+    """夹爪空间同样按臂裁剪：未启用臂用**同空间** home（张开）填充，不会拿关节值充数。"""
+    adapter = _exec_adapter()
+    adapter.configure(enabled_arms=["right"])
+    assert adapter.action_dim_for("gripper") == 1
+    adapter.execute(np.array([0.3]), layout="gripper")
+    assert adapter.executed == [[1.0, 0.3]]  # 左臂 home = 1（张开），右臂动作
 
 
 def test_configure_cameras_subset():
     """只启用部分相机：capabilities / observe 只暴露启用相机。"""
     adapter = test_adapter_mod.TestRobotAdapter()
     adapter.configure(enabled_cameras=["cam_head", "cam_right_wrist"])
-    assert adapter.enabled_images == ["cam_head", "cam_right_wrist"]
+    assert adapter.images == ["cam_head", "cam_right_wrist"]
     assert adapter.capabilities.image_names == ["cam_head", "cam_right_wrist"]
 
 
@@ -551,7 +611,7 @@ def test_configure_validation_errors_atomic():
     with pytest.raises(ValueError, match="unknown camera"):
         adapter.configure(enabled_cameras=["cam_nope"])
     # 状态未被污染：仍为缺省双臂
-    assert adapter.action_dim == 14
+    assert adapter.action_dim == 12
     assert adapter.enabled_arms == ["left", "right"]
 
 
@@ -560,27 +620,28 @@ def test_configure_preserves_physical_arm_order():
     adapter = test_adapter_mod.TestRobotAdapter()
     adapter.configure(enabled_arms=["right", "left"])
     assert adapter.enabled_arms == ["left", "right"]
-    assert adapter.action_dim == 14
+    assert adapter.action_dim == 12
 
 
-def test_select_qpos_picks_enabled_arm_dims():
-    """基类 _select_qpos：按启用臂物理顺序挑选 / 拼接 qpos。"""
+def test_select_arm_segments_picks_enabled_arm_dims():
+    """基类 _select_arm_segments：按启用臂物理顺序挑选 / 拼接等长分段（三空间共用）。"""
     adapter = test_adapter_mod.TestRobotAdapter()
-    qpos = np.arange(14, dtype=np.float32)
-    assert np.array_equal(adapter._select_qpos(qpos), qpos)  # 全臂 → 原样
+    qpos = np.arange(12, dtype=np.float32)
+    assert np.array_equal(adapter._select_arm_segments(qpos, 6), qpos)  # 全臂 → 原样
     adapter.configure(enabled_arms=["right"])
-    assert np.array_equal(adapter._select_qpos(qpos), qpos[7:14])
+    assert np.array_equal(adapter._select_arm_segments(qpos, 6), qpos[6:12])
     adapter.configure(enabled_arms=["left"])
-    assert np.array_equal(adapter._select_qpos(qpos), qpos[0:7])
+    assert np.array_equal(adapter._select_arm_segments(qpos, 6), qpos[0:6])
 
 
-def test_expand_action_uses_home_for_disabled_arm():
-    """基类 _expand_action：未启用臂用类常量 HOME_QPOS 填充。"""
+def test_expand_layout_uses_home_for_disabled_arm():
+    """基类 ``_expand_layout``：未启用臂用类常量 HOME[段] 填充（同段 HOME）。"""
     adapter = test_adapter_mod.TestRobotAdapter()
     adapter.configure(enabled_arms=["right"])
-    full = adapter._expand_action(np.ones(7), "rollout")
-    # TestRobotAdapter 缺省 HOME_QPOS = 全 0
-    assert np.array_equal(full, np.array([0.0] * 7 + [1.0] * 7))
+    full, arms = adapter._expand_layout(np.ones(6), "rollout")
+    # TestRobotAdapter 缺省 HOME["joint"] = 全 0；缺省作用域 = 运行时启用的臂 → 展开回全臂
+    assert arms is None
+    assert np.array_equal(full, np.array([0.0] * 6 + [1.0] * 6))
 
 
 # ---- node：_probe_adapter 应用运行时 adapter 配置（命令 / 前端设置，非 edge.yml）----
@@ -601,7 +662,7 @@ def test_node_probe_applies_adapter_config(monkeypatch):
     node._last_probe = 0.0
     node._probe_adapter()
     assert node.adapter is inner  # 复用同一进程 / 同一 adapter，不新建
-    assert inner.action_dim == 7
+    assert inner.action_dim == 6
     assert inner.enabled_arms == ["right"]
 
 
@@ -700,8 +761,9 @@ def test_adapter_config_current_reports_effective():
     assert data["enabled"]["arms"].get("right") is True
     assert data["enabled"]["arms"].get("left") is False
     assert data["enabled"]["cameras"].get("cam_head") is True
-    assert data["action_dim"] == 7
-    assert data["home_qpos"] == [0.0] * 14  # TestRobotAdapter 缺省 HOME_QPOS 全 0
+    assert data["action_dim"] == 6
+    assert data["action_dims"] == {"joint": 6, "pose": 6, "pose_delta": 6, "gripper": 1}
+    assert data["home"] == {"joint": [0.0] * 12, "gripper": [1.0] * 2}  # 类常量 HOME（全臂）
 
 
 def test_adapter_config_current_without_adapter_is_rejected():

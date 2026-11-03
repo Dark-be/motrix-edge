@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""Robot HTTP action-space 契约：未落地的空间必须显式拒绝。"""
+"""Robot HTTP 动作布局与遥操作模式契约。"""
 
 from fastapi.testclient import TestClient
 from robot.base_robot import BaseRobot
@@ -54,10 +54,10 @@ class _Env:
             "teleop_mode": self.robot.teleop_mode,
         }
 
-    def robot_rollout(self, action):
+    def robot_rollout(self, action, *, layout=None, arms=None, wait=False):
         self.rollouts.append(action)
 
-    def robot_execute(self, action):
+    def robot_execute(self, action, *, layout=None, arms=None, wait=False):
         self.executes.append(action)
 
 
@@ -66,7 +66,8 @@ def test_teleop_modes_match_edge_contract():
     assert set(BaseRobot.TELEOP_MODES) == set(TELEOP_MODES)
 
 
-def test_cartesian_action_is_rejected_until_robot_ik_is_available():
+def test_legacy_action_space_field_is_rejected_instead_of_silently_ignored():
+    """v6 契约改用 layout；旧 action_space 字段必须 422，不能静默按 joint 执行。"""
     env = _Env()
     with TestClient(create_app(env)) as client:
         rollout = client.post("/v1/rollout", json={"action": [1, 2], "action_space": "cartesian_pose"})
@@ -74,13 +75,13 @@ def test_cartesian_action_is_rejected_until_robot_ik_is_available():
 
     assert rollout.status_code == 422
     assert execute.status_code == 422
-    assert "available: ['joint']" in rollout.json()["detail"]
-    assert execute.json()["detail"] == rollout.json()["detail"]
+    assert rollout.json()["detail"][0]["type"] == "extra_forbidden"
+    assert execute.json()["detail"][0]["type"] == "extra_forbidden"
     assert env.rollouts == []
     assert env.executes == []
 
 
-def test_joint_action_remains_backward_compatible_without_field():
+def test_joint_layout_remains_backward_compatible_without_field():
     env = _Env()
     with TestClient(create_app(env)) as client:
         response = client.post("/v1/rollout", json={"action": [1, 2]})

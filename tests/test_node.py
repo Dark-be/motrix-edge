@@ -478,6 +478,7 @@ class _FakeExecAdapter:
 
     def __init__(self):
         self.executed = []
+        self.execute_layouts: list[str | None] = []
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
         self.reset_error: Exception | None = None
@@ -489,10 +490,11 @@ class _FakeExecAdapter:
             raise self.reset_error
         self.reset_calls += 1
 
-    def execute(self, action):
+    def execute(self, action, layout=None):
         if self.execute_error is not None:
             raise self.execute_error
         self.executed.append(action)
+        self.execute_layouts.append(None if layout is None else str(layout))
 
     def set_teleop(self, enabled: bool, mode: str | None = None):
         if self.teleop_error is not None:
@@ -597,6 +599,68 @@ def test_robot_execute_supports_semicolon_separated_qpos():
     assert replies[0].status == "ok"
 
 
+def test_robot_execute_forwards_layout():
+    """robot execute：可选布局参数透传给 adapter（pose → 机器人侧解算），回执回显。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_EXECUTE,
+            params={"qpos": "0,0,0,0,0,0,0", "layout": "pose"},
+            reply_to=replies.append,
+        )
+    )
+    assert adapter.executed == [[0.0] * 7]
+    assert adapter.execute_layouts == ["pose"]
+    assert replies[0].status == "ok"
+    assert replies[0].data["layout"] == "pose"
+
+
+def test_robot_execute_defaults_to_joint_layout():
+    """robot execute：不带 layout → joint（只用 ``<qpos>`` 的旧调用方语义不变）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "0,0,0"}, reply_to=replies.append))
+    assert adapter.execute_layouts == ["joint"]
+    assert replies[0].status == "ok"
+    assert replies[0].data["layout"] == "joint"
+
+
+def test_robot_execute_rejects_unknown_layout():
+    """robot execute：布局不在词表内 → rejected（不下发动作）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_EXECUTE,
+            params={"qpos": "0,0,0", "layout": "cartesian"},
+            reply_to=replies.append,
+        )
+    )
+    assert replies[0].status == "rejected"
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
+    assert "invalid layout" in replies[0].error
+    assert adapter.executed == []
+    assert node.state == NodeState.READY
+
+
+def test_robot_execute_rejects_legacy_action_space_key():
+    """旧键 ``action_space``：**拒绝**而不是静默缺省成 ``joint``（joint/pose 维度相同，静默会动错机器人）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_EXECUTE,
+            params={"qpos": "0,0,0,0,0,0,0", "action_space": "pose"},
+            reply_to=replies.append,
+        )
+    )
+    assert replies[0].status == "rejected"
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
+    assert "renamed to layout" in replies[0].error
+    assert adapter.executed == []  # 一条都不下发
+
+
 def test_robot_execute_rejects_invalid_qpos():
     """READY 下 robot execute：qpos 缺失 / 非法 → rejected（不崩溃，不调用 adapter）。"""
     node, adapter = _ready_node_with_exec_adapter()
@@ -618,7 +682,7 @@ def test_robot_execute_rejected_when_adapter_dim_mismatch():
     """robot execute：adapter.execute 维度校验失败 → 回执 rejected（异常不外泄）。"""
 
     class _DimAdapter(_FakeExecAdapter):
-        def execute(self, action):
+        def execute(self, action, layout=None):
             if len(action) != 14:
                 raise ValueError(f"execute action dim {len(action)} != action_dim 14")
             self.executed.append(action)

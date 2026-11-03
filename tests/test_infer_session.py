@@ -25,6 +25,7 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from motrix_edge.command import META_REPLY_DEADLINE, build_command_registry
 from motrix_edge.errors import ErrorCode
@@ -114,6 +115,8 @@ class _FakeAdapter:
         self.ready = ready
         self.safe_stop_calls = 0
         self.executed = []
+        self.execute_error: Exception | None = None
+        self.execute_layouts: list[str | None] = []
         self.reset_calls = 0
         self.reset_error_after: int | None = None
         self.teleop_values: list[bool] = []
@@ -146,21 +149,24 @@ class _FakeAdapter:
             return next(self._observations, None)
         return {"observations/qpos": np.zeros(14, dtype=np.float32)}
 
-    def execute(self, action):
+    def execute(self, action, layout=None):
+        if self.execute_error is not None:
+            raise self.execute_error
         self.executed.append(action)
+        self.execute_layouts.append(None if layout is None else str(layout))
 
     def set_teleop(self, enabled, mode=None):
         self.teleop_values.append(bool(enabled))
         self.teleop_calls.append((bool(enabled), mode))
         self.teleop_refused = bool(enabled)
 
-    def rollout(self, action, action_space=None) -> bool:
+    def rollout(self, action, *, layout=None, arms=None) -> bool:
         if self.rollout_error is not None:
             raise self.rollout_error
         if self.teleop_refused:  # 模拟 SDK 409（遥操作 / 人工接管中）：本拍不下发
             return False
         self.executed.append(action)
-        self.rollout_spaces.append(None if action_space is None else str(action_space))
+        self.rollout_spaces.append(None if layout is None else str(layout))
         return True
 
     def start_capture(self):
@@ -272,6 +278,19 @@ def _build_gated_session(adapter, policy, *seq, warmup_required=True):
 def _patch(monkeypatch, policy):
     """注入 fake policy；adapter 由 _build_session 直接注入（会话不再自建）。"""
     monkeypatch.setattr(infer_session, "get_policy", lambda cfg, **kw: policy)
+
+
+def test_session_rejects_policy_layout_not_supported_by_adapter(monkeypatch):
+    """策略 layout 必须在进入会话时按 adapter 能力拒绝，不能拖到每步下发才失败。"""
+    adapter = _FakeAdapter(ready=True)
+    adapter.type = "fake"
+    adapter.parse_layout = lambda layout: (_ for _ in ()).throw(ValueError(f"unsupported layout {layout}"))
+    policy = _FakePolicy()
+    policy.action_layout = "wrench"
+    _patch(monkeypatch, policy)
+
+    with pytest.raises(ValueError, match="policy action_layout 'wrench'.*fake"):
+        _build_session(adapter, policy, (), warmup_required=False)
 
 
 def test_infer_loop_runs_observation_to_action(monkeypatch):
@@ -546,10 +565,17 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
     assert snapshot["policy_type"] == "openpi"  # 未显式选策略 → 配置缺省类型
     assert snapshot["requires_prompt"] is True
     assert snapshot["missing"] == ["prompt"]  # 未预置 → 缺失必填项
-    # 公共项（推理端点 host / port + 预热门控 warmup_required）= 与策略项同一张表单（无「连接后锁定」轴）
-    assert [item["key"] for item in snapshot["items"]] == ["host", "port", "warmup_required", "prompt", "image_size"]
-    assert [item.get("group") for item in snapshot["items"]] == ["endpoint", "endpoint", None, None, None]
-    assert [item["runtime"] for item in snapshot["items"]] == [False, False, False, True, True]
+    # 公共项（推理端点 + 预热门控 + 动作布局）与策略项共用同一张表单。
+    assert [item["key"] for item in snapshot["items"]] == [
+        "host",
+        "port",
+        "warmup_required",
+        "action_layout",
+        "prompt",
+        "image_size",
+    ]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint", "endpoint"] + [None] * 4
+    assert [item["runtime"] for item in snapshot["items"]] == [False, False, False, False, True, True]
     assert snapshot["values"]["warmup_required"] is True  # 缺省要求先预热
     # 会话内即时生效的键 = runtime=True（端点 / 预热门是会话级配置：进入会话时固化）
     assert snapshot["runtime_keys"] == ["image_size", "prompt"]
@@ -897,6 +923,18 @@ def test_robot_execute_in_infer_loop(monkeypatch):
     session = _build_session(adapter, policy, ("robot execute 0,0,0,0,0,0,0", "session quit"))
     assert session.run() == RunResult.FINISHED
     assert adapter.executed == [[0.0] * 7]  # qpos 直接作为参数传给 adapter.execute
+
+
+def test_robot_execute_forwards_layout_in_infer_loop(monkeypatch):
+    """推理循环中 robot execute：布局参数透传（pose → 机器人侧解算成关节目标）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("robot execute 0,0,0,0,0,0,0 pose", "session quit"))
+
+    assert session.run() == RunResult.FINISHED
+    assert adapter.executed == [[0.0] * 7]
+    assert adapter.execute_layouts == ["pose"]
 
 
 def test_infer_rollout_auto_connects(monkeypatch):
