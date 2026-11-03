@@ -202,16 +202,23 @@ class DualPiperRobot(BaseRobot):
         self._connect_masters()
         # 重力前馈只装在执行臂（主手只读）
         gravity = self.robot_config.get("gravity")
+        mit_profiles = self.robot_config.get("mit_profiles")
         for arm in self.ARM_NAMES:
-            self._controller_for_arm(arm).connect(
-                port=self.ports[arm],
-                gravity=gravity,
+            profile = self.robot_config.get("mit_profile", "default")
+            if isinstance(profile, dict):
+                profile = profile.get(arm, profile.get(self.ARM_CONTROLLERS[arm], profile.get("default", "default")))
+            connect_kwargs = {
+                "port": self.ports[arm],
+                "gravity": gravity,
                 **(
                     {"firmware": self.robot_config["follower_firmware"]}
                     if "follower_firmware" in self.robot_config
                     else {}
                 ),
-            )
+            }
+            if "mit_profile" in self.robot_config or mit_profiles is not None:
+                connect_kwargs.update(mit_profile=str(profile), mit_profiles=mit_profiles)
+            self._controller_for_arm(arm).connect(**connect_kwargs)
         debug_print(self.name, "Setup controllers done", "INFO")
         for name in self.IMAGE_NAMES:
             self.sensors[name].connect(

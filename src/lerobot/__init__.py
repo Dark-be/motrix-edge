@@ -11,17 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """
 Vendored, trimmed subset of `lerobot` (Apache-2.0, HuggingFace Inc.).
 
-仅保留与官方 `async_inference` gRPC **wire 互通**所需的最小模块（在仓库内当内置
-依赖使用，避免引入完整 `lerobot` + 训练栈依赖）：
+Keeps only what the **zenoh remote-inference wire** needs, so edge can talk to
+`lerobot-policy-server` without the full training stack (and on Python 3.10):
 
--   ``lerobot.transport``：gRPC proto 生成物 + chunk 分片 / pickle 工具（裁剪自
-    `src/lerobot/transport`）。
--   ``lerobot.async_inference.helpers``：wire 数据类（TimedData / TimedAction /
-    TimedObservation / RemotePolicyConfig），字段布局与官方一致以保证 pickle 互通。
+-   ``lerobot.transport``: zenoh session/subscriber/queryable wrappers.
+-   ``lerobot.policies``: ``ExecutionMode`` / ``FeatureSpec`` / ``ChunkPolicySpec`` /
+    ``QueueSnapshot`` declarations.
+-   ``lerobot.inference``: transport-independent contracts plus the remote settings.
+-   ``lerobot.remote_inference``: protocol envelope, msgpack codec and ``RemoteClient``.
 
-pickle 往返依赖 ``lerobot.*`` 模块路径，故以同名顶层包提供（位于 ``src/lerobot``，
-dev/可编辑安装下 ``src`` 在 sys.path，``import lerobot`` 即可用）。
+The scheduling engines (``RemoteInferenceEngine``, RTC, sync) are intentionally NOT
+vendored — ``motrix_edge.rtc`` owns chunk caching, splitting and prefetch.
+
+The original gRPC-based subset (``lerobot.async_inference`` + ``services_pb2``) was removed when
+edge moved to the v1 zenoh protocol.
 """
+
+__version__ = "0.6.2"
+"""Version of the upstream lerobot this subset was taken from (protocol v1)."""

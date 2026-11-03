@@ -24,10 +24,18 @@ dependencies = [
 [project.optional-dependencies]
 # openpi 策略客户端：WebSocket + msgpack 一问一答（transport/ws.py、policy/openpi/）
 openpi = ["websockets>=11.0", "msgpack>=1.0.5"]
-# lerobot-act 策略客户端：gRPC 流式（transport/grpc.py、policy/lerobot_act/）。
-# 服务端动作载荷是 torch.Tensor，pickle 反序列化需 torch → 必须 `+cpu` 版本（官方 CPU
-# wheel）避免拉入 CUDA / nvidia-* 依赖；CPU wheel 由内网 PyPI 提供。
-lerobot = ["grpcio>=1.62.0", "torch==2.9.1+cpu"]
+# lerobot-remote 策略客户端：zenoh 远程推理（vendored src/lerobot：protocol/codec/client）。
+# - eclipse-zenoh：协议传输（服务端 lerobot-policy-server 同协议，v1）；
+# - msgpack：wire 编码；
+# - torch：动作载荷是 torch.Tensor（客户端侧只做 numpy 转换）→ 必须 `+cpu` 版本（官方 CPU
+#   wheel）避免拉入 CUDA / nvidia-* 依赖；CPU wheel 由内网 PyPI 提供；
+# - pillow：仅 encoding=jpeg 时需要（codec 懒加载，raw 模式可不装）。
+lerobot = [
+    "eclipse-zenoh>=1.9.0,<1.11.0",
+    "msgpack>=1.1.0,<2.0.0",
+    "torch==2.9.1+cpu",
+    "pillow>=10.0.0,<12.0.0",
+]
 # WebRTC 预览推流（server/webrtc.py）：aiortc 视频编码栈，可选面里最重的一个。
 # 多相机独立 msid 依赖 RTCRtpSender._stream_id 私有字段（见 server/webrtc.py），
 # 上限约束防升级静默失效。
@@ -41,8 +49,6 @@ dev = [
     "pytest-cov",
     "pytest-timeout>=2.4.0",
     "ruff",
-    "grpcio-tools>=1.62.0",  # 重生成 vendored lerobot/transport 的 services_pb2{,_grpc}.py
-    "protobuf>=4.25",
 ]
 
 # 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装，
@@ -59,6 +65,7 @@ motrix-edge = "motrix_edge.__main__:main"
 test_robot = "motrix_edge.adapter.test_adapter:TestRobotAdapter"
 dual_piper = "motrix_edge.adapter.dual_piper_adapter:DualPiperAdapter"
 single_piper = "motrix_edge.adapter.single_piper_adapter:SinglePiperAdapter"
+simulation_piper = "motrix_edge.adapter.simulation_piper_adapter:SimulationPiperAdapter"
 
 [[tool.uv.index]]
 name = "motphys"

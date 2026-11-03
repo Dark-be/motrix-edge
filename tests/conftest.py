@@ -30,7 +30,7 @@ import pytest
 # 可选面 → 标志性第三方依赖（与 pyproject 的 extras 对应）
 _OPTIONAL_DEPS: dict[str, tuple[str, ...]] = {
     "openpi": ("websockets", "msgpack"),
-    "lerobot": ("torch", "grpc"),
+    "lerobot": ("torch", "zenoh", "msgpack"),
     "webrtc": ("aiortc",),
 }
 
@@ -40,7 +40,7 @@ _OPTIONAL_FILES: dict[str, str] = {
     "test_transport_target.py": "openpi",
     "test_infer_point.py": "openpi",
     "test_webrtc.py": "webrtc",
-    "test_lerobot_act_client.py": "lerobot",
+    "test_lerobot_remote_client.py": "lerobot",
 }
 
 

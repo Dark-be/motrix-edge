@@ -16,17 +16,15 @@
 
 按「传输方式」承载并抽象，策略客户端只依赖本包提供的传输对象：
 
-- ``WsTransport``（msgpack-over-websocket）：openpi / 通用一问一答策略使用；
-- ``AsyncInferenceGrpcTransport``（lerobot AsyncInference gRPC）：lerobot-act 等走
-  lerobot 官方 ``policy_server`` 的流式策略使用（vendored ``src/lerobot`` 提供
-  proto 与 wire 数据类，本包只做 channel/stub 封装与连接管理）。
+- ``WsTransport``（msgpack-over-websocket）：openpi / 通用一问一答策略使用。
+
+``lerobot-remote``（zenoh）**不走本包**：它的传输（``ZenohTransport``）与协议一起由
+vendored ``src/lerobot`` 提供，策略客户端直接使用，避免在 edge 侧再抽象一层 zenoh 语义。
 
 传输层不关心消息格式：序列化契约（``contract``）与策略语义由上层策略客户端负责。
-导入本包不触发 grpc / pb2 导入（各自延迟到使用时），避免纯 ws 场景缺依赖报错。
 """
 
 from .base import BaseTransport
-from .grpc import AsyncInferenceGrpcTransport
 from .ws import WsTransport
 
-__all__ = ["BaseTransport", "WsTransport", "AsyncInferenceGrpcTransport"]
+__all__ = ["BaseTransport", "WsTransport"]

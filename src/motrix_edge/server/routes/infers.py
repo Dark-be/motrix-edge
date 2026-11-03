@@ -171,10 +171,10 @@ def build_router(services: Services) -> APIRouter:
     def infers_config(req: InferConfigRequest, x_lease_id: str | None = Header(default=None)):
         """运行期设置**策略配置项**（``infer config set``）。
 
-        body 为配置项对象（可部分：openpi → prompt；lerobot-act → pretrained_name_or_path / device /
-        actions_per_chunk）→ 按当前策略 schema 白名单校验并写入内存态 ``policy`` 段：
+        body 为配置项对象（可部分：openpi → prompt；lerobot-remote → deployment / semantics /
+        chunk_merge）→ 按当前策略 schema 白名单校验并写入内存态 ``policy`` 段：
         ``runtime: True`` 的键同样应用到运行中的策略客户端（下一请求生效），``runtime: False``
-        的键（host / port、模型路径…）退出会话重进才生效并在回执 ``deferred`` 列出。
+        的键（host / port / endpoint、deployment…）退出会话重进才生效并在回执 ``deferred`` 列出。
         未知键 / 类型不符 / 必填为空 → 400。受控操作：须已在推理会话且持有租约。
         """
         return accepted(_commands().submit(CMD_INFER_CONFIG_SET, {"json": dict(req.config)}, lease_id=x_lease_id))

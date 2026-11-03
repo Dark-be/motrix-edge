@@ -23,7 +23,6 @@ from motrix_edge.policy.contract import (
     resize_with_pad,
     to_rgb_uint8,
 )
-from motrix_edge.policy.lerobot_act.client import LerobotActClient
 
 
 @pytest.fixture
@@ -36,46 +35,6 @@ def test_resize_with_pad_center_pads():
     out = resize_with_pad(img, 224, 224)
     assert out.shape == (224, 224, 3)
     assert out.dtype == np.uint8
-
-
-def test_act_state_can_concatenate_robot_qpos_error():
-    """新 ACT 输入按 qpos、qpos_err 顺序拼接；Edge 不从 action 推导误差。"""
-    client = LerobotActClient(
-        {
-            "host": "127.0.0.1",
-            "port": 1,
-            "observation_layout": "qpos+qpos_err",
-            "image_cameras": ["cam_head", "cam_right_wrist"],
-        }
-    )
-    obs = {
-        "observations/qpos": np.arange(7, dtype=np.float32),
-        "observations/qpos_err": np.arange(7, dtype=np.float32) + 10,
-        "action": np.full(7, 999, dtype=np.float32),
-        "observations/images/cam_head": np.zeros((8, 8, 3), dtype=np.uint8),
-        "observations/images/cam_right_wrist": np.zeros((8, 8, 3), dtype=np.uint8),
-    }
-
-    features = client._lerobot_features(obs)
-    raw = client._build_raw_observation(obs)
-
-    state = features["observation.state"]
-    assert state["shape"] == (14,)
-    assert state["names"] == [f"qpos_{i}" for i in range(7)] + [f"qpos_err_{i}" for i in range(7)]
-    assert [raw[name] for name in state["names"]] == pytest.approx([*range(7), *range(10, 17)])
-    assert set(features) == {
-        "observation.state",
-        "observation.images.cam_head",
-        "observation.images.cam_right_wrist",
-    }
-
-
-def test_act_qpos_error_layout_requires_matching_robot_observation():
-    client = LerobotActClient({"host": "127.0.0.1", "port": 1, "observation_layout": "qpos+qpos_err"})
-    with pytest.raises(KeyError, match="observations/qpos_err"):
-        client._lerobot_features({"observations/qpos": np.zeros(7)})
-    with pytest.raises(ValueError, match="qpos_err shape"):
-        client._lerobot_features({"observations/qpos": np.zeros(7), "observations/qpos_err": np.zeros(6)})
 
 
 def test_jpeg_roundtrip_preserves_rgb_channels():
@@ -204,8 +163,8 @@ def test_openpi_adopts_server_declared_cameras():
 def test_openpi_image_size_is_read_live():
     """image_size **每次请求现读**：会话内 ``infer config set image_size`` 下一块立即按新尺寸下发。
 
-    openpi 无握手状态（每请求独立变换），故 schema 标 ``runtime=True``；lerobot-act 的图像尺寸
-    是握手级配置（随策略指令下发），会话内改不生效，见 test_lerobot_act_client。
+    openpi 无握手状态（每请求独立变换），故 schema 标 ``runtime=True``；lerobot-remote 的图像尺寸
+    由服务端声明（会话级），端上不提供可热改的 image_size。
     """
     from motrix_edge.policy.openpi.client import OpenPIClient
 
@@ -231,17 +190,16 @@ def test_policy_config_runtime_keys_by_policy():
     - openpi：``prompt`` / ``image_size`` 每请求现读 → 会话内可改；
     - 公共项 ``host`` / ``port``（推理端点）：**会话级**（进入会话时构造传输层并固化）→
       ``runtime: False``，与其它会话级键同一语义（没有专门命令，也没有「连接后锁定」轴）；
-    - lerobot-act：模型路径 / 设备 / 块长 / 图像尺寸都是**握手级**（只在 Ready +
-      SendPolicyInstructions 时下发，服务端据此加载 checkpoint / 定块长），会话内改要退出重进
-      → 全部标 ``runtime: False``。
+    - lerobot-remote：``deployment`` / ``semantics`` / ``mode`` / ``chunk_merge`` / 编码方式都是
+      **会话级**（构造配置 + admission 即固化），会话内改要退出重进 → 全部标 ``runtime: False``。
     """
     from motrix_edge.policy import policy_config_items, policy_config_runtime_keys
 
     assert policy_config_runtime_keys("openpi") == {"prompt", "image_size"}
-    assert policy_config_runtime_keys("lerobot-act") == set()
+    assert policy_config_runtime_keys("lerobot-remote") == set()
     # 端点是必需项（没配好连不上推理节点），且属会话级
     endpoint = {item["key"]: item for item in policy_config_items("openpi") if item.get("group") == "endpoint"}
-    assert set(endpoint) == {"host", "port"}
+    assert {"host", "port"} <= set(endpoint)
     assert all(item["runtime"] is False for item in endpoint.values())  # 会话级（进入会话时固化）
     assert all(item["required"] is False for item in endpoint.values())  # 后端不硬性要求（前端按 group=endpoint 门控）
     assert (endpoint["port"]["min"], endpoint["port"]["max"]) == (1, 65535)
@@ -443,19 +401,20 @@ def test_openpi_prompt_dynamic_per_request():
     assert transport.last_payload["prompt"] == "switch tasks now"
 
 
-# lerobot-act 策略已改为 lerobot gRPC 流式客户端（见 tests/test_act_grpc_client.py），
+# lerobot 策略已改为 zenoh 远程推理客户端（见 policy/lerobot_remote、tests/test_lerobot_remote_client.py），
 # 不再使用 ws / ActionChunkBroker / image_size；相关旧断言已移除。
 
 
-def test_policy_registry_has_openpi_and_act():
+def test_policy_registry_has_openpi_and_remote():
     assert "openpi" in POLICY_REGISTRY
-    assert "lerobot-act" in POLICY_REGISTRY
+    assert "lerobot-remote" in POLICY_REGISTRY
+    assert "lerobot-act" not in POLICY_REGISTRY
 
 
 def test_validate_policy_type():
     from motrix_edge.policy import validate_policy_type
 
-    assert validate_policy_type("lerobot-act") == "lerobot-act"
+    assert validate_policy_type("lerobot-remote") == "lerobot-remote"
     with pytest.raises(ValueError, match="nonexistent"):
         validate_policy_type("nonexistent")
 
@@ -471,15 +430,24 @@ def test_get_policy_default_openpi():
     assert policy.__class__.__name__ == "OpenPIClient"
 
 
-def test_get_policy_act():
-    policy = get_policy({"policy": {"type": "lerobot-act"}})
-    assert policy.__class__.__name__ == "LerobotActClient"
-    # lerobot-act 走 lerobot gRPC：不再有 ws 的 image_size / image_format
+@pytest.mark.optional("lerobot")
+def test_get_policy_remote():
+    policy = get_policy({"policy": {"type": "lerobot-remote", "deployment": "d", "semantics": "s"}})
+    assert policy.__class__.__name__ == "LerobotRemoteClient"
     assert not hasattr(policy, "image_size")
 
 
-def test_get_policy_uses_only_shared_endpoint_config():
-    policy = get_policy({"policy": {"host": "127.0.0.1", "port": 8765}}, policy_type="lerobot-act")
-    assert policy.policy_config["host"] == "127.0.0.1"
-    assert policy.policy_config["port"] == 8765
-    assert policy._transport.endpoint == {"host": "127.0.0.1", "port": 8765}
+@pytest.mark.optional("lerobot")
+def test_remote_endpoint_falls_back_to_host_port():
+    """没填 endpoint 时由 host/port 拼 zenoh 端点；填了 endpoint 以它为准。"""
+    from motrix_edge.policy.lerobot_remote.client import LerobotRemoteClient
+
+    policy = get_policy(
+        {"policy": {"deployment": "d", "semantics": "s", "host": "10.0.0.9", "port": 7447}},
+        policy_type="lerobot-remote",
+    )
+    assert policy._config.endpoint == "tcp/10.0.0.9:7447"
+    explicit = LerobotRemoteClient(
+        {"endpoint": "tls/router:7447", "deployment": "d", "semantics": "s", "host": "10.0.0.9", "port": 1}
+    )
+    assert explicit._config.endpoint == "tls/router:7447"

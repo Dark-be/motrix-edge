@@ -574,6 +574,9 @@ def test_control_detail_carries_config_facts_only(piper_controller, gravity):
     assert detail["gravity"]["active"] is True and detail["gravity"]["alpha"] == 1.0
     assert detail["gravity"]["limit_nm"] == gravity.T_FF_LIMIT_NM
     assert detail["gravity"]["placeholder"] is False
+    assert detail["mit_profile"] == "default"
+    assert len(detail["mit_params"]) == 6
+    assert detail["mit_params"][0]["kp"] == 6.0
     assert "degrades" not in detail["gravity"] and "clips" not in detail["gravity"]
     assert _control_arm(piper_controller).control_detail["gravity"] is None
 
@@ -595,7 +598,7 @@ def test_control_layout_records_execution_controllers_only(dual_piper, piper_con
 
 
 def test_control_layout_aggregate_and_empty(dual_piper, piper_controller):
-    """执行臂唯一 → 聚合值就是它；没有执行控制器（如 test_robot）→ None + 空表。"""
+    """执行臂唯一 → 聚合值就是它；没有执行控制器 → None + 空表。"""
     robot = _robot(dual_piper)
     robot.controllers = {
         "left_arm": _control_arm(piper_controller),

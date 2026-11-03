@@ -17,8 +17,9 @@
 与 adapter / session 包一致：通过 POLICY_REGISTRY 注册策略客户端，
 由 get_policy(base_cfg) 依据配置 policy.type 选择性实例化。
 
-策略客户端 = 传输（``motrix_edge.transport``：openpi → ws+msgpack，lerobot-act → lerobot gRPC）
-            + 格式契约（contract.py）+ 策略特有行为（openpi/、lerobot-act/）。策略**只负责取推理结果**
+策略客户端 = 传输（openpi → ``transport`` 的 ws+msgpack；lerobot-remote → vendored ``src/lerobot``
+            的 zenoh 客户端，自带协议） + 格式契约（contract.py）+ 策略特有行为（openpi/、lerobot_remote/）。
+            策略**只负责取推理结果**
             （``infer_chunk``）；动作块缓存 / 三元切分 / 时序平滑 / 预取时机由 ``motrix_edge.rtc``
             统一负责（见 wiki/design/motrix_edge_rtc.md）。
 第三方依赖（websockets / grpc / vendored lerobot）均为懒加载，避免导入 motrix_edge
@@ -31,7 +32,7 @@ import importlib
 # 懒加载：仅当 get_policy() 选中该类型时才 import 对应模块（连带加载其第三方依赖）。
 POLICY_REGISTRY = {
     "openpi": ("motrix_edge.policy.openpi.client", "OpenPIClient"),
-    "lerobot-act": ("motrix_edge.policy.lerobot_act.client", "LerobotActClient"),
+    "lerobot-remote": ("motrix_edge.policy.lerobot_remote.client", "LerobotRemoteClient"),
 }
 
 # 策略配置项（**静态声明**：每个策略有自己的独立配置项——prompt / 模型路径 / 设备 / 块长…）。
@@ -52,7 +53,7 @@ POLICY_REGISTRY = {
 #   multiline   长文本项（prompt / system_prompt 等）：前端渲染为多行 textarea（缺省 6 行）
 #   rows        multiline 的行数（可选；缺省用前端缺省值）
 #
-# 端点配置项（host / port）：策略要连 TCP 端点（openpi → ws、lerobot-act → gRPC）→ 排在最前两项。
+# 端点配置项：openpi / lerobot-remote 都连 TCP 端点（openpi → ws、lerobot-remote → zenoh）→ 排在最前。
 # 与策略自身配置项**完全同级**：同一 schema、同一表单、同一 `infer config set` /
 # POST /v1/infers/config 通道、同一校验；也是**会话级**配置（runtime=False：进入会话时构造
 # 传输层，会话内改需退出重进）；**没有专用命令**（旧 `infer ip` / `infer port` 已移除）。
@@ -80,6 +81,18 @@ POLICY_ENDPOINT_CONFIG_ITEMS: list[dict] = [
         "default": None,
         "placeholder": "如 8080",
         "help": "推理节点端口；**进入会话时生效，会话内改需退出重进**",
+    },
+    {
+        "key": "endpoint",
+        "label": "远程推理端点 endpoint",
+        "type": "text",
+        "required": False,
+        "runtime": False,
+        "group": "endpoint",
+        "default": None,
+        "placeholder": "tcp/127.0.0.1:7447",
+        "help": "lerobot-remote（zenoh）的端点：`tcp/host:port`；填了就以它为准（否则由 host/port 拼），"
+        "`tls/...` 需配 zenoh_config_path；**进入会话时生效，会话内改需退出重进**",
     },
 ]
 
@@ -149,7 +162,28 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
             "**每次请求现读**，会话内改立即生效",
         },
     ],
-    "lerobot-act": [
+    "lerobot-remote": [
+        {
+            "key": "deployment",
+            "label": "服务端部署名 deployment",
+            "type": "text",
+            "required": True,
+            "runtime": False,
+            "default": None,
+            "placeholder": "如 press_three_buttons",
+            "help": "lerobot-policy-server 的 deployment 名（服务端 server.yaml 的 `deployment`），"
+            "发现阶段据此选中实例；**会话内改需退出重进**",
+        },
+        {
+            "key": "semantics",
+            "label": "动作语义 semantics",
+            "type": "text",
+            "required": True,
+            "runtime": False,
+            "default": None,
+            "placeholder": "如 piper-joint-abs-7d-v1",
+            "help": "端与服务端约定的动作单位/顺序标识，必须与服务端逐字一致（admission 校验）；**会话内改需退出重进**",
+        },
         {
             "key": "observation_layout",
             "label": "状态输入布局 observation_layout",
@@ -159,50 +193,59 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
             "default": "qpos",
             "options": ["qpos", "qpos+qpos_err"],
             "placeholder": "qpos | qpos+qpos_err",
-            "help": "ACT observation.state 的布局：qpos 保持旧模型兼容；qpos+qpos_err 按顺序拼接"
-            "机器人显式提供的关节/夹爪实测值与目标误差。单臂各 7 维时得到 14 维 state；"
-            "Edge 不计算 qpos_err。**会话内改需退出重进**",
+            "help": "state 向量布局：qpos = 关节/夹爪实测值（维度须等于服务端声明）；"
+            "qpos+qpos_err 追加机器人提供的目标误差。Edge 不计算 qpos_err；**会话内改需退出重进**",
         },
         {
-            "key": "pretrained_name_or_path",
-            "label": "模型路径 pretrained_name_or_path",
+            "key": "mode",
+            "label": "执行模式 mode",
             "type": "text",
-            "required": True,
-            "runtime": False,  # 握手级：随策略指令下发（服务端据此加载 checkpoint）
+            "required": False,
+            "runtime": False,
+            "default": "chunk",
+            "options": ["chunk"],
+            "help": "执行模式：chunk = 端侧按块执行（块缓存/切分/预取由 edge RTC 负责）；"
+            "RTC 模式需要服务端声明对应能力，暂时只开放 chunk；**会话内改需退出重进**",
+        },
+        {
+            "key": "chunk_merge",
+            "label": "块拼接 chunk_merge",
+            "type": "text",
+            "required": False,
+            "runtime": False,
+            "default": "append",
+            "options": ["append", "aligned"],
+            "help": "append = 服务端整块返回、端侧按绝对步号自行跳过过期步；aligned = 额外与服务端"
+            "协商游标对齐（需服务端支持 chunk_alignment_v2）；edge RTC 自带对齐，默认 append",
+        },
+        {
+            "key": "encoding",
+            "label": "图像编码 encoding",
+            "type": "text",
+            "required": False,
+            "runtime": False,
+            "default": "raw",
+            "options": ["raw", "jpeg"],
+            "help": "raw = 无损 RGB（默认，与训练输入一致）；jpeg 省带宽但有压缩损失；**会话内改需退出重进**",
+        },
+        {
+            "key": "jpeg_quality",
+            "label": "JPEG 质量 jpeg_quality",
+            "type": "int",
+            "required": False,
+            "runtime": False,
+            "default": 90,
+            "help": "encoding=jpeg 时的质量（1-100）；**会话内改需退出重进**",
+        },
+        {
+            "key": "expected_artifact",
+            "label": "固定模型制品 expected_artifact",
+            "type": "text",
+            "required": False,
+            "runtime": False,
             "default": None,
-            "placeholder": "/path/to/pretrained_model",
-            "help": "lerobot 类策略：进入会话时随策略指令下发给服务端加载 checkpoint（infer model set）；"
-            "**会话内改需退出重进**",
-        },
-        {
-            "key": "device",
-            "label": "推理设备 device",
-            "type": "text",
-            "required": False,
-            "runtime": False,
-            "default": "cpu",
-            "help": "下发给服务端的推理设备（GPU 部署填 cuda / cuda:0）；**会话内改需退出重进**",
-        },
-        {
-            "key": "actions_per_chunk",
-            "label": "动作块长 actions_per_chunk",
-            "type": "int",
-            "required": False,
-            "runtime": False,
-            "default": 50,
-            "help": "服务端对模型原生块的**截断上界**（``chunk[:, :K, :]``：不补齐 / 不重采样）；"
-            "**会话内改需退出重进**",
-        },
-        {
-            "key": "image_size",
-            "label": "图像尺寸 image_size",
-            "type": "int",
-            "required": False,
-            "runtime": False,
-            "default": 224,
-            "placeholder": "224",
-            "help": "**端侧上传前的 letterbox 压缩目标**；lerobot 服务端按 checkpoint 尺寸 bilinear"
-            "**拉伸**、**无兜底**，故须与训练分辨率一致；**会话内改需退出重进**",
+            "placeholder": "可选：制品指纹",
+            "help": "可选。填了就把会话钉在指定模型/处理器制品上（admission 校验指纹）；留空 = 接受当前部署",
         },
     ],
 }
@@ -232,15 +275,18 @@ def policy_config_runtime_keys(policy_type: str) -> set[str]:
 def policy_features(policy_type: str) -> dict:
     """策略特性速查（由配置项清单派生，供前后端快速判断）。
 
-    ``requires_prompt`` = 声明了必填的 ``prompt`` 项（语言条件策略，如 openpi）；
-    ``requires_model_path`` = 声明了必填的 ``pretrained_name_or_path`` 项（lerobot 类，如 lerobot-act）。
+    - ``requires_prompt`` = 声明了必填的 ``prompt`` 项（语言条件策略，如 openpi）；
+    - ``requires_model_path`` = 需要端上指定 checkpoint 路径（旧 gRPC 客户端已移除 → 恒 False：
+      ``lerobot-remote`` 的模型由服务端 deployment 决定）；
+    - ``lerobot`` = lerobot 远端部署类策略（端上要求 ``deployment`` / ``semantics`` 而非模型路径）。
     """
     items = policy_config_items(policy_type)
+    keys = {item["key"] for item in items}
     required = {item["key"] for item in items if item.get("required")}
     return {
         "requires_prompt": "prompt" in required,
         "requires_model_path": "pretrained_name_or_path" in required,
-        "lerobot": "pretrained_name_or_path" in {item["key"] for item in items},
+        "lerobot": "deployment" in keys,
     }
 
 

@@ -34,4 +34,6 @@
 -   [robot-pipeline 遥操作（绝对映射 / 增量接管）](./robot_pipeline_teleop.md)
 -   [robot-pipeline 重力补偿与阻抗控制](./robot_pipeline_impedance.md)
 
+-   [仿真管线](./simulation_pipeline.md)
+
 <!-- 新增设计文档后在此登记标题链接。 -->

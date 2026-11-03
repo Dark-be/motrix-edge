@@ -52,7 +52,7 @@ def test_load_config_falls_back_without_writing(monkeypatch, tmp_path):
     cfg = load_config("edge.yml")
     assert cfg["INFO_LEVEL"] == "INFO"
     assert cfg["adapter"]["host"] == "127.0.0.1"
-    assert cfg["policy"]["type"] == "lerobot-act"
+    assert cfg["policy"]["type"] == "lerobot-remote"
     assert not runtime_dir.exists()
 
 

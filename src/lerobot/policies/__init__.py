@@ -12,6 +12,13 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-from .client import LerobotActClient
+"""Vendored policy-contract subset of ``lerobot`` (Apache-2.0, HuggingFace Inc.).
 
-__all__ = ["LerobotActClient"]
+``chunk.py`` and ``rtc.py`` are copied from ``lerobot.policies``; only the declarations the remote
+inference wire needs are kept, so edge does not depend on the training/policy stack.
+"""
+
+from .chunk import ChunkPolicySpec, ExecutionMode, FeatureSpec
+from .rtc import QueueSnapshot
+
+__all__ = ["ChunkPolicySpec", "ExecutionMode", "FeatureSpec", "QueueSnapshot"]

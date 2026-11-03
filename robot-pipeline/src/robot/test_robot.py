@@ -73,6 +73,8 @@ class TestRobot(BaseRobot):
             "left_arm": TestArmController("left_arm"),  # 左臂，执行
             "right_arm": TestArmController("right_arm"),  # 右臂，执行
         }
+        for controller in self.controllers.values():
+            controller.step_rad = self.step_rad
         self.sensors: dict = {
             "cam_head": TestVisionSensor("cam_head"),
             "cam_left_wrist": TestVisionSensor("cam_left_wrist"),

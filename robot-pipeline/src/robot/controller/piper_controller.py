@@ -55,6 +55,8 @@ MIT_CTRL_CFG = [
     {"vel_ref": 0.0, "kp": 2.0, "kd": 0.4, "t_ref": 0.0},
 ]
 
+MIT_PROFILES = {"default": MIT_CTRL_CFG}
+
 
 def _scalar(value) -> float:
     """取标量（SDK 个别字段是长度 1 的序列；统一成 ``float``）。"""
@@ -116,6 +118,8 @@ class PiperController(ArmController):
         self.gripper = None
         self.port: str = "can0"
         self.ctrl_mode: str = "mit"  # 下发通路：``mit``（缺省，力矩环）或 ``joint``（SDK 位置速度模式）
+        self.mit_profile: str = "default"
+        self.mit_params: list[dict] = [dict(item) for item in MIT_CTRL_CFG]
         self.role: str = "follower"  # 角色，支持 "leader" 或 "follower"
         self._limit_warned: tuple[int, ...] | None = None  # 限位告警去重（同一组超限关节只打一条）
         # 重力前馈（可选，缺省 None = 纯位置环）：装载见 enable_gravity_compensation()
@@ -130,9 +134,23 @@ class PiperController(ArmController):
         role: str = "follower",
         firmware: str = PiperFW.V188,
         gravity: dict | None = None,
+        mit_profile: str = "default",
+        mit_profiles: dict | None = None,
     ):
         self.port = port
         self.ctrl_mode = ctrl_mode
+        profiles = dict(MIT_PROFILES)
+        profiles.update(mit_profiles or {})
+        if mit_profile not in profiles:
+            raise ValueError(f"Unknown MIT profile {mit_profile!r}; available: {sorted(profiles)}")
+        params = profiles[mit_profile]
+        if not isinstance(params, list) or len(params) != 6 or not all(isinstance(item, dict) for item in params):
+            raise ValueError(f"MIT profile {mit_profile!r} must contain six parameter mappings")
+        required = {"vel_ref", "kp", "kd", "t_ref"}
+        if any(set(item) != required for item in params):
+            raise ValueError(f"MIT profile {mit_profile!r} entries must contain exactly {sorted(required)}")
+        self.mit_profile = str(mit_profile)
+        self.mit_params = [{key: float(item[key]) for key in sorted(required)} for item in params]
 
         cfg = create_agx_arm_config(robot=ArmModel.PIPER, firmeware_version=firmware, channel=port)
         self.robot = AgxArmFactory.create_arm(cfg)
@@ -320,10 +338,10 @@ class PiperController(ArmController):
                 self.robot.move_mit(
                     joint_index=i + 1,
                     p_des=joint[i],
-                    v_des=MIT_CTRL_CFG[i]["vel_ref"],
-                    kp=MIT_CTRL_CFG[i]["kp"],
-                    kd=MIT_CTRL_CFG[i]["kd"],
-                    t_ff=MIT_CTRL_CFG[i]["t_ref"] if torque_ff is None else float(torque_ff[i]),
+                    v_des=self.mit_params[i]["vel_ref"],
+                    kp=self.mit_params[i]["kp"],
+                    kd=self.mit_params[i]["kd"],
+                    t_ff=self.mit_params[i]["t_ref"] if torque_ff is None else float(torque_ff[i]),
                 )
 
         elif self.ctrl_mode == "joint":
@@ -428,6 +446,10 @@ class PiperController(ArmController):
             "mode": self.control_mode,
             "ctrl_mode": self.ctrl_mode,
             "role": self.role,
+            "mit_profile": getattr(self, "mit_profile", "default") if self.ctrl_mode == "mit" else None,
+            "mit_params": [dict(item) for item in getattr(self, "mit_params", MIT_CTRL_CFG)]
+            if self.ctrl_mode == "mit"
+            else None,
             "gravity": None
             if self.gravity is None
             else {
