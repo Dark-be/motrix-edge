@@ -58,6 +58,7 @@ motrix-edge = "motrix_edge.__main__:main"
 [project.entry-points."motrix_edge.adapters"]
 test_robot = "motrix_edge.adapter.test_adapter:TestRobotAdapter"
 dual_piper = "motrix_edge.adapter.dual_piper_adapter:DualPiperAdapter"
+single_piper = "motrix_edge.adapter.single_piper_adapter:SinglePiperAdapter"
 
 [[tool.uv.index]]
 name = "motphys"

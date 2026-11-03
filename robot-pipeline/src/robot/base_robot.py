@@ -63,6 +63,7 @@ class BaseRobot:
     JOINT_DIM_PER_ARM = 6
     POSE_DIM_PER_ARM = 0  # 0 = 该机型不提供位姿
     ARM_NAMES: tuple[str, ...] = ()  # 物理臂序（所有具体机型必须声明）
+    PROFILE_DEPTH_CAMERAS: tuple[str, ...] = ()  # 共享档案允许声明、但本机型未必启用的深度相机
     PROFILE_ARM_NAMES: tuple[str, ...] = ()  # 共享机器档案可声明的臂；空 = 与 ARM_NAMES 相同
     ARM_CONTROLLERS: dict[str, str] = {}  # 臂名 -> controllers 键（子类声明）
     MASTER_CONTROLLERS: dict[str, str] = {}  # 臂名 -> 遥操作输入控制器键（有主手的子类声明）
@@ -167,7 +168,8 @@ class BaseRobot:
 
         # 末端 TCP（robot.tcp，可选）：位姿读写原点从法兰切到工具末端
         tcp_section = self.robot_config.get(tcp.SECTION)
-        self.tcp_offsets = tcp.resolve_tcp(tcp_section, tuple(self.ARM_NAMES))
+        profile_offsets = tcp.resolve_tcp(tcp_section, self.PROFILE_ARM_NAMES or tuple(self.ARM_NAMES))
+        self.tcp_offsets = {arm: value for arm, value in profile_offsets.items() if arm in self.ARM_NAMES}
         self.pose_frame = tcp.FRAME_TCP if self.tcp_offsets else tcp.FRAME_FLANGE
         if bool((tcp_section or {}).get("enabled", False)) and not (self.tcp_offsets and self.pose_dim() > 0):
             debug_print(self.name, f"robot.{tcp.SECTION} 已开启但不生效（不提供位姿 / 未声明臂名），已忽略", "WARNING")
@@ -1269,7 +1271,7 @@ class BaseRobot:
 
         - ``enabled: false`` → 空（不开深度流）；
         - ``cameras`` 缺省 / 空 → 全部具备深度的相机（``DEPTH_CAMERAS``）；
-        - 给了则必须是 ``DEPTH_CAMERAS`` 的子集，否则 ``ValueError``；
+        - 显式名单须属于已知机器资源，按当前机型取交集；未知相机 → ``ValueError``；
         - 未知键打 WARNING。
         """
         depth_config = self.robot_config.get("depth") or {}
@@ -1281,7 +1283,8 @@ class BaseRobot:
         requested = [str(name).strip() for name in (depth_config.get("cameras") or [])]
         if not requested:
             return [name for name in self.IMAGE_NAMES if name in self.DEPTH_CAMERAS]
-        unsupported = [name for name in requested if name not in self.DEPTH_CAMERAS]
+        known_cameras = self.PROFILE_DEPTH_CAMERAS or self.DEPTH_CAMERAS
+        unsupported = [name for name in requested if name not in known_cameras]
         if unsupported:
             raise ValueError(
                 f"{self.name}: robot.depth.cameras 含无深度能力的相机 {unsupported}（可用：{list(self.DEPTH_CAMERAS)}）"

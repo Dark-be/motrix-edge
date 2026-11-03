@@ -176,7 +176,7 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
     当成硬件故障）。读取异常与 `None` 走同一条路径（`_refresh_teleop_targets` 统一 try/except），
     不会冒出 `step()`。
 -   **单臂布局**：`step()` 按 `ARM_NAMES` 和每臂维度切块；`SinglePiperRobot` 与双臂机型
-    共用机器档案，仅消费 `left_master` / `left` 这一对主从臂。
+    共用机器档案，装配与映射见[单臂机器档案](./robot_pipeline_action_spaces.md#单臂机型复用双臂机器档案)。
 -   **接管前的对齐由人工完成**：主臂**不可被程序驱动**（Piper leader 模式只读），因此不提供
     「推理期主臂跟随从臂」；接管前操作员手动把主臂摆到与从臂相近的位姿，剩下的差值由锚点
     零化（见「增量锚点」）。

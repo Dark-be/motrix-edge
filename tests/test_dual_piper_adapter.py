@@ -654,3 +654,29 @@ def test_tracked_motion_refusal_is_not_application():
     adapter = _adapter(_FakeHttp(post_status={PATH_ROLLOUT: 409}))
     result = adapter.submit_motion([0.0], command_id="grip-2", layout="gripper", arms=["left"])
     assert result["execution_status"] == "rejected" and result["command_id"] == "grip-2"
+
+
+def test_single_piper_discovery_layout_and_scoped_commands():
+    from motrix_edge.adapter import get_adapter
+    from motrix_edge.adapter.base import DiscoveredRobot
+    from motrix_edge.adapter.single_piper_adapter import SinglePiperAdapter
+
+    adapter = get_adapter(DiscoveredRobot(name="surviving", type="single_piper"))
+    assert isinstance(adapter, SinglePiperAdapter)
+    assert adapter.capabilities.action_dims == {
+        "joint": 6,
+        "joint_delta": 6,
+        "pose": 6,
+        "pose_delta": 6,
+        "gripper": 1,
+        "gripper_delta": 1,
+    }
+    assert adapter.capabilities.image_names == ["cam_head", "cam_right_wrist"]
+    assert adapter.enabled_arms == ["right"]
+    http = _FakeHttp()
+    adapter._http = http
+    adapter.rollout([0.0] * 6 + [1.0], layout="joint+gripper", arms=["right"])
+    assert http.posts[-1][1]["arms"] == ["right"]
+    assert len(http.posts[-1][1]["action"]) == 7
+    with pytest.raises(ValueError):
+        adapter.configure(enabled_arms=["left"])
