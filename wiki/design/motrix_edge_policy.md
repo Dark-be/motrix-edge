@@ -311,18 +311,6 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 `infer rollout` / `robot execute` 在下发动作前还会自查**回执有效期**（`deadline_exceeded`）：提交方
 已超时放弃 → **丢弃动作**（真机不动）+ 回执 504，计数见 status `dropped_actions`。
 
-## 虚拟推理端点（scripts/test_infer_point.py）
-
-无真实推理的**模拟官方 `WebsocketPolicyServer`** 的联调端点：连接后先下发 metadata（
-`--publish-horizon` 可选带上 `action_horizon`），按 openpi 官方 flat 契约接收观测，返回一段
-**有界随机游走**的动作块 `{"actions": [horizon, dim]}`（块间连续），用于在无真实模型时验证
-「edge → 推理端」的传输契约与 rtc 的取块 / 切分。与 Edge 的耦合仅限 wire 契约
-（`policy/openpi/contract.py` / `transport/msgpack_numpy.py`），可独立运行：
-
-```
-uv run python scripts/test_infer_point.py --host 0.0.0.0 --port 8765 --action-dim 14 --action-horizon 16
-```
-
 ## 相关文档
 
 -   动作块消费（RTC）：[RTC 动作块管理](./motrix_edge_rtc.md)

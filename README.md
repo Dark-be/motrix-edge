@@ -83,7 +83,7 @@ robot-pipeline/      # 机械臂底层承载（独立 uv 子项目）：src 下 
                      #   robot / server / collector / utils，启动脚本在 scripts/
 wiki/                # 设计与计划文档
 tests/               # 测试
-scripts/             # 联调脚本（虚拟推理端点等）
+scripts/             # Edge 本机脚本（start.sh 启动 / update.sh 安全更新）
 ```
 
 ## 快速开始
@@ -104,7 +104,10 @@ cp .env.example .env
 ```
 
 -   Compose 自动读取项目目录的 `.env`：`docker compose up -d`。
--   裸跑时显式加载：`uv run --env-file .env motrix-edge run`。
+-   一键启动 Edge：`bash scripts/start.sh`（自动加载仓库根目录 `.env`；参数透传给
+    `motrix-edge run`）。也可裸跑：`uv run --env-file .env motrix-edge run`。
+-   Edge 本机人工安全更新：`bash scripts/update.sh`；只允许干净的 `dev` 工作树快进到
+    `origin/dev`，本地修改、领先或分叉时拒绝更新，且不会自动同步依赖或重启服务。
 
 运行根分别由 `MOTRIX_EDGE_DIR` 和 `MOTRIX_ROBOT_PIPELINE_DIR` 指定；配置在 `<root>/config`，
 日志在 `<root>/logs`。Compose 使用单独的 `*_IN_CONTAINER` 值，避免把宿主绝对路径传入容器。
