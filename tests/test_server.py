@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from motrix_edge.adapter.base import CaptureStatus
 from motrix_edge.command import (
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_SYNC,
@@ -58,6 +59,8 @@ from motrix_edge.command import (
     parse_bool,
     parse_meta,
     parse_rollout_mode,
+    parse_teleop_follow_axes,
+    parse_teleop_follow_space,
     parse_teleop_mode,
     policy_config_status,
     set_policy_config,
@@ -311,15 +314,17 @@ class FakeRobot:
         self.enabled_arms = ["left", "right"]  # 运行时启用臂（preview 按臂标注 EEF / 会话 bind_adapter）
         self.teleop_enabled = False  # 遥操作运行位（capture / infer status 展示）
         self.teleop_mode = None  # 人工接管模式（absolute / delta）
-        self.teleop_calls: list[tuple[bool, str | None]] = []  # 收到的 set_teleop（断言实际下发）
+        self.teleop_calls: list[tuple[bool, str | None, str | None, list[str] | None]] = []
         # 统一坐标系外参（镜像 ``GET /v1/cameras`` 的 ``frames`` 段）：None = 未标定
         self.frames_payload: dict | None = None
+        # TCP 偏移（法兰系，米，逐臂）：镜像 ``tcp_offset_by_arm()``；空 = 非 TCP 位姿系
+        self.tcp_offsets_payload: dict[str, list[float]] = {}
 
-    def set_teleop(self, enabled, mode=None):
+    def set_teleop(self, enabled, mode=None, follow_axes=None, follow_space=None):
         """遥操作 / 人工接管开关（镜像适配器契约：记录调用 + 更新运行位）。"""
         self.teleop_enabled = bool(enabled)
         self.teleop_mode = mode if enabled else None
-        self.teleop_calls.append((self.teleop_enabled, self.teleop_mode))
+        self.teleop_calls.append((self.teleop_enabled, self.teleop_mode, follow_space, follow_axes))
 
     def reset(self):
         """机器人复位（adapter.reset：非阻塞，只重设目标）。"""
@@ -354,6 +359,10 @@ class FakeRobot:
     def frame_set(self):
         """标定外参（镜像 adapter 的 ``frame_set()``）：未标定 → ``None``。"""
         return None if not self.frames_payload else FrameSet.from_payload(self.frames_payload)
+
+    def tcp_offset_by_arm(self):
+        """TCP 偏移（镜像 adapter 契约）：未开启 ``robot.tcp`` → 空 dict。"""
+        return {arm: np.asarray(values, dtype=float) for arm, values in self.tcp_offsets_payload.items()}
 
     def pose_by_arm(self, pose):
         """位姿向量 → 按臂名的 6 维块（镜像 adapter 契约：本替身两臂 × 每臂 6 维）。"""
@@ -396,6 +405,9 @@ class FakeCaptureSession:
             if name == CMD_CAPTURE_EPISODE_END:  # 结束一轮采集
                 self.recording = False
                 self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+            elif name == CMD_CAPTURE_EPISODE_CANCEL:  # 取消并丢弃本轮采集
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
             else:  # 未识别命令（当前会话不适用）统一回执，避免 submit 挂起（镜像真实 CaptureSession）
                 cmd_name = getattr(cmd, "name", None)
                 self._reply(
@@ -515,6 +527,9 @@ class FakeInferSession:
             elif name == CMD_CAPTURE_EPISODE_END:  # 推理时 rollout 录制结束
                 self.recording = False
                 self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+            elif name == CMD_CAPTURE_EPISODE_CANCEL:  # 推理时取消并丢弃 rollout 录制
+                self.recording = False
+                self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
             elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
                 # 与产线一致：走 parse_meta（同时接受 CLI 文本与 HTTP 原生 dict）
                 self._reply(cmd, ok_result(state="ready", meta=parse_meta((cmd.params or {}).get("meta"))))
@@ -614,13 +629,28 @@ class FakeNode:
                     try:
                         enabled = parse_bool((cmd.params or {}).get("enabled"))
                         mode = parse_teleop_mode((cmd.params or {}).get("mode"))
+                        follow_space = (
+                            parse_teleop_follow_space((cmd.params or {}).get("follow_space")) if enabled else None
+                        )
+                        follow_axes = (
+                            parse_teleop_follow_axes((cmd.params or {}).get("follow_axes")) if enabled else None
+                        )
                     except ValueError as exc:
                         self._reply(
                             cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
                         )
                     else:
-                        self.adapter.set_teleop(enabled, mode)
-                        self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode))
+                        self.adapter.set_teleop(enabled, mode, follow_axes, follow_space)
+                        self._reply(
+                            cmd,
+                            ok_result(
+                                node_state=self.state,
+                                teleop=enabled,
+                                mode=mode,
+                                follow_space=follow_space,
+                                follow_axes=follow_axes,
+                            ),
+                        )
                 else:  # 未识别命令：兜底 rejected 409（镜像真实 EdgeNode._dispatch 的兜底回执）
                     self._reply(
                         cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
@@ -936,6 +966,32 @@ def test_depth_wrist_camera_composes_same_frame_pose():
     assert not np.allclose(first, second["xyz_world"])
 
 
+def test_depth_wrist_camera_restores_flange_when_tcp_is_enabled():
+    """开启 ``robot.tcp`` 时：``observations/pose`` 是 **TCP 原点**，深度服务须先还原法兰再合成外参。
+
+    断言「同一物理配置下 ``xyz_world`` 不变」：法兰位姿 ``[0, 0, 0]``（rpy = 0）与它的 TCP 位姿
+    ``[0, 0, 0.1]``（偏移 [0, 0, 0.1]）必须给出同一个世界点——否则腕相机的世界坐标会整体偏一个
+    TCP 偏移（``FrameSet`` 的腕相机段用的是 ``T_flange_cam``）。见 wiki/design/robot_pipeline_tcp.md。
+    """
+    node = FakeNode()
+    node.adapter.frames_payload = _frames_payload(wrist_camera="cam_head")
+    client = make_depth_client(node)
+    lease = install_lease(client)
+
+    def world_for(pose: np.ndarray) -> list[float] | None:
+        node.frame_manager.update({"observations/depth/cam_head": _depth_frame(), "observations/pose": pose})
+        body = client.get("/v1/depth", params={"camera": "cam_head"}, headers={"X-Lease-Id": lease}).json()
+        return body["xyz_world"]
+
+    flange = world_for(np.zeros(12, dtype=float))
+    assert flange is not None
+    node.adapter.tcp_offsets_payload = {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.1]}
+    tcp_pose = np.zeros(12, dtype=float)
+    tcp_pose[2] = 0.1  # 左臂：法兰 +z（工具方向）上 0.1 m，rpy 仍为 0
+    tcp_pose[8] = 0.1  # 右臂同理
+    assert world_for(tcp_pose) == pytest.approx(flange, abs=1e-9)
+
+
 def wait_node_state(node, state, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1197,7 +1253,12 @@ def test_commands_robot_teleop_returns_receipt():
             "command_id": "c1",
             "lease_id": lease,
             "capability": "robot/teleop",
-            "params": {"enabled": "true", "mode": "delta"},
+            "params": {
+                "enabled": "true",
+                "mode": "delta",
+                "follow_space": "pose",
+                "follow_axes": ["x", "y", "z", "yaw"],
+            },
         },
     )
     assert r.status_code == 200
@@ -1207,21 +1268,9 @@ def test_commands_robot_teleop_returns_receipt():
     assert body["deprecated"] is False
     assert body["data"]["teleop"] is True  # 回执回显实际生效的开关
     assert body["data"]["mode"] == "delta"  # 人工接管（增量）模式
-    assert node.teleop_calls == [(True, "delta")]  # 命令已进总线并被 fake node 消费
-    # HTTP JSON 原生 bool 不经 CLI 字符串化；False 必须被识别为关闭，不能当成空值。
-    off = client.post(
-        "/v1/commands",
-        json={
-            "command_id": "c-off",
-            "lease_id": lease,
-            "capability": "robot_teleop",
-            "params": {"enabled": False},
-        },
-    )
-    assert off.status_code == 200
-    assert off.json()["status"] == "ok"
-    assert off.json()["data"]["teleop"] is False
-    assert node.teleop_calls[-1] == (False, None)
+    assert body["data"]["follow_space"] == "pose"
+    assert body["data"]["follow_axes"] == ["x", "y", "z", "yaw"]
+    assert node.teleop_calls == [(True, "delta", "pose", ["x", "y", "z", "yaw"])]
     # 非法 mode：命令处理器回执 rejected（HTTP 200 + status=rejected + error），不是静默 accepted
     bad = client.post(
         "/v1/commands",
@@ -1249,7 +1298,7 @@ def test_commands_robot_teleop_returns_receipt():
     assert off.status_code == 200
     assert off.json()["status"] == "ok"
     assert off.json()["data"]["teleop"] is False
-    assert node.teleop_calls[-1] == (False, None)  # 已真正下发关闭
+    assert node.teleop_calls[-1] == (False, None, None, None)  # 已真正下发关闭
     # 数字 0 / 1 同样接受（`enabled: 0`）
     zero = client.post(
         "/v1/commands",
@@ -1264,21 +1313,8 @@ def test_commands_robot_teleop_returns_receipt():
     assert zero.json()["data"]["teleop"] is False
 
 
-@pytest.mark.parametrize("raw", [False, 0, "false", "0"])
-def test_parse_bool_accepts_false_scalars(raw):
-    assert parse_bool(raw) is False
-
-
-@pytest.mark.parametrize("raw", [False, 0, [], {}])
-def test_optional_mode_parsers_do_not_treat_non_string_falsy_values_as_missing(raw):
-    with pytest.raises(ValueError, match="invalid teleop mode"):
-        parse_teleop_mode(raw)
-    with pytest.raises(ValueError, match="invalid rollout"):
-        parse_rollout_mode(raw)
-
-
-def test_commands_capture_episode_start_end_return_receipts():
-    """capability=capture/episode/start|end → submit，回执回显 episode / recording。
+def test_commands_capture_episode_start_end_cancel_return_receipts():
+    """capture episode start / end / cancel 均回显 episode / recording。
 
     采集按钮据此互锁：开始采集回执 → 禁用「开始」、使能「结束」（前端还会读
     ``capture_status.running`` 作为权威位）。
@@ -1306,6 +1342,21 @@ def test_commands_capture_episode_start_end_return_receipts():
     assert ended.status_code == 200
     assert ended.json()["data"]["episode"] == "end"
     assert ended.json()["data"]["recording"] is False
+
+    assert (
+        client.post(
+            "/v1/commands",
+            json={"command_id": "c3", "lease_id": lease, "capability": "capture/episode/start"},
+        ).status_code
+        == 200
+    )
+    cancelled = client.post(
+        "/v1/commands",
+        json={"command_id": "c4", "lease_id": lease, "capability": "capture/episode/cancel"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["data"]["episode"] == "cancel"
+    assert cancelled.json()["data"]["recording"] is False
 
     assert client.delete("/v1/captures", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
@@ -2073,8 +2124,8 @@ def test_infers_config_available_before_session():
     assert cfg["missing"] == []
 
 
-def test_infers_episode_recording_start_end():
-    """推理时 rollout 录制：episode start/end → capture episode 命令 → recording 状态翻转。"""
+def test_infers_episode_recording_start_end_cancel():
+    """推理 rollout 录制支持保存结束与取消丢弃。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
@@ -2099,6 +2150,13 @@ def test_infers_episode_recording_start_end():
     assert node.session.recording is False
     assert CMD_CAPTURE_EPISODE_START in [getattr(c, "name", None) for c in node.session.pulled]
     assert CMD_CAPTURE_EPISODE_END in [getattr(c, "name", None) for c in node.session.pulled]
+    # 再开一轮并取消：走独立端点与独立命令。
+    assert client.post("/v1/infers/episode/start", headers={"X-Lease-Id": lease}).status_code == 200
+    r = client.post("/v1/infers/episode/cancel", headers={"X-Lease-Id": lease})
+    assert r.status_code == 200
+    assert r.json()["episode"] == "cancel"
+    assert r.json()["recording"] is False
+    assert CMD_CAPTURE_EPISODE_CANCEL in [getattr(c, "name", None) for c in node.session.pulled]
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
 

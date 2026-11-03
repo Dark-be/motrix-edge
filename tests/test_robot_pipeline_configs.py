@@ -19,6 +19,7 @@ robot-pipeline 自身没有自动化测试，配置只在机器人进程启动�
 本用例把「配置可解析 + 关键字段」纳入 CI（配置是 YAML，不是代码，ruff/pytest 都不会碰它）。
 """
 
+import math
 import re
 from pathlib import Path
 
@@ -31,6 +32,12 @@ _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
 _HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml")
 # 声明深度观测的机型（见 wiki/design/robot_pipeline_depth.md）
 _DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
+# 机型 → 臂名（校验 ``robot.tcp.arms`` 的键名用；与机器人类的 ``ARM_NAMES`` 一致）
+_TCP_ARMS = {
+    "test_robot.yml": ("left", "right"),
+    "dual_piper.yml": ("left", "right"),
+    "single_piper.yml": ("left",),
+}
 
 
 def _load(name: str) -> dict:
@@ -81,6 +88,84 @@ def test_depth_block_shape(name):
     cameras = block.get("cameras")
     assert isinstance(cameras, list), f"{name} 的 robot.depth.cameras 应为列表（空 = 全部具备深度的相机）"
     assert all(isinstance(camera, str) and camera for camera in cameras), f"{name} 的 cameras 含空项"
+
+
+def _resolve_tcp(section, arms):
+    """调 robot-pipeline 的 ``robot.kinematics.tcp.resolve_tcp``（纯 numpy，无硬件依赖）。"""
+    import importlib
+    import sys
+
+    src = str(_CONFIG_DIR.parent)  # robot-pipeline/src（配置目录的父目录）
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    return importlib.import_module("robot.kinematics.tcp").resolve_tcp(section, arms)
+
+
+def test_tcp_block_shape_and_resolves():
+    """``robot.tcp``（可选，见 wiki/design/robot_pipeline_tcp.md）：形状对 + 能被解析器接受。
+
+    偏移写错（带旋转 / 不是 3 个数 / 臂名不认识）在启动期就报错（``BaseRobot`` 构造 →
+    ``resolve_tcp``）；这里用**同一个解析器**把配置过一遗，避开「配置写坏但 CI 全绿」
+    ——另外机型名到臂名的对应表也要同步，否则新开机型的 ``arms`` 覆盖会漏校验。
+    """
+    for path in _CONFIG_FILES:
+        block = _load(path.name)["robot"].get("tcp")
+        if block is None:
+            continue
+        assert path.name in _TCP_ARMS, f"{path.name} 带了 robot.tcp，但 _TCP_ARMS 没登记臂名"
+        assert set(block) <= {"enabled", "offset", "arms"}, f"{path.name} 的 robot.tcp 有未知键：{set(block)}"
+        resolved = _resolve_tcp(block, _TCP_ARMS[path.name])
+        # 关闭 → 空（偏移不生效）；开启 → 逐臂都有值
+        assert (resolved == {}) is not bool(block.get("enabled")), f"{path.name} 的 robot.tcp 解析结果与开关不符"
+
+
+def test_tcp_offset_flag_matches_shipped_defaults():
+    """出厂配置里 TCP **默认关闭**（法兰原点）：开启属于现场按末端实装量出来的值。"""
+    for name in _TCP_ARMS:
+        block = _load(name)["robot"].get("tcp")
+        if block is not None:
+            assert block.get("enabled") is False, f"{name} 的 robot.tcp.enabled 出厂应为 false"
+
+
+def test_teleop_block_shape_and_joint_offsets():
+    """``robot.teleop``（可选，见 wiki/design/robot_pipeline_teleop.md）形状校验。
+
+    偏置长度 / 数值写错在机器人构造期报错（``BaseRobot._resolve_teleop_joint_offset``）；这里钉
+    形状与臂名（与 ``_TCP_ARMS`` 同一份机器人类声明），避免配置写坏时 CI 全绿。
+    """
+    for path in _CONFIG_FILES:
+        block = _load(path.name)["robot"].get("teleop")
+        if block is None:
+            continue
+        assert set(block) <= {"joint_offset", "follow_space", "follow_axes"}, (
+            f"{path.name} 的 robot.teleop 有未知键：{set(block)}"
+        )
+        follow_space = block.get("follow_space", "joint")
+        assert follow_space in {"joint", "pose"}, f"{path.name} 的 follow_space 非法：{follow_space!r}"
+        follow_axes = block.get("follow_axes")
+        if follow_axes is not None:
+            assert follow_space == "pose", f"{path.name} 只有 pose 跟随可配置 follow_axes"
+            assert follow_axes and len(follow_axes) == len(set(follow_axes)), f"{path.name} 的 follow_axes 非空且不重复"
+            assert set(follow_axes) <= {"x", "y", "z", "roll", "pitch", "yaw"}, (
+                f"{path.name} 的 follow_axes 非法：{follow_axes!r}"
+            )
+        offset = block.get("joint_offset")
+        if offset is None:
+            continue
+        if isinstance(offset, dict):
+            assert path.name in _TCP_ARMS, f"{path.name} 带了逐臂 joint_offset，但 _TCP_ARMS 没登记臂名"
+            assert set(offset) <= set(_TCP_ARMS[path.name]), f"{path.name} 的 joint_offset 含未知臂：{set(offset)}"
+            per_arm = list(offset.values())
+        else:
+            per_arm = [offset]
+        assert per_arm, f"{path.name} 的 joint_offset 为空"
+        for values in per_arm:
+            assert isinstance(values, list) and len(values) == 6, (
+                f"{path.name} 的 joint_offset 每臂应为 6 个关节值（rad），实为 {values!r}"
+            )
+            assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in values), (
+                f"{path.name} 的 joint_offset 含非数值项：{values!r}"
+            )
 
 
 def _registered_robot_types() -> set[str]:

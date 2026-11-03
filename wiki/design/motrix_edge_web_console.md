@@ -38,7 +38,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 2. **会话区（采集 / 推理二选一）**：同一时刻只可能有一个会话，故两张卡共用一块位置——顶部「会话类型」分段控件切换（会话进行中则锁定为当前会话）；只有被选中的那张面板参与渲染。
 
-3. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束（`capture episode start/end`）按采集运行位互锁**——开始后（收到回执或 `capture_status.running=true`）「开始」置灰、「结束」使能，反之亦然，避免误触反序操作；另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与节点 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
+3. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束 / 取消（`capture episode start/end/cancel`）按采集运行位互锁**——未录制时显示“开始录制”，录制中并排显示“停止录制”和“取消录制”；停止会保存本轮文件，取消经确认后结束当前录制并删除本轮文件。另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码分类，`capture.yml` 新增分类即出现），选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与机器人进程 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
 
 4. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制；头部显示**当前遥操作位**（程控 / 遥操作（absolute）/ 人工接管（增量）），关遥操作在未开启时置灰。
 
@@ -71,8 +71,8 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
     - **推理会话卡片按钮区**（一个按钮 = 一个命令）：**进入推理**、**连接推理节点 / 重新连接**
       （同一命令 `infer connect`：未连接时作重试入口，已连接时用于服务端变更后重连并预热）、
       **推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`）/ **停止推理**
-      （`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制**
-      （`POST /v1/infers/episode/start·end` → `capture episode start/end`，robot 不关心模式；
+      （`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制 / 取消录制**
+      （`POST /v1/infers/episode/start·end·cancel` → `capture episode start/end/cancel`，robot 不关心模式；
       开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带
       `task_name=prompt`）、**退出推理**。推理只提供「单步」与「持续」两种模式。
     - 卡片下部：RTC 卡片 → **策略服务器 metadata**（只展示 `metadata` 与「已连接 / 未连接」徽标，
@@ -103,6 +103,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 | `POST /v1/infers/rollout`（body `mode=continuous`）    | `infer rollout continuous` |
 | `POST /v1/infers/episode/start`                        | `capture episode start`    |
 | `POST /v1/infers/episode/end`                          | `capture episode end`      |
+| `POST /v1/infers/episode/cancel`                       | `capture episode cancel`   |
 | `POST /v1/infers/sync`                                 | `capture sync`             |
 | `POST /v1/infers/config`                               | `infer config set <json>`  |
 | `POST /v1/infers/rtc`                                  | `infer rtc set <json>`     |
@@ -115,9 +116,9 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 ## 契约要点（前端实现，单点定义）
 
 -   受控请求封装：统一注入 `X-Lease-Id`；非 2xx 抛出 `{ status, detail }`；**请求带超时**（缺省 15s，上传扫描 / 打包 120s），超时抛明确文案而不是永久 busy。
--   命令回执 `POST /v1/commands`：`status` 即命令结果（`ok` / `rejected` / `error`；`accepted` = push 型无回执），`data` 带结果字段（teleop 的 `teleop`/`mode`、episode 的 `episode`/`recording`）；前端据此判定成功并即时翻转按钮状态（不等下一次轮询）。
+-   命令回执 `POST /v1/commands`：`status` 即命令结果（`ok` / `rejected` / `error`；`accepted` = push 型无回执），`data` 带结果字段（teleop 的 `teleop`/`mode`/`follow_space`/`follow_axes`、episode 的 `episode`/`recording`）；前端据此判定成功并即时翻转按钮状态（不等下一次轮询）。
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
--   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集，推理状态同构，分类可拓展，前端按 key 逐行展示）；adapter 段带**遥操作位**（`teleop` / `teleop_mode`）；推理状态额外返回连接成功后的 `metadata`、`prompt` / `recording` / **`continuous`**（持续推理运行位）。
+-   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集，推理状态同构，分类可拓展，前端按 key 逐行展示）；adapter 段带**遥操作位**（`teleop` / `teleop_mode` / `teleop_follow_space` / `teleop_follow_axes`）。teleop 关闭时可选择 `joint` / `pose`，启用时冻结，并在下次开启时发送 `follow_space`；pose 时显示六轴锁定复选框并发送 `follow_axes`。不支持 pose 的机型由机器人进程明确拒绝。推理状态额外返回连接成功后的 `metadata`、`prompt` / `recording` / **`continuous`**（持续推理运行位）。
 -   采集元信息选项：`GET /v1/captures/meta` 读列表（免租约）与写回执同构 `{meta: {分类: [选项]}}`；前端按返回的分类动态渲染选择框与管理的下拉（不硬编码分类，新分类无需改前端）。
 -   推理面板提供 Prompt 输入（经 `POST /v1/infers/config` 写入策略配置项 `prompt`，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
 -   **RTC 卡片**：展示 `GET /v1/infers` 的 `rtc`（enabled / 块长 H / 执行段 E / 后缀 S / 聚合函数 /

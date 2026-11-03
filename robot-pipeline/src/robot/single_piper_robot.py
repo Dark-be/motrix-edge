@@ -45,6 +45,8 @@ class SinglePiperRobot(BaseRobot):
 
     QPOS = 6  # Follower 单臂：6 关节角（joint 空间）
     GRIPPER = 1  # Follower 单臂：1 夹爪（gripper 空间）
+    # 臂名 -> controllers 键：本机型唯一从臂由 Follower 控制器执行（臂名取 state_arms() 缺省序号）
+    ARM_CONTROLLERS = {"arm_1": "follower"}
     IMAGE_NAMES: list[str] = []  # 无相机
     IMAGES: dict[str, tuple[int, int]] = {}
     CAMERA_KINDS: dict[str, str] = {}

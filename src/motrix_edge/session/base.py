@@ -302,6 +302,7 @@ class BaseSession:
                 self._on_episode_start(cmd)
             except Exception as exc:  # noqa: BLE001 SDK/HTTP 故障不得击穿会话循环
                 self._reply_upstream_error(cmd, "capture start", exc)
+            self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_EPISODE_END:
             if self._reject_expired_control(cmd, "capture end"):
@@ -310,6 +311,16 @@ class BaseSession:
                 self._on_episode_end(cmd)
             except Exception as exc:  # noqa: BLE001 SDK/HTTP 故障不得击穿会话循环
                 self._reply_upstream_error(cmd, "capture end", exc)
+            self._mark_capture_status_dirty()
+            return CommonDispatch.HANDLED
+        if name == CMD_CAPTURE_EPISODE_CANCEL:
+            if self._reject_expired_control(cmd, "capture cancel"):
+                return CommonDispatch.HANDLED
+            try:
+                self._on_episode_cancel(cmd)
+            except Exception as exc:  # noqa: BLE001 SDK/HTTP 故障不得击穿会话循环
+                self._reply_upstream_error(cmd, "capture cancel", exc)
+            self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_SYNC:
             if self._reject_expired_control(cmd, "capture sync"):
@@ -318,6 +329,7 @@ class BaseSession:
                 self._on_capture_sync(cmd)
             except Exception as exc:  # noqa: BLE001 SDK/HTTP 故障不得击穿会话循环
                 self._reply_upstream_error(cmd, "capture sync", exc)
+            self._mark_capture_status_dirty()
             return CommonDispatch.HANDLED
         if name in _CAPTURE_META_COMMANDS:
             self._reply(cmd, self._on_capture_meta(cmd))
@@ -331,6 +343,11 @@ class BaseSession:
             cmd,
             CommandResult(status="error", error=f"{operation} failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
         )
+
+    def _mark_capture_status_dirty(self) -> None:
+        """作废节点采集状态缓存，使下一拍立即重新读取。"""
+        if self._on_capture_status_dirty is not None:
+            self._on_capture_status_dirty()
 
     def reject_not_applicable(self, cmd, scope: str | None = None) -> None:
         """未识别 / 当前循环不适用命令的统一回执（``<cmd> not applicable``）。

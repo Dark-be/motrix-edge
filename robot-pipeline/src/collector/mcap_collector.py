@@ -49,6 +49,7 @@
     c.start()                 # 生成 UUID 文件名打开 .mcap（唯一，无编号冲突）
     c.collect(standard_obs)   # 每帧直接落盘
     c.finish()                # -> 已写入的 .mcap 文件 Path（并写同名 .json 元信息）
+    c.cancel()                # -> 关闭并删除本轮 .mcap，不写 .json
 
 结束一轮时写与 mcap 同名的 JSON 元信息文件（``{uuid}.json``），描述该 mcap（见
 ``_write_meta_json``）：含**控制模式**（``control_mode`` / ``control``——``mit`` /
@@ -296,6 +297,21 @@ class ActMcapCollector:
                 f"Collector finish: episode finished, {self._step_count} steps -> {path}",
                 "INFO",
             )
+        return path
+
+    def cancel(self) -> Path | None:
+        """取消当前 episode：关闭 writer，并删除本轮文件且不写元信息 JSON。
+
+        未 start 过时返回 ``None``；重复调用幂等。writer 仍先正常关闭，避免文件句柄泄漏，
+        随后删除 MCAP。防御性删除同名 JSON，确保取消操作不会保留本轮数据文件。
+        """
+        path = self._close_writer()
+        if path is None:
+            return None
+        json_path = path.with_suffix(".json")
+        path.unlink(missing_ok=True)
+        json_path.unlink(missing_ok=True)
+        debug_print(self.name, f"Collector cancel: episode discarded -> {path}", "INFO")
         return path
 
     # ---- 采集元信息（meta）：写入接口统一为 set_*_meta，读取用 meta property ----

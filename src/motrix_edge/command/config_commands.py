@@ -43,26 +43,66 @@ from .naming import (
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
     CMD_INFER_RTC_SET,
+    CMD_ROBOT_TCP,
 )
-from .params import TELEOP_COMMAND_MODES, parse_bool, parse_meta, teleop_mode_for
+from .params import (
+    TELEOP_COMMAND_MODES,
+    parse_alpha,
+    parse_bool,
+    parse_meta,
+    parse_offset,
+    parse_teleop_follow_axes,
+    parse_teleop_follow_space,
+    teleop_mode_for,
+)
 
 
-def apply_teleop(adapter, cmd) -> tuple[bool, str | None]:
+def apply_teleop(adapter, cmd) -> tuple[bool, str | None, str | None, list[str] | None]:
     """``robot teleop`` / ``robot teach`` / ``robot takeover`` 的唯一实现（node 与会话共用）。
 
     模式：``robot teach`` → ``absolute``（示教）、``robot takeover`` → ``delta``（人工接管）
     ——命令名固定、**不接受** ``mode`` 参数；``robot teleop`` 用可选 ``mode``（缺省 ``absolute``，
     见 ``/v1/teleop`` 契约，保持旧调用方行为不变）。``enabled`` 必填（true/false）。
 
-    参数非法 → ``ValueError``（调用方回执 ``rejected``）；成功返回 ``(enabled, mode)`` 供回执回显。
+    参数非法 → ``ValueError``（调用方回执 ``rejected``）；成功返回
+    ``(enabled, mode, follow_space, follow_axes)`` 供回执回显。
     """
     # 别名命令的模式由命令名固定：显式传 mode 说明调用方误解了语义 → 明确拒绝（不静默忽略）
     if cmd.name in TELEOP_COMMAND_MODES and str(cmd.params.get("mode") or "").strip():
         raise ValueError(f"{cmd.name}: mode is fixed by the command name (drop the mode argument)")
     enabled = parse_bool(cmd.params.get("enabled"))
     mode = teleop_mode_for(cmd.name, cmd.params.get("mode"))
-    adapter.set_teleop(enabled, mode)
-    return enabled, mode
+    follow_space = parse_teleop_follow_space(cmd.params.get("follow_space")) if enabled else None
+    follow_axes = parse_teleop_follow_axes(cmd.params.get("follow_axes")) if enabled else None
+    if follow_space == "joint" and follow_axes is not None:
+        raise ValueError("follow_axes is only valid when follow_space='pose'")
+    adapter.set_teleop(enabled, mode, follow_axes, follow_space)
+    return enabled, mode, follow_space, follow_axes
+
+
+def apply_switch(adapter, cmd, *, in_session: bool) -> dict:
+    """``robot tcp`` / ``robot gravity`` 的唯一实现（node 与会话共用，与 ``apply_teleop`` 同构）。
+
+    两条命令都会改「**同一会话内的语义**」：``tcp`` 换 ``observations/pose`` 的原点、``gravity``
+    改 ``control_mode``（采集 JSON 的元信息）——因此**离开会话才能切**（同 ``adapter config set``
+    先例）。⚠️ 与 ``robot teleop`` 不同：人工接管是**会话中**的正常操作，不受此限。
+
+    ``enabled`` 必填；``offset``（tcp，米，3 个数）/ ``alpha``（gravity，前馈比例）可选。
+    参数非法 / 会话中切换 → ``ValueError``（调用方回执 rejected）；成功返回回执字段（回显请求）。
+    """
+    if in_session:
+        raise ValueError(
+            f"{cmd.name}: quit the session first（切换位姿系 / 重力前馈会让同一会话内的观测语义与"
+            "数据元信息前后不一致；人工接管 robot teleop 不受此限）"
+        )
+    enabled = parse_bool(cmd.params.get("enabled"))
+    if cmd.name == CMD_ROBOT_TCP:
+        offset = parse_offset(cmd.params.get("offset"))
+        adapter.set_tcp(enabled, offset)
+        return {"tcp": enabled, "offset": offset}
+    alpha = parse_alpha(cmd.params.get("alpha"))
+    adapter.set_gravity(enabled, alpha)
+    return {"gravity": enabled, "alpha": alpha}
 
 
 def get_rtc_params(base_cfg) -> dict:

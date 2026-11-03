@@ -26,6 +26,7 @@ from .naming import (
     CMD_ADAPTER_CONFIG,
     CMD_ADAPTER_CONFIG_CURRENT,
     CMD_ADAPTER_CONFIG_SET,
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -47,8 +48,10 @@ from .naming import (
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
+    CMD_ROBOT_GRAVITY,
     CMD_ROBOT_RESET,
     CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TCP,
     CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
@@ -170,8 +173,13 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),
         CommandSpec(name=CMD_ROBOT_TEACH, positional=("enabled",)),  # robot teach <true|false>：示教（absolute）
         CommandSpec(name=CMD_ROBOT_TAKEOVER, positional=("enabled",)),  # robot takeover <true|false>：接管（delta）
+        # robot tcp <true|false> [offset=[x,y,z]]：运行期位姿系开关（**离开会话才能切**）
+        CommandSpec(name=CMD_ROBOT_TCP, positional=("enabled", "offset")),
+        # robot gravity <true|false> [alpha=<float>]：运行期重力前馈开关（**离开会话才能切**）
+        CommandSpec(name=CMD_ROBOT_GRAVITY, positional=("enabled", "alpha")),
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
+        CommandSpec(name=CMD_CAPTURE_EPISODE_CANCEL),  # capture episode cancel
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>
         CommandSpec(name=CMD_CAPTURE_META_LIST, positional=("key",)),  # capture meta list [key]
         CommandSpec(name=CMD_CAPTURE_META_ADD, positional=("key", "value")),  # capture meta add <key> <value>

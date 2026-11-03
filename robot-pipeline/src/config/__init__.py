@@ -124,7 +124,8 @@ def list_configs() -> list[str]:
 PROFILE_HEADER = """\
 # 机器档案（每台机器一份）：只写「这台机器不同」的键，其余继承机型 yml（深合并）。
 # 常见键：robot.name / robot.ports / robot.cameras / robot.gravity.arms.<臂>.params /
-#         collector.save_dir / can.bindings（USB 物理口 -> <目标CAN名>:<波特率>）。
+#         robot.teleop.joint_offset / collector.save_dir /
+#         can.bindings（USB 物理口 -> <目标CAN名>:<波特率>）。
 # 生成 / 更新：bash scripts/setup_robot.sh --config <机型> --machine <本机名>
 # 生效：robot server 启动时按 --machine / MOTRIX_ROBOT_PIPELINE_MACHINE / hostname 自动叠加。
 """
