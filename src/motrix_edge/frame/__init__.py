@@ -36,7 +36,7 @@ _PREVIEW_JPEG_QUALITY = 80
 def cache_observation(obs: dict, image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE) -> dict:
     """整理 adapter 观测为 Edge 侧缓存帧：摄像头帧降采样为 ``image_size`` JPEG。
 
-    obs 由 ``adapter.observe()`` 返回（图像为 JPEG，如 640x480）；其余值（qpos / action /
+    obs 由 ``adapter.observe()`` 返回（图像为 JPEG，如 640x480）；其余值（qpos / qpos_err / action /
     pose / **深度图**）原样透传——深度是 ``uint16`` 数组，不进 JPEG 也不降采样（降采样会
     破坏「像素 ↔ 深度」的对应关系，而去掉像素对应关系的深度图没有用）。
     """
@@ -70,6 +70,7 @@ class FrameManager:
 
     - ``update(obs)``：写入最新观测（``adapter.observe()`` 返回；图像降采样为 jpeg）。
     - ``latest()``：读取最新观测帧（供 preview / WebRTC 推流）；无帧返回 None。
+    - ``latest_versioned()`` / ``wait_for_update()``：按单调版本等待**新一帧**，供多帧采样使用。
     - ``clear()``：清空缓存（会话结束 / 退出时）。
     """
 
@@ -77,6 +78,8 @@ class FrameManager:
         self._image_size = image_size
         self._latest: dict | None = None
         self._lock = threading.Lock()
+        self._updated = threading.Condition(self._lock)
+        self._revision = 0
 
     @property
     def image_size(self) -> tuple[int, int]:
@@ -85,18 +88,37 @@ class FrameManager:
 
     def update(self, obs: dict) -> None:
         """写入最新观测帧（图像降采样为 Edge 侧尺寸 jpeg）。"""
-        with self._lock:
-            self._latest = cache_observation(obs, self._image_size)
+        cached = cache_observation(obs, self._image_size)
+        with self._updated:
+            self._latest = cached
+            self._revision += 1
+            self._updated.notify_all()
 
     def latest(self) -> dict | None:
         """读取最新观测帧（线程安全；无帧返回 None）。"""
         with self._lock:
             return self._latest
 
+    def latest_versioned(self) -> tuple[int, dict | None]:
+        """返回 ``(revision, latest)``；revision 每次更新 / 清空都严格递增。"""
+        with self._lock:
+            return self._revision, self._latest
+
+    def wait_for_update(self, after_revision: int, timeout: float | None = None) -> tuple[int, dict | None]:
+        """等待 revision 大于 ``after_revision``，超时则返回当前版本与帧。
+
+        以通知驱动等待，消费者不会按固定 sleep 猜观测频率，也不会把同一缓存帧重复当成多份样本。
+        """
+        with self._updated:
+            self._updated.wait_for(lambda: self._revision > after_revision, timeout=timeout)
+            return self._revision, self._latest
+
     def clear(self) -> None:
         """清空缓存。"""
-        with self._lock:
+        with self._updated:
             self._latest = None
+            self._revision += 1
+            self._updated.notify_all()
 
 
 __all__ = ["DEFAULT_IMAGE_SIZE", "FrameManager", "cache_observation"]

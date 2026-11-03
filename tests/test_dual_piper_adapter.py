@@ -24,6 +24,7 @@ from motrix_edge.adapter.base import (
     KEY_ACTION,
     KEY_POSE,
     KEY_QPOS,
+    KEY_QPOS_ERR,
     ActionSpace,
     AdapterCapability,
 )
@@ -121,7 +122,7 @@ def test_identity_and_capabilities():
     assert caps.action_spaces == ["joint", "joint_delta", "pose", "pose_delta", "gripper", "gripper_delta"]
     assert set(adapter.action_layouts()) >= {"joint_delta", "gripper_delta", "joint_delta+gripper_delta"}
     # 观测键 = observe() 实际产出的键（状态向量 qpos + 目标向量 action + 位姿），相机键在后
-    assert caps.observation_keys[:3] == [KEY_QPOS, KEY_ACTION, KEY_POSE]
+    assert caps.observation_keys[:4] == [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION, KEY_POSE]
     assert caps.image_names == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert all(caps.supports(cap) for cap in AdapterCapability)
 
@@ -219,6 +220,7 @@ def test_observe_builds_edge_observation(monkeypatch):
         def read(self):
             return {
                 "qpos": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
+                "qpos_err": np.zeros(14, dtype=np.float64),
                 "action": _state_vector(np.arange(12, dtype=np.float64) + 100, _GRIPPER),  # 与 qpos 可区分
                 "images": images,
             }
@@ -231,6 +233,7 @@ def test_observe_builds_edge_observation(monkeypatch):
 
     assert obs is not None
     assert obs[KEY_QPOS].dtype == np.float32
+    assert obs[KEY_QPOS_ERR].dtype == np.float32
     assert obs[KEY_ACTION].dtype == np.float32
     assert obs[KEY_QPOS].shape == (14,)
     # action 取 SHM 里进程侧的目标向量，而不是 qpos 副本（preview 显示真实指令）
@@ -262,6 +265,7 @@ def _depth_reader(depths, images=None):
     """假 ObsShmReader：帧里带深度区（``None`` = 该帧没有 ``depths`` 键）。"""
     payload = {
         "qpos": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
+        "qpos_err": np.zeros(14, dtype=np.float64),
         "action": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
         "images": images or [np.full((8, 8, 3), 40, dtype=np.uint8) for _ in range(3)],
     }
@@ -351,6 +355,7 @@ def _pose_reader(pose, pose_dim, images=None):
     """假 ObsShmReader：带 header 的 pose_dim 与可选位姿区（模拟机器人是否上位姿区）。"""
     payload = {
         "qpos": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
+        "qpos_err": np.zeros(14, dtype=np.float64),
         "action": _state_vector(np.arange(12, dtype=np.float64), _GRIPPER),
         "images": images or [np.full((8, 8, 3), 40, dtype=np.uint8) for _ in range(3)],
     }
@@ -492,6 +497,7 @@ def test_observe_rejects_camera_count_mismatch(monkeypatch):
         def read(self):
             return {
                 "qpos": np.arange(12, dtype=np.float64),
+                "qpos_err": np.zeros(12, dtype=np.float64),
                 "gripper": np.array([0.5, 0.8]),
                 "action": np.arange(12, dtype=np.float64),
                 "images": images,

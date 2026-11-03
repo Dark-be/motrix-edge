@@ -47,7 +47,9 @@
 | ``env.get_env_meta`` / ``env.get_camera_meta``    | adapter 能力自描述 + 观测缓存分辨率（**免租约**） |
 | ``env.get_observation`` / ``env.get_robot_state`` | ``adapter.observe()`` 原图（``image_source: native``）/ 降采样帧 |
 | ``env.reset``                                     | 命令通道 ``robot/reset``（含租约与回执）     |
-| ``env.move_delta`` / ``env.rotate_delta``         | ``adapter.rollout(pose_delta)``（机器人侧叠加增量） |
+| ``env.capture_episode_start`` / ``end``           | 同步 meta 后开始 / 保存一轮（不管理 capture session） |
+| ``env.move_delta`` / ``env.rotate_delta``         | 末端语义轴增量 → ``adapter.rollout(pose_delta)`` |
+| ``env.move_delta_abs``                            | ``world`` 轴平移增量 → ``adapter.rollout(pose_delta)`` |
 | ``env.set_gripper``                               | ``adapter.rollout(joint)``（基座取关节段目标，其余维不变） |
 | ``env.recover_joint_posture``                     | 关节回 home（``HOME["joint"]``）+ 保持夹爪 |
 | ``env.step`` / ``env.chunk_step``                 | 逐帧 ``adapter.rollout(...)``（按控制频率节奏） |
@@ -83,7 +85,7 @@ RPent 不认 ``X-Lease-Id`` 头，故租约 id 由本服务解析：配置 ``ser
 - 语义：双 Franka 的块是**绝对 TCP 位姿**（非增量），``action_scale`` 是机器人侧的每步限幅 →
   edge 不做缩放；
 - ``server.rpent.dry_run: true`` → **任何下发都被拦住**（`step` / `chunk_step` 只回转换结果；
-  `reset` / 四条写原语回 `sent: false` + `reached: null` + `reason: dry_run`；`_push_qpos` 兜底
+  `reset` / 全部写方法回 `sent: false` + `reached: null` + `reason: dry_run`；`_push_qpos` 兜底
   报错），真机联调先对数值、机器人不动；是否 dry-run 可从 `env.get_env_meta` 的 `settle.dry_run` 看出。
 
 **到位等待（settle）**：写原语下发后阻塞到机器人到位（参数 / 回执见

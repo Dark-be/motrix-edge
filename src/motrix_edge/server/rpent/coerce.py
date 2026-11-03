@@ -52,6 +52,24 @@ def _floats(value: Any, what: str) -> np.ndarray:
         raise RpentError(f"{what} must be numbers ({exc})", kind="argument") from exc
 
 
+def gripper_openness(value: Any, what: str = "open") -> float:
+    """夹爪入参 → 归一化开合度 ``[0, 1]``（``True`` / ``False`` ≡ ``1.0`` / ``0.0``，0 = 闭合）。
+
+    域与自描述 ``gripper_range`` 同源（机器人的 ``gripper`` 空间本身就是归一化值）。越界 / 非数值
+    一律拒绝（``kind="argument"``，**不静默限幅**）：回执里的开合度是 agent 判断「我让它合到什么
+    程度」的依据，悄悄夹到 1.0 会让它以为这是自己算错而不是参数被改。
+    """
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    array = _floats(value, what)
+    if array.size != 1:
+        raise RpentError(f"{what} must be a single number in [0, 1], got {array.size} values", kind="argument")
+    wanted = float(array[0])
+    if not 0.0 <= wanted <= 1.0:  # nan 也走这里（比较恒 False）
+        raise RpentError(f"{what} must be in [0, 1] (0 = closed, 1 = open), got {wanted}", kind="argument")
+    return wanted
+
+
 def as_action_matrix(actions: Any) -> np.ndarray:
     """动作块 → ``[N, dim]`` ``float32`` 矩阵（单帧 ``[dim]`` 也接受；非数值 → ``kind=argument``）。"""
     try:
@@ -129,6 +147,7 @@ __all__ = [
     "as_action_matrix",
     "as_float_array",
     "decode_jpeg",
+    "gripper_openness",
     "seconds_until",
     "space_value",
     "split_arm_and_vector",

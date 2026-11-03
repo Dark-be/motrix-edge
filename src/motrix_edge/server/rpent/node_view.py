@@ -167,6 +167,30 @@ class EdgeNodeView:
             raise RpentError("frame manager not available", kind="state")
         return frame_manager.latest() or {}
 
+    def frame_revision(self) -> int | None:
+        """当前观测帧版本；旧式 / 测试缓存不提供版本时返回 ``None``。"""
+        getter = getattr(getattr(self._node, "frame_manager", None), "latest_versioned", None)
+        if not callable(getter):
+            return None
+        revision, _frame = getter()
+        return int(revision)
+
+    def wait_for_frame_update(self, after_revision: int, timeout: float) -> int:
+        """等待下一观测帧并返回版本；生产 ``FrameManager`` 由条件变量唤醒。"""
+        waiter = getattr(getattr(self._node, "frame_manager", None), "wait_for_update", None)
+        if not callable(waiter):
+            return after_revision
+        revision, _frame = waiter(after_revision, timeout=max(float(timeout), 0.0))
+        return int(revision)
+
+    def observe_interval(self) -> float:
+        """节点观测缓存刷新周期（秒）；缺失 / 非法时使用生产缺省 50 ms。"""
+        try:
+            value = float(getattr(self._node, "observe_interval", 0.05))
+        except (TypeError, ValueError):
+            return 0.05
+        return value if value > 0 else 0.05
+
     def image_size(self) -> tuple[int, int]:
         """预览缓存尺寸（``FrameManager.image_size``，WebRTC / 降采样用）；拿不到 → ``(0, 0)``。"""
         size = getattr(getattr(self._node, "frame_manager", None), "image_size", None)

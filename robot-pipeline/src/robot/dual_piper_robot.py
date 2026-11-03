@@ -200,9 +200,7 @@ class DualPiperRobot(BaseRobot):
 
         端口 / 相机序列号取自 ``robot.ports`` / ``robot.cameras``（构造时已校验必填）。
         """
-        for arm in self.ARM_NAMES:
-            master_name = self.MASTER_CONTROLLERS[arm]
-            self._master_controller_for_arm(arm).connect(port=self.ports[master_name], role="leader")
+        self._connect_masters()
         # 重力前馈只装在执行臂（主手只读）
         gravity = self.robot_config.get("gravity")
         for arm in self.ARM_NAMES:
@@ -216,6 +214,12 @@ class DualPiperRobot(BaseRobot):
             )
         debug_print(self.name, "Setup sensors done", "INFO")
         self.ready = True
+
+    def _connect_masters(self):
+        """连接只读 Piper 主手；其他主手机型覆盖此硬件接入点。"""
+        for arm in self.ARM_NAMES:
+            master_name = self.MASTER_CONTROLLERS[arm]
+            self._master_controller_for_arm(arm).connect(port=self.ports[master_name], role="leader")
 
     def disconnect(self):
         """断开 master/slave 控制器与相机（幂等，重复调用安全）。"""

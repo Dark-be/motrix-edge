@@ -31,6 +31,7 @@ from motrix_edge.adapter.base import (
     KEY_ACTION,
     KEY_POSE,
     KEY_QPOS,
+    KEY_QPOS_ERR,
     ActionSpace,
     AdapterCapability,
     CaptureStatus,
@@ -114,7 +115,7 @@ class FakeRobotAdapter(RobotAdapter):
     # -- 能力 ---------------------------------------------------------------
     @property
     def capabilities(self) -> RobotCapabilities:
-        keys = [KEY_QPOS, KEY_ACTION, KEY_POSE] + [f"{CAMERA_PREFIX}{img}" for img in self.IMAGES]
+        keys = [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION, KEY_POSE] + [f"{CAMERA_PREFIX}{img}" for img in self.IMAGES]
         keys += [f"{DEPTH_PREFIX}{img}" for img in self.DEPTH_CAMERAS]
         return RobotCapabilities(
             robot_model_id=self.ROBOT_MODEL_ID,
@@ -162,10 +163,13 @@ class FakeRobotAdapter(RobotAdapter):
 
     # -- 观测 ---------------------------------------------------------------
     def observe(self) -> dict:
+        qpos = self._state_vector()
+        action = self._action_vector()
         obs = {
-            KEY_QPOS: self._state_vector(),
+            KEY_QPOS: qpos,
+            KEY_QPOS_ERR: action - qpos,
             KEY_POSE: self._pose.copy(),
-            KEY_ACTION: self._action_vector(),
+            KEY_ACTION: action,
         }
         for img in self.IMAGES:
             frame = np.full((64, 64, 3), 128, dtype=np.uint8)

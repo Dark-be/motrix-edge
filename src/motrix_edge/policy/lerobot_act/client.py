@@ -22,11 +22,24 @@ from motrix_edge.policy.base import BasePolicyClient
 from motrix_edge.policy.contract import (
     KEY_OBS_IMAGE_PREFIX,
     KEY_OBS_QPOS,
+    KEY_OBS_QPOS_ERR,
     resize_with_pad,
     to_rgb_uint8,
 )
 from motrix_edge.rtc import ActionChunk
 from motrix_edge.transport import AsyncInferenceGrpcTransport
+
+OBSERVATION_LAYOUT_QPOS = "qpos"
+OBSERVATION_LAYOUT_QPOS_ERR = "qpos+qpos_err"
+OBSERVATION_LAYOUTS = {OBSERVATION_LAYOUT_QPOS, OBSERVATION_LAYOUT_QPOS_ERR}
+
+
+def _normalize_observation_layout(value) -> str:
+    """规范化 ACT state 布局；缺省保持旧 checkpoint 的纯 qpos 输入。"""
+    layout = OBSERVATION_LAYOUT_QPOS if value in (None, "") else str(value).strip().lower()
+    if layout not in OBSERVATION_LAYOUTS:
+        raise ValueError(f"invalid observation_layout {value!r} (expect one of {sorted(OBSERVATION_LAYOUTS)})")
+    return layout
 
 
 class LerobotActClient(BasePolicyClient):
@@ -64,6 +77,7 @@ class LerobotActClient(BasePolicyClient):
         )
         # lerobot lerobot-act 策略参数（edge.yml policy 段）
         self._actions_per_chunk = int(self.policy_config.get("actions_per_chunk", 50))
+        self._observation_layout = _normalize_observation_layout(self.policy_config.get("observation_layout"))
         # 块长契约：服务端按 actions_per_chunk 返回**整块**（构造时即可声明），首次推理后以实测
         # 块长覆盖（服务端仍可能少给，如临近 episode 结尾）；供 RTC 兜底校准块长上限 H。
         self.observed_chunk_len: int | None = self._actions_per_chunk
@@ -176,11 +190,12 @@ class LerobotActClient(BasePolicyClient):
         与服务端 ``build_dataset_frame(features, raw_obs, "observation")`` 对齐；字段
         （``dtype`` / ``shape`` / ``names``）与官方客户端 ``hw_to_dataset_features(..., use_video=False)``
         同形——服务端还有 ``dataset_to_policy_features`` 会读 ``shape`` / ``names``，缺字段在那边会报错。
-          - state:  {"dtype":"float32","shape":(N,),"names":[qpos_i]}
+          - state:  {"dtype":"float32","shape":(N,),"names":[qpos_i, qpos_err_i]}
+            （是否包含 qpos_err 由 ``observation_layout`` 决定）
           - images: {"dtype":"image","shape":(H,W,3),"names":[height,width,channels]}（HWC，与下发一致）
         """
-        dim = int(np.asarray(observation[KEY_OBS_QPOS]).size)
-        state_names = [f"qpos_{i}" for i in range(dim)]
+        state, state_names = self._state_values(observation)
+        dim = int(state.size)
         features = {"observation.state": {"dtype": "float32", "shape": (dim,), "names": state_names}}
         height, width = self._image_size
         for _, dataset_cam in self._policy_cameras(observation):
@@ -190,6 +205,21 @@ class LerobotActClient(BasePolicyClient):
                 "names": ["height", "width", "channels"],
             }
         return features
+
+    def _state_values(self, observation) -> tuple[np.ndarray, list[str]]:
+        """按配置组装 state；误差只读取机器人观测，不在 Edge 推导或缓存。"""
+        qpos = np.asarray(observation[KEY_OBS_QPOS], dtype=np.float32).reshape(-1)
+        names = [f"qpos_{i}" for i in range(qpos.size)]
+        if self._observation_layout != OBSERVATION_LAYOUT_QPOS_ERR:
+            return qpos, names
+
+        if KEY_OBS_QPOS_ERR not in observation:
+            raise KeyError(f"{KEY_OBS_QPOS_ERR!r} is required by observation_layout={self._observation_layout!r}")
+        qpos_err = np.asarray(observation[KEY_OBS_QPOS_ERR], dtype=np.float32).reshape(-1)
+        if qpos_err.shape != qpos.shape:
+            raise ValueError(f"qpos_err shape {qpos_err.shape} != qpos shape {qpos.shape}")
+        names += [f"qpos_err_{i}" for i in range(qpos_err.size)]
+        return np.concatenate((qpos, qpos_err)), names
 
     def _policy_cameras(self, observation) -> list[tuple[str, str]]:
         """策略输入相机（edge 名, 下发名）列表，保持观测键序。
@@ -253,15 +283,14 @@ class LerobotActClient(BasePolicyClient):
             self._policy_features = features  # 记录已下发的布局（下次比对决定是否重发）
 
     def _build_raw_observation(self, observation) -> dict:
-        """edge 观测（qpos + jpeg/ndarray 图像）→ lerobot raw obs（state 分量标量 + uint8 图像）。
+        """edge 观测（state 段 + 图像）→ lerobot raw obs（state 分量标量 + uint8 图像）。
 
         图像解码为 uint8 RGB 后由 edge 直接 ``resize_with_pad`` 等比缩放到
         ``image_size``（默认 224×224，横向图上下留黑边），不依赖服务端缩放。
         """
         raw: dict = {}
-        qpos = np.asarray(observation[KEY_OBS_QPOS]).reshape(-1)  # 兼容 (N,) / (1,N) / (N,1)（adapter 布局差异）
-        for i, value in enumerate(qpos):
-            raw[f"qpos_{i}"] = float(value)
+        state, names = self._state_values(observation)
+        raw.update((name, float(value)) for name, value in zip(names, state, strict=True))
         for edge, dataset_cam in self._policy_cameras(observation):
             value = observation[f"{KEY_OBS_IMAGE_PREFIX}{edge}"]
             raw[dataset_cam] = resize_with_pad(to_rgb_uint8(value), *self._image_size)

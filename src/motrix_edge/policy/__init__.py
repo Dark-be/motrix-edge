@@ -47,6 +47,7 @@ POLICY_REGISTRY = {
 
 #   default     代码缺省（可选；None 表示无缺省）
 #   placeholder / help  前端输入提示（可选）
+#   options     固定候选值（可选；前端渲染 select，后端同时校验）
 #   group       分组（"endpoint" = 推理端点项：前端分组展示，并据此门控「进入推理」）
 #   multiline   长文本项（prompt / system_prompt 等）：前端渲染为多行 textarea（缺省 6 行）
 #   rows        multiline 的行数（可选；缺省用前端缺省值）
@@ -103,10 +104,20 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "required": False,
         "runtime": False,  # 会话级：进入会话时固化（下发通路固定）
         "default": "joint",
-        "placeholder": "joint | joint+gripper",
-        "help": "策略**输出**的动作语义（布局词表，段名用 + 连接）：joint（缺省）= 每臂 6 关节角"
-        "（夹爪需另经 gripper 段，未启用臂补 home）；joint+gripper = 每臂「6 关节角 + 1 夹爪」，"
-        "**一条请求**同时写关节与夹爪（未选臂由机器人保持、不补 home）。布局**不按动作长度猜测**；"
+        "options": [
+            "joint",
+            "joint_delta",
+            "joint+gripper",
+            "joint_delta+gripper_delta",
+            "pose",
+            "pose_delta",
+            "pose+gripper",
+            "pose_delta+gripper_delta",
+        ],
+        "placeholder": "joint | joint_delta | joint_delta+gripper_delta",
+        "help": "策略**输出**的动作语义（布局词表，段名用 + 连接）：joint 为绝对关节目标；"
+        "joint_delta 为叠加到机器人当前 target 的关节增量；可与 gripper / gripper_delta 组合。"
+        "布局**不按动作长度猜测**，是否支持及每段维数由机器人能力校验；"
         "**会话内改需退出重进**",
     },
 ]
@@ -139,6 +150,19 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
         },
     ],
     "lerobot-act": [
+        {
+            "key": "observation_layout",
+            "label": "状态输入布局 observation_layout",
+            "type": "text",
+            "required": False,
+            "runtime": False,
+            "default": "qpos",
+            "options": ["qpos", "qpos+qpos_err"],
+            "placeholder": "qpos | qpos+qpos_err",
+            "help": "ACT observation.state 的布局：qpos 保持旧模型兼容；qpos+qpos_err 按顺序拼接"
+            "机器人显式提供的关节/夹爪实测值与目标误差。单臂各 7 维时得到 14 维 state；"
+            "Edge 不计算 qpos_err。**会话内改需退出重进**",
+        },
         {
             "key": "pretrained_name_or_path",
             "label": "模型路径 pretrained_name_or_path",

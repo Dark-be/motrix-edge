@@ -22,17 +22,18 @@ robot:
   ports: # 控制器端口（键 = 代码里的角色名）
     left_master: "" # 左主手（Alicia 示教臂）串口设备节点：**现场填写**（留空 → 启动报错）
     right_master: "" # 右主手串口设备节点：**现场填写**（留空 → 启动报错）
-    left: can_left # 左从臂（Piper，CAN 接口名）
-    right: can_right # 右从臂
-  cameras: # 相机（键 = IMAGE_NAMES 的相机名）：头部 RealSense 序列号 / 腕部 V4L2 节点
+    left: left # 左从臂（Piper，CAN 接口名）
+    right: right # 右从臂
+  cameras: # 相机（键 = IMAGE_NAMES 的相机名）：三路均为 RealSense，按序列号指定
     cam_head: "" # 头部 RealSense 序列号：**现场填写**（留空 → 启动报错）
-    cam_left_wrist: "" # 左腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
-    cam_right_wrist: "" # 右腕相机 V4L2 节点：**现场填写**（留空 → 启动报错）
-  # 深度观测（见 wiki/design/robot_pipeline_depth.md）：本机型**只有 cam_head** 具备深度
-  # （两腕是网络摄像头）；输出对齐到彩色图的深度图，由 edge 的 GET /v1/depth 查询像素深度。
+    cam_left_wrist: "" # 左腕 RealSense 序列号：**现场填写**（留空 → 启动报错）
+    cam_right_wrist: "" # 右腕 RealSense 序列号：**现场填写**（留空 → 启动报错）
+  # 深度观测（见 wiki/design/robot_pipeline_depth.md）：RealSense 相机额外输出**对齐到彩色图**
+  # 的深度图（observations/depth/<cam>），由 edge 的 GET /v1/depth 查询像素深度（米）。
+  # 不进数据集（采集器只收 observations/images/）；关掉可省带宽（三路 ≈1.8MB/帧 @10Hz）。
   depth:
-    enabled: true # 缺省 true；false = 不开深度流
-    cameras: [] # 空 / 缺省 = 所有具备深度的相机（这里 = cam_head）
+    enabled: true # 缺省 true；false = 完全不开深度流
+    cameras: [] # 空 / 缺省 = 该机型所有具备深度的相机（这里 = 三路 RealSense）
   # 重力前馈（可选；见 wiki/design/robot_pipeline_impedance.md）：t_ff = α·τ̂_g(实测 q)
   # 只装在执行臂（Piper 从手 left / right）；Alicia 主手只读，不装载。
   gravity:
@@ -40,9 +41,49 @@ robot:
     alpha: 1.0 # 前馈比例（0 = 不补偿）；首跑建议逐档验收
     t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，这里只能收紧
     params: gravity/piper_6dof.json # 缺省参数（随包自带已是标定版；占位全 0 = 不补偿）
+    arms: # 每臂覆盖（键 = 控制器名 left / right）
+      left:
+        params: gravity/piper_6dof.json # 左臂参数：标定后换成 gravity/piper_left.json
+      right:
+        params: gravity/piper_6dof.json # 右臂参数：标定后换成 gravity/piper_right.json
+  # 末端 TCP（见 wiki/design/robot_pipeline_tcp.md）：位姿（pose / pose_delta 动作与
+  # observations/pose / pose_action 观测）的原点从法兰切到**工具末端**——开启后「往前 5 cm」
+  # 让**尖端**走 5 cm（look_at / move_delta 同样作用在尖端）。offset = TCP 在**法兰系**下的
+  # 位置（米），只允许纯平移（带姿态的 TCP 会让 RPent 的工具三轴与 look_at 指向轴同时失真，
+  # 故意拒绝）；两臂末端不等长（腕相机 / 探针支架）时用 arms 逐臂覆盖。
+  # **dual piper 出厂默认开启**：该机型末端（夹爪 / 探针支架）的实装长度固定写在这里；
+  # ⚠️ 换末端 / 换支架后必须实测重验（量尖端到法兰的距离改 offset），否则整条位姿链偏一个常量。
+  tcp:
+    enabled: true # true = 位姿读 / 写都以 TCP 为原点；false = 法兰
+    offset: [0, 0, 0.12] # TCP 在法兰系下的位置（米；法兰 +z = 工具伸出方向，长度写在 z）= 12 cm 尖端
+    arms: {} # 逐臂覆盖（键 = 控制器名 left / right），如 right: {offset: [0, 0, 0.08]}
+  # 遥操作（见 wiki/design/robot_pipeline_teleop.md）
+  teleop:
+    # 跟随空间：joint（缺省，既有行为）| pose（主臂 FK → 位姿映射 → IK → MIT）。
+    # pose 时可配置 follow_axes 白名单；未列轴锁在启用 teleop 首拍的从臂位姿，例如锁 roll：
+    # follow_axes: [x, y, z, pitch, yaw]
+    follow_space: joint
+    # 主臂读数的**常量偏置**（rad，逐关节 = 主从零位差；装配差异属于现场值，按机器档案覆盖）：
+    # absolute（示教）下直接体现；delta（人工接管）下由锚点自动抵消，不进入增量。
+    # 每臂一份（键 = 臂名 left / right）；也可给一个长度 = 每臂关节数的列表，全臂共用同一组偏置。
+    joint_offset:
+      left: [0, 0.1, 0, 0, 0, 0]
+      right: [0, 0.1, 0, 0, 0, 0]
+    # 主臂 FK 后的位姿常量偏置：每臂 xyz（m）+ rpy（rad）。仅 pose 跟随使用；姿态会 wrap。
+    # 与 joint_offset 一样，absolute 下可见、delta 下由锚点抵消；未列出的臂缺省全 0。
+    pose_offset:
+      left: [0, 0, 0, 0, 0, 0]
+      right: [0, 0, 0, 0, 0, 0]
 
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:
   type: act_mcap # 采集器类型：act_mcap（act_hdf5 暂不可用）
   save_dir: ./data/dual_alicia_piper # 采集数据保存目录
   image_format: jpeg # 图像编码：jpeg | raw
+  # 帧头跳过（只对**遥操作录制**生效）：capture 开始后主臂相对首帧未超过阈值 → 不记录
+  # （连 episode 都不开），直到出现一次有效移动；此后微小位移照常记录，下一轮重新武装
+  # 阈值按现场主臂手感调（偏大 = 更容易把「还没开始动」的帧算作有效移动）
+  skip_until_motion:
+    enabled: true # false = 关闭（首帧即记录）
+    joint_eps: 0.05 # 关节有效移动阈值（rad，取 max|Δq|）
+    gripper_eps: 0.05 # 夹爪有效移动阈值（归一化 [0,1]，取 max|Δg|）

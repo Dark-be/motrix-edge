@@ -29,7 +29,12 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 0. **顶部状态条（sticky）**：Edge Base URL（默认 `http://localhost:8000`，localStorage 记忆 + **刷新自动重连**）+ 连接 / 断开 + 在线 / **离线（数据已过期）** + `node_state` + 当前会话类型 / 状态 + 租约状态与到期倒计时 + **全局急停**（须持租约；快捷键 `Esc`）。
     - **顶部状态条常驻**：急停、租约倒计时、节点 / 会话状态不必滚到下面的卡片里找。
-1. **观测预览面板（左栏首卡，瞩目位置）**：WebRTC `<video>` 逐相机播放 + 连接状态 + 连接 / 断开按钮 + `GET /v1/preview` 的**全部数值字段**（`qpos` / `gripper` / `action` / 末端位姿 EEF 实测 `pose` / 目标 `pose_target`）与摄像头名列表（图像不内联）。所有数值**按 `arms` 切成每臂一段、同一行并列**（`LEFT qpos: …  RIGHT qpos: …`；EEF 段内为 `pos=[…] rpy=[…]`），3 位小数；无臂名或除不尽时退化为整条一行。**观测无需进入会话**（节点级持续观测）；默认展开，头部「预览显示」开关可收起（收起时停止轮询与推流，保留会话状态 / 相机路数 / 视频状态摘要）。
+1. **共享观测与 3D 预览区域**：采集、推理、手动和调试页复用同一个 3D 场景与相机视角。实色模型由
+   `GET /v1/preview` 的实测 `qpos` 驱动；同场景中的**蓝色半透明模型**由 `action`（每臂
+   `[joint6, gripper1]`）驱动，明确表达 Robot 当前目标，不拿推理回执或前端暂存值冒充已下发动作。
+   WebRTC `<video>` 逐相机播放；数值区展示 `qpos` / `gripper` / `qpos_err`（每臂
+   `[joint_error6, gripper_error1]`）/ `action` / EEF 实测 `pose` / 目标 `pose_target`，并按
+   `arms` 切成每臂一段、保留 3 位小数。观测无需进入会话。
 
 > **原语接口（外部 agent 执行层）不走会话**：外部 agent 用 `GET /v1/primitives`（能力）/
 > `POST /v1/primitives`（执行，同步等到位）直接驱动机器人（持租约即可），见
@@ -57,8 +62,9 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
       的 `policy_config`）：**需端点的策略**（openpi / lerobot-act）清单最前是端点项 `host` /
       `port`（与其它项同层级、同一张表单），随后是策略项——openpi → 文本指令 `prompt`（必填）/
       `image_size`；lerobot-act → 模型路径 `pretrained_name_or_path`（必填）/ `device` /
-      `actions_per_chunk` / `image_size`。长文本项（`prompt`，schema 标 `multiline`）渲染为**多行
-      textarea**（占满整行、可拖拽调高）。
+      `actions_per_chunk` / `image_size`。schema 带 `options` 的配置项统一渲染为**下拉选择**并由后端
+      校验候选值；`action_layout` 与 `observation_layout` 因而只能选择声明的固定搭配，不允许自由文本
+      拼写。长文本项（`prompt`，schema 标 `multiline`）渲染为**多行 textarea**（占满整行、可拖拽调高）。
       **配置在「进入推理」时随会话下发并锁定**（会话内整张卡片只读，没有「应用配置」按钮）；要改
       先退出推理（写内存态，下一会话生效）。必填项缺失（`missing` 非空）或端点项
       （`group=endpoint`）为空 / 越界时「进入推理」禁用（端点门控按 schema 的端点分组推导，

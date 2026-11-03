@@ -98,6 +98,11 @@ capture meta delete-key operator
 也原样回报 `meta`——**不设** `operator` / `task_name` 之类的同义顶层字段，以免同一事实两处
 维护（消费方按需读 `meta["operator"]`）。
 
+RPent 数采另把 `runtime_context` 作为已知 object 字段同步，用于保存提供给 LLM 数据采集的运行信息，
+例如 RPent 日志 / artifact 路径、模型、agent 与会话标识。Edge 与 robot-pipeline 只保留 JSON 结构，
+不解释其中路径或检查本地存在性。最终 MCAP 同名 JSON 固定包含 `operator` / `task_name` /
+`runtime_context`（未同步时为 `null`），Edge upload 扫描也把三者作为结构化字段。
+
 ## 分发与状态可用性
 
 -   `CaptureMetaStore`：`utils/capture_meta.py`；缺省路径为 `<root>/config/capture.yml`，包内默认在
