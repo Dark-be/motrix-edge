@@ -62,7 +62,7 @@ def make_signals(*seq):
 
 class _FakePolicy:
     def __init__(self, requires_prompt=False):
-        self.requires_prompt = requires_prompt  # 是否语言条件策略（openpi=True 门控；lerobot-act=False 不门控）
+        self.requires_prompt = requires_prompt  # 是否语言条件策略（openpi=True 门控；lerobot-remote=False 不门控）
         self.infer_calls = 0
         self.reset_calls = 0
         self.disconnect_calls = 0
@@ -485,9 +485,9 @@ def test_infer_capture_episode_start_requires_prompt(monkeypatch):
 
 
 def test_infer_non_language_policy_needs_no_prompt(monkeypatch):
-    """非语言条件策略（lerobot-act：requires_prompt=False）**不需要 prompt**：不门控推理 / 录制。"""
+    """非语言条件策略（lerobot-remote：requires_prompt=False）**不需要 prompt**：不门控推理 / 录制。"""
     adapter = _FakeAdapter(ready=True)
-    policy = _FakePolicy()  # requires_prompt=False（lerobot-act 语义）
+    policy = _FakePolicy()  # requires_prompt=False（lerobot-remote 语义）
     _patch(monkeypatch, policy)
     replies = []
     rollout = _REGISTRY.parse_argv(["infer", "rollout"])
@@ -524,13 +524,14 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
     assert [item["key"] for item in snapshot["items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]
-    assert [item.get("group") for item in snapshot["items"]] == ["endpoint", "endpoint"] + [None] * 4
-    assert [item["runtime"] for item in snapshot["items"]] == [False, False, False, False, True, True]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 3 + [None] * 4
+    assert [item["runtime"] for item in snapshot["items"]] == [False] * 5 + [True, True]
     assert snapshot["values"]["warmup_required"] is True  # 缺省要求先预热
     # 会话内即时生效的键 = runtime=True（端点 / 预热门是会话级配置：进入会话时固化）
     assert snapshot["runtime_keys"] == ["image_size", "prompt"]
@@ -621,13 +622,13 @@ def test_infer_config_set_rejects_unknown_key(monkeypatch):
 
 
 def test_infer_model_set_applies_to_policy_config(monkeypatch):
-    """``infer model set <path>``：lerobot 类策略（lerobot-act）的模型路径运行时给定。"""
+    """``infer model set <name>``：lerobot-remote 的远端部署名运行时给定（模型在服务端）。"""
     adapter = _FakeAdapter(ready=True)
     policy = _FakePolicy()
-    config = {"policy": {"infer_freq": 1000, "type": "lerobot-act", "device": "cuda"}}
+    config = {"policy": {"infer_freq": 1000, "type": "lerobot-remote", "semantics": "piper-v1"}}
     _patch(monkeypatch, policy)
     replies = []
-    set_model = _REGISTRY.parse_argv(["infer", "model", "set", "/tmp/pretrained_model"])
+    set_model = _REGISTRY.parse_argv(["infer", "model", "set", "press_three_buttons"])
     set_model.reply_to = replies.append
     session = infer_session.InferSession(
         config, command_source=make_signals(set_model, "session quit"), adapter=adapter
@@ -635,9 +636,9 @@ def test_infer_model_set_applies_to_policy_config(monkeypatch):
 
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "ok"
-    assert replies[0].data["written"] == {"pretrained_name_or_path": "/tmp/pretrained_model"}
-    assert config["policy"]["pretrained_name_or_path"] == "/tmp/pretrained_model"
-    assert session.policy_config_status()["requires_model_path"] is True
+    assert replies[0].data["written"] == {"deployment": "press_three_buttons"}
+    assert config["policy"]["deployment"] == "press_three_buttons"
+    assert session.policy_config_status()["requires_model_path"] is False
 
 
 def test_infer_capture_sync_syncs_meta(monkeypatch):
@@ -1052,7 +1053,7 @@ def test_infer_connect_cancelled_by_estop(monkeypatch):
 def test_infer_connect_rewarms_after_connection_loss(monkeypatch):
     """连接丢失（服务端重启 / 链路断开）→ 预热闩锁**自动失效**，且可重新预热。
 
-    ``warmed_up`` 是「本连接」的闩锁：连接断了服务端的模型也不在（lerobot-act 重连还会重发
+    ``warmed_up`` 是「本连接」的闩锁：连接断了服务端的会话也不在（lerobot-remote 重连还要重新
     策略指令重新加载 checkpoint）。不复位会有三个连带后果：status 同时显示「已预热 + 未连接」；
     ``infer connect`` 被幂等短路、会话内无任何途径重新预热；``infer rollout`` 反而被预热门放行 →
     惰性重连 + 首块内联等模型加载（分钟级）。
@@ -1143,7 +1144,7 @@ def test_infer_rollout_blocked_while_warming_even_if_warmup_not_required(monkeyp
 
     策略客户端契约：可跨线程调用，但**同一时刻至多一个请求**（`rtc/manager.py`）——预热线程的
     ``prepare`` / ``infer_chunk`` 与 rollout 的 inline 取块并发，会在同一条 ws 上并发 send/recv
-    （响应错位）或抢走 lerobot-act 的单飞块，也会并发 ``adapter.observe()``。
+    （响应错位）或抢走 lerobot-remote 的单飞块，也会并发 ``adapter.observe()``。
     """
     release = threading.Event()
 

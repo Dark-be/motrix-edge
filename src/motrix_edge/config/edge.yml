@@ -59,26 +59,34 @@ adapter:
   port: 8090
 
 # 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
-# 推理会话时由调用方显式选择；host / port 是**会话级**策略配置项（进入会话时固化，改需退出重进），
-# 与 prompt / 模型路径同一 schema、同一通道：infer config set / POST /v1/infers 的 config。
-# **策略要连 TCP 端点**（openpi → ws、lerobot-act → gRPC）；host / port 排在其配置项清单最前，
-# 单臂任务：策略用通用 lerobot-act（按启用臂数直通）；「哪条臂 / 怎么映射回全臂维度」由 adapter 运行时配置承载。
+# 推理会话时由调用方显式选择；端点项 host / port / endpoint 是**会话级**策略配置项
+# （进入会话时固化，改需退出重进），与 deployment / semantics 同一 schema、同一通道：
+# infer config set / POST /v1/infers 的 config。
+# **策略要连 TCP 端点**：openpi → ws（host/port）；lerobot-remote → zenoh（endpoint，缺省由
+# host/port 拼成 tcp/host:port，默认端口 7447）。
+# 单臂任务：策略用通用 lerobot-remote；「哪条臂 / 怎么映射回全臂维度」由 adapter 运行时配置承载。
 policy:
   host: 127.0.0.1
-  port: 8080
-  type: lerobot-act # 默认策略类型（会话显式选择时覆盖）
-  # --- 策略配置项（**每个策略有自己的独立配置项**：prompt / 模型路径 / 设备 / 块长…）---
+  port: 8080 # openpi 的 ws 端口（lerobot-remote 走下面的 endpoint）
+  endpoint: tcp/127.0.0.1:7447 # zenoh 端点（lerobot-remote）；留空则由 host/port 拼
+  type: lerobot-remote # 默认策略类型（会话显式选择时覆盖）
+  # --- 策略配置项（**每个策略有自己的独立配置项**：prompt / deployment / 块拼接…）---
   # 声明见 policy.POLICY_CONFIG_ITEMS；查询 `infer config`，设置 `infer config set <json>`
   # 或 POST /v1/infers/config（会话内）/ POST /v1/infers body `config`（进入会话前）。
-  # **运行时给定，不在此维护**：模型路径（lerobot-act 的 pretrained_name_or_path，`infer model set`）
+  # **运行时给定，不在此维护**：远端部署名（lerobot-remote 的 deployment，`infer model set`）
   # 与文本指令（openpi 的 prompt，`infer config set`）由调用方 / 前端按所选策略动态填写。
-  device: cuda # lerobot-act：下发给服务端的推理设备（GPU 部署填 cuda / cuda:0）
-  actions_per_chunk: 50 # lerobot-act：动作块长 K（须匹配模型 chunk）
+  deployment: null # lerobot-remote：服务端 deployment 名（== server.yaml 的 deployment）
+  semantics: null # lerobot-remote：动作单位/顺序标识，必须与服务端逐字一致
+  mode: chunk # lerobot-remote：执行模式（块缓存/切分/预取由 edge RTC 负责）
+  chunk_merge: append # lerobot-remote：块拼接语义（append | aligned，需服务端能力）
+  encoding: raw # lerobot-remote：图像编码（raw | jpeg）
   observation_layout: qpos+qpos_err # state = concat(qpos, Robot 同帧提供的 qpos_err)
   action_layout: joint_delta # 模型输出叠加到 Robot 当前关节 target
   image_cameras: [cam_head, cam_right_wrist] # 只声明并上传 checkpoint 使用的两路图像
+  # camera_map: # 可选：端上相机名 → 服务端特征名（缺省按短名后缀自动匹配，如 cam_head → ..._cam_head）
+  #   cam_head: observation.images.piper_0_cam_head
   # --- RTC（实时动作块管理：异步预取 + 三元切分 + 过渡策略；见 wiki/design/motrix_edge_rtc.md）---
-  # 策略只返回原始动作块（openpi/lerobot-act 通用）；块缓存 / 切分 / 过渡 / 预取由 rtc 统一负责。
+  # 策略只返回原始动作块（openpi / lerobot-remote 通用）；块缓存 / 切分 / 过渡 / 预取由 rtc 统一负责。
   # 预取在后台线程完成（控制环不阻塞）：推理期间走过的步会在返回时按步号自动跳过。
   # 运行期可经 `infer rtc`（查询）/ `infer rtc set <json>`（设置）或 POST /v1/infers/rtc 修改。
   rtc:

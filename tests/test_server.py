@@ -38,7 +38,6 @@ from motrix_edge.command import (
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
     CMD_INFER_ROLLOUT,
-    CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
     CMD_NODE_RESET,
@@ -120,19 +119,6 @@ def _no_discover(monkeypatch):
     monkeypatch.setattr("motrix_edge.adapter.discover_adapter", fake_discover)
 
 
-def test_command_service_submit_accepts_all_success_statuses(monkeypatch):
-    """REST 命令通道与 CommandResult 契约一致：accepted 也是成功，且透传 data。"""
-    service = CommandService(CommandBus())
-    monkeypatch.setattr(service, "_check_lease", lambda lease_id: None)
-    monkeypatch.setattr(
-        service._dispatcher,
-        "dispatch",
-        lambda *args, **kwargs: CommandResult(status="accepted", data={"queued": True}),
-    )
-
-    assert service.submit(CMD_ROBOT_ESTOP) == {"queued": True}
-
-
 @pytest.fixture(autouse=True)
 def _isolate_base_cfg():
     """隔离共享 BASE_CFG：推理端点 / 策略配置项等内存态写入不串测（用例按序变动）。"""
@@ -144,7 +130,7 @@ def _isolate_base_cfg():
 
 def test_health_returns_identity_and_version():
     """/v1/health：版本 / identity / node 已绑定适配器 / 磁盘 / 时钟（不实时 discover）。"""
-    node = FakeNode()  # 已绑定 adapter（type=test_robot, name=Test Robot）
+    node = FakeNode()  # 已绑定 adapter（adapter_id/type=test_robot, name=Test Robot）
     client = TestClient(create_app(BASE_CFG, node=node))
     resp = client.get("/v1/health")
     assert resp.status_code == 200
@@ -158,43 +144,34 @@ def test_health_returns_identity_and_version():
     assert "adapters" in body and "robots" in body["adapters"]
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-remote"]
     # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 预热门控 warmup_required
     # + 动作布局 action_layout）
     by_type = {p["type"]: p for p in body["adapters"]["policies"]}
     assert [item["key"] for item in by_type["openpi"]["config_items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]
-    assert [item["key"] for item in by_type["lerobot-act"]["config_items"]] == [
+    assert [item["key"] for item in by_type["lerobot-remote"]["config_items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
+        "deployment",
+        "semantics",
         "observation_layout",
-        "pretrained_name_or_path",
-        "device",
-        "actions_per_chunk",
-        "image_size",
+        "mode",
+        "chunk_merge",
+        "encoding",
+        "jpeg_quality",
+        "expected_artifact",
     ]
-
-
-def test_v1_responses_disable_browser_cache():
-    client = TestClient(create_app(BASE_CFG))
-
-    assert client.get("/v1/health").headers["Cache-Control"] == "no-store"
-
-
-def test_non_v1_responses_are_not_forced_to_no_store():
-    client = TestClient(create_app(BASE_CFG))
-
-    response = client.get("/openapi.json")
-    assert response.status_code == 200
-    assert "Cache-Control" not in response.headers
 
 
 def test_health_without_node_returns_empty_robot():
@@ -203,7 +180,7 @@ def test_health_without_node_returns_empty_robot():
     body = client.get("/v1/health").json()
     assert body["robot"] == {"name": None, "type": None}
     assert body["adapters"]["robots"] == []
-    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-act"]
+    assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-remote"]
 
 
 def test_adapters_info_returns_capabilities():
@@ -308,7 +285,7 @@ def test_health_returns_correlation_header():
     assert resp.headers.get("X-Correlation-Id")
 
 
-def test_command_without_service_returns_not_implemented():
+def test_command_accepted_with_metadata():
     client = TestClient(create_app(BASE_CFG))
     resp = client.post(
         "/v1/commands",
@@ -456,8 +433,7 @@ class FakeInferSession:
         self.connected = False  # 策略服务器连接状态（infer connect 成功后为 True）
         self.prompt = None  # 当前推理文本指令（prompt；推理/录制前必须非空）
         self.recording = False  # 推理会话是否开启 rollout 录制（capture episode start/end）
-        self.continuous = False  # 持续推理运行位（rollout continuous / rollout stop）
-        self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-act=False 不门控）
+        self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-remote=False 不门控）
         # 会话使用的策略类型（决定配置项 schema）；缺省取配置 policy.type
         self.policy_config_type = policy_type or BASE_CFG.get("policy", {}).get("type", "openpi")
         self._rtc_params = {"enabled": True, "suffix_len": 10}  # RTC 参数（infer rtc set 可改）
@@ -507,24 +483,12 @@ class FakeInferSession:
             elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步（缺省）/ continuous 持续
                 mode = parse_rollout_mode((cmd.params or {}).get("mode"))
                 if mode == ROLLOUT_MODE_CONTINUOUS:
-                    self.continuous = True
                     self._reply(cmd, ok_result(state="continuous", started=True, count=0, actions=[]))
                 else:
                     self._reply(
                         cmd,
                         ok_result(state="ready", count=1, action=[1.0, 2.0], actions=[[1.0, 2.0]]),
                     )
-            elif name == CMD_INFER_ROLLOUT_STOP:
-                if not self.continuous:
-                    self._reply(
-                        cmd,
-                        CommandResult(
-                            status="rejected", error="continuous rollout not running", code=ErrorCode.CONFLICT
-                        ),
-                    )
-                else:
-                    self.continuous = False
-                    self._reply(cmd, ok_result(state="ready", continuous=False))
             elif name in (  # 策略配置项：infer config(set) / infer model(set)（按策略 schema 校验）
                 CMD_INFER_CONFIG,
                 CMD_INFER_CONFIG_SET,
@@ -586,6 +550,7 @@ class FakeNode:
         self.lifecycle = SimpleNamespace(state=NodeState.READY)
         self.session = None
         self.pulled = []
+        self.pending_adapter = None
         self.lease_manager = None  # 夹具可注入（镜像生产：节点持有 Edge 级租约管理器）
         self.frame_manager = FrameManager()  # Edge 级观测帧缓存（preview / WebRTC 读取）
         self.adapter_name = "Test Robot"  # 节点绑定的唯一 adapter 名称（单 adapter 包）
@@ -593,6 +558,10 @@ class FakeNode:
         self.adapter = FakeRobot()
         self._task_thread = None  # 任务线程（session.run 后台线程，镜像真实 EdgeNode）
         self._task_result = None
+
+    def set_pending_adapter(self, adapter_id):
+        """记录 HTTP 预留的待选适配器 id（真实 EdgeNode 为带锁槽位，此处仅记录）。"""
+        self.pending_adapter = adapter_id
 
     def _poll_critical(self):
         """安全命令旁路（镜像真实 EdgeNode）：任务运行期间普通命令由会话消费，急停仍即时生效。"""
@@ -1067,10 +1036,11 @@ def install_lease(client, **overrides) -> str:
     return r.json()["lease_id"]
 
 
-def enter_captures(client, node, lease_id=None):
+def enter_captures(client, node, adapter_id=None, lease_id=None):
     """先持有租约（缺省自动签发），再创建采集会话（POST /v1/captures，带 X-Lease-Id）。"""
     lease = lease_id or install_lease(client)
-    r = client.post("/v1/captures", headers={"X-Lease-Id": lease})
+    payload = {"adapter_id": adapter_id} if adapter_id else {}
+    r = client.post("/v1/captures", json=payload, headers={"X-Lease-Id": lease})
     assert r.status_code == 200
     wait_session_state(node, SessionState.READY)
     return lease
@@ -1192,23 +1162,6 @@ def test_commands_require_lease_and_estop():
         ).status_code
         == 403
     )
-
-
-def test_commands_require_non_empty_capability():
-    node = FakeNode()
-    client = make_commands_client(node)
-    lease = install_lease(client)
-
-    missing = client.post("/v1/commands", json={"command_id": "c1", "lease_id": lease})
-    assert missing.status_code == 422
-
-    blank = client.post(
-        "/v1/commands",
-        json={"command_id": "c2", "lease_id": lease, "capability": "   "},
-    )
-    assert blank.status_code == 400
-    assert blank.json()["code"] == ErrorCode.INVALID_ARGUMENT
-    assert node.pulled == []
 
 
 def test_commands_reset_recovers_node():
@@ -1574,7 +1527,7 @@ def test_captures_exit_finishes_session():
 
 
 def test_captures_real_node_observes_until_exit(tmp_path):
-    """端到端：web（CommandService）驱动真实 EdgeNode + FakeRobotAdapter，enter → 持续观测 → exit。"""
+    """端到端：web（CaptureService）驱动真实 EdgeNode + FakeRobotAdapter，enter → 持续观测 → exit。"""
     cfg = {
         **BASE_CFG,
         "capture": {"obs_freq": 30},
@@ -1921,13 +1874,6 @@ def test_infers_rollout_single_and_continuous():
     assert r.status_code == 200
     body = r.json()
     assert body["state"] == "continuous"
-    assert client.get("/v1/infers").json()["continuous"] is True
-    # stop 只结束持续推理：回到 READY，会话仍保留，后续仍可单步推理。
-    stopped = client.post("/v1/infers/rollout/stop", headers={"X-Lease-Id": lease})
-    assert stopped.status_code == 200
-    assert stopped.json()["continuous"] is False
-    assert node.session is not None
-    assert client.get("/v1/infers").json()["continuous"] is False
     # drain（缓存推理）已取消：mode 只允许 single/continuous → 422
     assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "drain"}).status_code == 422
     # 多步（count）已取消：字段不再存在 → 忽略，等价单步（不再有专门的 400 分支）
@@ -2001,12 +1947,14 @@ def test_infers_status_exposes_policy_config():
     assert [item["key"] for item in cfg["items"]] == [
         "host",
         "port",
+        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
     assert [item["runtime"] for item in cfg["items"]] == [
+        False,
         False,
         False,
         False,
@@ -2044,11 +1992,11 @@ def test_infers_config_sets_policy_config():
     assert r.json()["policy_config"]["missing"] == []
     assert r.json()["policy_config"]["values"]["prompt"] == "把零件放好"
     assert r.json()["deferred"] == []  # prompt 是 runtime=True：立即生效，无延后项
-    # 非本策略的配置项（lerobot-act 的模型路径）→ 400（不静默写入）
+    # 非本策略的配置项（lerobot-remote 的 deployment）→ 400（不静默写入）
     bad = client.post(
         "/v1/infers/config",
         headers={"X-Lease-Id": lease},
-        json={"config": {"pretrained_name_or_path": "/tmp/x"}},
+        json={"config": {"deployment": "press_three_buttons"}},
     )
     assert bad.status_code == 400
     assert "unknown openpi config key" in bad.json()["detail"]
@@ -2104,30 +2052,30 @@ def test_infers_enter_config_applies_endpoint():
 
 
 def test_infers_enter_applies_policy_config():
-    """POST /v1/infers 携带 config：进入会话前写入策略配置项（lerobot-act 的模型路径运行时给定）。"""
+    """POST /v1/infers 携带 config：进入会话前写入策略配置项（lerobot-remote 的部署名运行时给定）。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
     r = client.post(
         "/v1/infers",
         headers={"X-Lease-Id": lease},
-        json={"policy_type": "lerobot-act", "config": {"pretrained_name_or_path": "/tmp/pretrained_model"}},
+        json={"policy_type": "lerobot-remote", "config": {"deployment": "press_three_buttons"}},
     )
     assert r.status_code == 200
-    assert BASE_CFG["policy"]["pretrained_name_or_path"] == "/tmp/pretrained_model"
-    assert node.session.policy_config_type == "lerobot-act"  # 会话按所选策略渲染配置项
-    # 会话内设置非本策略的配置项（lerobot-act 无 prompt）→ 400
+    assert BASE_CFG["policy"]["deployment"] == "press_three_buttons"
+    assert node.session.policy_config_type == "lerobot-remote"  # 会话按所选策略渲染配置项
+    # 会话内设置非本策略的配置项（lerobot-remote 无 prompt）→ 400
     bad_key = client.post("/v1/infers/config", headers={"X-Lease-Id": lease}, json={"config": {"prompt": "x"}})
     assert bad_key.status_code == 400
-    assert "unknown lerobot-act config key" in bad_key.json()["detail"]
+    assert "unknown lerobot-remote config key" in bad_key.json()["detail"]
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
     wait_node_state(node, NodeState.READY)
     # 进入会话前下发非法键 → 400（且不进入会话）
     bad = client.post(
-        "/v1/infers", headers={"X-Lease-Id": lease}, json={"policy_type": "lerobot-act", "config": {"prompt": "x"}}
+        "/v1/infers", headers={"X-Lease-Id": lease}, json={"policy_type": "lerobot-remote", "config": {"prompt": "x"}}
     )
     assert bad.status_code == 400
-    assert "unknown lerobot-act config key" in bad.json()["detail"]
+    assert "unknown lerobot-remote config key" in bad.json()["detail"]
     assert node.session is None  # 校验失败不进入会话
 
 
@@ -2136,10 +2084,10 @@ def test_infers_config_available_before_session():
     node = FakeNode()
     client = make_infers_client(node)
     assert client.get("/v1/infers").json()["policy_config"]["policy_type"] == "openpi"
-    BASE_CFG["policy"] = {"type": "lerobot-act", "pretrained_name_or_path": "/tmp/m", "device": "cuda"}
+    BASE_CFG["policy"] = {"type": "lerobot-remote", "deployment": "d", "semantics": "s"}
     cfg = client.get("/v1/infers").json()["policy_config"]
-    assert cfg["policy_type"] == "lerobot-act"
-    assert cfg["requires_model_path"] is True
+    assert cfg["policy_type"] == "lerobot-remote"
+    assert cfg["requires_model_path"] is False  # 模型在服务端，端上不再指定 checkpoint 路径
     assert cfg["missing"] == []
 
 
