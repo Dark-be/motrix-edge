@@ -38,6 +38,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_POSE_ACTION, KEY_QPOS, KEY_QPOS_ERR
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 _QPOS = [0.0] * 12  # joint 空间：每臂 6 关节角 × 2 臂
@@ -91,9 +93,15 @@ class _FakeArm:
         self.gripper = float(value)
 
 
-@pytest.fixture(scope="module")
-def dual_piper():
-    """导入 robot-pipeline 的 DualPiperRobot。"""
+@pytest.fixture(scope="module", params=("piper", "alicia"))
+def dual_piper(request):
+    """两种主手机型都必须满足相同的执行与数据布局契约。"""
+    if request.param == "alicia":
+        from test_machine_profile import _stub_hardware_sdks as stub_all_hardware
+
+        stub_all_hardware()
+        module = _load("robot.dual_alicia_piper_robot")
+        return types.SimpleNamespace(DualPiperRobot=module.DualAliciaPiperRobot)
     return _load("robot.dual_piper_robot")
 
 
@@ -181,6 +189,83 @@ def test_robot_observation_uses_explicit_physical_keys(dual_piper):
     assert all(not key.startswith("observations/") for key in state if key != robot.KEY_TIMESTAMP)
 
 
+def test_standard_observation_packs_fused_contract_vectors(dual_piper):
+    """``standard_observation()``：融合键（每臂「值 + 夹爪」）由 robot **单点**产出。
+
+    采集器落盘与共享内存发布读的是**同一份**契约观测——回归点：融合曾经只在 server 层做过、且
+    不回写观测，采集器拿到原始 ``joint`` / ``gripper`` → 每拍 ``KeyError: 'observations/qpos'``
+    （日志刷 ``env observe step error``、episode 0 帧）。
+    """
+    robot = _robot(dual_piper, left_joint=np.arange(6), right_joint=np.arange(6) + 10, grippers=(0.4, 0.6))
+    robot.motion_state = robot.sample_state()
+    robot.motion_state[f"{robot.CAMERA_PREFIX}cam_head"] = np.zeros((2, 2, 3), dtype=np.uint8)
+    robot.motion_state[robot.KEY_TIMESTAMP] = 12.5
+
+    obs = robot.standard_observation()
+
+    assert obs[KEY_QPOS].tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 0.4, 10, 11, 12, 13, 14, 15, 0.6])
+    assert obs[KEY_ACTION].shape == (14,) and obs[KEY_QPOS_ERR].shape == (14,)
+    assert obs[KEY_QPOS_ERR].tolist() == pytest.approx((obs[KEY_ACTION] - obs[KEY_QPOS]).tolist())
+    # 位姿键按**契约名**（带 observations/ 前缀，与 robot 原始 pose / pose_action 不同名）
+    assert obs[KEY_POSE].shape == (12,) and obs[KEY_POSE_ACTION].shape == (12,)
+    assert obs[f"{robot.CAMERA_PREFIX}cam_head"].shape == (2, 2, 3)  # 本拍帧原样带走
+    assert obs["timestamp"] == pytest.approx(12.5) and obs["seq"] == robot.seq
+    assert robot.KEY_JOINT not in obs and robot.KEY_GRIPPER not in obs  # 原始键不外泄：消费方只认契约键
+
+
+def test_standard_observation_without_first_sample(dual_piper):
+    """控制线程还没采到第一拍 → 无观测（``None``），不是一份缺键的假观测。"""
+    robot = _robot(dual_piper)
+
+    assert robot.standard_observation() is None
+
+
+def test_interleave_state_rejects_mismatched_blocks(dual_piper):
+    """关节 / 夹爪长度与臂布局不符 → 立即报错（不拼出一条看似有效的状态向量）。"""
+    robot = _robot(dual_piper)
+
+    with pytest.raises(ValueError, match=r"cannot pack state"):
+        robot.interleave_state(np.arange(5), [0.25, 0.75])
+    with pytest.raises(ValueError, match=r"cannot pack state"):
+        robot.interleave_state(np.arange(12), [0.25])
+
+
+def test_collector_consumes_standard_observation(dual_piper, collector, tmp_path):
+    """真采集器 + robot 契约观测：episode 要真的写进帧（回归：融在 server 层时这里是 0 帧）。"""
+    pytest.importorskip("mcap_ros2", reason="robot-pipeline 侧依赖（mcap），宿主机 / 容器可能未装")
+
+    from unittest.mock import Mock
+
+    robot = _robot(dual_piper, grippers=(0.4, 0.6))
+    robot.sensors = {
+        name: Mock(
+            pixel_format="raw", get_information=Mock(return_value={"color": np.zeros((480, 640, 3), dtype=np.uint8)})
+        )
+        for name in robot.IMAGE_NAMES
+    }
+    instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
+    instance.set_state_layout(robot.state_layout())
+    instance.start()
+    for _ in range(2):
+        robot.motion_state = robot.sample_state()
+        instance.collect(robot.standard_observation(robot.build_observation()))
+    path = instance.finish()
+
+    assert path is not None and path.exists()
+    meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert meta["frames"] == 2  # 每拍都真的落了帧（不是 0）
+    assert meta["state_dims"] == robot.state_layout()["state_dims"]
+    assert meta["action_dims"] == robot.state_layout()["action_dims"]
+    from mcap.reader import make_reader
+
+    with path.open("rb") as stream:
+        messages = list(make_reader(stream).iter_messages())
+    assert sum(channel.topic == "observations/qpos" for _, channel, _ in messages) == 2
+    assert sum(channel.topic == "action" for _, channel, _ in messages) == 2
+    for name in robot.IMAGE_NAMES:
+        assert sum(channel.topic == f"observations/images/{name}" for _, channel, _ in messages) == 2
+
+
 def test_robot_rejects_short_joint_block(dual_piper):
     """控制器少回关节时立即报错，不能拼出长度不完整但看似有效的整机向量。"""
     robot = _robot(dual_piper, left_joint=np.arange(5), right_joint=np.arange(6))
@@ -201,6 +286,8 @@ def test_robot_action_keys_are_explicit(dual_piper):
     assert state[robot.KEY_JOINT_ACTION].shape == state[robot.KEY_JOINT].shape == (12,)
     assert state[robot.KEY_JOINT_ACTION].tolist() == pytest.approx(targets)
     assert state[robot.KEY_GRIPPER_ACTION].tolist() == pytest.approx([0.1, 0.2])
+    assert state[robot.KEY_JOINT_ERROR].tolist() == pytest.approx(targets - state[robot.KEY_JOINT])
+    assert state[robot.KEY_GRIPPER_ERROR].tolist() == pytest.approx(np.asarray([0.1, 0.2]) - state[robot.KEY_GRIPPER])
 
 
 def test_gripper_target_can_run_without_joint_target(dual_piper):
@@ -398,8 +485,11 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
     instance.set_robot_meta(robot_name="dual_piper_001", robot_type="dual_piper")
     instance.set_state_layout(layout)
+    runtime_context = {"log_path": "/rpent/runs/42/run.log", "model": "rpent-agent-v1"}
+    instance.set_meta({"operator": "张三", "task_name": "桌面整理", "runtime_context": runtime_context})
 
     assert instance.meta["state_space"] == "joint"  # /v1/capture/status 的 meta 同源
+    assert instance.meta["runtime_context"] == runtime_context
     episode = tmp_path / "abc.mcap"
     episode.write_bytes(b"not-a-real-mcap")  # 只验证元信息，不真写 mcap
     meta = json.loads(instance._write_meta_json(episode).read_text(encoding="utf-8"))
@@ -408,6 +498,8 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     assert meta["state_space"] == "joint"
     assert meta["state_dims"] == layout["state_dims"]
     assert meta["action_space"] == "joint" and meta["action_dims"] == layout["action_dims"]
+    assert meta["operator"] == "张三" and meta["task_name"] == "桌面整理"
+    assert meta["runtime_context"] == runtime_context
 
 
 def test_collector_layout_defaults_to_empty(collector, tmp_path):
@@ -602,3 +694,39 @@ def test_env_control_layout_follows_connect_time_gravity(
 
     assert env._collector.meta["control_mode"] == "mit+gravity"
     assert env._collector.meta["control"]["left_arm"]["gravity"]["active"] is True
+
+
+def test_dual_hardware_connection_and_gripper_deadzone(dual_piper):
+    from unittest.mock import Mock
+
+    robot = _robot(dual_piper)
+    robot.controllers = {name: Mock() for name in robot.controllers}
+    robot.sensors = {name: Mock() for name in robot.sensors}
+    robot.connect()
+    for arm in robot.ARM_NAMES:
+        name = robot.MASTER_CONTROLLERS[arm]
+        kwargs = {"port": robot.ports[name]}
+        if robot.PORT_KINDS[name] == "can":
+            kwargs["role"] = "leader"
+        robot.controllers[name].connect.assert_called_once_with(**kwargs)
+        robot._controller_for_arm(arm).connect.assert_called_once_with(port=robot.ports[arm], gravity=None)
+    for name, sensor in robot.sensors.items():
+        kwargs = {"device": robot.camera_devices[name], "pixel_format": "jpg"}
+        if robot.CAMERA_KINDS[name] == "realsense":
+            kwargs["enable_depth"] = name in robot.depth_cameras
+        sensor.connect.assert_called_once_with(**kwargs)
+    robot._apply_commands(np.zeros(12), np.array([0.1, 0.7]))
+    robot.controllers["left_arm"].set_gripper.assert_called_once_with(0.0)
+    robot.controllers["right_arm"].set_gripper.assert_called_once_with(0.7)
+    robot.disconnect()
+    assert robot.ready is False
+
+
+def test_dual_pose_roundtrip_with_tcp(dual_piper):
+    robot = _robot(dual_piper)
+    robot.set_tcp(True, [0, 0, 0.12])
+    joints = np.array([0, 0.1, 0, 0, 0, 0] * 2, dtype=float)
+    pose = robot.get_observation_pose(joints)
+    assert pose.shape == (12,) and np.isfinite(pose).all()
+    solved = robot._solve_pose(pose, joints)
+    np.testing.assert_allclose(robot.get_observation_pose(solved), pose, atol=1e-4)

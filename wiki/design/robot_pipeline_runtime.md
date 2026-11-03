@@ -39,6 +39,20 @@ flowchart LR
 -   **观测线程**：消费采集指令 → `robot.build_observation()`（缓存状态 + 本拍相机帧）→ 帧钩子
     `on_frame`（server 据此发布共享内存）→ 采集落盘。
 
+## 双臂 Piper 机型的一致性
+
+`dual_piper` 与 `dual_alicia_piper` 使用同一套 Piper 执行臂行为：关节 / 夹爪下发（含夹爪死区）、
+FK / IK、TCP 位姿、遥操作目标和标准观测均以 `DualPiperRobot` 为单点；Alicia 机型继承该实现，
+只定制主手装配与连接。两者通过相同 env / collector 产出同布局的 MCAP 与 JSON 元信息。
+
+硬件差异仅限主手：Alicia 主手走串口及其 SDK 关节映射，Piper 主手走 CAN leader；
+两种机型均使用三路 RealSense，相机与深度能力完全一致。Alicia 的主手读数已映射到 Piper 关节空间，
+共用的位姿跟随表示映射后的 Piper FK，不表示 Alicia 主手的物理末端位姿。
+
+两份机型配置的执行、TCP、遥操作与采集参数保持一致，身份、保存目录、主手端口按
+机型保留。现场主从零位、TCP 长度及逐臂重力标定通过机器档案覆盖；已存在的运行目录整份配置
+优先于包内示例，部署时需同步这些参数。
+
 ## 线程职责
 
 | 线程     | 频率             | 唯一写者                                                         | 消费队列           | 每拍动作                                       |
@@ -90,7 +104,8 @@ flowchart LR
 在钩子之上，`BaseRobot` 提供按线程划分的入口：
 
 -   `sample_state()`（控制线程）：分别读取 joint / gripper，并附上各自 target（原始键为
-    `joint_action` / `gripper_action`），`seq` 自增，结果**缓存**进 `motion_state`；机器人提供位姿时
+    `joint_action` / `gripper_action`）及同拍 `joint_error` / `gripper_error`（目标减实测），
+    `seq` 自增，结果**缓存**进 `motion_state`；机器人提供位姿时
     同拍计算 `pose` / `pose_action`。此处不组装 qpos / action。
 -   `capture_frames()`（观测线程）：调 `get_observation_frames()`，组装为
     `observations/images/<cam_name>`（恒有）与 `observations/depth/<cam_name>`（仅**生效的
@@ -119,6 +134,8 @@ flowchart LR
 
 -   `observations/qpos`：**状态向量**（每臂「值 + 夹爪」交错；值当前是关节角）——数采 / VLA 要的
     就是它；**夹爪是每臂块末位，不再单独成键**（逐维含义见采集 JSON 的 `state_space` / `state_dims`）；
+-   `observations/qpos_err`：机器人按同拍 `action - qpos` 生成的目标跟踪误差，与 qpos 同维同布局；
+    经共享内存提供给 Edge 推理，但不改变现有 MCAP 落盘 schema；
 -   `action`：**目标向量**（同维同布局：每臂「关节目标 + 夹爪目标」；无指令时回退状态）；
 -   `observations/pose`：**实测末端位姿**（每臂 6 维 `xyz + rpy`，米 / 弧度，**不交错**）——由**同一帧关节角**
     正解；
@@ -127,14 +144,13 @@ flowchart LR
     稳态误差。
     机器人用 **`POSE_DIM_PER_ARM`** 声明：0 = 不提供（这两个键都不出现、共享内存不占对应区），> 0 = 提供
     （`_ShmPublisher` 创建写者时传 `pose_dim` / `pose_target_dim`，区域顺序
-    `qpos | action | pose | pose_target | images | depths`；共享内存内部沿用 `pose_target` 字段名）。
+    `qpos | qpos_err | action | pose | pose_target | images | depths`；共享内存内部沿用 `pose_target` 字段名）。
 
 -   **每臂 6 维** `xyz + rpy`，扁平顺序与 qpos 的臂布局一致（对齐 Edge 侧适配器的
     `ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}` 与 `_select_arm_segments`）；
 -   **test_robot**（虚拟）无真实运动学：用固定可逆映射 `POSE_MAP`（对角：`x←j1 y←j2 z←j3
 rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——「关节动 → EEF 跟着动」，
-    预览与笛卡尔闭环都可解释；
--   **dual_piper（真机，已实现）**：`POSE_DIM_PER_ARM = 6`，`pose_dim()` 根据双臂推导为 12；
+    预览与笛卡尔闭环都可解释；- **dual_piper（真机，已实现）**：`POSE_DIM_PER_ARM = 6`，`pose_dim()` 根据双臂推导为 12；
     `get_observation_pose(joint=None)` 用**同一拍关节角**经
     `robot/kinematics` 的正解解算（米 / 弧度，与 edge 契约同量纲同约定）——**与位姿目标的解算共用
     同一个运动学模型**，所以「读到的位姿」与「下发的位姿目标」同系可直接比对；底层硬件依赖
@@ -143,6 +159,11 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 -   **读取失败 → 写 NaN**（而不是 `None`）：写者的 `pose=None` 语义是「本帧保持旧值」，那会让
     下游把陈旧位姿当真值；NaN 写进位姿区后 edge 侧的量纲/有限性防护会**丢弃该帧位姿**，
     下游看到的是「声明了但本拍不可用」而不是「一个错的真值」（同原因只告警一条）；
+-   **组装单点** `BaseRobot.standard_observation()`：共享内存发布（`_ShmPublisher.publish`）与采集落盘
+    （`ActMcapCollector.collect`）消费的是**同一份**契约观测——融合向量 + 位姿 + 本拍图像 +
+    `timestamp` + `seq`，由 robot 层一次组装，env 观测线程一拍算好同时喂给两方（server 只发布、
+    collector 只落盘）。⚠️ 谁都不要再自己拼一份：曾经融合只在 server 层做过、且不回写观测，
+    采集器就拿到原始 `joint` / `gripper` → 每拍 `KeyError: 'observations/qpos'`、episode 0 帧。
 -   采集（`ActMcapCollector`）落 `observations/qpos`（**状态向量** = 每臂「值 + 夹爪」）+ `action`
     （**目标向量**，同维同布局）+ 相机 topic，**位姿不入 mcap**（数据集格式未定，暂不扩 schema）；
     每轮 mcap 的同名 JSON 里写 `state_space` / `state_dims` / `action_space` / `action_dims`

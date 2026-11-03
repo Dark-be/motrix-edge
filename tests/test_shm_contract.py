@@ -34,7 +34,7 @@ _QPOS_DIM = 2
 _ACTION_DIM = 2
 _POSE_DIM = 6  # 位姿区（双臂量级）；0 = 本机不提供位姿
 _DEPTH_COUNT = 2  # 深度区（两路深度相机）；0 = 本机无深度
-_EXPECTED_VERSION = 7
+_EXPECTED_VERSION = 8
 _STALE = 0.05  # 测试用陈旧阈值（秒）
 
 
@@ -43,11 +43,13 @@ def _new_name() -> str:
 
 
 def _write(writer: ObsShmWriter, value: int, action: int | None = None) -> None:
-    """写一帧：qpos / action / 图像都可辨识（action 缺省 = qpos）。"""
+    """写一帧：qpos / qpos_err / action / 图像都可辨识。"""
+    target = value if action is None else action
     writer.write(
-        np.full(_QPOS_DIM, value, dtype="<f8"),
-        np.full(_ACTION_DIM, value if action is None else action, dtype="<f8"),
-        [np.full((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), value, dtype="<u1")],
+        qpos=np.full(_QPOS_DIM, value, dtype="<f8"),
+        qpos_err=np.full(_QPOS_DIM, target - value, dtype="<f8"),
+        action=np.full(_ACTION_DIM, target, dtype="<f8"),
+        images=[np.full((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), value, dtype="<u1")],
     )
 
 
@@ -57,6 +59,7 @@ def _make_writer(name: str, pose_dim: int = 0, depth_count: int = 0) -> ObsShmWr
         image_count=_IMAGE_COUNT,
         image_size=_IMAGE_SIZE,
         qpos_dim=_QPOS_DIM,
+        qpos_err_dim=_QPOS_DIM,
         action_dim=_ACTION_DIM,
         pose_dim=pose_dim,
         pose_target_dim=pose_dim,  # 目标位姿随实测位姿同生共死（机器人侧契约）
@@ -73,9 +76,10 @@ def test_pose_region_roundtrip():
         assert reader.pose_dim == _POSE_DIM
         assert reader.pose_target_dim == _POSE_DIM
         writer.write(
-            np.full(_QPOS_DIM, 1, dtype="<f8"),
-            np.full(_ACTION_DIM, 2, dtype="<f8"),
-            [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+            qpos=np.full(_QPOS_DIM, 1, dtype="<f8"),
+            qpos_err=np.full(_QPOS_DIM, 1, dtype="<f8"),
+            action=np.full(_ACTION_DIM, 2, dtype="<f8"),
+            images=[np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
             pose=np.arange(_POSE_DIM, dtype="<f8"),
             pose_target=np.arange(_POSE_DIM, dtype="<f8") + 10.0,
         )
@@ -115,9 +119,10 @@ def test_depth_region_roundtrip():
         assert reader.depth_size == _IMAGE_SIZE
         depths = [np.full((_IMAGE_SIZE[1], _IMAGE_SIZE[0]), 1000 + index, dtype="<u2") for index in range(_DEPTH_COUNT)]
         writer.write(
-            np.full(_QPOS_DIM, 1, dtype="<f8"),
-            np.full(_ACTION_DIM, 2, dtype="<f8"),
-            [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+            qpos=np.full(_QPOS_DIM, 1, dtype="<f8"),
+            qpos_err=np.full(_QPOS_DIM, 1, dtype="<f8"),
+            action=np.full(_ACTION_DIM, 2, dtype="<f8"),
+            images=[np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
             depths=depths,
         )
         frame = reader.read()
@@ -155,9 +160,10 @@ def test_depth_shape_mismatch_is_rejected():
     try:
         with pytest.raises(ValueError, match="depth shape"):
             writer.write(
-                np.zeros(_QPOS_DIM, dtype="<f8"),
-                np.zeros(_ACTION_DIM, dtype="<f8"),
-                [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+                qpos=np.zeros(_QPOS_DIM, dtype="<f8"),
+                qpos_err=np.zeros(_QPOS_DIM, dtype="<f8"),
+                action=np.zeros(_ACTION_DIM, dtype="<f8"),
+                images=[np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
                 depths=[np.zeros((_IMAGE_SIZE[1] + 1, _IMAGE_SIZE[0]), dtype="<u2")],
             )
     finally:
@@ -193,6 +199,7 @@ def test_read_returns_latest_frame():
         frame = reader.read()
         assert frame is not None
         assert frame["qpos"].tolist() == [7, 7]
+        assert frame["qpos_err"].tolist() == [0, 0]
         assert frame["action"].tolist() == [7, 7]
         assert int(frame["images"][0][0, 0, 0]) == 7
     finally:
@@ -211,6 +218,7 @@ def test_read_returns_target_action_not_qpos():
         frame = reader.read()
         assert frame is not None
         assert frame["qpos"].tolist() == [1, 1]
+        assert frame["qpos_err"].tolist() == [8, 8]
         assert frame["action"].tolist() == [9, 9]  # 关键：不是 [1, 1]
     finally:
         reader.close()

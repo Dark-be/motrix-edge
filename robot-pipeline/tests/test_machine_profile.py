@@ -264,7 +264,9 @@ def test_steps_skip_virtual_devices(setup_module):
     steps = setup_module.steps_for(dual)
 
     assert ("ports", "left_master", "serial") in steps and ("cameras", "cam_head", "realsense") in steps
-    assert ("cameras", "cam_left_wrist", "v4l2") in steps
+    assert ("cameras", "cam_left_wrist", "realsense") in steps
+    assert ("cameras", "cam_right_wrist", "realsense") in steps
+    assert dual.DEPTH_CAMERAS == tuple(dual.IMAGE_NAMES)
 
 
 def test_patch_for_maps_identity_to_profile(setup_module):

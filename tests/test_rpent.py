@@ -34,6 +34,7 @@ from motrix_edge.adapter.base import (
     RobotAdapter,
     RobotCapabilities,
 )
+from motrix_edge.frame import FrameManager
 from motrix_edge.geometry import IDENTITY, EgoAxes, FrameSet
 from motrix_edge.lease import BEIJING_TZ, Lease, LeaseManager, LeaseState
 from motrix_edge.node import NodeState
@@ -230,11 +231,19 @@ class FakeFrameManager:
     def __init__(self, obs: dict | None = None, adapter: "FakeAdapter | None" = None):
         self._obs = dict(obs or {})
         self._adapter = adapter
+        self._revision = 1
 
     def latest(self) -> dict | None:
         if self._adapter is not None:
             return self._adapter.observation_frame()
         return self._obs
+
+    def latest_versioned(self) -> tuple[int, dict | None]:
+        return self._revision, self.latest()
+
+    def wait_for_update(self, after_revision: int, timeout: float | None = None) -> tuple[int, dict | None]:
+        self._revision = max(self._revision, after_revision) + 1
+        return self._revision, self.latest()
 
 
 class FakeNode:
@@ -442,6 +451,10 @@ def test_healthz_and_self_description_are_lease_free():
     assert meta["action_dim"] == 14 and meta["arms"] == ["left", "right"]
     assert meta["agent_observation"]["inline_cameras"] == ["cam_head"]  # 进模型上下文的相机
     assert meta["pose_convention"] == "xyz_rpy" and meta["gripper_range"] == [0.0, 1.0]
+    assert meta["capture_episode"] == {
+        "session_managed_by_caller": True,
+        "start_required_meta": ["operator", "task_name", "runtime_context"],
+    }
     cameras = service.call("env.get_camera_meta")
     assert cameras["cameras"] == {"cam_head": [640, 480]} and cameras["encoding"] == "uint8 HWC (RGB)"
 
@@ -540,6 +553,95 @@ def test_reset_reports_rejected_receipt_as_error():
     assert "robot busy" in str(excinfo.value) and excinfo.value.kind == "state"
 
 
+def test_capture_episode_start_syncs_meta_before_start_and_end_only_closes_episode(env):
+    """RPent 只控制 episode；session 由调用方管理，且 start 快照前元信息必须已经同步。"""
+    service, _node, _adapter, _leases, commands = env
+
+    started = service.call(
+        "env.capture_episode_start",
+        kwargs={
+            "operator": " 张三 ",
+            "task_name": " 双臂整理 ",
+            "runtime_context": {
+                "log_path": "/rpent/runs/42/run log.txt",
+                "model": "rpent-agent-v1",
+                "session_id": "run-42",
+            },
+            "meta": {
+                "description": "smoke",
+                "operator": "不得覆盖显式参数",
+                "task_name": "不得覆盖显式参数",
+                "runtime_context": {"不得": "覆盖显式参数"},
+            },
+        },
+    )
+
+    expected_meta = {
+        "description": "smoke",
+        "operator": "张三",
+        "task_name": "双臂整理",
+        "runtime_context": {
+            "log_path": "/rpent/runs/42/run log.txt",
+            "model": "rpent-agent-v1",
+            "session_id": "run-42",
+        },
+    }
+    assert started["ok"] is True and started["recording"] is True
+    assert started["meta"] == expected_meta
+    assert [call["capability"] for call in commands.calls] == ["capture/sync", "capture/episode/start"]
+    assert commands.calls[0]["params"] == {"meta": expected_meta}
+    assert commands.calls[1]["params"] == {}
+
+    ended = service.call("env.capture_episode_end")
+    assert ended["ok"] is True and ended["recording"] is False
+    assert commands.calls[-1]["capability"] == "capture/episode/end"
+    assert commands.calls[-1]["params"] == {}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"operator": "", "task_name": "task", "runtime_context": {"log_path": "/tmp/run.log"}}, "operator"),
+        ({"operator": "Alice", "task_name": "  ", "runtime_context": {"log_path": "/tmp/run.log"}}, "task_name"),
+        ({"operator": "Alice", "task_name": "task", "runtime_context": None}, "runtime_context"),
+        ({"operator": "Alice", "task_name": "task", "runtime_context": {}}, "runtime_context"),
+    ],
+)
+def test_capture_episode_start_requires_non_empty_metadata(env, kwargs, field):
+    service, _node, _adapter, _leases, commands = env
+    with pytest.raises(RpentError) as excinfo:
+        service.call("env.capture_episode_start", kwargs=kwargs)
+    assert excinfo.value.kind == "argument" and field in str(excinfo.value)
+    assert commands.calls == []
+
+
+def test_capture_episode_start_rejects_non_object_extra_meta(env):
+    service, _node, _adapter, _leases, commands = env
+    with pytest.raises(RpentError) as excinfo:
+        service.call(
+            "env.capture_episode_start",
+            kwargs={
+                "operator": "Alice",
+                "task_name": "task",
+                "runtime_context": {"log_path": "/tmp/run.log"},
+                "meta": [],
+            },
+        )
+    assert excinfo.value.kind == "argument" and "meta" in str(excinfo.value)
+    assert commands.calls == []
+
+
+def test_capture_episode_start_requires_json_serializable_runtime_context(env):
+    service, _node, _adapter, _leases, commands = env
+    with pytest.raises(RpentError) as excinfo:
+        service.call(
+            "env.capture_episode_start",
+            kwargs={"operator": "Alice", "task_name": "task", "runtime_context": {"labels": {"not-json"}}},
+        )
+    assert excinfo.value.kind == "argument" and "JSON-serializable" in str(excinfo.value)
+    assert commands.calls == []
+
+
 def test_move_delta_sends_delta_and_reports_robot_target(env):
     """``env.move_delta``：只下发**增量**（``pose_delta``），目标由机器人在自己的目标上叠加。
 
@@ -569,9 +671,7 @@ def test_move_delta_sends_delta_and_reports_robot_target(env):
 def test_move_delta_single_arm_keeps_the_other(env):
     """指定 ``arm`` → 只改该臂，另一臂增量恒为 0（``rotate_delta`` 同形）。"""
     service, _node, adapter, _leases, _commands = env
-    result = service.call(
-        "env.rotate_delta", kwargs={"arm": "right", "delta_rpy": [0.0, 0.1, 0.0], "settle": False}
-    )
+    result = service.call("env.rotate_delta", kwargs={"arm": "right", "delta_rpy": [0.0, 0.1, 0.0], "settle": False})
 
     values, layout = adapter.rollout_calls[-1]
     assert layout == "pose_delta"
@@ -629,6 +729,35 @@ def test_set_gripper_only_changes_gripper(env):
     action, layout = adapter.rollout_calls[-1]
     assert layout == "joint+gripper"
     assert list(grippers_of(action)) == pytest.approx([1.0, 1.0])
+
+
+def test_set_gripper_accepts_openness_in_unit_range(env):
+    """``env.set_gripper`` 收 ``[0, 1]`` 的**开合度**（bool 仍兼容；域与自描述 ``gripper_range`` 同源）。
+
+    0 = 闭合 / 1 = 张开；回执 ``open`` 回显生效的开合度，agent 才能确认「让它合到什么程度」落地了。
+    """
+    service, _node, adapter, _leases, _commands = env
+    result = service.call("env.set_gripper", kwargs={"arm": "right", "open": 0.3, "settle": False})
+    action, layout = adapter.rollout_calls[-1]
+    assert layout == "joint+gripper"  # 仍是一条命令：关节目标 + 夹爪同一拍
+    assert list(joints_of(action)) == pytest.approx(list(default_qpos()))  # 关节目标不动
+    assert list(grippers_of(action)) == pytest.approx([0.25, 0.3])  # 只有右夹爪动，且是半开
+    assert result["open"] == pytest.approx(0.3)
+
+    service.call("env.set_gripper", kwargs={"arm": "left", "open": 1.0, "settle": False})
+    left, right = list(grippers_of(adapter.rollout_calls[-1][0]))
+    assert left == pytest.approx(1.0)  # 只动点名的臂
+    assert right == pytest.approx(float(default_gripper()[1]))  # 另一臂仍是基座值
+
+
+def test_set_gripper_rejects_openness_outside_unit_range(env):
+    """开合度越界 / 非数值 → ``kind=argument`` 且**不下发任何动作**（不静默限幅成 0 / 1）。"""
+    service, _node, adapter, _leases, _commands = env
+    for value in (1.5, -0.1, "half", None, float("nan")):
+        with pytest.raises(RpentError) as excinfo:
+            service.call("env.set_gripper", kwargs={"open": value})
+        assert excinfo.value.kind == "argument" and "open" in str(excinfo.value)
+    assert adapter.rollout_calls == []  # 一次都没动机器人
 
 
 def test_set_gripper_bases_on_joint_target_not_measured_joints():
@@ -1133,6 +1262,7 @@ def test_env_meta_exposes_lease_and_settle_contract():
         "timeout_s": 5.0,
         "max_timeout_s": 90.0,  # 逐次覆盖的上限（客户端 HTTP 超时 120s）
         "target_wait_s": 1.0,  # 增量下发后等「命令落地」的上限（pose_target 跃迁）
+        "dwell_s": 0.5,  # 判到位后再多等一小段才回执（回读可能领先物理）
         "image_source": "native",
         "dry_run": False,  # 启动自检：dry-run 的节点会回 sent: false / reached: null
         "action_layout": None,
@@ -1169,7 +1299,7 @@ def test_lease_satisfied_means_usable_not_merely_resolved():
 
 
 def test_dry_run_never_sends_write_primitives_or_reset():
-    """安全回归：``dry_run`` 下四条写原语与 ``env.reset`` 都**不下发**（真机不动）。
+    """安全回归：``dry_run`` 下控制、复位和数采命令都**不下发**（真机与 collector 不动）。
 
     旧实现：写原语直接下发、``env.reset`` 照样打命令通道，而回执又声称 ``reason: dry_run``
     ——“以为不会动但会动”。
@@ -1178,14 +1308,25 @@ def test_dry_run_never_sends_write_primitives_or_reset():
     commands = service._commands
 
     move = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    move_abs = service.call("env.move_delta_abs", kwargs={"arm": "left", "delta_xyz": [0.02, 0.0, 0.0]})
     rotate = service.call("env.rotate_delta", kwargs={"delta_rpy": [0.0, 0.0, 0.1]})
     gripper = service.call("env.set_gripper", kwargs={"open": False})
     recover = service.call("env.recover_joint_posture", kwargs={"reason": "slip"})
     reset = service.call("env.reset")
+    capture_start = service.call(
+        "env.capture_episode_start",
+        kwargs={
+            "operator": "Alice",
+            "task_name": "task",
+            "runtime_context": {"log_path": "/rpent/run.log"},
+        },
+    )
+    capture_end = service.call("env.capture_episode_end")
 
-    for receipt in (move, rotate, gripper, recover, reset):
+    for receipt in (move, move_abs, rotate, gripper, recover, reset, capture_start, capture_end):
         assert receipt["dry_run"] is True and receipt["sent"] is False
         assert receipt["reached"] is None and receipt["reason"] == "dry_run"
+    assert capture_start["recording"] is False
     assert move["target"].shape == (14,) and gripper["target"].shape == (14,)  # 数值仍可核对
     assert adapter.rollout_calls == [] and adapter.reset_calls == 0  # 一帧都没下发
     assert commands.calls == []  # env.reset 也没打命令通道
@@ -1253,7 +1394,7 @@ def test_settle_receipt_reports_per_unit_errors_for_joint_space():
 def test_default_tolerances_absorb_mit_steady_state_error():
     """包内**兜底**容差（位置 1cm / 姿态 0.05rad）能吸收 MIT 的静态误差：0.03 rad 算到位。
 
-    部署值在 ``edge.yml``（当前 2cm / 0.2rad，按重力前馈后的残余静态误差量级收敛）；本用例没给
+    部署值在 ``edge.yml``（当前 4cm / 0.4rad ≈ 23°，按现场 final_err 平台值标定）；本用例没给
     ``server.rpent.settle``，走的就是 ``SettleConfig`` 的兜底值。
 
     底层只有 P/D，未补偿（无前馈 / 参数未标定）时“设定什么关节就是什么关节”不成立——容差小于
@@ -1503,8 +1644,45 @@ def test_settle_per_call_override_rejects_bad_type():
     assert excinfo.value.kind == "invalid_params" and "settle" in str(excinfo.value)
 
 
+def test_settle_dwells_after_reaching():
+    """判到位后再**多等一小段**（``dwell_s``）才回执：回读领先物理时「命令生效」≠「动作完成」。"""
+    service, _adapter = delta_service(track=True, track_step=0.005, settle={"dwell_s": 0.2})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is True
+    assert result["settle_dwell_s"] == pytest.approx(0.2)
+    assert result["elapsed_s"] >= 0.2  # 判到位那一刻之后还有 dwell（elapsed 含它）
+
+
+def test_settle_dwell_defaults_to_deployment_value():
+    """``settle`` 没写 ``dwell_s`` → 取 ``SettleConfig`` 兜底（0.5s）：不写配置也有「等一小会」的行为。"""
+    service, _adapter = delta_service(track=True, track_step=0.005)
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is True and result["settle_dwell_s"] == pytest.approx(0.5)
+    assert result["elapsed_s"] >= 0.5
+
+
+def test_settle_dwell_can_be_disabled_per_call():
+    """逐次 ``settle={"dwell_s": 0}`` 关掉额外等待（流式 / 自己轮询观测的场景）。"""
+    service, _adapter = delta_service(track=True, track_step=0.005, settle={"dwell_s": 0.0})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is True and result["settle_dwell_s"] == 0.0
+    assert result["elapsed_s"] < 0.3
+
+
+def test_settle_dwell_applies_only_when_reached():
+    """只有「判到位」才 dwell：超时 / 停滞不额外等（失败已经花了时间，白等只会让 agent 更慢看到失败）。"""
+    service, _adapter = delta_service(settle={"dwell_s": 1.0, "stall_s": 10.0, "timeout_s": 0.05})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.02, 0.0, 0.0]})
+    assert result["reached"] is False and result["timeout"] is True
+    assert result["settle_dwell_s"] == pytest.approx(1.0)  # 生效值照回（agent 能看出配置）
+    assert result["elapsed_s"] < 1.0  # 但没真花这 1s
+
+
 def test_set_gripper_waits_for_gripper_to_close():
-    """``set_gripper`` 也等到位：状态向量（``observations/qpos``）的夹爪槽走到目标值。"""
+    """``set_gripper`` 也等到位：状态向量（``observations/qpos``）的夹爪槽走到目标值。
+
+    开合度也一样等（不是只对 ``open`` / ``close`` 两个端点生效）。
+    """
     open_frames = [make_obs(qpos=default_qpos(), gripper=[1.0, 1.0], pose=default_pose())]
     closed_frames = [make_obs(qpos=default_qpos(), gripper=[0.0, 0.0], pose=default_pose()) for _ in range(20)]
 
@@ -1512,6 +1690,13 @@ def test_set_gripper_waits_for_gripper_to_close():
     result = service.call("env.set_gripper", kwargs={"open": False})
     assert result["reached"] is True and result["final_err"] <= 0.05
     assert result["target"][6] == pytest.approx(0.0) and result["target"][13] == pytest.approx(0.0)
+
+    half_frames = [make_obs(qpos=default_qpos(), gripper=[1.0, 1.0], pose=default_pose())]
+    half_frames += [make_obs(qpos=default_qpos(), gripper=[0.4, 0.4], pose=default_pose()) for _ in range(20)]
+    service, _adapter = settle_service(frames=half_frames)
+    result = service.call("env.set_gripper", kwargs={"open": 0.4})
+    assert result["reached"] is True and result["final_err"] <= 0.05
+    assert result["target"][6] == pytest.approx(0.4) and result["target"][13] == pytest.approx(0.4)
 
 
 def test_recover_joint_posture_keeps_grippers():
@@ -1577,13 +1762,15 @@ def test_recover_falls_back_to_adapter_reset_without_home():
 class StubDepth:
     """深度服务假件：直接回一条 ``/v1/depth`` 形状的回执（记录调用参数）。"""
 
-    def __init__(self, body: dict | None = None):
-        self.body = dict(body or {})
+    def __init__(self, body: dict | list[dict] | None = None):
+        values = body if isinstance(body, list) else [body or {}]
+        self.bodies = [dict(value) for value in values]
         self.calls: list[tuple] = []
 
     def depth(self, camera, u=0.5, v=0.5, lease_id=None):
         self.calls.append((camera, u, v))
-        return dict(self.body)
+        index = min(len(self.calls) - 1, len(self.bodies) - 1)
+        return dict(self.bodies[index])
 
 
 def depth_body(**overrides) -> dict:
@@ -1625,7 +1812,72 @@ def test_get_object_position_returns_world_coordinates() -> None:
     assert reply["xyz_camera"] == [0.01, 0.02, 0.75]
     assert (reply["frame"], reply["world"]) == ("world", "left_base")
     assert reply["kind"] is None and reply["reason"] is None
-    assert depth.calls == [("cam_head", 0.5, 0.4)]  # 归一化坐标原样透传
+    assert depth.calls == [("cam_head", 0.5, 0.4)] * 5  # 五个不同缓存版本，坐标原样透传
+    assert reply["sampling"]["accepted"] == 5
+
+
+def test_get_object_position_averages_inliers_and_drops_invalid_and_outlier() -> None:
+    """无深度帧不进候选，偏离主体 3D 簇过远的点被剔除，其余坐标与深度求均值。"""
+    samples = [
+        depth_body(xyz_world=[0.10, 0.20, 0.30], xyz_camera=[0.00, 0.00, 0.70], depth_m=0.70),
+        depth_body(valid=False, depth_m=None, xyz_camera=None, xyz_world=None),
+        depth_body(xyz_world=[0.11, 0.20, 0.30], xyz_camera=[0.01, 0.00, 0.71], depth_m=0.71),
+        depth_body(xyz_world=[2.00, 2.00, 2.00], xyz_camera=[1.90, 1.80, 2.40], depth_m=2.40),
+        depth_body(xyz_world=[0.09, 0.20, 0.30], xyz_camera=[-0.01, 0.00, 0.69], depth_m=0.69),
+        depth_body(xyz_world=[0.10, 0.21, 0.30], xyz_camera=[0.00, 0.01, 0.70], depth_m=0.70),
+    ]
+    service, _adapter = service_with_depth(StubDepth(samples))
+
+    reply = service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 0.5, "y": 0.5})
+
+    assert reply["available"] is True
+    assert np.allclose(reply["xyz_world"], [0.10, 0.2025, 0.30])
+    assert np.allclose(reply["xyz_camera"], [0.00, 0.0025, 0.70])
+    assert reply["depth_m"] == pytest.approx(0.70)
+    assert reply["sampling"]["frames_observed"] == 6
+    assert reply["sampling"]["candidates"] == 5
+    assert reply["sampling"]["accepted"] == 4
+    assert reply["sampling"]["rejected_invalid"] == 1
+    assert reply["sampling"]["rejected_outlier"] == 1
+
+
+def test_get_object_position_requires_enough_valid_samples() -> None:
+    """观察窗口内有坐标但不足三份时不把单帧偶然值伪装成稳定结果。"""
+    samples = [
+        depth_body(xyz_world=[0.10, 0.20, 0.30]),
+        depth_body(xyz_world=[0.11, 0.20, 0.30]),
+        *[depth_body(valid=False, depth_m=None, xyz_camera=None, xyz_world=None) for _ in range(8)],
+    ]
+    service, _adapter = service_with_depth(StubDepth(samples))
+
+    reply = service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 0.5, "y": 0.5})
+
+    assert reply["available"] is False and reply["kind"] == "insufficient_samples"
+    assert reply["xyz_world"] is None
+    assert reply["sampling"]["frames_observed"] == 10
+    assert reply["sampling"]["candidates"] == 2
+
+
+def test_get_object_position_does_not_count_one_cached_frame_repeatedly() -> None:
+    """深度源停更时等到短超时并返回样本不足，不能把同一缓存帧复制成五个候选。"""
+    adapter = FakeAdapter()
+    node = FakeNode(adapter)
+    node.frame_manager = FrameManager()
+    node.frame_manager.update({"frame": 1})
+    leases = LeaseManager()
+    install_lease(leases)
+    depth = StubDepth(depth_body())
+    cfg = {
+        **BASE_CFG,
+        "server": {"rpent": {"object_position": {"samples": 5, "min_samples": 3, "max_frames": 10, "timeout_s": 0.01}}},
+    }
+    service = RpentService(node, StubCommands(), leases=leases, depth=depth, base_cfg=cfg)
+
+    reply = service.call("env.get_object_position", kwargs={"camera": "cam_head", "x": 0.5, "y": 0.5})
+
+    assert reply["available"] is False and reply["kind"] == "insufficient_samples"
+    assert reply["sampling"]["frames_observed"] == 1
+    assert len(depth.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -1782,9 +2034,7 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     pose = [0.1, 0.2, 0.3, 0.0, np.pi / 2, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
     adapter.pose_target = np.asarray(pose, dtype=np.float32)
 
-    forward = service.call(
-        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0], "settle": False}
-    )
+    forward = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0], "settle": False})
     assert forward["delta_frame"] == "tool" and forward["delta_axes"] == ["forward", "left", "up"]
     assert np.allclose(forward["converted_delta_base"][0], [0.05, 0.0, 0.0], atol=1e-6), "x = 前"
     pushed, layout = adapter.rollout_calls[-1]
@@ -1792,15 +2042,67 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     assert np.allclose(pushed[0:3], [0.05, 0.0, 0.0], atol=1e-6)
     assert np.allclose(pushed[3:6], [0.0, 0.0, 0.0])  # 平移不碰姿态
 
-    up = service.call(
-        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05], "settle": False}
-    )
+    up = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05], "settle": False})
     assert np.allclose(up["converted_delta_base"][0], [0.0, 0.0, 0.05], atol=1e-6), "z = 上"
 
-    left = service.call(
-        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0], "settle": False}
-    )
+    left = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0], "settle": False})
     assert np.allclose(left["converted_delta_base"][0], [0.0, 0.05, 0.0], atol=1e-6), "y = 左"
+
+
+def test_move_delta_abs_uses_world_axes_independent_of_tool_pose(env) -> None:
+    """``move_delta_abs`` 的 xyz 固定在 ``world``，不随末端姿态旋转。"""
+    service, _node, adapter, *_ = env
+    pose = [0.1, 0.2, 0.3, 0.4, -0.6, 1.2, 0.4, 0.5, 0.6, -0.3, 0.7, -1.0]
+    adapter.pose_target = np.asarray(pose, dtype=np.float32)
+
+    reply = service.call(
+        "env.move_delta_abs",
+        kwargs={"arm": "left", "delta_xyz": [0.02, -0.01, 0.03], "settle": False},
+    )
+
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose_delta"
+    assert np.allclose(pushed[:3], [0.02, -0.01, 0.03], atol=1e-6)
+    assert np.allclose(pushed[3:6], [0.0, 0.0, 0.0])
+    assert np.allclose(pushed[6:12], [0.0] * 6), "未指定的右臂不动"
+    assert reply["delta_frame"] == "world" and reply["delta_axes"] == ["x", "y", "z"]
+    assert np.allclose(reply["converted_delta_base"][0], [0.02, -0.01, 0.03], atol=1e-6)
+
+
+def test_move_delta_abs_rotates_world_vector_into_arm_base(env) -> None:
+    """非 world 臂只按 ``T_world_base`` 的旋转换算向量，平移外参不参与。"""
+    service, _node, adapter, *_ = env
+    frames = anchored_frames((0.4, -0.6, 0.2))
+    frames.arms["right"][:3, :3] = rpy_to_matrix([0.0, 0.0, np.pi / 2])
+    adapter._frame_set = frames
+
+    reply = service.call(
+        "env.move_delta_abs",
+        kwargs={"arm": "right", "delta_xyz": [0.02, 0.0, 0.0], "settle": False},
+    )
+
+    pushed, layout = adapter.rollout_calls[-1]
+    assert layout == "pose_delta"
+    assert np.allclose(pushed[6:9], [0.0, -0.02, 0.0], atol=1e-6)
+    assert np.allclose(reply["converted_delta_base"][0], [0.0, -0.02, 0.0], atol=1e-6)
+
+
+def test_move_delta_abs_needs_extrinsics_for_non_world_arm(env) -> None:
+    """非 world 臂缺外参时拒绝，不把 world 向量误当该臂基座向量。"""
+    service, _node, adapter, *_ = env
+    adapter._frame_set = None
+
+    left = service.call(
+        "env.move_delta_abs",
+        kwargs={"arm": "left", "delta_xyz": [0.01, 0.0, 0.0], "settle": False},
+    )
+    assert np.allclose(left["converted_delta_base"][0], [0.01, 0.0, 0.0], atol=1e-6)
+    with pytest.raises(RpentError) as excinfo:
+        service.call(
+            "env.move_delta_abs",
+            kwargs={"arm": "right", "delta_xyz": [0.01, 0.0, 0.0], "settle": False},
+        )
+    assert excinfo.value.kind == "uncalibrated"
 
 
 def test_rotate_delta_chart_increment_is_exact(env) -> None:
@@ -1814,9 +2116,7 @@ def test_rotate_delta_chart_increment_is_exact(env) -> None:
     adapter.pose_target = np.asarray([0.1, 0.2, 0.3, *rpy, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0], dtype=np.float32)
     delta_semantic = [0.0, 0.0, np.radians(20.0)]  # 绕“上”转 20°
 
-    reply = service.call(
-        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False}
-    )
+    reply = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False})
     basis = EgoAxes().basis()  # 语义系 → 法兰系
     exact = rpy_to_matrix(rpy) @ (basis @ rpy_to_matrix(delta_semantic) @ basis.T)
     chart = np.asarray(reply["converted_delta_base"][0], dtype=np.float64)
@@ -1841,14 +2141,10 @@ def test_rotate_delta_identity_target_maps_semantic_axes(env) -> None:
     """
     service, _node, adapter, *_ = env
     adapter.pose_target = rpent_pose_target(default_pose())
-    up = service.call(
-        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1], "settle": False}
-    )
+    up = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1], "settle": False})
     assert np.allclose(up["converted_delta_base"][0], [-0.1, 0.0, 0.0], atol=1e-6)  # 上 = 法兰 -x
     adapter.pose_target = rpent_pose_target(default_pose())  # 假机器人已把上一条增量叠进目标 → 复位
-    left = service.call(
-        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0], "settle": False}
-    )
+    left = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0], "settle": False})
     assert np.allclose(left["converted_delta_base"][0], [0.0, 0.1, 0.0], atol=1e-6)  # 左 = 法兰 +y
 
 
@@ -1903,9 +2199,7 @@ def test_move_to_needs_extrinsics_for_non_world_arm(env) -> None:
     adapter._frame_set = None
     adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
     adapter.pose = np.asarray(default_pose(), dtype=np.float32)
-    left = service.call(
-        "env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False}
-    )
+    left = service.call("env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False})
     assert np.allclose(np.asarray(left["target"])[0:3], [0.15, 0.25, 0.35], atol=1e-6)  # 恒等：原样
     with pytest.raises(RpentError) as excinfo:
         service.call("env.move_to", kwargs={"arm": "right", "target": [0.15, 0.25, 0.35]})
@@ -1930,9 +2224,18 @@ def test_env_meta_describes_delta_frame_and_look_at(client) -> None:
     assert meta["ego_axes"] == {"forward": "+z", "left": "+y", "up": "-x"}
     assert meta["delta_frame"] == "tool"  # 增量只有一种参考系，没有 space 开关
     assert meta["delta_axes"] == ["forward", "left", "up"]  # delta 分量语义 = x 前 / y 左 / z 上
+    assert meta["move_delta_abs"] == {"input_frame": "world", "delta_axes": ["x", "y", "z"]}
     assert meta["move_to"]["input_frame"] == "world"
     assert meta["look_at"]["roll"] == 0.0 and meta["look_at"]["input_frame"] == "world"
     assert meta["object_position"]["input"] == "normalized u / v"
+    assert meta["object_position"]["sampling"] == {
+        "samples": 5,
+        "min_samples": 3,
+        "max_frames": 10,
+        "timeout_s": 0.75,
+        "outlier_m": 0.03,
+        "mad_scale": 3.0,
+    }
 
 
 def test_env_meta_reports_tcp_offset_when_reported(env) -> None:

@@ -68,7 +68,8 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
 一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos` **状态向量** = 每臂「值 +
-夹爪」交错、`action` **目标向量** = 同维同布局、`observations/images/<cam>`，机器人提供末端位姿时
+夹爪」交错、`observations/qpos_err` = Robot 同帧计算的目标误差、`action` **目标向量** = 同维同布局、
+`observations/images/<cam>`，机器人提供末端位姿时
 另有 `observations/pose` / `observations/pose_action`）、HTTP 端点、共享内存布局都由
 **motrix_edge.adapter** 下的契约文件单点定义；robot server 复用这些定义，env 只负责控制 robot，
 不碰 HTTP / 共享内存。
@@ -98,11 +99,11 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 具体机器人实现（`BaseRobot` 子类）在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册
 （类型名 -> 模块 + 类名）；配置 `robot.type` 即按此自动匹配：
 
-| 注册类型                  | 实现                                                 | 说明                                 |
-| ------------------------- | ---------------------------------------------------- | ------------------------------------ |
-| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）             |
-| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                       |
-| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作 |
+| 注册类型                  | 实现                                                 | 说明                                  |
+| ------------------------- | ---------------------------------------------------- | ------------------------------------- |
+| `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）              |
+| `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                        |
+| `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作  |
 | `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂遥操作（共用档案的左主手+左从臂） |
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
@@ -154,7 +155,7 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
         下发按它遍历
     -   `POSE_DIM_PER_ARM`：每臂末端位姿宽度（`xyz + rpy`；**0 = 不提供位姿观测**）；整机长度由
         `pose_dim()` 推导，并由静态正解给出，
-        robot server 据此把**实测位姿**与**动作位姿**写入共享内存（布局 v7 的
+        robot server 据此把**实测位姿**与**动作位姿**写入共享内存（布局 v8 的
         `pose` / `pose_target` 传输区）
     -   `GRIPPER_DEADZONE`：夹爪死区（piper 为 0.2；缺省 0）
     -   `IMAGE_NAMES` / `IMAGES`：相机名与分辨率
@@ -186,9 +187,8 @@ robot:
 示例里都不放**现场值**，也不放**占位值**（假序列号只会把错误推迟到 SDK「找不到设备」）；未知
 键名 → `WARNING`（帮助发现拼写错误）。
 键名分别是实现里的 `PORT_ROLES` 与 `IMAGE_NAMES`（见 `src/robot/dual_piper_robot.py`、
-`dual_alicia_piper_robot.py` 与 `single_piper_robot.py`）。相机值随机型不同：**RealSense 机型
-（`dual_piper_robot`）三路都是 RealSense 序列号**；Alicia 机型（`dual_alicia_piper_robot`）
-的腕相机是 V4L2 设备节点。
+`dual_alicia_piper_robot.py` 与 `single_piper_robot.py`）。两种双臂机型（`dual_piper_robot` /
+`dual_alicia_piper_robot`）三路均为 RealSense，相机配置均填写序列号。
 
 这些值**每台机器不同** → 写进**实际配置目录** `<根>/config/`（包内 yml 只是零现场值的示例），有两种落点（见下节）。
 
@@ -200,12 +200,14 @@ robot:
 ```yaml
 robot:
     tcp:
-        enabled: true # false（缺省）= 法兰原点
-        offset: [0, 0, 0.1] # TCP 在**法兰系**下的位置（米；法兰 +z 就是工具伸出方向）
+        enabled: true # 出厂：dual piper 开启；false / 无该段 = 法兰原点
+        offset: [0, 0, 0.12] # TCP 在**法兰系**下的位置（米；法兰 +z 就是工具伸出方向）= 12 cm 尖端
         arms: { right: { offset: [0, 0, 0.08] } } # 两臂末端不等长时逐臂覆盖
 ```
 
 -   开启后「往前 5 cm」让**尖端**走 5 cm（`look_at` / `move_delta` 同样作用在尖端）；
+-   出厂值只对得上出厂末端：**换末端 / 换支架必须实测重验 `offset`**（改 `<根>/config/dual_piper.yml`
+    或机器档案），否则位姿全线偏一个常量；
 -   **只允许纯平移**（带旋转的 TCP 会让工具三轴与 `look_at` 的指向轴同时失真）→ 写了 `rpy` 直接报错；
 -   位姿系随 `/v1/discover` 上报（`pose_frame` / `tcp_offset`）：Edge 据此还原法兰（腕相机深度反投影）
     并如实告诉调用方；设计与边界见 `wiki/design/robot_pipeline_tcp.md`。
@@ -506,8 +508,8 @@ robot:
 ## 遥操作
 
 -   `single_piper`：Leader 主臂（读取）+ Follower 从臂（执行），同构映射；
--   `dual_piper` / `dual_alicia_piper`：master 主手（alicia）+ slave 从手（piper），
-    左 → 左、右 → 右。
+-   `dual_piper`：Piper CAN 主手 + Piper 从臂，左 → 左、右 → 右；
+-   `dual_alicia_piper`：仅主手换为 Alicia 串口示教臂，其余执行臂、三路 RealSense 与采集行为同 `dual_piper`。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
 跟随（`robot.step_rad`）；遥操作默认关闭。HTTP 的 `mode` 仍只选择映射模式：

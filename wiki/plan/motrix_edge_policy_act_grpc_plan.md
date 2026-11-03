@@ -58,6 +58,9 @@
 -   [x] 观测适配：edge 观测（qpos + jpeg/ndarray 相机）→ lerobot raw obs（state 分量
         标量 + **edge 侧 letterbox 到 image_size（默认 224×224，上下留黑边）** 的 uint8
         RGB 图）；`_lerobot_features` 按 state 维度 + 相机（edge 配置 `rename_cameras` → lerobot `rename_map`）生成
+-   [x] 可选 `observation_layout=qpos+qpos_err`：Robot 同帧提供误差，Edge 仅拼接为 state；
+        单臂 `[joint6, gripper1] × 2` 得到 14 维输入，delta joint 输出继续使用既有
+        `action_layout=joint_delta`，不新增策略类型
 -   [x] 通用 broker 移除：删 `policy/broker.py`（当时缓存由策略自持，后统一收归 `motrix_edge.rtc`）
 -   [x] `session/infer.py`（act 流式适配）：`BasePolicyClient` 接口不变、同步流式
         无需收线程，此阶段**无改动**；连接语义调整见下方「连接生命周期内聚 policy」

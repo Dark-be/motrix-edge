@@ -99,12 +99,13 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 同口径。
 
 **观测常驻、与动作空间无关**：`qpos` 是**状态向量**（每臂「值（当前 = 关节角）+ 夹爪」交错；逐维
-含义见采集 JSON 的 `state_space` / `state_dims`），`action` 是同维同布局的目标向量，
+含义见采集 JSON 的 `state_space` / `state_dims`），`qpos_err` 是 Robot 同拍计算的
+`action - qpos`，`action` 是同维同布局的目标向量，
 `pose` / `pose_action` 是**实测 / 目标**末端位姿（每臂 6 维 xyz + rpy，米 / 弧度，**不交错**；
 机器人提供位姿时才有）——「目标 − 实测」就是底层 MIT 的实时稳态误差。
 其中 `action` 是**进程侧当前目标动作**（SDK 侧正在执行的指令；尚无指令时进程回退为 qpos），
 经共享内存单独传输，**不是 qpos 的副本**——所以 preview 显示的是真实指令。裁剪后
-`qpos` / `action`（以及机器人提供位姿时的 `pose` / `pose_action`）共用同一个
+`qpos` / `qpos_err` / `action`（以及机器人提供位姿时的 `pose` / `pose_action`）共用同一个
 `_select_arm_segments()` 口径，观测内臂维度始终自洽；预览的 `qpos` / `gripper` 两个字段是
 `adapter.split_state()` 对状态向量的**展示层**拆分（不是两个观测键）；位姿策略靠 `pose` 知道
 自己末端在哪（见

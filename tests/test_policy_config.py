@@ -69,6 +69,16 @@ def test_prompt_item_is_multiline():
     assert openpi["prompt"].get("multiline") is True
 
 
+def test_layout_items_expose_and_enforce_fixed_options():
+    common = {item["key"]: item for item in policy_config_items("lerobot-act")}
+    assert common["observation_layout"]["options"] == ["qpos", "qpos+qpos_err"]
+    assert "joint_delta" in common["action_layout"]["options"]
+    cfg = {"policy": {}}
+    assert set_policy_config(cfg, "lerobot-act", {"action_layout": "joint_delta"}) == {"action_layout": "joint_delta"}
+    with pytest.raises(ValueError, match="action_layout must be one of"):
+        set_policy_config(cfg, "lerobot-act", {"action_layout": "not-a-layout"})
+
+
 def test_status_reports_values_and_missing_required(schema_policy):
     """状态回显：值原样给出；缺失的必填项进 ``missing``（前端据此提示）。"""
     status = policy_config_status(_cfg(model="m"), policy_type=schema_policy)

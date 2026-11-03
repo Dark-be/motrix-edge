@@ -46,14 +46,16 @@ robot:
         params: gravity/piper_6dof.json # 左臂参数：标定后换成 gravity/piper_left.json
       right:
         params: gravity/piper_6dof.json # 右臂参数：标定后换成 gravity/piper_right.json
-  # 末端 TCP（可选；见 wiki/design/robot_pipeline_tcp.md）：位姿（pose / pose_delta 动作与
+  # 末端 TCP（见 wiki/design/robot_pipeline_tcp.md）：位姿（pose / pose_delta 动作与
   # observations/pose / pose_action 观测）的原点从法兰切到**工具末端**——开启后「往前 5 cm」
   # 让**尖端**走 5 cm（look_at / move_delta 同样作用在尖端）。offset = TCP 在**法兰系**下的
   # 位置（米），只允许纯平移（带姿态的 TCP 会让 RPent 的工具三轴与 look_at 指向轴同时失真，
   # 故意拒绝）；两臂末端不等长（腕相机 / 探针支架）时用 arms 逐臂覆盖。
+  # **dual piper 出厂默认开启**：该机型末端（夹爪 / 探针支架）的实装长度固定写在这里；
+  # ⚠️ 换末端 / 换支架后必须实测重验（量尖端到法兰的距离改 offset），否则整条位姿链偏一个常量。
   tcp:
-    enabled: false # true = 位姿读 / 写都以 TCP 为原点；false = 法兰（现状）
-    offset: [0, 0, 0] # TCP 在法兰系下的位置（米；法兰 +z = 工具伸出方向，长度写在 z）
+    enabled: true # true = 位姿读 / 写都以 TCP 为原点；false = 法兰
+    offset: [0, 0, 0.12] # TCP 在法兰系下的位置（米；法兰 +z = 工具伸出方向，长度写在 z）= 12 cm 尖端
     arms: {} # 逐臂覆盖（键 = 控制器名 left / right），如 right: {offset: [0, 0, 0.08]}
   # 遥操作（见 wiki/design/robot_pipeline_teleop.md）
   teleop:
