@@ -16,9 +16,6 @@ node_modules
 # VS Code Copilot 扩展运行期锁文件（可能落在工作区同名子目录下）
 .copilot/
 
-# Web console（edge-console）是独立维护、频繁更新的 dev 工具，不入 edge 仓库版本控制
-frontend/edge-console/
-
 .ruff_cache
 
 code-quality-report.json
