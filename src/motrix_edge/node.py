@@ -21,7 +21,7 @@
   ACTIVE  任务执行中（session run 已启动；session quit 退出回 READY）
   ERROR   硬件故障 / 通信异常 / 机器人进程失联：node reset 恢复回 IDLE
 
-命令驱动（Command / CommandBus，见 ``motrix_edge.command``）：命令词**空格分隔不用点**。
+命令驱动（Command / CommandBus，见 utils/commands.py）：命令词**空格分隔不用点**。
 本地命令（CLI / 脚本）无需租约、不走 HTTP；HTTP 经 submit 同步等回执。**进入会话与
 启动会话合并为一个流程**：``session run <type>``（type = capture / infer）选择并启动
 会话一步完成（原 capture.start/infer.start + session.run 两个流程合并）。adapter 生命
@@ -57,8 +57,10 @@ from motrix_edge.command import (
     CMD_SESSION_RUN,
     META_SOURCE,
     SOURCE_INTERNAL,
+    SWITCH_COMMANDS,
     TELEOP_COMMANDS,
     CommandResult,
+    apply_switch,
     apply_teleop,
     expired_command_result,
     handle_capture_meta,
@@ -165,7 +167,7 @@ class EdgeNode:
         frame_manager=None,
         probe_interval=2.0,
         alive_check_interval=2.0,
-        capture_status_interval=2.0,
+        capture_status_interval=0.2,
         observe_interval=0.05,
         capture_meta_store=None,
         lease_manager=None,
@@ -196,6 +198,8 @@ class EdgeNode:
         # 周期任务参数（_tick）：探测间隔 / 失联检查间隔 / 采集状态刷新间隔 / 观测间隔（秒）
         self.probe_interval = probe_interval
         self.alive_check_interval = alive_check_interval
+        # 采集状态刷新比 health 快得多（5 Hz）：时长 / 帧数在录制中持续增长，前端按 5 Hz 轮询，
+        # 节奏跟不上就会看到数值一跳一跳。
         self.capture_status_interval = capture_status_interval
         self.observe_interval = observe_interval
         self._last_probe = 0.0
@@ -229,6 +233,16 @@ class EdgeNode:
         轮询 /v1/captures 只读本缓存——edge 运行不依赖前端。
         """
         return self._capture_status
+
+    def invalidate_capture_status(self) -> None:
+        """作废采集状态缓存：下一个 tick（≤ ``poll_interval``）立即重查，不等当前节奏到点。
+
+        采集命令（``capture episode start|end`` / ``capture sync``）由**会话**消费，节点主循环
+        看不到；会话经 ``on_capture_status_dirty`` 回调告知本方法——否则「开始 / 停止录制」后最多
+        要等一整个刷新间隔才会在 ``GET /v1/captures`` 上看到新值（与 ``robot tcp`` 切开关后催
+        health 同一手法，见 ``_handle_adapter_command``）。
+        """
+        self._last_capture_status = 0.0
 
     def _log_state(self, state):
         """状态进入日志（NodeLifecycle.on_enter 钩子，消息在进入时求值）。
@@ -310,7 +324,7 @@ class EdgeNode:
             self._reply(cmd, ok_result(node_state=self.state))
             return
 
-        # RTC 配置（infer rtc / infer rtc set <json>）：配置级命令，任何状态均可用；写内存态
+            # RTC 配置（infer rtc / infer rtc set <json>）：配置级命令，任何状态均可用；写内存态
         # base_cfg["policy"]["rtc"]，下次 session run infer 实例化 RTCManager 时生效
         # （会话内由 InferSession 额外应用到正在运行的 manager，下一块起生效）。
         if cmd.name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):
@@ -504,8 +518,8 @@ class EdgeNode:
                 return True
             policy_type = cmd.params.get("policy_type")
             if session_type == "infer":
-                # policy_type 可选：缺省用配置 policy.type（与 HTTP / CLI 的会话启动契约一致，
-                # 而非强制调用方显式提供 —— 修复此前真实节点对缺省 400 的分歧）。
+                # policy_type 可选：缺省用配置 policy.type（与 InferService.enter / get_policy
+                # 的契约一致，而非强制调用方显式提供 —— 修复此前真实节点对缺省 400 的分歧）。
                 if not policy_type:
                     policy_type = self.base_cfg.get("policy", {}).get("type", "openpi")
                 try:
@@ -518,8 +532,7 @@ class EdgeNode:
                 config = cmd.params.get("config")
                 if config:
                     try:
-                        parsed_config = parse_meta(config, what="session run infer config")
-                        set_policy_config(self.base_cfg, policy_type, parsed_config)
+                        set_policy_config(self.base_cfg, policy_type, dict(config))
                     except ValueError as exc:
                         self._reply(
                             cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
@@ -556,11 +569,7 @@ class EdgeNode:
                 self._reply(cmd, expired)
                 return True
         if cmd.name == CMD_ROBOT_RESET:
-            try:
-                self.adapter.reset()
-            except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得击穿 node 主循环
-                self._reply_adapter_error(cmd, "reset", exc)
-                return True
+            self.adapter.reset()
             self._reply(cmd, ok_result(node_state=self.state))
             return True
         if cmd.name == CMD_ROBOT_EXECUTE:
@@ -573,34 +582,46 @@ class EdgeNode:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
             except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得击穿 node 主循环
-                self._reply_adapter_error(cmd, "execute", exc)
-                return True
-            self._reply(cmd, ok_result(node_state=self.state, action=qpos, layout=layout))
-            return True
-        if cmd.name in TELEOP_COMMANDS:  # robot teleop / robot teach / robot takeover
-            try:
-                enabled, mode = apply_teleop(self.adapter, cmd)
-            except ValueError as exc:
-                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
-                return True
-            except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得击穿 node 主循环
                 debug_print("EdgeNode", f"teleop command failed: {exc}", "WARNING")
                 self._reply(
                     cmd,
                     CommandResult(status="error", error=f"teleop command failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
                 )
                 return True
-            self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode if enabled else None))
+            self._reply(cmd, ok_result(node_state=self.state, action=qpos, layout=layout))
+            return True
+        if cmd.name in TELEOP_COMMANDS:  # robot teleop / robot teach / robot takeover
+            try:
+                enabled, mode, follow_space, follow_axes = apply_teleop(self.adapter, cmd)
+            except ValueError as exc:
+                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
+                return True
+            self._reply(
+                cmd,
+                ok_result(
+                    node_state=self.state,
+                    teleop=enabled,
+                    mode=mode if enabled else None,
+                    follow_space=follow_space,
+                    follow_axes=follow_axes,
+                ),
+            )
+            return True
+        if cmd.name in SWITCH_COMMANDS:  # robot tcp / robot gravity：运行位开关
+            # **会话中一律拒绝**（tcp 换 observations/pose 的原点、gravity 改 control_mode；
+            # 机器人 teleop 不受此限——人工接管本来就是会话中的操作）。
+            in_session = self.session is not None
+            try:
+                data = apply_switch(self.adapter, cmd, in_session=in_session)
+            except ValueError as exc:
+                code = ErrorCode.CONFLICT if in_session else ErrorCode.INVALID_ARGUMENT
+                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=code))
+                return True
+            # 运行位真值走 health（切换不留影子）：催一次刷新，让紧随其后的状态查询看到新值
+            self._last_alive_check = 0.0
+            self._reply(cmd, ok_result(node_state=self.state, **data))
             return True
         return False
-
-    def _reply_adapter_error(self, cmd, operation: str, exc: Exception) -> None:
-        """把 adapter / SDK 异常转成统一回执，保持节点主循环存活。"""
-        debug_print("EdgeNode", f"{operation} command failed: {exc}", "WARNING")
-        self._reply(
-            cmd,
-            CommandResult(status="error", error=f"{operation} command failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
-        )
 
     def _on_error(self, cmd):
         """ERROR：node reset 恢复 → IDLE；其余命令不适用（adapter 已释放）。返回是否已回执。"""
@@ -634,6 +655,8 @@ class EdgeNode:
                 adapter=self.adapter,  # 复用节点 active adapter（生命周期归节点）
                 policy_type=policy_type,
                 capture_meta_store=self.capture_meta_store,  # 同一实例（单锁）
+                # 采集命令由会话消费：录制起止后让节点立刻作废采集状态缓存（不等下个周期）
+                on_capture_status_dirty=self.invalidate_capture_status,
             )
             self.session_type = session_type
             self.session.session_start()  # 连接硬件/初始化会话（adapter 已就绪则跳过 discover）
@@ -763,8 +786,8 @@ class EdgeNode:
         elif state in (NodeState.READY, NodeState.ACTIVE):
             self._check_adapter_alive()
             self._observe()  # 持续观测（无需进入会话；显示观测统一归节点，会话不再写）
-            # 采集状态与 health 同节奏周期刷新（**不限采集会话**）：进会话前也要能看到
-            # 进程是否在采集（可能由现场直接启动的采集）、元信息与数据目录。
+            # 采集状态周期刷新（**不限采集会话**）：进会话前也要能看到进程是否在采集
+            # （可能由现场直接启动的采集）、元信息与数据目录。
             self._refresh_capture_status()
 
     def _observe(self) -> None:
@@ -920,11 +943,12 @@ class EdgeNode:
             self._enter_error(f"adapter health check failed: {exc}")
 
     def _refresh_capture_status(self) -> None:
-        """周期查询采集状态并缓存（READY / ACTIVE 期间，与 health 同节奏）。
+        """周期查询采集状态并缓存（READY / ACTIVE 期间，节奏见 ``capture_status_interval``）。
 
         ``capture_status()`` 返回运行位（进程是否正在采集）+ 采集员 / 任务名等元信息 +
         数据目录 / 列表；查询 / 缓存语义与 ``health`` 一致（edge 自行查询，不依赖前端轮询，
-        也不限于采集会话——未进会话时同样能看到进程状态）。
+        也不限于采集会话——未进会话时同样能看到进程状态；节奏比 health 快，见构造参数）。
+        录制开始 / 结束的瞬间另由 :meth:`invalidate_capture_status` 立即重查，不等下一拍。
         """
         if self.adapter is None:
             self._capture_status = None

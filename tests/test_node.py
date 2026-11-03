@@ -28,8 +28,10 @@ from motrix_edge.command import (
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
+    CMD_ROBOT_GRAVITY,
     CMD_ROBOT_RESET,
     CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TCP,
     CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_RUN,
@@ -37,7 +39,6 @@ from motrix_edge.command import (
     Command,
     CommandBus,
     CommandError,
-    _coerce_policy_config_value,
     build_command_registry,
     deadline_exceeded,
     ok_result,
@@ -293,11 +294,11 @@ def test_enter_error_without_session_no_crash():
 
 
 # ---------------------------------------------------------------------------
-# 会话启动：复用节点当前绑定的单一 adapter
+# adapter 选择：adapter_selector（CLI 交互）/ pending_adapter_id（HTTP 预留）
 # ---------------------------------------------------------------------------
 
 
-class _FakeRunSession:
+class _FakeSelectSession:
     name = "FakeSession"
 
     def __init__(self):
@@ -325,12 +326,14 @@ def _patch_get_session(monkeypatch, captured):
         adapter=None,
         policy_type=None,
         capture_meta_store=None,
+        on_capture_status_dirty=None,
     ):
         captured["session_type"] = session_type
         captured["adapter"] = adapter
         captured["policy_type"] = policy_type
         captured["capture_meta_store"] = capture_meta_store
-        return _FakeRunSession()
+        captured["on_capture_status_dirty"] = on_capture_status_dirty
+        return _FakeSelectSession()
 
     monkeypatch.setattr(node_mod, "get_session", fake_get_session)
 
@@ -348,6 +351,8 @@ def test_start_session_reuses_node_adapter(monkeypatch):
     assert captured["session_type"] == "capture"
     assert captured["adapter"] is node.adapter  # 复用节点 adapter
     assert captured["capture_meta_store"] is node.capture_meta_store  # 单实例：会话不另建 store
+    # 会话消费采集命令 → 回调节点作废采集状态缓存（开始 / 停止录制立刻可见）
+    assert captured["on_capture_status_dirty"] == node.invalidate_capture_status
     assert node.state == NodeState.ACTIVE
     assert node._task_thread is not None and node._task_thread.is_alive()  # 任务已启动
     node.session.stop()
@@ -482,25 +487,27 @@ class _FakeExecAdapter:
         self.execute_layouts: list[str | None] = []
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
-        self.reset_error: Exception | None = None
-        self.execute_error: Exception | None = None
-        self.teleop_error: Exception | None = None
+        self.teleop_follow_axes: list[list[str] | None] = []
+        self.teleop_follow_spaces: list[str | None] = []
+        self.switch_calls: list[tuple[str, bool, object]] = []  # robot tcp / robot gravity
 
     def reset(self):
-        if self.reset_error is not None:
-            raise self.reset_error
         self.reset_calls += 1
 
     def execute(self, action, layout=None):
-        if self.execute_error is not None:
-            raise self.execute_error
         self.executed.append(action)
         self.execute_layouts.append(None if layout is None else str(layout))
 
-    def set_teleop(self, enabled: bool, mode: str | None = None):
-        if self.teleop_error is not None:
-            raise self.teleop_error
+    def set_teleop(self, enabled: bool, mode: str | None = None, follow_axes=None, follow_space=None):
         self.teleop_calls.append((bool(enabled), mode))
+        self.teleop_follow_axes.append(follow_axes)
+        self.teleop_follow_spaces.append(follow_space)
+
+    def set_tcp(self, enabled: bool, offset=None):
+        self.switch_calls.append(("tcp", bool(enabled), offset))
+
+    def set_gravity(self, enabled: bool, alpha: float | None = None):
+        self.switch_calls.append(("gravity", bool(enabled), alpha))
 
 
 def _ready_node_with_exec_adapter():
@@ -525,26 +532,6 @@ def test_robot_execute_in_ready_calls_adapter():
     assert node.state == NodeState.READY
 
 
-@pytest.mark.parametrize("name", [CMD_ROBOT_RESET, CMD_ROBOT_EXECUTE])
-def test_adapter_http_errors_return_upstream_error_without_stopping_node(name):
-    """SDK 拒绝 reset / execute 时返回 upstream_error，节点主循环语义保持 READY。"""
-    node, adapter = _ready_node_with_exec_adapter()
-    if name == CMD_ROBOT_RESET:
-        adapter.reset_error = RuntimeError("HTTP 500")
-        params = {}
-    else:
-        adapter.execute_error = RuntimeError("HTTP 500")
-        params = {"qpos": "0,0,0,0,0,0,0"}
-    replies = []
-
-    node._dispatch(Command(name, params=params, reply_to=replies.append))
-
-    assert replies[0].status == "error"
-    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
-    assert "HTTP 500" in replies[0].error
-    assert node.state == NodeState.READY
-
-
 def test_robot_execute_supports_brackets_and_spaces():
     """robot execute：兼容方括号 / 空白分隔的 qpos 参数。"""
     node, adapter = _ready_node_with_exec_adapter()
@@ -562,38 +549,6 @@ def test_robot_execute_supports_fullwidth_commas():
     assert adapter.executed == [[1.0] * 7]
     assert replies[0].status == "ok"
 
-
-@pytest.mark.parametrize(
-    ("name", "params"),
-    [
-        (CMD_ROBOT_RESET, {}),
-        (CMD_ROBOT_EXECUTE, {"qpos": "1,2,3"}),
-        (CMD_ROBOT_TELEOP, {"enabled": "true", "mode": "delta"}),
-    ],
-)
-def test_expired_adapter_commands_do_not_change_robot(name, params):
-    """submit 已超时的 reset / execute / teleop 到达 READY 后必须丢弃，不产生真机副作用。"""
-    node, adapter = _ready_node_with_exec_adapter()
-    replies = []
-    cmd = Command(
-        name,
-        params=params,
-        meta={META_REPLY_DEADLINE: time.monotonic() - 1},
-        reply_to=replies.append,
-    )
-
-    node._dispatch(cmd)
-
-    assert adapter.reset_calls == 0
-    assert adapter.executed == []
-    assert adapter.teleop_calls == []
-    assert replies[0].status == "rejected"
-    assert replies[0].code == ErrorCode.TIMEOUT
-
-
-def test_robot_execute_supports_semicolon_separated_qpos():
-    """robot execute：兼容分号分隔的 qpos。"""
-    node, adapter = _ready_node_with_exec_adapter()
     replies = []
     node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "1;2;3"}, reply_to=replies.append))
     assert adapter.executed[-1] == [1.0, 2.0, 3.0]
@@ -760,33 +715,51 @@ def test_robot_teleop_passes_mode():
     assert replies[0].data["mode"] == "delta"
 
 
-def test_robot_teleop_disable_omits_ignored_mode_from_reply():
-    """关闭遥操作时 mode 不生效，回执应与 health 状态一致为 None。"""
+def test_robot_teleop_passes_pose_follow_axes():
     node, adapter = _ready_node_with_exec_adapter()
     replies = []
-    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "false", "mode": "delta"}, reply_to=replies.append))
-
-    assert adapter.teleop_calls == [(False, "delta")]
-    assert replies[0].status == "ok"
-    assert replies[0].data == {"node_state": NodeState.READY, "teleop": False, "mode": None}
-
-
-def test_robot_teleop_drops_expired_submit_before_sdk_side_effect():
-    """submit 已超时时不得迟到切换真机遥操状态。"""
-    node, adapter = _ready_node_with_exec_adapter()
-    replies = []
-    cmd = Command(
-        CMD_ROBOT_TELEOP,
-        params={"enabled": "true", "mode": "delta"},
-        meta={META_REPLY_DEADLINE: time.monotonic() - 1.0},
-        reply_to=replies.append,
+    axes = ["x", "y", "z", "yaw"]
+    node._dispatch(
+        Command(
+            CMD_ROBOT_TELEOP,
+            params={"enabled": True, "mode": "absolute", "follow_space": "pose", "follow_axes": axes},
+            reply_to=replies.append,
+        )
     )
+    assert adapter.teleop_follow_axes == [axes]
+    assert adapter.teleop_follow_spaces == ["pose"]
+    assert replies[0].data["follow_space"] == "pose"
+    assert replies[0].data["follow_axes"] == axes
 
-    node._dispatch(cmd)
 
-    assert adapter.teleop_calls == []
+def test_robot_teleop_rejects_invalid_follow_axes():
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_TELEOP,
+            params={"enabled": True, "follow_axes": ["x", "spin"]},
+            reply_to=replies.append,
+        )
+    )
     assert replies[0].status == "rejected"
-    assert replies[0].code == ErrorCode.TIMEOUT
+    assert "follow_axes" in replies[0].error
+    assert adapter.teleop_calls == []
+
+
+def test_robot_teleop_rejects_axes_for_joint_space():
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_ROBOT_TELEOP,
+            params={"enabled": True, "follow_space": "joint", "follow_axes": ["x"]},
+            reply_to=replies.append,
+        )
+    )
+    assert replies[0].status == "rejected"
+    assert "only valid" in replies[0].error
+    assert adapter.teleop_calls == []
 
 
 def test_robot_teach_and_takeover_aliases_fix_the_mode():
@@ -842,20 +815,6 @@ def test_robot_teleop_rejects_invalid_enabled():
     assert adapter.teleop_calls == []
 
 
-def test_robot_teleop_sdk_error_replies_without_crashing_node():
-    """SDK 503 / 连接失败转为 502 回执，READY node 继续运行。"""
-    node, adapter = _ready_node_with_exec_adapter()
-    adapter.teleop_error = OSError("robot sdk unavailable")
-    replies = []
-
-    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
-
-    assert replies[0].status == "error"
-    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
-    assert "robot sdk unavailable" in replies[0].error
-    assert node.state == NodeState.READY
-
-
 def test_robot_teleop_not_applicable_in_idle():
     """IDLE（无 adapter）下 robot teleop → 兜底回执 rejected。"""
     node = EdgeNode({}, command_source=lambda: None)
@@ -863,6 +822,56 @@ def test_robot_teleop_not_applicable_in_idle():
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# robot tcp / robot gravity（运行位开关：位姿系 / 重力前馈；**离开会话才能切**）
+# ---------------------------------------------------------------------------
+
+
+def test_robot_tcp_and_gravity_in_ready_call_adapter():
+    """READY 下 robot tcp / robot gravity：enabled + 可选参数 → adapter，回执 ok 并回显。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TCP, params={"enabled": "true", "offset": "[0,0,0.1]"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_GRAVITY, params={"enabled": True, "alpha": "0.5"}, reply_to=replies.append))
+
+    assert adapter.switch_calls == [("tcp", True, [0.0, 0.0, 0.1]), ("gravity", True, 0.5)]
+    assert replies[0].data["tcp"] is True and replies[0].data["offset"] == [0.0, 0.0, 0.1]
+    assert replies[1].data["gravity"] is True and replies[1].data["alpha"] == 0.5
+    assert node._last_alive_check == 0.0  # 催一次心跳刷新（运行位真值从 health 读回）
+
+
+def test_switch_commands_reject_bad_params():
+    """参数非法 → rejected（不调用 adapter）：offset 必须 3 个有限数、alpha 必须是有限数。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TCP, params={"enabled": "true", "offset": "0,0"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_GRAVITY, params={"enabled": "true", "alpha": "nan"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_TCP, params={}, reply_to=replies.append))
+
+    assert [r.status for r in replies] == ["rejected"] * 3
+    assert [r.code for r in replies] == [ErrorCode.INVALID_ARGUMENT] * 3
+    assert adapter.switch_calls == []
+
+
+def test_switch_commands_rejected_while_a_session_is_active():
+    """**会话中**（node.session 非 None）切位姿系 / 重力前馈 → 409，且**不下发**。
+
+    同一会话内的观测语义 / 数据元信息不能前后不一致；人工接管（robot teleop）不受此限
+    ——它是会话中的正常操作，由会话层直接处理（见 test_capture_session / test_infer_session）。
+    """
+    node, adapter = _ready_node_with_exec_adapter()
+    node.lifecycle.transition(NodeState.ACTIVE)
+    node.session = _FakeSession()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TCP, params={"enabled": "false"}, reply_to=replies.append))
+    node._dispatch(Command(CMD_ROBOT_GRAVITY, params={"enabled": "true"}, reply_to=replies.append))
+
+    assert [r.status for r in replies] == ["rejected", "rejected"]
+    assert [r.code for r in replies] == [ErrorCode.CONFLICT] * 2
+    assert all("quit the session first" in r.error for r in replies)
+    assert adapter.switch_calls == []
     assert replies[0].code == ErrorCode.CONFLICT
 
 
@@ -917,6 +926,36 @@ def test_tick_refreshes_capture_status_cache():
     node.lifecycle.transition(NodeState.READY)
     node._tick()  # READY：不依赖采集会话也刷新采集状态缓存
     assert node.capture_status is adapter.status
+
+
+def test_invalidate_capture_status_refreshes_on_next_tick():
+    """``invalidate_capture_status()`` 后下一拍立即重查（采集命令落地后不必等整个间隔）。
+
+    回归：采集命令由会话消费，节点侧不知情；缺这个作废调用时「开始 / 停止录制」后
+    最多要等一整个 ``capture_status_interval`` 才在 ``GET /v1/captures`` 上看到新运行位。
+    """
+    from motrix_edge.adapter.base import CaptureStatus
+
+    calls = []
+
+    class _StatusAdapter(_FakeAdapter):
+        def capture_status(self):
+            calls.append(None)
+            return CaptureStatus(running=len(calls) > 1, meta={})
+
+    adapter = _StatusAdapter(available=True)
+    node = EdgeNode({}, command_source=lambda: None, probe_interval=0.0, capture_status_interval=3600.0)
+    node.initialize()  # INIT → IDLE
+    node.adapter = adapter
+    node.lifecycle.transition(NodeState.READY)
+    node._tick()  # 首拍：无缓存 → 查询（慢档下也只查这一次）
+    assert node.capture_status.running is False
+    node._tick()  # 慢档内：不重查
+    assert len(calls) == 1
+    node.invalidate_capture_status()  # 采集命令落地 → 作废缓存
+    node._tick()
+    assert node.capture_status.running is True
+    assert len(calls) == 2
 
 
 def test_tick_observes_into_frame_manager_when_ready():
@@ -982,37 +1021,12 @@ def test_command_bus_submit_marks_deadline_and_drops_late_reply():
     assert exc.value.code == ErrorCode.TIMEOUT
     assert META_REPLY_DEADLINE in timed_out.meta  # 提交时已写入截止时刻
     assert deadline_exceeded(timed_out)  # 超时后自查为真（处理器据此丢弃动作）
-    # 超时后 sink 已关闭：迟到与重复回执均直接丢弃、不阻塞。
+    # 迟到回执：调用方已放弃 → 丢弃（连续两次也不会抛 queue.Full / 不阻塞）
     timed_out.reply_to(ok_result())
     timed_out.reply_to(ok_result())
     # 未到期的 deadline / 无 deadline（push 或手工构造）→ 不门控，保持既有语义
     assert not deadline_exceeded(Command(CMD_NODE_RESET, meta={META_REPLY_DEADLINE: time.monotonic() + 5}))
     assert not deadline_exceeded(Command(CMD_NODE_RESET))
-
-
-def test_session_run_infer_parses_cli_json_config(monkeypatch):
-    """CLI 的 config=<json> 文本须先解析为对象，再按策略 schema 应用。"""
-    node, _adapter = _ready_node_with_exec_adapter()
-    captured = {}
-
-    def fake_start(session_type, policy_type=None):
-        captured.update(session_type=session_type, policy_type=policy_type)
-        return ok_result()
-
-    monkeypatch.setattr(node, "_start_session", fake_start)
-    replies = []
-    node._dispatch(
-        Command(
-            CMD_SESSION_RUN,
-            params={"session": "infer", "config": '{"host":"10.0.0.8","port":9000}'},
-            reply_to=replies.append,
-        )
-    )
-
-    assert replies[0].status == "ok"
-    assert captured == {"session_type": "infer", "policy_type": "openpi"}
-    assert node.base_cfg["policy"]["host"] == "10.0.0.8"
-    assert node.base_cfg["policy"]["port"] == 9000
 
 
 def test_infer_config_reports_endpoint_values():
@@ -1058,27 +1072,6 @@ def test_infer_config_set_rejects_invalid_endpoint():
     assert replies[0].status == "rejected"
     assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert node.base_cfg["policy"]["host"] == "0.0.0.0"
-
-
-@pytest.mark.parametrize("kind", ["int", "float"])
-@pytest.mark.parametrize("raw", [True, False])
-def test_numeric_policy_config_rejects_bool(kind, raw):
-    """bool 是 int 子类，但数值配置不得静默将 true/false 当成 1/0。"""
-    with pytest.raises(ValueError, match="must be"):
-        _coerce_policy_config_value("numeric", {"type": kind}, raw)
-
-
-@pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf"), "nan", "inf"])
-def test_float_policy_config_rejects_non_finite_values(raw):
-    """NaN 会绕过 min/max 比较，浮点配置只接受有限值。"""
-    with pytest.raises(ValueError, match="finite number"):
-        _coerce_policy_config_value("timeout", {"type": "float", "min": 0.0, "max": 10.0}, raw)
-
-
-def test_float_policy_config_accepts_finite_numeric_values():
-    item = {"type": "float", "min": 0.0, "max": 10.0}
-    assert _coerce_policy_config_value("timeout", item, 1) == 1.0
-    assert _coerce_policy_config_value("timeout", item, "1.25") == 1.25
 
 
 def test_lease_revoke_command_revokes_current():

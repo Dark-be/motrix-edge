@@ -44,6 +44,7 @@ def get_session(
     adapter=None,
     policy_type=None,
     capture_meta_store=None,
+    on_capture_status_dirty=None,
 ):
     """工厂：从注册表实例化会话。
 
@@ -59,6 +60,9 @@ def get_session(
       capture_meta_store: 采集元信息选项存储（``CaptureMetaStore``）；节点注入同一实例，
                      使「会话内 CLI 命令」与节点命令共用一份数据与一把锁（缺省 None = 会话
                      自行按需创建；不注入时不传该实参，兼容自定义会话）。
+      on_capture_status_dirty: 采集命令（episode start/end、sync）落地后的回调；节点注入
+                     ``EdgeNode.invalidate_capture_status``，让状态查询立刻看到新值
+                     （缺省 None = 不回调）。
     """
     if session_type is None:
         session_type = base_cfg.get("session", {}).get("type", "capture")
@@ -78,6 +82,8 @@ def get_session(
         kwargs["policy_type"] = policy_type  # 仅推理会话消费策略类型
     if capture_meta_store is not None:  # 进程内单实例：节点注入，避免多把锁各管一段
         kwargs["capture_meta_store"] = capture_meta_store
+    if on_capture_status_dirty is not None:  # 回调节点：采集命令落地后立即作废采集状态缓存
+        kwargs["on_capture_status_dirty"] = on_capture_status_dirty
     return cls(**kwargs)
 
 

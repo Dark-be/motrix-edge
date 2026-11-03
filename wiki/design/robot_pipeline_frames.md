@@ -155,7 +155,9 @@
 ```
 
 -   `arms.<arm>.probe_tip`：探针尖在**法兰系**的位置（米，**可选**）——标定副产品；
-    `verify_extrinsics.py` 的绝对精度比对要用它。
+    `verify_extrinsics.py` 的绝对精度比对要用它。⚠️ 末端装的若就是标定探针，它与控制侧的
+    [`robot.tcp`](./robot_pipeline_tcp.md) 偏移是**同一类量**（都在法兰系）——两处数值应当一致，
+    否则「标定说 12 cm、控制按 10 cm 走」会在世界坐标里差 cm 级且很难查。
 
 校验（读到文件就全量校验，**半份产物不如没有**）：`version` 支持、`world` 非空、每个变换是 16 个数
 且旋转部分正交（`RRᵀ = I`、`det = +1`，容差 1e-6）、腕相机的 `arm` 在 `arms` 里存在、
@@ -312,4 +314,8 @@ $$T_{world\leftarrow base_R} = \Big[\,I \;\Big|\; -2\,(o_c \cdot n)\,n\,\Big]$$
 -   **相机内参自标**：先用 RealSense 出厂内参（`GET /v1/cameras`）；标定残差偏大时再用
     `cv2.calibrateCamera` 复核。
 -   **点云 / 区域查询**：本期只做单点；整帧端点另行评估。
+-   **运行期坐标查询的归属**：反投影现在在 Edge（`server/depth.py`），而它的四个输入（深度图 / 内参 /
+    外参 / 法兰位姿）**都在机器人进程里**——搬到机器人侧可让坐标链在内部闭合（Edge 不再需要 TCP
+    偏移），但要新增跨项目端点 + 机器人侧帧缓存（保住「查询与 `/v1/preview` 同帧」语义）→ 单独立项
+    （见 [末端 TCP](./robot_pipeline_tcp.md)「后续」）。
 -   **`table` 派生帧**：产物里留了 `table` 字段位（`null`），按台面表达任务点时再启用。

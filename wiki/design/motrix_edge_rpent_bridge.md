@@ -295,8 +295,8 @@ agent 会写成“往前得给 -x”；语义量不受装配影响，且 **0 位
 `ok=false kind=unsupported`、`settle` 回 `reached: null`，故 agent 启动就该拦。机器人侧需实现：
 `POSE = 12`（每臂 6 维 `xyz+rpy`、米/弧度）+ `get_observation_pose(qpos=None)`（与位姿解算
 **同一套运动学**，位姿动作设计文档随位姿动作 MR 合入）+ `get_target_pose()`
-（= `FK(关节段目标)`：增量基准与上位判到位的参考）+ `POSE_FRAME`（与位姿下发同系，piper 为
-`flange`）。
+（= `FK(关节段目标)`：增量基准与上位判到位的参考）+ `POSE_FRAME`（与位姿下发同系：piper 缺省为
+`flange`，配了 `robot.tcp` 则由机器人上报 `tcp`——见 [末端 TCP](./robot_pipeline_tcp.md)）。
 
 **增量原语的基准与到位判定**（MIT 力矩控制下的硬要求）：
 

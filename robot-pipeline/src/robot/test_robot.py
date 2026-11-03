@@ -114,12 +114,16 @@ class TestRobot(BaseRobot):
         return self._pose_of_joints(joints)
 
     def _pose_of_joints(self, joints: np.ndarray) -> np.ndarray:
-        """逐臂虚拟正解 → 扁平位姿（``POSE`` 维）；关节值非法 → NaN 向量。"""
+        """逐臂虚拟正解 → 扁平位姿（``POSE`` 维）；关节值非法 → NaN 向量。
+
+        正解后统一经 ``pose_to_tcp()`` 换到**位姿系**（``robot.tcp`` 未开启时就是法兰）：与
+        ``DualPiperRobot`` 同一套口径，前端联调 / 离线验收因此也能覆盖 TCP 模式。
+        """
         values = np.asarray(joints, dtype=np.float64).reshape(-1)
         if values.shape[0] < self.QPOS or not np.all(np.isfinite(values[: self.QPOS])):
             return np.full(self.POSE, np.nan)
         arms = values[: self.QPOS].reshape(len(self.ARM_NAMES), self.JOINTS_PER_ARM)
-        return np.concatenate([TestArmController.joint_to_pose(arm) for arm in arms])
+        return self.pose_to_tcp(np.concatenate([TestArmController.joint_to_pose(arm) for arm in arms]))
 
     def get_target_pose(self) -> np.ndarray | None:
         """**目标位姿** = ``FK(关节段目标)``（与 ``get_observation_pose()`` 同一套虚拟正解）。"""
@@ -169,7 +173,12 @@ class TestRobot(BaseRobot):
         return self._solve_pose(target, seed)
 
     def _solve_pose(self, pose: np.ndarray, seed: np.ndarray) -> np.ndarray:
-        """绝对目标位姿（每臂 ``xyz + rpy``）→ 关节段目标（逐臂虚拟逆解，起点 ``seed``）。"""
+        """绝对目标位姿（每臂 ``xyz + rpy``）→ 关节段目标（逐臂虚拟逆解，起点 ``seed``）。
+
+        ``pose`` 是**位姿系**的值（``robot.tcp`` 开启时原点在 TCP）——解算前经 ``tcp_to_flange()``
+        还原成法兰，与 ``DualPiperRobot`` 同一套口径。
+        """
+        flange_pose = self.tcp_to_flange(pose)
         start_joints = np.asarray(seed, dtype=np.float64).reshape(-1)
         home = np.asarray(self.init_joint, dtype=np.float64).reshape(-1)
         joints: list[np.ndarray] = []
@@ -177,7 +186,7 @@ class TestRobot(BaseRobot):
             start = index * self.POSE_DIM_PER_ARM
             joint_start = index * self.JOINTS_PER_ARM
             span = slice(joint_start, joint_start + self.JOINTS_PER_ARM)
-            block = pose[start : start + self.POSE_DIM_PER_ARM]
+            block = flange_pose[start : start + self.POSE_DIM_PER_ARM]
             result = TestArmController.pose_to_joint(block, start_joints[span], fallback_seeds=(home[span],))
             if not result.ok:
                 raise CartesianActionError(f"{self.name}: {arm} arm pose target rejected ({result.describe()})")

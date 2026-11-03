@@ -50,6 +50,10 @@ stateDiagram-v2
 -   **READY / ACTIVE**：周期刷新采集状态缓存（`adapter.capture_status()`：运行位 + 元信息（采集员 /
     任务名等）+ 数据目录），server 状态只读缓存，**不因前端轮询而实时请求 SDK**
     （edge 运行不依赖前端）；**不限采集会话**——未进会话时同样能看到进程是否在采集。
+    节奏 `capture_status_interval`（缺省 0.2 s，比 health 快：录制中时长 / 帧数持续增长，
+    前端按 5 Hz 轮询要看连续读数）；采集命令（`capture episode start|end`、`capture sync`）由
+    会话消费，会话经 `on_capture_status_dirty` 回调 `EdgeNode.invalidate_capture_status`，
+    使「开始 / 停止录制」的下一拍就反映到 `GET /v1/captures`，不必等整个间隔。
 
 ## 命令分发
 

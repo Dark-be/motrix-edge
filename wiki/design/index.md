@@ -30,6 +30,7 @@
 -   [robot-pipeline 下发契约收敛（layout + arms）](./robot_pipeline_action_layouts.md)
 -   [robot-pipeline 深度观测（depth）](./robot_pipeline_depth.md)
 -   [robot-pipeline 统一坐标系与外参（frames）](./robot_pipeline_frames.md)
+-   [robot-pipeline 末端 TCP 位姿（帧开关）](./robot_pipeline_tcp.md)
 -   [robot-pipeline 遥操作（绝对映射 / 增量接管）](./robot_pipeline_teleop.md)
 -   [robot-pipeline 重力补偿与阻抗控制](./robot_pipeline_impedance.md)
 

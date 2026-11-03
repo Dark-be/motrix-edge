@@ -184,14 +184,53 @@ class BaseEnv:
         debug_print(self.robot.name, "HTTP 收到命令: safe_stop（急停）", "INFO")
         self.commands.put(("safe_stop", None))
 
-    def robot_set_teleop(self, enabled: bool, mode: str | None = None):
+    def robot_set_teleop(
+        self,
+        enabled: bool,
+        mode: str | None = None,
+        follow_axes=None,
+        follow_space: str | None = None,
+    ):
         """设置遥操作（``enabled``：True=遥操作 / False=程控；``mode``：映射模式）：入队，控制线程执行。
 
         ``mode`` 为 ``absolute``（缺省，主臂绝对位姿直连）或 ``delta``（**人工接管**：以接管
         瞬间的主 / 从位姿为锚点，只叠加主臂增量）——具体语义与锚点采样见 ``BaseRobot``。
         """
-        debug_print(self.robot.name, f"HTTP 收到命令: teleop enabled={bool(enabled)} mode={mode}", "INFO")
-        self.commands.put(("teleop", (bool(enabled), mode)))
+        if enabled and (follow_space is not None or follow_axes is not None):
+            self.robot.resolve_teleop_follow(follow_space, follow_axes)
+        debug_print(
+            self.robot.name,
+            f"HTTP 收到命令: teleop enabled={bool(enabled)} mode={mode}"
+            f" follow_space={follow_space} follow_axes={follow_axes}",
+            "INFO",
+        )
+        self.commands.put(("teleop", (bool(enabled), mode, follow_axes, follow_space)))
+
+    def robot_set_tcp(self, enabled: bool, offset=None):
+        """运行期切换位姿系（法兰 ↔ 工具末端）：**直接同步切换**（HTTP 线程调 ``BaseRobot.set_tcp``）。
+
+        ``offset``（3 个数，米）给定时覆盖配置的公共偏移（**运行期值**，不写回 yml，重启回落）。
+        与构造期同一套校验（``resolve_tcp``）：非法 → ``ValueError``（server 回 422，**运行位不变**）。
+        会话内不允许切（由 Edge 判：同一 episode 内 ``observations/pose`` 的语义不能前后不一致）。
+        """
+        self.robot.set_tcp(bool(enabled), offset)
+        debug_print(self.robot.name, f"HTTP 收到命令: tcp enabled={bool(enabled)} offset={offset}", "INFO")
+
+    def robot_set_gravity(self, enabled: bool, alpha: float | None = None):
+        """运行期开关重力前馈（执行臂）：**直接同步切换**（HTTP 线程调 ``BaseRobot.set_gravity``）。
+
+        ``enabled=False`` → 卸载模型（回到纯位置环）；``alpha`` 给定时覆盖配置比例（0 = 保留
+        装载但不补偿）。参数 / 限幅仍来自 ``robot.gravity``（不动标定产物）。
+
+        **为什么不像其它指令那样入队**：开关必须把「机型不支持重力前馈」**直接回给调用方**
+        （server 回 422 / ``rejected``），而经队列执行的话回执早就发完了，现场只会看到 ok 但
+        ``t_ff`` 恒为 0。因此本方法不入队：``set_gravity`` 自己就是那个判断（先校验后动状态，
+        失败零副作用）。切换后立即重注入控制模式（``control_mode`` 是采集 JSON 的元信息）。
+        会话内不允许切（由 Edge 判）。
+        """
+        self.robot.set_gravity(bool(enabled), alpha)
+        debug_print(self.robot.name, f"HTTP 收到命令: gravity enabled={bool(enabled)} alpha={alpha}", "INFO")
+        self._inject_control_layout()  # 控制模式随开关走（否则后续 episode 的元信息会漏报）
 
     def robot_capture_start(self):
         """开始一轮采集（episode 开始）：入队，由观测线程置 capturing=True。
@@ -208,6 +247,11 @@ class BaseEnv:
         """
         debug_print(self.robot.name, "HTTP 收到命令: capture/end（结束采集）", "INFO")
         self.capture_commands.put(("capture_end", None))
+
+    def robot_capture_cancel(self):
+        """取消当前采集：入队，由观测线程停止录制并丢弃本轮文件。"""
+        debug_print(self.robot.name, "HTTP 收到命令: capture/cancel（取消并丢弃本轮）", "INFO")
+        self.capture_commands.put(("capture_cancel", None))
 
     def robot_capture_sync(self, meta: dict):
         """同步采集元信息（operator / task_name / description 等）到 collector：入队。
@@ -238,8 +282,13 @@ class BaseEnv:
             "last_error": err,
             "control_hz": self.control_hz,
             "measured_hz": self.measured_hz,
-            "teleop_enabled": bool(self.robot.teleop_enabled),
-            "teleop_mode": self.robot.teleop_mode if self.robot.teleop_enabled else None,
+            # ---- 运行位（→ /v1/health）----
+            # 位姿系 / TCP 偏移：运行期可切（/v1/tcp），走 health 读回故无需另做缓存与过期
+            **self.robot.tcp_status(),
+            # 重力前馈状态：与采集 JSON 的 control 段**同源**（BaseRobot.control_layout 单点定义）
+            "gravity": self.robot.control_layout(),
+            "teleop_follow_space": self.robot.teleop_follow_space,
+            "teleop_follow_axes": list(self.robot.teleop_follow_axes),
         }
 
     @property
@@ -454,13 +503,16 @@ class BaseEnv:
                 elif cmd == "safe_stop":
                     self.robot.safe_stop()
                 elif cmd == "teleop":
-                    enabled, mode = payload
+                    enabled, mode, follow_axes, follow_space = payload
                     if not enabled:
                         self.robot.disable_teleop()
                     elif mode:
-                        self.robot.enable_teleop(mode)  # 显式模式（delta = 人工接管）
+                        self.robot.enable_teleop(mode, follow_axes, follow_space)  # 显式模式（delta = 人工接管）
                     else:
-                        self.robot.enable_teleop()  # 缺省 absolute（兼容只发 enabled 的调用方）
+                        self.robot.enable_teleop(
+                            follow_axes=follow_axes,
+                            follow_space=follow_space,
+                        )  # 缺省 absolute（兼容旧调用方）
                 else:
                     debug_print(self.robot.name, f"unknown command '{cmd}' ignored", "WARNING")
             except ValueError as exc:
@@ -492,6 +544,9 @@ class BaseEnv:
                 elif cmd == "capture_end":
                     self.capturing = False
                     self._finish_head_skip()
+                elif cmd == "capture_cancel":
+                    self.capturing = False
+                    self._cancel_capture()
                 elif cmd == "capture_sync":
                     self._collector.set_meta(payload)
                 else:
@@ -623,3 +678,11 @@ class BaseEnv:
             f"capture: 本轮未记录（主臂无有效移动，跳过 {state['skipped']} 帧）",
             "WARNING",
         )
+
+    def _cancel_capture(self) -> None:
+        """丢弃当前 episode（观测线程内调用，保持 collector 单写者）。"""
+        self._head_skip = None
+        if not self._episode_open:
+            return
+        self._episode_open = False
+        self._collector.cancel()

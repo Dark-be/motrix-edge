@@ -47,7 +47,7 @@ flowchart LR
 | 观测线程 | `OBS_HZ`（10Hz） | collector / `observation`                                          | `capture_commands` | 采集指令 → `build_observation()` → 发布 → 落盘 |
 
 指令分类固定：`robot_reset` / `robot_execute` / `robot_rollout` / `robot_safe_stop` /
-`robot_set_teleop` 入 `commands`；`robot_capture_start` / `robot_capture_end` /
+`robot_set_teleop` 入 `commands`；`robot_capture_start` / `robot_capture_end` / `robot_capture_cancel` /
 `robot_capture_sync` 入 `capture_commands`。两条队列各自只有一个消费者线程，FIFO 只保证
 **队列内**顺序（`capture sync` 先于 `capture end` 生效）；**跨队列顺序不保证**，见下。
 
@@ -58,6 +58,8 @@ flowchart LR
 -   **同一拍**内 drain 到 `capture start` + `capture end`（`capturing` 先真后假、`_episode_open`
     从未置位）→ **不产出任何文件**（静默丢弃，连空 episode 都没有）；
 -   **相邻两拍**各自生效 → **只含 1 帧**的 episode（start 那拍记 1 帧，end 在下一拍开头生效并在该拍末尾收尾）。
+-   `capture cancel` 与 `capture end` 一样在观测线程生效；若本轮已经打开 MCAP，则关闭 writer 后
+    删除该 MCAP 且不生成同名 JSON，尚未开文件时只复位本轮状态。重复取消幂等。
 
 ### 跨队列顺序（有意弱化）
 
@@ -196,10 +198,11 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 -   `stop()`：置运行位为假 → join 控制线程（2s）→ join 观测线程（6s，可能正阻塞在相机取帧，
     最长 5s）→ `robot.disconnect()`。超时未退出的线程是 daemon，随进程退出。
 -   `safe_stop` 语义不变：清空 `target_action`，`step()` 不再下发；线程与观测继续运行，可直接恢复。
--   **采集落盘边界**：`capture start/end` 都在观测拍**开头**（`_drain_capture_commands()`）生效，
+-   **采集落盘边界**：`capture start/end/cancel` 都在观测拍**开头**（`_drain_capture_commands()`）生效，
     `capture end` 使**本拍** `capturing=False` → **本拍帧不写入**，末尾 `_update_capture()` 才
     调用 `finish()`（写 footer + 元信息 JSON）；相机卡顿时 episode 落盘相应延后。与运动指令的
-    相对顺序不保证，见「跨队列顺序（有意弱化）」。
+    相对顺序不保证，见「跨队列顺序（有意弱化）」；`capture cancel` 则关闭并删除已打开的本轮文件，
+    不写元信息 JSON。
 
 ## 与 Edge 的交互
 

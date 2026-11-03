@@ -109,6 +109,8 @@ class FakeAdapter(RobotAdapter):
         # 旧假件写成属性，于是 ``getattr(adapter, "frame_set")`` 拿不到 FrameSet 的 bug 藏住了）。
         # 测试里用 ``_frame_set`` 注入；未标定 → ``None``。
         self._frame_set: FrameSet | None = None
+        # TCP 偏移（法兰系，米，逐臂）：镜像 adapter 的 ``tcp_offset_by_arm()``；空 = 非 TCP 位姿系
+        self.tcp_offsets: dict[str, np.ndarray] = {}
         self.rollout_calls: list[tuple[np.ndarray, str]] = []
         self.reset_calls = 0
         self.refuse = False
@@ -206,6 +208,10 @@ class FakeAdapter(RobotAdapter):
 
     def reset(self) -> None:
         self.reset_calls += 1
+
+    def tcp_offset_by_arm(self) -> dict[str, np.ndarray]:
+        """TCP 偏移（镜像适配器契约）：本替身默认未开启 ``robot.tcp`` → 空 dict。"""
+        return dict(self.tcp_offsets)
 
     def safe_stop(self) -> None:
         pass
@@ -1131,6 +1137,7 @@ def test_env_meta_exposes_lease_and_settle_contract():
     }
     assert meta["cartesian_dim_per_arm"] == 7
     assert meta["pose_frame"] == "fk"  # 读（位姿观测）与写（笛卡尔动作）必须同系
+    assert meta["tcp_offset"] is None  # 非 TCP 位姿系：不给偏移（帧名与数值同源）
 
     install_lease(leases, "ls_meta")
     assert service.call("env.get_env_meta")["lease"]["satisfied"] is True
@@ -1907,3 +1914,17 @@ def test_env_meta_describes_delta_frame_and_look_at(client) -> None:
     assert meta["move_to"]["input_frame"] == "world"
     assert meta["look_at"]["roll"] == 0.0 and meta["look_at"]["input_frame"] == "world"
     assert meta["object_position"]["input"] == "normalized u / v"
+
+
+def test_env_meta_reports_tcp_offset_when_reported(env) -> None:
+    """机器人开启 ``robot.tcp`` 时：自描述同时给**帧名与偏移数值**（RPent 不必猜）。
+
+    ``pose_frame`` 与 ``tcp_offset`` 同源上报：帧名说「是哪个系」，偏移说「原点离开法兰多远」，
+    两者要么都有要么都没有（见 wiki/design/robot_pipeline_tcp.md）。
+    """
+    service, _node, adapter, *_ = env
+    adapter.POSE_FRAME = "tcp"
+    adapter.tcp_offsets = {"left": np.array([0.0, 0.0, 0.1]), "right": np.array([0.0, 0.0, 0.08])}
+    meta = service.call("env.get_env_meta")
+    assert meta["pose_frame"] == "tcp"
+    assert meta["tcp_offset"] == {"left": [0.0, 0.0, 0.1], "right": [0.0, 0.0, 0.08]}

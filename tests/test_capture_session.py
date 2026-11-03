@@ -202,18 +202,78 @@ def test_capture_robot_teleop_during_observe(tmp_path):
     session.session_finish()
 
 
-def test_capture_episode_start_end_during_observe(tmp_path):
-    """观测期间 capture episode start / end：adapter.start_capture / end_capture。"""
+def test_capture_switch_commands_rejected_during_session(tmp_path):
+    """会话中 robot tcp / robot gravity → 拒绝（**离开会话才能切**），不下发 adapter。
+
+    同一会话内的观测语义（位姿系）与数据元信息（control_mode）不能前后不一致；对照
+    ``test_capture_robot_teleop_during_observe``——人工接管是会话中的正常操作，不受此限。
+    """
     adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+    replies = []
+    tcp = _REGISTRY.parse_argv(["robot", "tcp", "true"])
+    tcp.reply_to = replies.append
+    gravity = _REGISTRY.parse_argv(["robot", "gravity", "true"])
+    gravity.reply_to = replies.append
     session = CaptureSession(
         make_config(tmp_path),
-        command_source=make_signals("capture episode start", "capture episode end", "session quit"),
+        command_source=make_signals(tcp, gravity, "session quit"),
         frame_manager=FrameManager(),
         adapter=adapter,
     )
     session.session_start()
     assert session.run() == RunResult.FINISHED
-    assert adapter.capture_episodes == ["start", "end"]  # 开启一轮 → 结束一轮
+    assert [r.status for r in replies] == ["rejected", "rejected"]
+    assert [r.code for r in replies] == [ErrorCode.CONFLICT] * 2
+    assert all("quit the session first" in r.error for r in replies)
+    assert adapter.switch_calls == []
+    session.session_finish()
+
+
+def test_capture_episode_start_end_cancel_during_observe(tmp_path):
+    """观测期间 start / end / cancel 分别保存或丢弃本轮。"""
+    adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+    session = CaptureSession(
+        make_config(tmp_path),
+        command_source=make_signals(
+            "capture episode start",
+            "capture episode end",
+            "capture episode start",
+            "capture episode cancel",
+            "session quit",
+        ),
+        frame_manager=FrameManager(),
+        adapter=adapter,
+    )
+    session.session_start()
+    assert session.run() == RunResult.FINISHED
+    assert adapter.capture_episodes == ["start", "end", "start", "cancel"]
+    session.session_finish()
+
+
+def test_capture_commands_mark_status_dirty(tmp_path):
+    """采集命令落地即回调节点（episode start / end / cancel / sync）→ 节点作废状态缓存。
+
+    回归：这些命令由会话消费，节点主循环看不到；少了这个回调，「开始 / 停止录制」后
+    最多要等一整个刷新间隔才会在 GET /v1/captures 上看到新运行位。
+    """
+    adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+    dirty = []
+    session = CaptureSession(
+        make_config(tmp_path),
+        command_source=make_signals(
+            "capture episode start",
+            "capture episode end",
+            "capture episode cancel",
+            'capture sync --meta \'{"operator": "张三"}\'',
+            "session quit",
+        ),
+        frame_manager=FrameManager(),
+        adapter=adapter,
+        on_capture_status_dirty=lambda: dirty.append(None),
+    )
+    session.session_start()
+    assert session.run() == RunResult.FINISHED
+    assert len(dirty) == 4  # start / end / cancel / sync 各通知一次
     session.session_finish()
 
 

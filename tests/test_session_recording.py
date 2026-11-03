@@ -25,7 +25,7 @@ from motrix_edge.session.recording import EPISODE_ID_FORMAT, EpisodeRecorder
 
 
 class _Adapter:
-    """adapter 替身：只记录 ``start_capture`` / ``end_capture`` 的调用顺序。"""
+    """adapter 替身：只记录录制边界调用顺序。"""
 
     def __init__(self):
         self.calls: list[str] = []
@@ -35,6 +35,9 @@ class _Adapter:
 
     def end_capture(self):
         self.calls.append("end")
+
+    def cancel_capture(self):
+        self.calls.append("cancel")
 
 
 def test_start_generates_episode_id_and_advances_seq():
@@ -73,6 +76,19 @@ def test_end_without_recording_still_notifies_adapter():
     assert recorder.recording is False
 
 
+def test_cancel_notifies_adapter_and_clears_recording():
+    """取消录制会通知 adapter 丢弃文件，并清除录制位。"""
+    adapter = _Adapter()
+    recorder = EpisodeRecorder(adapter)
+    episode_id = recorder.start()
+
+    recorder.cancel()
+
+    assert adapter.calls == ["start", "cancel"]
+    assert recorder.recording is False
+    assert recorder.episode_id == episode_id
+
+
 def test_missing_adapter_raises_runtime_error():
     """未绑定适配器就开轮 / 关轮 → 明确报错（构造期不报错：绑定可能晚于会话构造）。"""
     recorder = EpisodeRecorder(None)
@@ -80,3 +96,5 @@ def test_missing_adapter_raises_runtime_error():
         recorder.start()
     with pytest.raises(RuntimeError, match="has no adapter"):
         recorder.end()
+    with pytest.raises(RuntimeError, match="has no adapter"):
+        recorder.cancel()

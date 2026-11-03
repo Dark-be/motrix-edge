@@ -52,7 +52,10 @@ from motrix_edge.adapter.http_contract import (
     FIELD_LAYOUT,
     FIELD_OK,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_FOLLOW_AXES,
     FIELD_TELEOP_MODE,
+    FIELD_TELEOP_SPACE,
+    PATH_CAPTURE_CANCEL,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_SYNC,
@@ -371,6 +374,17 @@ def test_set_teleop_forwards_to_sdk():
     assert adapter.teleop_mode == "delta"
     assert adapter._http.posts[-1] == (PATH_TELEOP, {FIELD_TELEOP_ENABLED: True, FIELD_TELEOP_MODE: "delta"})
 
+    adapter.set_teleop(True, "absolute", ["x", "y", "z", "yaw"], "pose")
+    assert adapter._http.posts[-1] == (
+        PATH_TELEOP,
+        {
+            FIELD_TELEOP_ENABLED: True,
+            FIELD_TELEOP_MODE: "absolute",
+            FIELD_TELEOP_SPACE: "pose",
+            FIELD_TELEOP_FOLLOW_AXES: ["x", "y", "z", "yaw"],
+        },
+    )
+
     adapter.set_teleop(False)
     assert adapter.teleop_enabled is False
     assert adapter.teleop_mode is None  # 关闭后不留模式
@@ -382,7 +396,7 @@ def test_set_teleop_does_not_change_local_state_when_sdk_rejects():
     adapter = _exec_adapter()
     adapter._http = _FakeHttp(status_code=500)
 
-    with pytest.raises(RuntimeError, match="HTTP 500"):
+    with pytest.raises(ValueError, match="HTTP 500"):
         adapter.set_teleop(True, "delta")
 
     assert adapter.teleop_enabled is False
@@ -513,12 +527,13 @@ def test_rollout_layout_returns_false_when_sdk_refuses_teleop():
 # ---- capture episode（采集回合控制）------------------------------------------
 
 
-def test_start_end_capture_forwards_to_sdk():
-    """start_capture / end_capture：HTTP 转发 SDK /v1/capture/start、/v1/capture/end。"""
+def test_start_end_cancel_capture_forwards_to_sdk():
+    """录制 start / end / cancel 均转发到对应 SDK 端点。"""
     adapter = _exec_adapter()
     adapter.start_capture()
     adapter.end_capture()
-    assert [p[0] for p in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END]
+    adapter.cancel_capture()
+    assert [p[0] for p in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END, PATH_CAPTURE_CANCEL]
 
 
 def test_capture_commands_raise_when_sdk_rejects():

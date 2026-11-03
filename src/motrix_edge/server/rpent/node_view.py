@@ -117,10 +117,32 @@ class EdgeNodeView:
 
     @property
     def pose_frame(self) -> str | None:
-        """位姿坐标系名（``POSE_FRAME``）；机器人不提供位姿 → ``None``。"""
+        """位姿坐标系名（机器人**上报**优先 → 适配器类常量）；机器人不提供位姿 → ``None``。
+
+        机器人的位姿系可配（``robot.tcp``，见 ``wiki/design/robot_pipeline_tcp.md``）：真实适配器上
+        ``pose_frame()`` 是**方法**（惰性查询 + 缓存），进程未上报 / 不可达 → 回退 ``POSE_FRAME``。
+        ``env.get_env_meta.pose_frame`` 就是它——agent 据此理解位姿是哪个系，不能猜。
+        """
         if self.value_dim(ActionSpace.POSE) <= 0:
             return None
-        return str(getattr(self.adapter, "POSE_FRAME", "unknown"))
+        adapter = self.adapter
+        getter = getattr(adapter, "pose_frame", None)  # 方法（真实适配器）/ 属性（假件）都认
+        value = getter() if callable(getter) else getter
+        return str(value or getattr(adapter, "POSE_FRAME", "unknown"))
+
+    @property
+    def tcp_offset(self) -> dict[str, list[float]] | None:
+        """TCP 在**法兰系**下的位置（米，逐臂）；非 TCP 位姿系 / 机器人未上报 → ``None``。
+
+        「数值 + 帧名一起给」（与 [统一坐标系与外参](../../../../wiki/design/robot_pipeline_frames.md) 同口径）：
+        调用方不必猜这段偏移算不算在内。
+        """
+        adapter = self.adapter
+        getter = getattr(adapter, "tcp_offset_by_arm", None)
+        offsets = getter() if callable(getter) else None
+        if not offsets:
+            return None
+        return {str(arm): [float(value) for value in tuple(offset)[:3]] for arm, offset in offsets.items()}
 
     def images(self) -> dict[str, tuple[int, int]]:
         """相机 → **原生分辨率**（``IMAGES``；未声明 → ``{}``）。"""

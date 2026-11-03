@@ -29,7 +29,9 @@
 - **绝对精度**：与「探针尖的世界位置」对比（``T_world_base · FK(q) · t_probe``，偏移来自产物）——
   期望 5–15 mm（含 MIT 稳态误差与探针尖对准误差）；
 - ⚠️ **只在板附近测 = 自证**：在工作区换 2–3 个区域各测一遍；
-- ⚠️ 三台相机**没有跨相机硬件同步**，请**静止**测量（运动中不同拍的同一物理点本来就不重合）。
+- ⚠️ 三台相机**没有跨相机硬件同步**，请**静止**测量（运动中不同拍的同一物理点本来就不重合）；
+- ℹ️ 开启 ``robot.tcp`` 时预览里的位姿原点在工具末端：脚本会向机器人问过位姿系后自动还原法兰再
+  比对（见 ``wiki/design/robot_pipeline_tcp.md``）。
 """
 
 from __future__ import annotations
@@ -47,7 +49,14 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from motrix_edge.geometry import pose_to_transform, transform_points  # noqa: E402
+from motrix_edge.geometry import (  # noqa: E402
+    compose,
+    invert_transform,
+    make_transform,
+    pose_to_transform,
+    transform_points,
+    transform_to_pose,
+)
 
 
 def _get(url: str, *, lease: str | None = None, params: dict | None = None) -> dict:
@@ -57,6 +66,15 @@ def _get(url: str, *, lease: str | None = None, params: dict | None = None) -> d
     headers = {} if lease is None else {"X-Lease-Id": lease}
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=5.0) as response:  # noqa: S310
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"{url} → HTTP {exc.code}: {exc.read().decode(errors='replace')}") from exc
+
+
+def _post(url: str) -> dict:
+    """本地 HTTP POST（同 ``_get``：只用标准库）；HTTP 错误直接终止并打印回执。"""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=5.0) as response:  # noqa: S310
             return json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         raise SystemExit(f"{url} → HTTP {exc.code}: {exc.read().decode(errors='replace')}") from exc
@@ -128,6 +146,19 @@ def _robot_frames(host: str, port: int) -> dict | None:
         return None
 
 
+def _robot_declaration(host: str, port: int) -> dict:
+    """机器人自描述（``POST /v1/discover`` 的 ``robot`` 块）：位姿系 / TCP 偏移从这里取。
+
+    绝对精度那一步要的是 ``T_base_flange``，所以得知道机器人现在把位姿表达在哪个系里（见
+    ``wiki/design/robot_pipeline_tcp.md``）；读不到（进程未起 / 老版本）→ 空 dict（按法兰处理）。
+    """
+    try:
+        return dict(_post(f"http://{host}:{port}/v1/discover").get("robot") or {})
+    except SystemExit as exc:
+        print(f"  （读机器人自描述失败：{exc}）")
+        return {}
+
+
 def _pose_by_arm(observation: dict) -> dict[str, list[float]]:
     """``/v1/preview`` 的 ``observation.pose``（每臂 6 维扁平）→ 按臂名的列表。"""
     pose = observation.get("pose")
@@ -138,8 +169,34 @@ def _pose_by_arm(observation: dict) -> dict[str, list[float]]:
     return {arm: values[index, :6].tolist() for index, arm in enumerate(arms)}
 
 
+def _flange_pose_by_arm(
+    observation: dict, *, pose_frame: str, tcp_offset: dict[str, list[float]]
+) -> dict[str, list[float]]:
+    """``/v1/preview`` 的每臂位姿 → **法兰系**（绝对精度比对要的就是 ``T_base_flange``）。
+
+    机器人开启 ``robot.tcp`` 时（``pose_frame == "tcp"``），预览里的位姿**原点在工具末端**，需按
+    ``T_base_flange = T_base_tcp · T_flange_tcp⁻¹`` 还原——否则探针尖会整体偏一个 TCP 偏移，看着像
+    「标定不准」。该臂没有偏移可查 → 跳过该臂（宁可跳过，不拿错系的数据当真值）。
+    """
+    poses = _pose_by_arm(observation)
+    if pose_frame != "tcp" or not poses:
+        return poses
+    identity = np.eye(3, dtype=np.float64)
+    flange: dict[str, list[float]] = {}
+    for arm, pose in poses.items():
+        offset = tcp_offset.get(arm)
+        if offset is None:
+            continue
+        matrix = compose(pose_to_transform(pose), invert_transform(make_transform(identity, offset)))
+        flange[arm] = transform_to_pose(matrix).tolist()
+    return flange
+
+
 def _probe_tip_world(frames_payload: dict, arm: str, pose_by_arm: dict[str, list[float]]) -> np.ndarray | None:
-    """探针尖的 ``world`` 位置：``T_world_base · FK(q) · t_probe``（缺任一项 → ``None``）。"""
+    """探针尖的 ``world`` 位置：``T_world_base · FK(q) · t_probe``（缺任一项 → ``None``）。
+
+    ``pose_by_arm`` 必须是**法兰系**的位姿（调用方经 :func:`_flange_pose_by_arm` 还原）。
+    """
     block = dict((frames_payload.get("arms") or {}).get(arm) or {})
     tip = block.get("probe_tip")
     base = block.get("T_world_base")
@@ -174,6 +231,11 @@ def main(argv: list[str] | None = None) -> int:
     max_values: list[float] = []
     absolute_errors: list[float] = []
     frames_payload = _robot_frames(args.robot_host or args.host, args.robot_port) if args.probe_arm else None
+    declaration = _robot_declaration(args.robot_host or args.host, args.robot_port) if args.probe_arm else {}
+    pose_frame = str(declaration.get("pose_frame") or "flange")
+    tcp_offset = dict(declaration.get("tcp_offset") or {})
+    if args.probe_arm and pose_frame != "flange":
+        print(f"ℹ 机器人位姿系 = {pose_frame}（TCP 偏移 {tcp_offset}）→ 已按 T_flange_tcp⁻¹ 还原法兰再比对")
     for round_index in range(1, args.rounds + 1):
         print(f"\n=== 第 {round_index}/{args.rounds} 个位置 ===")
         points = _query_point(args.host, args.port, args.lease, cameras)
@@ -185,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  一致性：RMS {rms * 1000:.2f} mm · 最大 {worst * 1000:.2f} mm（{len(points)} 台相机）")
         if args.probe_arm and frames_payload:
             observation = _preview(args.host, args.port, args.lease).get("observation") or {}
-            tip_world = _probe_tip_world(frames_payload, args.probe_arm, _pose_by_arm(observation))
+            poses = _flange_pose_by_arm(observation, pose_frame=pose_frame, tcp_offset=tcp_offset)
+            tip_world = _probe_tip_world(frames_payload, args.probe_arm, poses)
             if tip_world is not None:
                 reference = np.mean([np.asarray(value, dtype=np.float64) for value in points.values()], axis=0)
                 error = float(np.linalg.norm(tip_world - reference))

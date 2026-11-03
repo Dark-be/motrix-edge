@@ -164,7 +164,7 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
 3.  在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册；在 `src/config/*.yml` 配置
     `robot.type` 即按此自动匹配。
 
-机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_joint` / `cartesian`）。
+机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_joint` / `cartesian` / `tcp`）。
 **硬件接线参数**也在此段描述（现场接线不同时只改这里，无需改代码）：
 
 ```yaml
@@ -186,6 +186,24 @@ robot:
 的腕相机是 V4L2 设备节点。
 
 这些值**每台机器不同** → 写进**实际配置目录** `<根>/config/`（包内 yml 只是零现场值的示例），有两种落点（见下节）。
+
+### 末端 TCP（可选）
+
+位姿（`pose` / `pose_delta` 动作与 `observations/pose` / `pose_target` 观测）的原点可以配成**工具末端**
+（腕相机 / 探针 / 吸盘支架的实装长度），而不是法兰：
+
+```yaml
+robot:
+    tcp:
+        enabled: true # false（缺省）= 法兰原点
+        offset: [0, 0, 0.1] # TCP 在**法兰系**下的位置（米；法兰 +z 就是工具伸出方向）
+        arms: { right: { offset: [0, 0, 0.08] } } # 两臂末端不等长时逐臂覆盖
+```
+
+-   开启后「往前 5 cm」让**尖端**走 5 cm（`look_at` / `move_delta` 同样作用在尖端）；
+-   **只允许纯平移**（带旋转的 TCP 会让工具三轴与 `look_at` 的指向轴同时失真）→ 写了 `rpy` 直接报错；
+-   位姿系随 `/v1/discover` 上报（`pose_frame` / `tcp_offset`）：Edge 据此还原法兰（腕相机深度反投影）
+    并如实告诉调用方；设计与边界见 `wiki/design/robot_pipeline_tcp.md`。
 
 ## 机器档案（每台机器一份，现场值不进仓库）
 
@@ -312,6 +330,7 @@ robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 | POST | `/v1/safe_stop`      | —                                 | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
 | POST | `/v1/capture/start`  | —                                 | 开始一轮采集（episode 开始）                                                    |
 | POST | `/v1/capture/end`    | —                                 | 结束一轮采集（episode 结束）                                                    |
+| POST | `/v1/capture/cancel` | —                                 | 取消当前采集（停止并删除本轮文件，不生成 JSON）                                 |
 | POST | `/v1/capture/sync`   | `{meta: {...}}`                   | 同步采集元信息（operator / task_name 等）                                       |
 | GET  | `/v1/capture/status` | —                                 | 采集状态（运行位 / 元信息 / 数据目录 / 帧头跳过进度）                           |
 
@@ -483,13 +502,29 @@ robot:
     左 → 左、右 → 右。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
-跟随（`robot.step_rad`）；遥操作默认关闭（adapter 通讯控制中暂时均为 false）。`mode` 选映射模式：
+跟随（`robot.step_rad`）；遥操作默认关闭。HTTP 的 `mode` 仍只选择映射模式：
 
 -   `absolute`（缺省）：主臂**绝对**位姿直连从臂 target——主从同构、位姿已对齐的示教采集；
 -   `delta`（**人工接管**）：`target = slave_ref + (master_now − master_ref)`——锚点在接管后
     首拍采样（主臂读数与从臂位姿同一拍），增量恒从 0 开始，从臂不会因主从位姿差突变；关节与
     夹爪同一套增量语义。模型即将失败时人工介入：先把主臂摆到与从臂相近的位姿，再
     `POST /v1/teleop {"enabled": true, "mode": "delta"}`。
+
+主从零位差用 `robot.teleop.joint_offset`（逐关节 rad 的常量偏置）补：`absolute` 下直接体现，
+`delta` 下由锚点抵消、不进入增量。属现场值，按机器档案覆盖。
+
+跟随空间与位姿轴锁定只在 robot-pipeline 配置，不改变 Edge 的 `rollout` / `execute`：
+
+```yaml
+robot:
+    teleop:
+        follow_space: pose # joint（缺省）| pose
+        follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在 teleop 首拍的从臂位姿
+```
+
+`pose` 跟随每拍执行「主臂 FK → absolute/delta + 轴白名单 → IK」，得到的关节目标仍经
+`step_rad` 与 `set_joint()` 下发；关闭 teleop 后轴锁定立即失效。只有声明 `pose` 能力且实现同源
+FK / IK 的机器人能启用该配置，配置写错会在启动时失败。
 
 两种模式的完整语义、锚点采样时机与边界见
 [robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。
