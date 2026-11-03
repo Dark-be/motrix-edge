@@ -23,12 +23,15 @@ routes/*（HTTP 映射）→ deps.Services（本模块）→ controllers（域�
 ```
 
 controllers（``meta`` / ``preview`` / ``webrtc`` / ``rpent``）只依赖 node / bus / store，
-**不依赖 FastAPI**；机器人 / 节点 / 会话动作的唯一命令入口是 ``CommandService``（REST 动作端点与
-``/v1/commands`` 共用），租约、上传与采集元信息等资源写入由各自 controller 负责。FastAPI 只出现
-在 ``app.py``（装配 + 中间件）与 ``routes/*``（入参 / 出参映射），故本模块也不依赖它。
+**不依赖 FastAPI**；**写路径唯一入口是 ``CommandService``**（REST 端点与 ``/v1/commands``
+共用）。FastAPI 只出现在 ``app.py``（装配 + 中间件）与 ``routes/*``（入参 / 出参映射），
+故本模块也不依赖它。
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from motrix_edge.identity import Identity
 from motrix_edge.lease import LeaseManager
@@ -36,8 +39,11 @@ from motrix_edge.node import EdgeNode
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
-from motrix_edge.server.webrtc import WebRTCService
-from motrix_edge.session.upload_session import UploadSession
+from motrix_edge.server.rpent import RpentService
+from motrix_edge.upload import UploadService
+
+if TYPE_CHECKING:  # 可选依赖（--extra webrtc）：仅类型标注用，import 时不触碰 aiortc
+    from motrix_edge.server.webrtc import WebRTCService
 
 
 @dataclass
@@ -46,18 +52,19 @@ class Services:
 
     ``identity`` / ``leases`` / ``uploads`` 总是有值（缺省按 base_cfg 自建）；
     其余由调用方（``__main__`` 或测试）注入：``node`` 供只读快照，``commands`` 是
-    **唯一命令写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` /
+    **唯一写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` /
     ``rpent`` 各自对应一个协议面。
     """
 
     identity: Identity
     leases: LeaseManager
-    uploads: UploadSession
+    uploads: UploadService
     node: EdgeNode | None = None
     commands: CommandService | None = None
     meta: CaptureMetaService | None = None
     preview: PreviewService | None = None
     webrtc: WebRTCService | None = None
+    rpent: RpentService | None = None
 
 
 __all__ = ["Services"]

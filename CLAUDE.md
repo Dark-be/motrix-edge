@@ -29,7 +29,8 @@ src/motrix_edge/
 ├── command/          # 命令模型 / 注册 / 参数解析 / 派发 / CommandBus
 ├── errors.py         # 跨层 ServiceError / ErrorCode 统一词表
 ├── adapter/          # 机器人硬件适配：RobotAdapter HAL + TestRobotAdapter + 工厂
-├── session/          # 会话：BaseSession / CaptureSession / InferSession + get_session 工厂
+├── session/          # 任务会话：BaseSession 基座 + CaptureSession / InferSession + get_session 工厂
+├── upload.py         # UploadService：本地 episode 扫描 / 选择 / 打包（**不是会话**，服务层直接持有）
 ├── policy/           # 推理策略客户端：BasePolicyClient + 契约 + openpi / lerobot_act + 注册工厂
 ├── transport/        # 推理传输层：WsTransport（msgpack-over-ws）/ AsyncInferenceGrpcTransport
 ├── rtc/              # RTCManager：动作块缓存 / 三元切分（P/E/S）/ 时序平滑 / 异步预取

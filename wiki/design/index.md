@@ -13,7 +13,7 @@
 -   [机器人适配器（adapter）](./motrix_edge_adapter.md)
 -   [会话（session）](./motrix_edge_session.md)
 -   [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)
--   [上传会话（UploadSession）](./motrix_edge_upload_session.md)
+-   [上传（upload，非会话）](./motrix_edge_upload.md)
 -   [推理策略客户端（policy）](./motrix_edge_policy.md)
 -   [边缘原语接口（primitives，面向外部 agent）](./motrix_edge_primitives.md)
 -   [RPent 对接契约（RPC facade 与命名约定）](./motrix_edge_rpent_bridge.md)

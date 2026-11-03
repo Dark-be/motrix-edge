@@ -40,7 +40,7 @@ flowchart TD
 
 | 文件                       | 职责                                                                                                                       |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `app.py`                   | 应用装配：identity / 租约 / 上传会话的缺省构造、CORS 与 correlation / no-store 中间件、统一错误处理器、挂载各域 router     |
+| `app.py`                   | 应用装配：identity / 租约 / 上传服务的缺省构造、CORS 与 correlation / no-store 中间件、统一错误处理器、挂载各域 router     |
 | `schemas.py`               | 请求 / 响应 Pydantic 模型（线上形状单点）                                                                                  |
 | `deps.py`                  | `Services` 容器（router 工厂的唯一入参）                                                                                   |
 | `routes/*`                 | 按域的 HTTP 映射（health / leases / commands / uploads / captures / infers / webrtc / rpent）；不含业务逻辑、不 try/except |
@@ -52,7 +52,7 @@ flowchart TD
 | `rpent.py`                 | RPent 兼容 RPC facade（外部协议适配）                                                                                      |
 
 -   **错误处理**：各层只抛 `ServiceError` 子类（基类在顶层 `motrix_edge/errors.py`：命令层
-    `CommandError`、租约层 `LeaseError`、会话层 `UploadError`、服务层各 `*Error` —— 放顶层
+    `CommandError`、租约层 `LeaseError`、上传服务 `UploadError`、服务层各 `*Error` —— 放顶层
     各层才能继承而不反向依赖）；`app.py` 注册**一个**处理器渲染成 `{"detail": ...}`，
     故路由层没有 try/except。
 -   **路由总则**：所有 HTTP handler 一律同步 `def`（FastAPI 交给线程池），因为内部都是阻塞调用
@@ -70,7 +70,7 @@ flowchart TD
 | POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}`                                                               | Edge 级租约（Console 签发镜像）                                                                                                    | LeaseManager       |
 | GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                                                                                      | 采集会话控制（写 → `session run/quit` 命令；读 → `status.py`）                                                                     | —（命令 + 快照）   |
 | POST            | `/v1/infers` + `/v1/infers/rollout`、`/v1/infers/episode/start·end`、`/v1/infers/sync`、`/v1/infers/rtc`、`/v1/infers/config` | 推理会话控制（写 → 各条命令；读 → `status.py`）                                                                                    | —（命令 + 快照）   |
-| GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                                                                               | 本地 episode 扫描 / 选择 / 打包 + 上传队列                                                                                         | UploadSession      |
+| GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                                                                               | 本地 episode 扫描 / 选择 / 打包 + 上传队列                                                                                         | UploadService      |
 | GET             | `/v1/preview`                                                                                                                 | 最新观测预览（须租约）                                                                                                             | PreviewService     |
 | POST            | `/v1/webrtc/offer`                                                                                                            | WebRTC 推流信令（须租约）                                                                                                          | WebRTCService      |
 | GET             | `/v1/captures/meta`                                                                                                           | 采集元信息选项（前端选择列表，免租约）                                                                                             | CaptureMetaService |
@@ -205,8 +205,8 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
 
 ## /v1/uploads（本地 episode 扫描与打包）
 
-本地采集目录的 episode 扫描 / 查看 / 选择 / **打包**，由 `UploadSession` 实现（**不占**
-RobotAdapter、不进节点任务状态机）；设计与字段见 [上传会话（UploadSession）](./motrix_edge_upload_session.md)。
+本地采集目录的 episode 扫描 / 查看 / 选择 / **打包**，由 `UploadService` 实现（**不占**
+RobotAdapter、不进节点任务状态机、不是会话）；设计与字段见 [上传（upload）](./motrix_edge_upload.md)。
 
 | 方法 | 路径                 | 租约 | 说明                                                                                                                                                                               |
 | ---- | -------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -253,7 +253,6 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 | POST   | `/v1/infers/sync`          | 必需          | `capture sync`：同步采集元信息（默认 `operator=policy` / `task_name=prompt`）                                                                                                                                                                                                   |
 | POST   | `/v1/infers/rtc`           | 必需          | `infer rtc set`：运行期设置 RTC 参数（可部分；非法 / 违反交叉约束 → 400）                                                                                                                                                                                                       |
 | POST   | `/v1/infers/config`        | 必需          | `infer config set`：按**当前策略 schema** 设置配置项（含公共项端点 `host` / `port`，与其它项同一校验；未知键 / 类型不符 / 越界 / 必填为空 → 400）                                                                                                                               |
-| POST   | `/v1/infers/prompt`        | 必需          | `infer prompt`：会话内预置 / 更新文本指令（需要 prompt 的策略）                                                                                                                                                                                                                 |
 | DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                                                        |
 
 ## 状态读取（只读缓存）

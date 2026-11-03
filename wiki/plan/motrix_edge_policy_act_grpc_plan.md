@@ -59,7 +59,7 @@
         标量 + **edge 侧 letterbox 到 image_size（默认 224×224，上下留黑边）** 的 uint8
         RGB 图）；`_lerobot_features` 按 state 维度 + 相机（edge 配置 `rename_cameras` → lerobot `rename_map`）生成
 -   [x] 通用 broker 移除：删 `policy/broker.py`（当时缓存由策略自持，后统一收归 `motrix_edge.rtc`）
--   [x] `session/infer_session.py`（act 流式适配）：`BasePolicyClient` 接口不变、同步流式
+-   [x] `session/infer.py`（act 流式适配）：`BasePolicyClient` 接口不变、同步流式
         无需收线程，此阶段**无改动**；连接语义调整见下方「连接生命周期内聚 policy」
 -   [x] 测试：`tests/test_lerobot_act_client.py`（fake AsyncInference servicer，覆盖握手/
         流式/落块/reset/letterbox）+ `tests/test_policy.py`（openpi）+ 全量回归
