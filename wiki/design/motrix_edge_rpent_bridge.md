@@ -399,13 +399,15 @@ object 元信息 schema，扫描结果保留 JSON 结构、不落入 `metadata_u
 
 -   **标定**：下发一个目标、等它停稳，看回执 `final_err_m` / `final_err_rad`（或 `final_err`）的平台值
     ——这与机器人型号 / 当前姿态 / 负载有关，不要照抄别人的数值；
--   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 4 cm / 姿态 0.4 rad ≈ 23°）是**按回执
+-   **当前部署值**（`edge.yml` 的 `server.rpent.settle`：位置 4 cm / 姿态 0.4 rad ≈ 23° /
+    关节 0.06 rad ≈ 3.4°）是**按回执
     `final_err` 的实测平台值**定的，当前取偏松侧（先把整定未完成的残余误差盖住；更早还用过
     5 cm / 0.4 rad）；现场仍应按 `final_err_m` / `final_err_rad` 的平台值收敛后再收紧，
     宁可先松后紧。**其余键不必写进 yml**：`enabled`（true）/ `timeout_s`（5s）/ `max_timeout_s`（90s）/ `stall_s`（1s）/
     `stall_eps`（1e-4）/ `poll_s`（0.02s）/ `target_wait_s`（1s）/ `dwell_s`（0.5s，非标定量——
     `edge.yml` 里写同值只是为了让它显式可见）缺键即取 `rpent/settle.py` 的兜底；
--   **位置与姿态分别比容差**（`pos_tol` 比米、`rot_tol` 比弧度），不把两种量纲混进一个阈值；
+-   **各空间独立比容差**：`pos_tol` 只比末端位置米，`rot_tol` 只比末端姿态弧度，`joint_tol` 比最大
+    逐关节角误差弧度，`gripper_tol` 比归一化开合误差；不跨空间复用阈值；
 -   **连续稳定到位**：在整个 `dwell_s` 内，序号持续增加的新鲜控制采样须满足容差；
     超龄、倒序、缺失或再次超差都会中断稳定区间。`timeout_s` 包含稳定等待，禁止盲睡后报成功。
     `dwell_s=0` 仍需要一个新鲜采样，不能靠重复读取缓存帧判到位；

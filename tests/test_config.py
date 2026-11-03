@@ -53,6 +53,7 @@ def test_load_config_falls_back_without_writing(monkeypatch, tmp_path):
     assert cfg["INFO_LEVEL"] == "INFO"
     assert cfg["adapter"]["host"] == "127.0.0.1"
     assert cfg["policy"]["type"] == "lerobot-remote"
+    assert cfg["server"]["rpent"]["settle"]["joint_tol"] == 0.06
     assert not runtime_dir.exists()
 
 
