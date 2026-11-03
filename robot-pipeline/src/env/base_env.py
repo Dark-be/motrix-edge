@@ -15,12 +15,12 @@
 """BaseEnv —— 机器人运行环境（server 进程内，**控制 / 观测双线程**；只控制 robot）。
 
 职责（不碰 HTTP / 共享内存 / 契约——那些归 robot server / contract_server）：
-- **控制线程**（``HZ``，默认 30Hz）：取本拍运动指令 → ``robot.step()`` 限速接近 target
-  → ``robot.sample_state()`` 采样并缓存分离的 joint / gripper / pose 状态。
+- **控制线程**：以 ``HZ``（默认 30Hz）执行运动指令和 ``robot.step()``，同时以 ``STATE_HZ``
+  （默认 100Hz）调用 ``robot.sample_state()``，缓存分离的 joint / gripper / pose 状态。
   相机取帧与采集落盘都**不在**本线程，故相机 / 磁盘卡顿不会拖慢或中断机械臂控制。
-- **观测线程**（``OBS_HZ``，默认 10Hz = **真实取观测的频率**）：取相机帧 + 缓存状态 → 契约观测
+- **观测线程**（``OBS_HZ``，默认 30Hz = **真实取图片的频率**）：取相机帧 + 缓存状态 → 契约观测
   （``robot.standard_observation()``：融合 qpos / action / qpos_err + 位姿 + 本拍图像）→ 帧钩子 ``on_frame``
-  （server 据此发布共享内存）→ 采集落盘；两个消费方读**同一份**。
+  （server 据此发布共享内存）→ 采集落盘；状态按 100Hz、图片按 30Hz 分别写入 MCAP。
 - **命令队列**：HTTP 线程（server handler）调用 ``robot_reset`` / ``robot_execute`` /
   ``robot_rollout`` / ``robot_safe_stop`` / ``robot_set_teleop`` **只把运动指令入队**，由
   控制线程每拍取出执行；``robot_capture_*`` **只把采集指令入队**，由观测线程取出执行。
@@ -62,7 +62,8 @@ class TakeoverActiveError(RuntimeError):
 
 class BaseEnv:
     HZ = 30.0  # 运动控制频率（Hz，可修改；改小/大即调整限速节奏）
-    OBS_HZ = 10.0  # 观测频率（Hz，可修改）= **真实取观测**的节奏（取帧 / 发布 / 落盘）
+    STATE_HZ = 100.0  # 关节 / 夹爪反馈采样频率（Hz）；采样时间来自 sample_state()
+    OBS_HZ = 30.0  # 相机观测频率（Hz）；图片与状态使用各自源头时间戳
     OBS_SLOW_FRAME_S = 0.5  # 观测慢帧告警阈值（秒）：单拍 step_observe() 超时即告警
     # 连续 step 失败达到该次数 → 上报 loop_error（≈0.33s @30Hz）：单帧偶发失败只计数，
     # 持续失败（硬件 / 控制器已读不出来）必须降级，否则 Edge 看到 ok 会继续下发指令。
@@ -96,6 +97,8 @@ class BaseEnv:
         self._motion_snapshot = None
         self.commands: queue.Queue = queue.Queue()  # 运动指令（控制线程消费，≤1/HZ 生效）
         self.capture_commands: queue.Queue = queue.Queue()  # 采集指令（观测线程消费，≤1/OBS_HZ 生效）
+        # 控制线程按 STATE_HZ 采样状态；采集仍由观测线程统一写 MCAP，避免 writer 并发写入。
+        self._capture_state_queue: deque[dict] = deque(maxlen=20000)
 
         # 采集：capturing=True 时观测拍记录观测；False 时保存为一条 episode
         # collector 类型由 capture_config 里的 `type` 决定（当前支持 act_mcap，默认 mcap）
@@ -438,7 +441,9 @@ class BaseEnv:
         本线程是机械臂控制回路的唯一执行者（不碰相机 / 采集）；相机或磁盘卡顿只表现为
         观测线程丢帧（慢帧告警），机械臂仍按 HZ 稳定步进。
         """
-        interval = 1.0 / self.HZ
+        interval = 1.0 / self.STATE_HZ
+        control_interval = 1.0 / self.HZ
+        next_control = time.perf_counter()
         self.loop_alive = True
         debug_print(self.robot.name, f"env control loop started @ {self.HZ:.1f}Hz", "INFO")
         self._control_prev_t = time.perf_counter()
@@ -446,14 +451,21 @@ class BaseEnv:
             while self._running:
                 t0 = time.perf_counter()
                 try:
-                    self.step_control()
+                    now = time.perf_counter()
+                    if now >= next_control:
+                        self._drain_commands()
+                        self.robot.step()
+                        self._control_periods.append(now - self._control_prev_t)
+                        self._control_prev_t = now
+                        next_control += control_interval
+                        if now - next_control > control_interval:
+                            next_control = now + control_interval
+                    self._sample_state()
                     self._step_ok()
                 except Exception as exc:  # noqa: BLE001 单帧异常不拖垮循环
                     self._step_failed(exc)
                 now = time.perf_counter()
-                # 帧间隔（含 step + sleep 补偿，首帧仅 step 无 sleep，窗口平均可忽略）
-                self._control_periods.append(now - self._control_prev_t)
-                self._control_prev_t = now
+                # 状态采样以 STATE_HZ 运行；控制频率统计只在实际下发 step 时更新。
                 sleep = interval - (now - t0)
                 if sleep > 0:
                     time.sleep(sleep)
@@ -612,6 +624,10 @@ class BaseEnv:
         """
         self._drain_commands()
         self.robot.step()
+        self._sample_state()
+
+    def _sample_state(self):
+        """采样一拍状态并把可采集的状态快照排入 MCAP 队列。"""
         sampled_at = time.monotonic()
         state = self.robot.sample_state()
         if state is not None:
@@ -623,6 +639,8 @@ class BaseEnv:
                 "teleop": bool(self.robot.teleop_enabled),
                 "observation": self.robot.standard_observation(state),
             }
+            if self.capturing and self._head_skip is None:
+                self._capture_state_queue.append(self._motion_snapshot["observation"])
 
     def step_observe(self):
         """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 契约观测 → 帧回调 → 采集落盘。
@@ -670,10 +688,25 @@ class BaseEnv:
                 start = getattr(self._collector, "start", None)
                 if start is not None:
                     start()
-            self._collector.collect(self.standard_observation)
+            self._flush_capture_states()
+            collect_images = getattr(self._collector, "collect_images", None)
+            if collect_images is not None:
+                collect_images(self.standard_observation)
+            else:
+                self._collector.collect(self.standard_observation)
         elif self._episode_open:
+            self._flush_capture_states()
             self._episode_open = False
             self._collector.finish()  # 写 footer + 同名 JSON 元信息（文件列表不经契约上报）
+
+    def _flush_capture_states(self) -> None:
+        """在观测线程中按源头时间顺序写出 100Hz 状态队列。"""
+        collect_state = getattr(self._collector, "collect_state", None)
+        if collect_state is None:
+            self._capture_state_queue.clear()
+            return
+        while self._capture_state_queue:
+            collect_state(self._capture_state_queue.popleft())
 
     def _arm_head_skip(self) -> None:
         """``capture_start``：遥操作录制时武装「帧头跳过」（否则不启用，按原行为直接记录）。
@@ -681,6 +714,7 @@ class BaseEnv:
         基准 = **本拍的主臂读数**（``teleop_master_sample()``，与下发 target 同源）；主臂此刻
         读不到（未开启遥操作 / 主臂还没读到）→ 不武装：宁可按原行为记录，也不静默丢帧。
         """
+        self._capture_state_queue.clear()
         self._head_skip = None
         if not self._head_skip_cfg.get("enabled", True):
             return
@@ -744,6 +778,7 @@ class BaseEnv:
 
     def _cancel_capture(self) -> None:
         """丢弃当前 episode（观测线程内调用，保持 collector 单写者）。"""
+        self._capture_state_queue.clear()
         self._head_skip = None
         if not self._episode_open:
             return
