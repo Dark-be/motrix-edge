@@ -95,11 +95,12 @@ def ok_result(**data) -> CommandResult:
 META_REPLY_DEADLINE = "reply_deadline"
 
 # 命令来源（``cmd.meta``）：**仅用于可观测性**（日志 / 排障），**不作为授权依据** —— 放行与否
-# 只看租约，而租约只约束 HTTP 入口（本地 CLI 不经该门，这也是两者**唯一差异**）；
+# 只看租约，而租约只约束 HTTP / RPent 入口（本地 CLI 不经该门，这也是两者**唯一差异**）；
 # 租约本身已是最可靠的来源信号，本字段是显式记录，用来回答「这条命令是谁发的」。
 META_SOURCE = "source"
 SOURCE_CLI = "cli"  # 本地交互式 CLI
 SOURCE_HTTP = "http"  # HTTP 控制面（/v1/commands 与各 REST 端点）
+SOURCE_RPENT = "rpent"  # RPent 兼容的 RPC 面（POST /call）
 SOURCE_INTERNAL = "internal"  # 进程内直接调用（会话内部 / 测试）
 
 # 安全命令（**任何状态**都要立即被消费，含任务运行期间）：走总线旁路队列（见 ``CommandBus``），

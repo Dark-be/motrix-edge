@@ -27,8 +27,8 @@ from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
-    CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
+    TELEOP_COMMANDS,
     CommandResult,
     ok_result,
     parse_meta,
@@ -106,7 +106,7 @@ class CaptureSession(BaseSession):
                 self._execute_action(cmd)
             elif name == CMD_ROBOT_RESET:  # 复位（任务期间；adapter 可用）
                 self._reset_robot(cmd)
-            elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
+            elif name in TELEOP_COMMANDS:  # 遥操作 / 人工接管（robot teleop | teach | takeover）
                 self._set_teleop(cmd)
             elif name == CMD_CAPTURE_EPISODE_START:  # 开始一轮采集（episode 开始）
                 if self._reject_expired_control(cmd, "capture start"):

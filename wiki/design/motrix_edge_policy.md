@@ -70,6 +70,24 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
 -   `AsyncInferenceGrpcTransport`（lerobot-act 用）：建立 channel 并等 READY（`connect_timeout`
     ，默认 5s），暴露 gRPC `stub`；具体 RPC 语义由策略客户端组合。
 
+### 可选依赖（pyproject extras）
+
+两个客户端各引入一组额外第三方依赖，故以**可选面**分发（`uv sync --extra <名>`）；核心
+`import motrix_edge` **不触碰**它们（`transport/ws.py` / `transport/grpc.py` 均为惰性导入）：
+
+| 可选面    | 传输 / 客户端                               | 引入的依赖               |
+| --------- | ------------------------------------------- | ------------------------ |
+| `openpi`  | `WsTransport` + openpi                      | `websockets` / `msgpack` |
+| `lerobot` | `AsyncInferenceGrpcTransport` + lerobot-act | `grpcio` / `torch`       |
+| `all`     | 以上全部                                    | —                        |
+
+未装对应可选面时，`connect()` 在导入依赖处抛 `ModuleNotFoundError` → 该 `policy.type` 进会话
+失败，其余功能不受影响（WebRTC 同理，见
+[motrix_edge_frame_webrtc.md](motrix_edge_frame_webrtc.md)）。测试侧由 `tests/conftest.py`
+按依赖可导入性决定收集：`test_ws_transport` / `test_transport_target` / `test_infer_point` /
+`test_webrtc` / `test_lerobot_act_client` 这五个**整文件**依赖的，缺依赖时不收集；
+`tests/test_policy.py` 里只有部分用例依赖 openpi，用 `@pytest.mark.optional("openpi")` 跳过。
+
 ## 共用契约层（contract.py）
 
 只提供两样东西，**不含任何策略专属字段**：

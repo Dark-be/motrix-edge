@@ -24,12 +24,13 @@
 
 本地命令（CLI / 脚本）与 HTTP 是**同一套命令语义**（同一 ``CommandSpec``、同一消费方、同一回执），
 **唯一差异是租约**：本地 CLI 在进程内直连总线（``CommandBus``），不经过 HTTP 入口的租约门；
-HTTP（``server.CommandService``）必须先持 Edge 级活跃租约才下发。
+HTTP（``server.CommandService``）与 RPent 面必须先持 Edge 级活跃租约才下发。
 校验分层：状态机校验（互斥兜底）对所有来源生效 —— 它是**消费方语义**，不是入口权限。
 """
 
 from .config_commands import (
     _coerce_policy_config_value,
+    apply_teleop,
     get_rtc_params,
     handle_capture_meta,
     handle_infer_rtc,
@@ -44,6 +45,7 @@ from .core import (
     SOURCE_CLI,
     SOURCE_HTTP,
     SOURCE_INTERNAL,
+    SOURCE_RPENT,
     SUCCESS_STATUSES,
     Command,
     CommandBus,
@@ -83,10 +85,13 @@ from .naming import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
+    CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     LEGACY_CAPABILITIES,
+    TELEOP_COMMANDS,
     CapabilityRef,
     capability_for,
     resolve_capability,
@@ -101,5 +106,6 @@ from .params import (
     parse_rollout_mode,
     parse_teleop_mode,
     reject_legacy_action_space,
+    teleop_mode_for,
 )
 from .registry import CommandRegistry, CommandSpec, build_command_registry

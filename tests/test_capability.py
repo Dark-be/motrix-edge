@@ -24,6 +24,8 @@ from motrix_edge.command import (
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
+    CMD_ROBOT_TAKEOVER,
+    CMD_ROBOT_TEACH,
     CMD_ROBOT_TELEOP,
     LEGACY_CAPABILITIES,
     build_command_registry,
@@ -35,6 +37,9 @@ from motrix_edge.command import (
 def test_capability_is_command_words_joined_by_slashes():
     assert capability_for(CMD_ROBOT_EXECUTE) == "robot/execute"
     assert capability_for(CMD_ROBOT_TELEOP) == "robot/teleop"
+    # 遥操作语义别名：模式由命令名决定（示教 / 接管），capability 各一
+    assert capability_for(CMD_ROBOT_TEACH) == "robot/teach"
+    assert capability_for(CMD_ROBOT_TAKEOVER) == "robot/takeover"
     assert capability_for(CMD_ROBOT_ESTOP) == "robot/estop"
     assert capability_for(CMD_NODE_RESET) == "node/reset"
     assert capability_for(CMD_INFER_CONNECT) == "infer/connect"

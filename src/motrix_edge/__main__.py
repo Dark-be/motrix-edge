@@ -83,13 +83,15 @@ def _run_node(args) -> None:
         local_config = config_path("edge.yml")
         config_source = local_config if local_config.exists() else "packaged default (config/edge.yml)"
 
+    from importlib.util import find_spec
+
     from motrix_edge.lease import build_lease_manager
     from motrix_edge.node import EdgeNode
     from motrix_edge.server import create_app
     from motrix_edge.server.command import CommandService
     from motrix_edge.server.meta import CaptureMetaService
     from motrix_edge.server.preview import PreviewService
-    from motrix_edge.server.webrtc import WebRTCService
+    from motrix_edge.server.rpent import RpentService
     from motrix_edge.utils.data_handler import ENV_LOG_FILE, debug_print, file_log_enabled, set_log_level
 
     # 日志级别：**只**读 ``edge.yml`` 的 ``INFO_LEVEL``（不写 → 代码缺省 INFO），经
@@ -138,11 +140,22 @@ def _run_node(args) -> None:
     node = EdgeNode(base_cfg, command_source=bus, lease_manager=leases)
     # 命令写通道（唯一）：REST 端点与 /v1/commands 共用（见 wiki/design/motrix_edge_server.md）
     commands = CommandService(bus, leases=leases)
-    # 采集元信息选项（config/capture.yml）：与 CLI / 会话共用节点持有的那一份 store（同一把锁）
+    # 采集元信息选项（capture.yml）：与 CLI / 会话共用节点持有的那一份 store（同一把锁）
     meta = CaptureMetaService(store=node.capture_meta_store, leases=leases)
-    webrtc = WebRTCService(node, leases=leases)
+    # WebRTC 预览（可选面 ``--extra webrtc``）：未装 aiortc → 关闭该面
+    # （``/v1/webrtc/offer`` 回 501），不影响控制面 / 采集 / 推理。
+    if find_spec("aiortc") is None:
+        debug_print("EdgeNode", "WebRTC 未启用：缺可选依赖 aiortc（uv sync --extra webrtc）", "WARNING")
+        webrtc = None
+    else:
+        from motrix_edge.server.webrtc import WebRTCService  # noqa: PLC0415
+
+        webrtc = WebRTCService(node, leases=leases)
     # 观测预览服务（独立于采集 / 推理会话）：直接读 node.frame_manager 观测缓存
     preview_service = PreviewService(node, leases=leases)
+    # RPent 兼容的 RPC 面（POST /call）：外部 agent（LLM + VLA 编排）经它驱动 edge；
+    # 写 / 观测方法沿用同一套 Edge 级租约（RPent 不带头，租约 id 由服务自行解析）
+    rpent_service = RpentService(node, commands, leases=leases, base_cfg=base_cfg)
     # 注：``uploads`` 不在此传 —— ``create_app`` 缺省按 ``base_cfg.upload`` 自建（见其 docstring）。
     web = _start_web(
         create_app(
@@ -153,6 +166,7 @@ def _run_node(args) -> None:
             webrtc=webrtc,
             preview=preview_service,
             meta=meta,
+            rpent=rpent_service,
         ),
         host,
         port,

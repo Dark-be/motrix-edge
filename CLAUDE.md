@@ -10,6 +10,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 
 对现有机器统一做一个二次抽象，形成一个边缘节点提供接口给数采，推理以及真机强化学习使用，边缘节点负责收集 observation 传输给推理节点、控制硬件数采端，部署时 edge 主动向推理端请求推理。
 
+## Optional Extras
+
+策略客户端 / 服务按**引入的额外第三方依赖**分组为 pyproject 可选面：`openpi`（websockets /
+msgpack）、`lerobot`（grpcio / torch）、`webrtc`（aiortc），`all` 为聚合；不引入额外依赖的
+客户端 / 服务不设选项（如 RPent 面）。实机部署用 `uv sync --extra all`；缺可选面时测试由
+`tests/conftest.py` 处理：**整文件**依赖的（import 阶段就触碰依赖）不收集，只有部分用例依赖的用
+`@pytest.mark.optional("<面>")` 跳过；pytest 末尾会列出未收集的文件。新增可选依赖时同步四处：
+`pyproject.toml`（extras）、惰性导入点、`tests/conftest.py`、README「可选面」表。
+
 ## Directory Structure
 
 ```

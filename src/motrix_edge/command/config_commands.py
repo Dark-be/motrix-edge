@@ -45,7 +45,25 @@ from .naming import (
     CMD_INFER_PROMPT,
     CMD_INFER_RTC_SET,
 )
-from .params import parse_bool, parse_meta
+from .params import TELEOP_COMMAND_MODES, parse_bool, parse_meta, teleop_mode_for
+
+
+def apply_teleop(adapter, cmd) -> tuple[bool, str | None]:
+    """``robot teleop`` / ``robot teach`` / ``robot takeover`` 的唯一实现（node 与会话共用）。
+
+    模式：``robot teach`` → ``absolute``（示教）、``robot takeover`` → ``delta``（人工接管）
+    ——命令名固定、**不接受** ``mode`` 参数；``robot teleop`` 用可选 ``mode``（缺省 ``absolute``，
+    见 ``/v1/teleop`` 契约，保持旧调用方行为不变）。``enabled`` 必填（true/false）。
+
+    参数非法 → ``ValueError``（调用方回执 ``rejected``）；成功返回 ``(enabled, mode)`` 供回执回显。
+    """
+    # 别名命令的模式由命令名固定：显式传 mode 说明调用方误解了语义 → 明确拒绝（不静默忽略）
+    if cmd.name in TELEOP_COMMAND_MODES and str(cmd.params.get("mode") or "").strip():
+        raise ValueError(f"{cmd.name}: mode is fixed by the command name (drop the mode argument)")
+    enabled = parse_bool(cmd.params.get("enabled"))
+    mode = teleop_mode_for(cmd.name, cmd.params.get("mode"))
+    adapter.set_teleop(enabled, mode)
+    return enabled, mode
 
 
 def get_rtc_params(base_cfg) -> dict:
@@ -221,7 +239,7 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
 def handle_capture_meta(cmd, store=None) -> CommandResult:
     """处理 ``capture meta`` 命令族（list / add / edit / delete / delete-key）。
 
-    读写 ``config/capture.yml`` 的 ``meta`` 段（``CaptureMetaStore``，可拓展任意分类 →
+    读写 ``capture.yml`` 的 ``meta`` 段（``CaptureMetaStore``，可拓展任意分类 →
     选项数组）；配置级命令「任何状态可用」（与 ``infer config`` 一致），节点主循环与会话
     循环共用本函数。``store`` 缺省用默认路径，测试可注入临时 store。
     参数缺失 / 重复 / 不存在 → rejected（不崩溃）。

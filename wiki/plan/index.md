@@ -13,6 +13,7 @@
 
 ## 索引
 
+-   [RPent 对接与命名统一实施计划](./motrix_edge_rpent_bridge_plan.md)
 -   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
 -   [ACT 走 Lerobot gRPC AsyncInference + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
 -   [robot-pipeline 控制 / 观测双线程实施计划](./robot_pipeline_control_thread_plan.md)

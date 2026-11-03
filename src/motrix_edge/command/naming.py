@@ -38,7 +38,11 @@ CMD_SESSION_QUIT = "session quit"  # 退出当前会话
 CMD_ROBOT_RESET = "robot reset"  # 复位机器人（仅 adapter 可用时）
 CMD_ROBOT_ESTOP = "robot estop"  # 急停（安全停止 + 转 ERROR；全局安全命令）
 CMD_ROBOT_EXECUTE = "robot execute"  # 直接下发 raw 动作（位置参数 qpos，逗号分隔数字）
-CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作（位置参数 enabled = true/false；可选 mode = absolute|delta 人工接管）
+CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作（位置参数 enabled；可选 mode = absolute|delta）——底层命令
+CMD_ROBOT_TEACH = "robot teach"  # 示教遥操作（= robot teleop <enabled> absolute：主臂绝对读数直连从臂）
+CMD_ROBOT_TAKEOVER = "robot takeover"  # 人工接管（= robot teleop <enabled> delta：锚点增量，接管瞬间不突变）
+# 遥操作命令组：同一实现（``config_commands.apply_teleop``），模式由命令名（别名）或 ``mode`` 参数决定
+TELEOP_COMMANDS = (CMD_ROBOT_TELEOP, CMD_ROBOT_TEACH, CMD_ROBOT_TAKEOVER)
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）
