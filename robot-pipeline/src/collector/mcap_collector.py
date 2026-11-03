@@ -125,6 +125,7 @@ class ActMcapCollector:
         self._schema_img = None  # CompressedImage schema
         self._path: Path | None = None  # 当前 episode 文件路径
         self._step_count = 0  # 当前 episode 已写帧数（sequence）
+        self._message_seq = 0  # MCAP 消息序号（状态与图片共用）
         # ---- 元信息（finish 时写与 mcap 同名 JSON，描述该 mcap）----
         # 跨 episode 保留的字段（start() 时快照进新 episode）：
         self._identity: dict = {}  # 机器人身份（robot_name / robot_type），set_robot_meta() 设置
@@ -212,6 +213,7 @@ class ActMcapCollector:
         self._schema_qpos = self._writer.register_msgdef(TYPE_FLOAT64_MULTI_ARRAY, MSG_FLOAT64_MULTI_ARRAY)
         self._schema_img = self._writer.register_msgdef(TYPE_COMPRESSED_IMAGE, MSG_COMPRESSED_IMAGE)
         self._step_count = 0
+        self._message_seq = 0
         # 本轮元信息基线（finish 写同名 JSON）：created_at = 采集开始时间（ISO 本地）；
         # identity（robot_name/robot_type）与已同步字段（operator/task_name/runtime_context/...）跨
         # episode 保留，在此快照进本轮基线——采集开始前同步的信息不会因新 episode 丢失。
@@ -235,12 +237,66 @@ class ActMcapCollector:
         if self._writer is None:
             raise RuntimeError("ActMcapCollector not started; call start() first")
 
-        topics = [TOPIC_QPOS, TOPIC_ACTION] + [
-            key for key, value in standard_obs.items() if key.startswith(CAMERA_PREFIX) and value is not None
-        ]
+        self.collect_state(standard_obs)
+        self.collect_images(standard_obs)
+
+    def collect_state(self, standard_obs: dict):
+        """写入一条状态采样（目标频率通常为 100Hz）。"""
+        if self._writer is None:
+            raise RuntimeError("ActMcapCollector not started; call start() first")
         timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
         if not isinstance(timestamps, Mapping):
             raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
+        times = self._resolve_times(standard_obs, (TOPIC_QPOS, TOPIC_ACTION), timestamps)
+        earliest, latest = min(times.values()), max(times.values())
+        self._first_ts_ns = earliest if self._first_ts_ns is None else min(self._first_ts_ns, earliest)
+        self._last_ts_ns = latest if self._last_ts_ns is None else max(self._last_ts_ns, latest)
+        qpos = np.asarray(standard_obs[KEY_QPOS], dtype=np.float64).tolist()
+        action = np.asarray(standard_obs[KEY_ACTION], dtype=np.float64).tolist()
+        seq = self._message_seq
+        self._message_seq += 1
+        for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
+            ts_ns = times[topic]
+            self._writer.write_message(
+                topic=topic, schema=self._schema_qpos,
+                message={"layout": {"dim": [], "data_offset": 0}, "data": data},
+                log_time=ts_ns, publish_time=ts_ns, sequence=seq,
+            )
+        self._step_count += 1
+
+    def collect_images(self, standard_obs: dict):
+        """写入一拍图片（目标频率通常为 30Hz）。"""
+        if self._writer is None:
+            raise RuntimeError("ActMcapCollector not started; call start() first")
+        image_topics = [
+            key for key, value in standard_obs.items() if key.startswith(CAMERA_PREFIX) and value is not None
+        ]
+        if not image_topics:
+            return
+        timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
+        if not isinstance(timestamps, Mapping):
+            raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
+        times = self._resolve_times(standard_obs, image_topics, timestamps)
+        self._first_ts_ns = (
+            min(times.values()) if self._first_ts_ns is None else min(self._first_ts_ns, *times.values())
+        )
+        self._last_ts_ns = (
+            max(times.values()) if self._last_ts_ns is None else max(self._last_ts_ns, *times.values())
+        )
+        seq = self._message_seq
+        self._message_seq += 1
+        for key in image_topics:
+            ts_ns = times[key]
+            sec, nanosec = divmod(ts_ns, 1_000_000_000)
+            self._writer.write_message(
+                topic=f"{TOPIC_IMAGE_PREFIX}{key[len(CAMERA_PREFIX):]}", schema=self._schema_img,
+                message={"header": {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": ""},
+                         "format": "jpeg", "data": self._image_to_jpeg(standard_obs[key])},
+                log_time=ts_ns, publish_time=ts_ns, sequence=seq,
+            )
+
+    def _resolve_times(self, standard_obs, topics, timestamps):
+        """Resolve per-topic timestamps with the legacy frame-time fallback."""
         fallback_ns = None
         times = {}
         for topic in topics:
@@ -256,46 +312,7 @@ class ActMcapCollector:
                     if not 0 <= fallback_ns < 2**64:
                         raise ValueError("invalid fallback timestamp")
                 times[topic] = fallback_ns
-        earliest, latest = min(times.values()), max(times.values())
-        self._first_ts_ns = earliest if self._first_ts_ns is None else min(self._first_ts_ns, earliest)
-        self._last_ts_ns = latest if self._last_ts_ns is None else max(self._last_ts_ns, latest)
-        qpos = np.asarray(standard_obs[KEY_QPOS], dtype=np.float64).tolist()
-        action = np.asarray(standard_obs[KEY_ACTION], dtype=np.float64).tolist()
-        seq = self._step_count
-        self._step_count += 1
-
-        # qpos（状态向量）/ action（同维同布局的目标向量）：std_msgs/msg/Float64MultiArray
-        for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
-            ts_ns = times[topic]
-            self._writer.write_message(
-                topic=topic,
-                schema=self._schema_qpos,
-                message={"layout": {"dim": [], "data_offset": 0}, "data": data},
-                log_time=ts_ns,
-                publish_time=ts_ns,
-                sequence=seq,
-            )
-        # images：每相机一个 topic，sensor_msgs/msg/CompressedImage（jpeg）
-        for key, val in standard_obs.items():
-            if key.startswith(CAMERA_PREFIX) and val is not None:
-                cam_name = key[len(CAMERA_PREFIX) :]
-                ts_ns = times[key]
-                sec, nanosec = divmod(ts_ns, 1_000_000_000)
-                self._writer.write_message(
-                    topic=f"{TOPIC_IMAGE_PREFIX}{cam_name}",
-                    schema=self._schema_img,
-                    message={
-                        "header": {
-                            "stamp": {"sec": sec, "nanosec": nanosec},
-                            "frame_id": "",
-                        },
-                        "format": "jpeg",
-                        "data": self._image_to_jpeg(val),
-                    },
-                    log_time=ts_ns,
-                    publish_time=ts_ns,
-                    sequence=seq,
-                )
+        return times
 
     def finish(self) -> Path | None:
         """结束当前 episode：写入 MCAP footer、写同名 JSON 元信息，返回 mcap 文件路径。
