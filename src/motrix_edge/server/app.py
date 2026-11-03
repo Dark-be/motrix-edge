@@ -30,9 +30,9 @@ health / preview / WebRTC 信令。仅中间件（correlation / no-store）用 `
 ``{"detail": ..., "code": ...}``。
 
 信任边界（当前实现）：
-  - 飞书认证未启用时 CORS 全放开；启用时必须配置明确 origin，并使用 HttpOnly 登录 Cookie；
-  - 飞书认证只加固人工采集的 ``capture sync`` 身份，其他受控操作仍只凭 Console 下发的
-    ``X-Lease-Id`` 本地镜像校验，无设备认证；
+  - 分布式部署由固定 Console 持有飞书 Cookie，并对 ``capture sync`` 的身份 / body 作 HMAC 签名；
+    Edge 校验时间窗、nonce 和租约主体；单机调试仍可选 Edge 本地 OAuth；
+  - 其他受控操作仍只凭 Console 下发的 ``X-Lease-Id`` 本地镜像校验；
   故生产部署仍须使用 TLS，并按需在网关统一保护其余控制端点。
 """
 
@@ -53,6 +53,7 @@ from motrix_edge.server.deps import Services
 from motrix_edge.server.depth import DepthService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
+from motrix_edge.server.proxy_auth import ProxyAuthError, ProxyIdentityVerifier, build_proxy_identity_verifier
 from motrix_edge.server.routes import build_routers
 from motrix_edge.server.rpent import RpentService
 from motrix_edge.upload import UploadService
@@ -91,6 +92,7 @@ def create_app(
     meta: CaptureMetaService | None = None,
     rpent: RpentService | None = None,
     auth: AuthService | None = None,
+    proxy_auth: ProxyIdentityVerifier | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
@@ -116,6 +118,8 @@ def create_app(
            未注入时该端点回 ``ok=false`` 信封。
     auth: 可选 ``AuthService``；未注入时按 ``base_cfg.auth.feishu`` 构建，配置关闭则保留
           原有匿名采集元信息同步行为。
+    proxy_auth: 可选 ``ProxyIdentityVerifier``；未注入时按 ``base_cfg.auth.console_proxy`` 构建，
+                启用后 ``capture sync`` 必须带中心 Console 的有效签名。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
@@ -124,6 +128,7 @@ def create_app(
     uploads = uploads or UploadService(base_cfg)
 
     auth = auth or build_auth_service(base_cfg, lease_manager)
+    proxy_auth = proxy_auth or build_proxy_identity_verifier(base_cfg, lease_manager)
     services = Services(
         identity=identity,
         leases=lease_manager,
@@ -136,6 +141,7 @@ def create_app(
         webrtc=webrtc,
         rpent=rpent,
         auth=auth,
+        proxy_auth=proxy_auth,
     )
 
     app = FastAPI(title="MotrixEdge", version=get_package_version())
@@ -149,6 +155,28 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _console_identity_middleware(request: Request, call_next):
+        """分布式部署：采集身份只接受中心 Console 对原始请求体的签名。"""
+        if proxy_auth is not None and request.url.path == "/v1/captures/sync":
+            target = request.url.path
+            if request.url.query:
+                target = f"{target}?{request.url.query}"
+            try:
+                request.state.proxy_identity = proxy_auth.verify(
+                    method=request.method,
+                    target=target,
+                    body=await request.body(),
+                    headers=request.headers,
+                )
+            except ProxyAuthError as exc:
+                code = exc.code
+                return JSONResponse(
+                    status_code=_HTTP_STATUS.get(code, 500),
+                    content={"detail": str(exc), "code": getattr(code, "value", str(code))},
+                )
+        return await call_next(request)
 
     @app.middleware("http")
     async def _correlation_middleware(request: Request, call_next):

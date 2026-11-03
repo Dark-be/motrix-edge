@@ -15,8 +15,8 @@
 > **不自行计算过期**。对外时间字段（`expires_at` / `renewed_at`）统一以北京时间
 > （`Asia/Shanghai`，+08:00）序列化，供展示 / 倒计时。
 
-> **前端暂代 Console**：Console Backend 尚未接入前，`frontend/edge-console` 的「租约编辑
-> 生成栏」暂代 Console 生成 / 续约 / 撤销租约（见「前端暂代 Console」）。
+> **Console 权威**：`console/` 的 Node BFF 完成登录与 Edge 白名单代理；浏览器租约编辑栏在已认证
+> Session 中生成 / 续约 / 撤销租约，Edge 只保存并校验镜像。
 
 ## 目标与原则
 
@@ -112,10 +112,9 @@ lease 信息暂包括：
 `GET /v1/preview`、`POST /v1/webrtc/offer`、`POST /v1/commands`（全部）——须携带匹配的
 `X-Lease-Id`，Edge 经 `LeaseManager.require` 校验；仅 `ACTIVE` 且未过期放行。
 
-## 前端暂代 Console（测试占位）
+## Console 租约编辑
 
-Console Backend 尚未接入时，`frontend/edge-console` 的**租约编辑生成栏**暂代 Console 生成 /
-管理租约（Edge 自身不生成租约）：
+`console/` 的**租约编辑生成栏**在中心登录会话中生成 / 管理租约（Edge 自身不生成租约）：
 
 -   填写部分字段（`lease_id` / `edge_id` / `holder_subject_id` / `purpose` / `state`）与
     **持续时间**，页面实时**提示预期过期时间**（= 当前时间 + 持续时间），提交

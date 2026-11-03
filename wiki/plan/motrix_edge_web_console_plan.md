@@ -1,29 +1,25 @@
 # Edge Web Console（前端）实施计划
 
-> **状态**：**前端源码不在本仓库**（`frontend/` 未入库）——master 已提供本计划依赖的只读契约
+> **状态**：Console 已以 `console/` 正式子项目纳入本仓库——master 已提供本计划依赖的只读契约
 > （health / leases / captures / preview / webrtc，以及 `capture_status`、`POST /v1/uploads/pack`）；
 > TODO 里未勾的实现项属控制台仓库，不代表后端缺接口。
 
-> **位置比例配套状态**：本地后端已支持 `pose_position_scale`、状态与入队配置回显；
-> 独立前端的比例输入、共享/逐臂编辑仍需在控制台仓库实施。本仓库未验证控制台构建与联调。
+> **位置比例配套状态**：后端与 Console 都已支持 `pose_position_scale`、状态与入队配置回显。
 > 初始姿态通过关节遥操作建立并跟踪到位，不提供手动摆动从臂后的实测重锚定。
 
 ## 摘要
 
 基于 [Edge Web Console（前端）](../design/motrix_edge_web_console.md)：Vite + React + TS +
-Tailwind 的浏览器测试控制台，消费现有 Edge HTTP API（health / leases / captures / preview /
-webrtc）。纯前端、零后端改动。功能完整落地后删除本文档并更新本索引。
+Tailwind 的浏览器控制台，Node BFF 负责飞书登录、设备白名单和 Edge API 代理。功能完整落地后删除本文档并更新本索引。
 
-> **范围说明**：本计划交付**设计文档与索引登记**（已完成）；前端实现由**控制台仓库**承担——本仓库的
-> `frontend/edge-console/` 只是本机工作副本（未入库），下文 TODO 的路径按该目录书写。所以 TODO 里
-> 未勾的项**不代表后端缺接口**，只表示控制台实现状态不随本仓库跟踪。
+> **范围说明**：Console UI 与 Node BFF 均在本仓库 `console/` 中维护；TODO 反映当前子项目实现状态。
 
 ## TODO
 
 -   [x] `wiki/design/motrix_edge_web_console.md`：设计文档（拓扑 / 布局 / 契约要点）
--   [ ] `frontend/edge-console/`：Vite + React + TS + Tailwind(v4) 工程骨架（package.json /
+-   [ ] `console/`：Vite + React + TS + Tailwind(v4) 工程骨架（package.json /
         vite.config / tsconfig / index.html / main.tsx / index.css）
--   [ ] `frontend/edge-console/src/api.ts` + `.../types.ts`：API client（`X-Lease-Id` 注入、错误 `{status, detail}` 解析）
+-   [ ] `console/src/api.ts` + `.../types.ts`：API client（`X-Lease-Id` 注入、错误 `{status, detail}` 解析）
     -   契约类型（health / adapters / leases / captures / preview / webrtc）
 -   [ ] Lease 管理：`useLease`（激活 / 续租 / 释放 / 自动续租定时器 / 到期倒计时）
 -   [ ] Adapter 信息：`GET /v1/adapters` 展示已注册能力，`GET /v1/health` 展示节点当前绑定的

@@ -41,6 +41,7 @@ from motrix_edge.server.command import CommandService
 from motrix_edge.server.depth import DepthService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
+from motrix_edge.server.proxy_auth import ProxyIdentityVerifier
 from motrix_edge.server.rpent import RpentService
 from motrix_edge.upload import UploadService
 
@@ -69,6 +70,7 @@ class Services:
     webrtc: WebRTCService | None = None
     rpent: RpentService | None = None
     auth: AuthService | None = None
+    proxy_auth: ProxyIdentityVerifier | None = None
 
 
 __all__ = ["Services"]

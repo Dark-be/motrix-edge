@@ -49,6 +49,7 @@ flowchart TD
 | `command.py`               | **HTTP 命令写通道** `CommandService`：`CommandDispatcher`（与 CLI 共用）+ 租约门 + capability / 回执映射                   |
 | `meta.py`                  | 采集元信息选项（`CaptureMetaService`，直连 `CaptureMetaStore`；配置级、有意不经总线）                                      |
 | `auth.py`                  | 可选飞书 OAuth、登录会话和可信采集员身份绑定                                                                               |
+| `proxy_auth.py`            | 中心 Console HMAC 身份签名验证、时间窗 / nonce 防重放与租约主体绑定                                                        |
 | `preview.py` / `webrtc.py` | 观测预览 / WebRTC 推流（各自协议面，不依赖 FastAPI）                                                                       |
 | `rpent.py`                 | RPent 兼容 RPC facade（外部协议适配）                                                                                      |
 
@@ -78,7 +79,7 @@ flowchart TD
 | GET             | `/v1/depth`                                                                                                                          | 像素深度查询（归一化坐标 → 米；须租约）                                                                                            | DepthService       |
 | POST            | `/v1/webrtc/offer`                                                                                                                   | WebRTC 推流信令（须租约）                                                                                                          | WebRTCService      |
 | GET             | `/v1/captures/meta`                                                                                                                  | 采集元信息选项（前端选择列表，免租约）                                                                                             | CaptureMetaService |
-| POST            | `/v1/captures/sync`                                                                                                                  | 同步采集元信息到机器人进程；启用飞书认证时注入可信采集员并校验租约主体                                                             | —（认证 + 命令）   |
+| POST            | `/v1/captures/sync`                                                                                                                  | 同步采集元信息；分布式部署验证 Console 签名并注入可信采集员，单机调试可用本地 OAuth                                                | —（认证 + 命令）   |
 | POST            | `/v1/infers/connect`                                                                                                                 | 启动异步预热（infer connect；立即回执）                                                                                            | —（命令）          |
 | POST            | `/call`                                                                                                                              | **RPent 兼容的 RPC 面**（外部 agent；`env.*` 子集，免租约白名单见下）                                                              | RpentService       |
 | GET             | `/v1/rpent`                                                                                                                          | RPent 面自省：已实现方法 + 租约解析状态（免租约）                                                                                  | RpentService       |
