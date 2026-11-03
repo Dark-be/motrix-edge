@@ -37,6 +37,7 @@ from motrix_edge.identity import Identity
 from motrix_edge.lease import LeaseManager
 from motrix_edge.node import EdgeNode
 from motrix_edge.server.command import CommandService
+from motrix_edge.server.depth import DepthService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.rpent import RpentService
@@ -52,8 +53,8 @@ class Services:
 
     ``identity`` / ``leases`` / ``uploads`` 总是有值（缺省按 base_cfg 自建）；
     其余由调用方（``__main__`` 或测试）注入：``node`` 供只读快照，``commands`` 是
-    **唯一写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``webrtc`` /
-    ``rpent`` 各自对应一个协议面。
+    **唯一写通道**，``meta`` 供采集元信息选项（直连 store），``preview`` / ``depth`` /
+    ``webrtc`` / ``rpent`` 各自对应一个协议面。
     """
 
     identity: Identity
@@ -63,6 +64,7 @@ class Services:
     commands: CommandService | None = None
     meta: CaptureMetaService | None = None
     preview: PreviewService | None = None
+    depth: DepthService | None = None
     webrtc: WebRTCService | None = None
     rpent: RpentService | None = None
 

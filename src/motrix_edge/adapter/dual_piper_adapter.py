@@ -80,6 +80,8 @@ class DualPiperAdapter(HttpShmAdapter):
         "cam_left_wrist": (640, 480),
         "cam_right_wrist": (640, 480),
     }
+    # 具备深度的相机（= robot-pipeline 的 ``DualPiperRobot.DEPTH_CAMERAS``：三路 RealSense 均有）
+    DEPTH_CAMERAS: tuple[str, ...] = ("cam_head", "cam_left_wrist", "cam_right_wrist")
 
     CAPABILITIES: dict[AdapterCapability, bool] = {
         AdapterCapability.CAPTURE: True,

@@ -29,6 +29,8 @@ _CONFIG_DIR = Path(__file__).resolve().parents[1] / "robot-pipeline" / "src" / "
 _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
 # 需要「帧头跳过」配置的机型（遥操作系统；其余机型保留代码缺省 HEAD_SKIP_DEFAULTS）
 _HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml")
+# 声明深度观测的机型（见 wiki/design/robot_pipeline_depth.md）
+_DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
 
 
 def _load(name: str) -> dict:
@@ -62,6 +64,23 @@ def test_head_skip_block_shape(name):
     assert block["enabled"] is True, f"{name} 的 skip_until_motion.enabled 应为 true"
     assert 0 < float(block["joint_eps"]) < 1, f"{name} 的 joint_eps 应落在 (0, 1) rad"
     assert 0 < float(block["gripper_eps"]) < 1, f"{name} 的 gripper_eps 应落在 (0, 1)"
+
+
+@pytest.mark.parametrize("name", _DEPTH_CONFIGS)
+def test_depth_block_shape(name):
+    """有深度相机的机型显式带 ``robot.depth``：``enabled`` 是 bool、``cameras`` 是列表。
+
+    相机名是否合法（必须属于该机型的 ``DEPTH_CAMERAS``）在启动时由
+    ``BaseRobot._resolve_depth_cameras()`` 报错——这里只钉形状，避免配置写坏（如同款 YAML
+    缩进事故）时 CI 发现不了。
+    """
+    block = _load(name)["robot"].get("depth")
+    assert isinstance(block, dict), f"{name} 缺少 robot.depth"
+    assert set(block) <= {"enabled", "cameras"}, f"{name} 的 robot.depth 有未知键：{set(block)}"
+    assert isinstance(block["enabled"], bool), f"{name} 的 robot.depth.enabled 应为 bool"
+    cameras = block.get("cameras")
+    assert isinstance(cameras, list), f"{name} 的 robot.depth.cameras 应为列表（空 = 全部具备深度的相机）"
+    assert all(isinstance(camera, str) and camera for camera in cameras), f"{name} 的 cameras 含空项"
 
 
 def _registered_robot_types() -> set[str]:

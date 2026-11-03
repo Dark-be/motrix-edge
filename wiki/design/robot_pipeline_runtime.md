@@ -77,13 +77,13 @@ flowchart LR
 
 ## 观测组装（单点定义在 BaseRobot）
 
-`BaseRobot` 持有观测键常量（`KEY_QPOS` / `CAMERA_PREFIX` / `KEY_TIMESTAMP`）与两个**取数
+`BaseRobot` 持有观测键常量（`KEY_QPOS` / `CAMERA_PREFIX` / `DEPTH_PREFIX` / `KEY_TIMESTAMP`）与两个**取数
 钩子**（子类实现，返回原始数据，不含契约键 / 时间戳）：
 
-| 钩子                       | 实现方       | 取数内容                                  | 所属线程 |
-| -------------------------- | ------------ | ----------------------------------------- | -------- |
-| `get_observation_qpos()`   | 各机器人子类 | 控制器读出的扁平 qpos                     | 控制线程 |
-| `get_observation_images()` | 各机器人子类 | 各相机 raw RGB 帧（顺序 = `IMAGE_NAMES`） | 观测线程 |
+| 钩子                       | 实现方       | 取数内容                                                     | 所属线程 |
+| -------------------------- | ------------ | ------------------------------------------------------------ | -------- |
+| `get_observation_qpos()`   | 各机器人子类 | 控制器读出的扁平 qpos                                        | 控制线程 |
+| `get_observation_frames()` | 各机器人子类 | 各相机**本拍**帧（顺序 = `IMAGE_NAMES`；彩色恒有，深度可选） | 观测线程 |
 
 在钩子之上，`BaseRobot` 提供按线程划分的入口：
 
@@ -91,15 +91,17 @@ flowchart LR
     结果**缓存**进 `motion_state`（机械臂侧状态快照，**不含帧时刻**）；机器人提供位姿时
     （`get_observation_pose()` 非 None）同拍把 `observations/pose` 一并放进快照——位姿与
     qpos **同拍**，下游不会读到错拍的组合。
--   `capture_images()`（观测线程）：调 `get_observation_images()`，组装为
-    `observations/images/<cam_name>`。
+-   `capture_frames()`（观测线程）：调 `get_observation_frames()`，组装为
+    `observations/images/<cam_name>`（恒有）与 `observations/depth/<cam_name>`（仅**生效的
+    深度相机**且本拍确实拿到深度时）——深度与彩色**同拍同源**（同一次取帧，见
+    [深度观测](./robot_pipeline_depth.md)）。
 -   `build_observation()`（观测线程）：`motion_state` + 本拍相机帧，并写入帧时刻 `timestamp`
     （**本线程打点**，观测拍取帧之前）；`motion_state` 为空（控制线程尚未采到第一拍）时返回
     `None`，该拍不出观测，下一拍重试。
--   `get_observation()`（单线程脚本 / 调试）：`sample_qpos()` + `capture_images()` 现场取整帧
+-   `get_observation()`（单线程脚本 / 调试）：`sample_qpos()` + `capture_frames()` 现场取整帧
     （同样在取帧前打点 `timestamp`）。
 
-⚠️ 相机取帧会阻塞，**控制线程不得调用取相机的方法**（`capture_images` / `get_observation` /
+⚠️ 相机取帧会阻塞，**控制线程不得调用取相机的方法**（`capture_frames` / `get_observation` /
 `build_observation`）；机械臂读取只在控制线程，观测线程只读 `motion_state` 快照。
 
 ⚠️ 观测里的 `timestamp` 由**观测线程**在 `build_observation()` 打点（**观测拍取帧之前**的时刻），

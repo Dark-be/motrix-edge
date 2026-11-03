@@ -22,19 +22,22 @@
 
 env（BaseEnv）只控制 robot：控制线程 30Hz 限速步进 + 观测线程取帧发布、状态切换、接收
 控制方法（robot_reset / robot_execute ...）。本模块把 /v1 指令桥接到 env，并在每拍回调
-（env.on_frame，由 env 观测线程触发）中读取 env 保留的观测副本（= 控制线程采样的机械臂
-状态 + 本拍相机帧）组装 standard_obs、写入共享内存、缓存供 /observe 调试。
+（env.on_frame，由 env 观测线程触发）中把 env 交来的**契约观测**
+（= ``robot.standard_observation()``：融合 qpos / action / qpos_err + 位姿 + 本拍相机帧）写入
+共享内存、缓存供 /observe 调试——**不自己拼状态向量**（采集器落盘读的也是同一份）。
 
 端点（前缀 /v1）:
     POST /v1/discover      自描述探活
     GET  /v1/health        {ok, detail}
+    GET  /v1/cameras       相机静态元数据（尺寸 / 彩色内参 / 深度比例）
     POST /v1/reset         复位到 home（非阻塞）
     POST /v1/execute       raw 动作 {action}
     POST /v1/rollout       推理动作 {action}（**人工接管中 → 409**）
-    POST /v1/teleop        遥操作 {enabled: bool, mode?: absolute|delta}
+    POST /v1/teleop        遥操作 {enabled, mode?, follow_space?, follow_axes?, pose_position_scale?}
     POST /v1/safe_stop     急停
     POST /v1/capture/start 开始一轮采集（episode 开始）
     POST /v1/capture/end   结束一轮采集（episode 结束）
+    POST /v1/capture/cancel 取消当前采集（停止并丢弃本轮文件）
     POST /v1/capture/sync  同步采集元信息 {meta}（采集员 / 任务名等）
     GET  /v1/capture/status {running, meta, data_dir}
 
@@ -59,26 +62,46 @@ from config import get_log_dir
 from env.base_env import TakeoverActiveError
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from robot.calibration.store import load_frames
 from utils.data_handler import debug_print, file_log_enabled
 from utils.logging import uvicorn_log_config
 
-from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_POSE, KEY_POSE_TARGET, KEY_QPOS
+from motrix_edge.adapter.base import (
+    CAMERA_PREFIX,
+    DEPTH_PREFIX,
+    KEY_ACTION,
+    KEY_POSE,
+    KEY_POSE_ACTION,
+    KEY_QPOS,
+    KEY_QPOS_ERR,
+)
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
     FIELD_ACTION_DIM,
     FIELD_ACTION_DIMS,
     FIELD_ACTION_LAYOUTS,
+    FIELD_ALIGNED_TO_COLOR,
+    FIELD_ARM,
+    FIELD_CAMERAS,
     FIELD_CAPABILITIES,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
+    FIELD_DEPTH,
+    FIELD_DEPTH_SCALE,
     FIELD_DETAIL,
     FIELD_ENDPOINT,
+    FIELD_FRAMES,
+    FIELD_GRAVITY,
     FIELD_HEAD_SKIP,
+    FIELD_HEIGHT,
+    FIELD_INTRINSICS,
     FIELD_MEASURED_HZ,
     FIELD_META,
+    FIELD_MOUNT,
     FIELD_NAME,
     FIELD_OBSERVATION_KEYS,
     FIELD_OK,
+    FIELD_POSE_FRAME,
     FIELD_ROBOT,
     FIELD_ROBOT_MODEL_ID,
     FIELD_ROBOT_MODEL_VERSION,
@@ -87,21 +110,32 @@ from motrix_edge.adapter.http_contract import (
     FIELD_STATE_ARMS,
     FIELD_STATUS,
     FIELD_SUPPORTED_ADAPTERS,
+    FIELD_TCP_OFFSET,
+    FIELD_TELEOP_ACTIVE_AXES,
+    FIELD_TELEOP_ACTIVE_SCALE,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_FOLLOW_SPACE,
     FIELD_TELEOP_MODE,
     FIELD_TYPE,
+    FIELD_WIDTH,
+    INTRINSICS_KEYS,
+    PATH_CAMERAS,
+    PATH_CAPTURE_CANCEL,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
     PATH_CAPTURE_SYNC,
     PATH_DISCOVER,
     PATH_EXECUTE,
+    PATH_GRAVITY,
     PATH_HEALTH,
     PATH_RESET,
     PATH_ROLLOUT,
     PATH_SAFE_STOP,
+    PATH_TCP,
     PATH_TELEOP,
     TELEOP_MODES,
+    VALUE_MOUNT_FIXED,
     VALUE_STATUS_ACCEPTED,
 )
 from motrix_edge.adapter.shm_contract import ObsShmWriter
@@ -122,7 +156,7 @@ def _robot_name(robot) -> str:
 
 
 def _robot_action_dims(robot) -> dict[str, int]:
-    """各**已声明**动作空间的维度（joint / pose / gripper）——机器人自己算（``action_dims()``）。"""
+    """各已声明绝对 / 增量动作空间的维度——机器人自己算（``action_dims()``）。"""
     action_dims = getattr(robot, "action_dims", None)
     if callable(action_dims):
         return {str(key): int(value) for key, value in action_dims().items()}
@@ -151,17 +185,13 @@ def _robot_state_arms(robot) -> list[str]:
 
 
 def _robot_state_dim(robot) -> int:
-    """状态向量（``observations/qpos`` / ``action``）宽度：每臂「值 + 夹爪」× 臂数（双臂 14）。
-
-    值段当前是关节角（``STATE_SPACE = joint``）；机器人整体切位姿时维度不变、语义由
-    ``state_layout()`` 自描述（采集 JSON 的 ``state_space`` / ``state_dims``）。
-    """
+    """采集边界 ``observations/qpos`` / ``action`` 的融合维度。"""
     return int(robot.state_vector_dim())
 
 
 def _robot_pose_dim(robot) -> int:
     """位姿区宽度（每臂 xyz + rpy）；0 = 本机不提供位姿（不占位姿区）。"""
-    return int(getattr(robot, "POSE", 0) or 0)
+    return int(robot.pose_dim() or 0)
 
 
 def _robot_image_names(robot) -> list[str]:
@@ -174,12 +204,52 @@ def _robot_image_names(robot) -> list[str]:
     return []
 
 
+def _robot_depth_names(robot) -> list[str]:
+    """机器人**生效**的深度相机名（顺序 = 深度流在共享内存里的顺序）。
+
+    取机器人的 ``depth_camera_names()``（配置开关 ∩ 具备深度的相机）——无深度 / 未实现的
+    替身机器人 → 空列表（不占深度区）。
+    """
+    names = getattr(robot, "depth_camera_names", None)
+    if callable(names):
+        return [str(name) for name in names()]
+    return []
+
+
 def _robot_observation_keys(robot) -> list[str]:
-    """机器人实际发布的 standard_obs 键（discover 自描述与 SHM publisher 共用口径）。"""
-    keys = [KEY_QPOS, KEY_ACTION]
+    """机器人实际发布的 standard_obs 键（discover 与 SHM publisher 共用口径）。"""
+    keys = [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION]
     if _robot_pose_dim(robot) > 0:
-        keys.append(KEY_POSE)
-    return keys + [f"{CAMERA_PREFIX}{name}" for name in _robot_image_names(robot)]
+        keys.extend((KEY_POSE, KEY_POSE_ACTION))
+    keys.extend(f"{CAMERA_PREFIX}{name}" for name in _robot_image_names(robot))
+    keys.extend(f"{DEPTH_PREFIX}{name}" for name in _robot_depth_names(robot))
+    return keys
+
+
+def _camera_payload(info: dict) -> dict:
+    """相机元数据 → HTTP 契约形状（**键名单点在这里收口**）。
+
+    机器人层只管给值（尺寸 / 内参 / 深度比例 / 安装方式），键名与嵌套形状在服务边界按契约常量拼装：
+    多余 / 缺失的键不会漂到网络上（缺失内参 → 0.0；无深度 → ``depth: null``）。
+    标定外参**不在这里逐相机重复**：整份产物另有一个载体（响应级 ``frames``，见 :func:`cameras`）。
+    """
+    intrinsics = info.get(FIELD_INTRINSICS) or {}
+    depth = info.get(FIELD_DEPTH) or None
+    return {
+        FIELD_NAME: str(info.get(FIELD_NAME) or ""),
+        FIELD_WIDTH: int(info.get(FIELD_WIDTH) or 0),
+        FIELD_HEIGHT: int(info.get(FIELD_HEIGHT) or 0),
+        FIELD_INTRINSICS: {key: float(intrinsics.get(key) or 0.0) for key in INTRINSICS_KEYS},
+        FIELD_DEPTH: None
+        if not depth
+        else {
+            FIELD_DEPTH_SCALE: float(depth.get(FIELD_DEPTH_SCALE) or 0.0),
+            FIELD_ALIGNED_TO_COLOR: bool(depth.get(FIELD_ALIGNED_TO_COLOR, False)),
+        },
+        # 安装方式（装配事实）：fixed = 外参常数；wrist = 随臂动（外参只能是 T_flange_cam）
+        FIELD_MOUNT: str(info.get(FIELD_MOUNT) or VALUE_MOUNT_FIXED),
+        FIELD_ARM: None if info.get(FIELD_ARM) is None else str(info.get(FIELD_ARM)),
+    }
 
 
 def _robot_capabilities(robot) -> dict[str, bool]:
@@ -197,18 +267,24 @@ _DEFAULT_HOST = "0.0.0.0"  # 对齐 Edge 侧 adapter.SDK_HOST
 _DEFAULT_PORT = 8090  # 对齐 Edge 侧 adapter.SDK_URL
 
 
+class MotionResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    command_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
 class ActionRequest(BaseModel):
+    command_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     model_config = ConfigDict(extra="forbid")  # 旧键（如 action_space）显式 422，不静默按 joint 解释
 
     action: list[float] = Field(
         ...,
-        description=("动作（按臂展开）：joint = 各臂 6 关节角；pose = 各臂 xyz+rpy；gripper = 各臂 1 夹爪"),
+        description="动作按臂展开；绝对 / delta 语义由 layout 段名确定",
     )
     layout: str | None = Field(
         default=None,
         description=(
             "下发布局：每臂块内的段序列，段名用 '+' 连接、书写顺序即块内顺序，"
-            "如 joint / gripper / joint+gripper / pose+gripper（缺省 joint）"
+            "如 joint_delta / gripper_delta / joint_delta+gripper_delta（缺省 joint）"
         ),
     )
     arms: list[str] | None = Field(
@@ -218,11 +294,44 @@ class ActionRequest(BaseModel):
 
 
 class TeleopRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = Field(..., description="是否启用遥操作（true=遥操作 / false=程控）")
     mode: str = Field(
         default=DEFAULT_TELEOP_MODE,
         description="遥操作映射模式：absolute=主臂绝对位姿直连 / delta=人工接管（锚点增量）",
     )
+    follow_space: str | None = Field(
+        default=None,
+        description="本次 teleop 的跟随空间覆盖：joint 或 pose；缺省沿用机器人配置",
+    )
+    follow_axes: list[str] | None = Field(
+        default=None,
+        description="本次 pose teleop 的跟随轴白名单；未列出的轴锁在启用拍的从臂锚点",
+    )
+
+    pose_position_scale: list | dict | None = None
+
+
+class TcpRequest(BaseModel):
+    """``/v1/tcp``：运行期切换位姿系（法兰 ↔ 工具末端）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., description="true = 位姿（读 + 写）以工具末端为原点；false = 法兰")
+    offset: list[float] | None = Field(
+        default=None,
+        description="TCP 在**法兰系**下的位置（米，3 个数）；缺省用配置 robot.tcp.offset（运行期值不写回 yml）",
+    )
+
+
+class GravityRequest(BaseModel):
+    """``/v1/gravity``：运行期开关重力前馈（执行臂）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(..., description="true = 启用重力前馈；false = 卸载（t_ff 下一拍回到 0）")
+    alpha: float | None = Field(default=None, description="前馈比例覆盖（0 = 保留装载但不补偿）")
 
 
 class CaptureSyncRequest(BaseModel):
@@ -230,58 +339,57 @@ class CaptureSyncRequest(BaseModel):
 
 
 class _ShmPublisher:
-    """server 侧观测发布器：组装 standard_obs 并写入共享内存（env 不碰共享内存）。
+    """server 侧观测发布器：把**契约观测**写入共享内存（env 不碰共享内存）。
 
-    env 观测线程每拍回调（on_frame）把保留的观测副本传入 publish()；本类按 adapter 契约
-    组装 standard_obs、写入 ObsShmWriter，并缓存供 /observe 调试。
+    env 观测线程每拍回调（on_frame）把 ``robot.standard_observation()`` 的结果传入 publish()；
+    本类只做「缓存 + 按 adapter 契约写 ObsShmWriter」——融合向量与图像键都由 robot 层单点组装，
+    采集器落盘读的也是同一份，**本类不再自己拼状态向量**（曾经自己拼且不回写观测 → 采集器
+    拿不到 ``observations/qpos``）。
     """
 
     def __init__(self, robot):
         self.robot = robot
         self._writer: ObsShmWriter | None = None
-        self.last_obs: dict = {}  # 最新 standard_obs（/observe 调试用）
+        self.last_obs: dict = {}  # 最新契约观测（/observe 调试用）
 
-    def publish(self, obs):
-        """发布一帧观测（obs 来自 env 观测线程保留的副本，键已按契约）。
+    def publish(self, observation):
+        """发布一帧观测（``observation`` = ``robot.standard_observation()`` 的输出）。
 
-        写入 qpos（**状态向量**：每臂「值 + 夹爪」）+ action（**同维同布局**的目标向量）+
-        pose（实测位姿）+ pose_target（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位
-        可见）+ raw RGB 图像；位姿（与目标位姿）仅在机器人提供（``POSE > 0``）时写入（否则不占该区）。
+        写入共享内存：qpos（状态向量）/ qpos_err（目标跟踪误差）/ action（目标向量）+ pose（实测位姿）
+        + pose_action（目标位姿 = ``FK(关节段目标)``，增量动作的解算结果靠它对上位可见）+ raw RGB 图像
+        + 深度图（机器人开启深度时；已对齐到彩色图）；位姿（与目标位姿）仅在机器人提供
+        （``pose_dim() > 0``）时写入，深度仅在**生效的深度相机**有值时写入（否则不占该区）。
         """
-        if obs is None or obs.get(KEY_QPOS) is None:
+        if not observation:
             return
         image_names = _robot_image_names(self.robot)
-        standard = {
-            KEY_QPOS: obs[KEY_QPOS],
-            KEY_ACTION: obs.get(KEY_ACTION) if obs.get(KEY_ACTION) is not None else obs[KEY_QPOS].copy(),
-            "seq": getattr(self.robot, "seq", 0),
-        }
-        if obs.get(KEY_POSE) is not None:
-            standard[KEY_POSE] = obs[KEY_POSE]  # 末端位姿（笛卡尔原语 / 预览的输入）
-        if obs.get(KEY_POSE_TARGET) is not None:
-            standard[KEY_POSE_TARGET] = obs[KEY_POSE_TARGET]  # 目标位姿（= FK(关节段目标)）
-        for name in image_names:
-            standard[f"{CAMERA_PREFIX}{name}"] = obs[f"{CAMERA_PREFIX}{name}"]
-        self.last_obs = standard
+        depth_names = _robot_depth_names(self.robot)
+        self.last_obs = dict(observation)
         if self._writer is None:
             self._writer = self._create_writer()
+        # 深度区宽度固定：路数对不上（某相机本拍无深度）就不传，宁可本帧深度停在上一次
+        depths = [value for name in depth_names if (value := observation.get(f"{DEPTH_PREFIX}{name}")) is not None]
         self._writer.write(
-            qpos=standard[KEY_QPOS],
-            action=standard[KEY_ACTION],
-            pose=standard.get(KEY_POSE),
-            pose_target=standard.get(KEY_POSE_TARGET),
-            images=[standard[f"{CAMERA_PREFIX}{n}"] for n in image_names],
+            qpos=observation[KEY_QPOS],
+            qpos_err=observation[KEY_QPOS_ERR],
+            action=observation[KEY_ACTION],
+            pose=observation.get(KEY_POSE),
+            pose_target=observation.get(KEY_POSE_ACTION),
+            images=[observation[f"{CAMERA_PREFIX}{name}"] for name in image_names],
+            depths=depths if len(depths) == len(depth_names) else None,
         )
 
     def _create_writer(self) -> ObsShmWriter:
         """创建共享内存写者（上次进程残留 → attach 后 unlink 重建）。
 
-        区域宽度：qpos / action = **状态向量维数**（每臂「值 + 夹爪」，双臂 14）；
-        pose / pose_target = 每臂 6 × 臂数（不提供位姿 → 0）。
+        区域宽度：qpos / action = 每臂 joint + gripper 的融合维数；
+        pose / pose_target = 每臂 6 × 臂数（不提供位姿 → 0）；深度区 = **生效的深度相机**数
+        （无深度 → 0，不占区）。
         """
         # 相机尺寸（假设各相机一致）；无相机机器人（IMAGES 为空）用占位尺寸，image_count=0 无图像数据
         image_size = next(iter(getattr(self.robot, "IMAGES", {}).values()), (640, 480))
         image_names = _robot_image_names(self.robot)
+        depth_names = _robot_depth_names(self.robot)
         qpos_dim = _robot_state_dim(self.robot)
 
         def build() -> ObsShmWriter:
@@ -290,9 +398,12 @@ class _ShmPublisher:
                 image_count=len(image_names),
                 image_size=image_size,
                 qpos_dim=qpos_dim,
+                qpos_err_dim=qpos_dim,
                 action_dim=qpos_dim,
                 pose_dim=_robot_pose_dim(self.robot),
                 pose_target_dim=_robot_pose_dim(self.robot),  # 目标位姿随实测位姿同生共死
+                depth_count=len(depth_names),
+                depth_size=image_size,  # 深度已对齐到彩色图 → 同尺寸
             )
 
         try:
@@ -361,6 +472,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             "endpoints": [
                 PATH_DISCOVER,
                 PATH_HEALTH,
+                PATH_CAMERAS,
                 PATH_RESET,
                 PATH_EXECUTE,
                 PATH_ROLLOUT,
@@ -368,6 +480,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 PATH_SAFE_STOP,
                 PATH_CAPTURE_START,
                 PATH_CAPTURE_END,
+                PATH_CAPTURE_CANCEL,
             ],
         }
 
@@ -399,7 +512,9 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 FIELD_ACTION_DIMS: _robot_action_dims(robot),
                 FIELD_ACTION_LAYOUTS: _robot_action_layouts(robot),
                 FIELD_STATE_ARMS: _robot_state_arms(robot),
-                # 观测键 = standard_obs 实际产出的键（qpos + 进程侧目标 action + 可选 pose + 相机），
+                # 位姿系 / TCP 偏移与重力前馈运行位**不走 discover**：它们运行期可切，走
+                # ``/v1/health``（Edge 本来就周期拉）才能随时新鲜，见 wiki/design/robot_pipeline_tcp.md
+                # 观测键 = standard_obs **实际产出**的键（状态向量 qpos + 目标向量 action + 位姿），
                 # 与 Edge 侧 ``observe()`` / ``capabilities.observation_keys`` 同口径
                 FIELD_OBSERVATION_KEYS: _robot_observation_keys(robot),
                 FIELD_CAPABILITIES: _robot_capabilities(robot),
@@ -411,7 +526,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 健康检查
     @app.get(PATH_HEALTH)
     def health():
-        """健康检查：频率与遥操实时状态由 Edge adapter.health 消费。"""
+        """健康检查：频率、遥操与运行位由 Edge adapter.health 消费。"""
         h = env.health()
         ok = bool(h.get("ready"))  # ready 已含两线程存活与无错误（env 单点定义）
         detail = "" if ok else (h.get("last_error") or "robot not ready")
@@ -420,29 +535,59 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             FIELD_DETAIL: detail,
             FIELD_CONTROL_HZ: h.get("control_hz"),
             FIELD_MEASURED_HZ: h.get("measured_hz"),
+            # 运行位（运行期可切，走 health 读回即随时新鲜；见 wiki/design/robot_pipeline_tcp.md）
+            FIELD_POSE_FRAME: h.get("pose_frame"),
+            FIELD_TCP_OFFSET: h.get("tcp_offset"),
+            FIELD_GRAVITY: h.get("gravity"),
             FIELD_TELEOP_ENABLED: bool(h.get("teleop_enabled", False)),
             FIELD_TELEOP_MODE: h.get("teleop_mode"),
+            FIELD_TELEOP_FOLLOW_SPACE: h.get("teleop_follow_space"),
+            FIELD_TELEOP_ACTIVE_AXES: h.get("teleop_follow_axes"),
+            FIELD_TELEOP_ACTIVE_SCALE: h.get("teleop_pose_position_scale"),
+        }
+
+    # ---------------------------------------------------------------- 相机元数据（静态）
+    @app.get(PATH_CAMERAS)
+    def cameras():
+        """相机静态元数据 ``{cameras: [...], frames: ...}``：尺寸 / **彩色内参** / 深度比例 /
+        安装方式 + **统一坐标系外参产物**。
+
+        深度图已**对齐到彩色图**，故反投影只需这一套内参；无深度的相机 ``depth`` 为 ``null``。
+        静态数据（不随帧变，进不了共享内存的逐帧区），Edge adapter 惰性查询一次并缓存，
+        供 ``GET /v1/depth`` 把像素深度换算成米与 ``world`` 坐标。未就绪时 503（sensor 尚无可读
+        内参——宁可不给，也不报 0 值内参）。
+
+        ``frames`` = 标定产物 ``<根>/config/calibration/frames.json`` **原样**（单点形状在
+        ``motrix_edge.geometry.FrameSet``）；未标定 / 产物非法 → ``null``（坐标功能关闭，其余照常）。
+        """
+        _require_ready()
+        meta = getattr(robot, "camera_meta", None)
+        infos = meta() if callable(meta) else []
+        frames = load_frames()
+        return {
+            FIELD_CAMERAS: [_camera_payload(info) for info in infos],
+            FIELD_FRAMES: None if frames is None else frames.to_payload(),
         }
 
     # ---------------------------------------------------------------- 指令
     @app.post(PATH_RESET)
-    def reset():
+    def reset(req: MotionResetRequest | None = None):
         """程序复位到 home（非阻塞）：与 execute 一样只修改唯一目标。"""
         _require_ready()
         try:
-            env.robot_reset()
+            receipt = env.robot_reset(command_id=req.command_id) if req else env.robot_reset()
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(e))
-        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED, **(receipt or {})}
 
-    def _apply_action(req: ActionRequest) -> dict:
+    def _apply_commands(req: ActionRequest) -> dict:
         _require_ready()
+        if req.command_id is not None:
+            raise HTTPException(status_code=422, detail="command_id is supported by rollout, not raw execute")
         try:
-            env.robot_execute(req.action, layout=req.layout, arms=req.arms, wait=True)
+            env.robot_execute(req.action, layout=req.layout, arms=req.arms)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
-        except TimeoutError as e:
-            raise HTTPException(status_code=504, detail=str(e))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_EXECUTE)
@@ -451,7 +596,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
 
         ``layout="pose"`` 时由机器人侧解算一次（失败 → 422，不改既有目标）。
         """
-        return _apply_action(req)
+        return _apply_commands(req)
 
     @app.post(PATH_ROLLOUT)
     def rollout(req: ActionRequest):
@@ -463,14 +608,42 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         """
         _require_ready()
         try:
-            env.robot_rollout(req.action, layout=req.layout, arms=req.arms, wait=True)
+            receipt = (
+                env.robot_rollout(req.action, layout=req.layout, arms=req.arms, command_id=req.command_id)
+                if req.command_id
+                else env.robot_rollout(req.action, layout=req.layout, arms=req.arms)
+            )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except TakeoverActiveError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
-        except TimeoutError as e:
-            raise HTTPException(status_code=504, detail=str(e))
-        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED, **(receipt or {})}
+
+    @app.get("/v1/motion/commands/{command_id}")
+    def motion_command(command_id: str):
+        receipt = env.motion_command(command_id)
+        if receipt is None:
+            raise HTTPException(status_code=404, detail="unknown or expired command_id")
+        return receipt
+
+    @app.get("/v1/motion/state")
+    def motion_state():
+        snapshot = env.motion_snapshot()
+        if snapshot is None:
+            raise HTTPException(status_code=503, detail="motion sample unavailable")
+
+        def json_value(value):
+            if isinstance(value, np.ndarray):
+                return json_value(value.tolist())
+            if isinstance(value, (list, tuple)):
+                return [json_value(item) for item in value]
+            if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+                return None
+            if isinstance(value, dict):
+                return {key: json_value(item) for key, item in value.items()}
+            return value
+
+        return json_value(snapshot)
 
     @app.post(PATH_TELEOP)
     def teleop(req: TeleopRequest):
@@ -483,7 +656,42 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         _require_ready()
         if req.mode not in TELEOP_MODES:
             raise HTTPException(status_code=422, detail=f"unknown teleop mode {req.mode!r} (expect {TELEOP_MODES})")
-        env.robot_set_teleop(req.enabled, req.mode)
+        try:
+            config = env.robot_set_teleop(
+                req.enabled, req.mode, req.follow_axes, req.follow_space, req.pose_position_scale
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED, "configuration_status": "queued", "configuration": config}
+
+    @app.post(PATH_TCP)
+    def tcp(req: TcpRequest):
+        """运行期切换位姿系：``enabled`` + 可选 ``offset``（米，3 个数）。
+
+        与构造期的 ``robot.tcp`` 同一套校验（非法 → 422，**运行位不变**）；切换只改语义（不动机
+        目标），在飞目标对应的物理位姿不变、机械臂不会跳。会话中不能切（由 Edge 判：同一 episode
+        内 ``observations/pose`` 的语义不能前后不一致）；设计见 ``wiki/design/robot_pipeline_tcp.md``。
+        """
+        _require_ready()
+        try:
+            env.robot_set_tcp(req.enabled, req.offset)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+
+    @app.post(PATH_GRAVITY)
+    def gravity(req: GravityRequest):
+        """运行期开关重力前馈（执行臂）：``enabled`` + 可选 ``alpha``。
+
+        ``enabled=false`` → 卸载模型（``t_ff`` 下一拍起回到 0 = 纯位置环）；``alpha`` 覆盖配置的
+        比例。参数 / 限幅仍来自 ``robot.gravity``（不动标定产物）。会话中不能切（由 Edge 判：
+        ``control_mode`` 是采集数据的元信息）；设计见 ``wiki/design/robot_pipeline_impedance.md``。
+        """
+        _require_ready()
+        try:
+            env.robot_set_gravity(req.enabled, req.alpha)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_SAFE_STOP)
@@ -505,6 +713,13 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         """结束一轮采集（episode 结束）：env 置 capturing=False，保存为一条 episode。"""
         _require_ready()
         env.robot_capture_end()
+        return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
+
+    @app.post(PATH_CAPTURE_CANCEL)
+    def capture_cancel():
+        """取消当前采集：env 置 capturing=False，并删除本轮已写文件。"""
+        _require_ready()
+        env.robot_capture_cancel()
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
 
     @app.post(PATH_CAPTURE_SYNC)
@@ -539,7 +754,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
     # ---------------------------------------------------------------- 调试（非契约）
     @app.get("/observe")
     def observe_debug():
-        """调试用：最新观测状态向量（每臂「值 + 夹爪」）+ 位姿 + 目标向量 + 相机 JPEG(base64)。
+        """调试用：最新状态、目标误差、目标向量、位姿与相机 JPEG(base64)。
 
         Edge 侧实际经共享内存读观测（本端点为调试用）；逐维含义见 ``state_layout()``
         （采集 JSON 的 ``state_space`` / ``state_dims``）。
@@ -550,6 +765,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         out = {
             "ready": True,
             "qpos": np.asarray(obs[KEY_QPOS], dtype=np.float64).tolist(),
+            "qpos_err": np.asarray(obs[KEY_QPOS_ERR], dtype=np.float64).tolist(),
             "seq": obs.get("seq"),
             "state_layout": robot.state_layout(),
         }
@@ -563,6 +779,18 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
                 continue
             ok, buf = cv2.imencode(".jpg", cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR))
             out[f"images/{name}"] = base64.b64encode(buf.tobytes()).decode("ascii") if ok else None
+        # 深度（生效的深度相机）：调试端点不回传整张深度图，只给形状与原始值范围
+        for name in _robot_depth_names(robot):
+            depth = obs.get(f"{DEPTH_PREFIX}{name}")
+            if depth is None:
+                out[f"depth/{name}"] = None
+                continue
+            values = np.asarray(depth, dtype=np.uint16)
+            out[f"depth/{name}"] = {
+                "shape": list(values.shape),
+                "min_raw": int(values.min()),
+                "max_raw": int(values.max()),
+            }
         return out
 
     return app

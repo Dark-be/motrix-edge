@@ -113,7 +113,7 @@ class SinglePiperRobot(BaseRobot):
             return np.full(self.GRIPPER, np.nan)
         return np.asarray([float(np.asarray(gripper, dtype=np.float64).reshape(-1)[0])], dtype=np.float64)
 
-    def get_observation_images(self) -> list:
+    def get_observation_frames(self) -> list:
         """无相机（IMAGE_NAMES 为空），返回空列表。"""
         return []
 

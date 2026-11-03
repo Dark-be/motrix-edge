@@ -50,6 +50,7 @@ from motrix_edge.identity import Identity, load_identity, new_correlation_id
 from motrix_edge.lease import LeaseManager, build_lease_manager
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.deps import Services
+from motrix_edge.server.depth import DepthService
 from motrix_edge.server.meta import CaptureMetaService
 from motrix_edge.server.preview import PreviewService
 from motrix_edge.server.routes import build_routers
@@ -85,6 +86,7 @@ def create_app(
     webrtc: WebRTCService | None = None,
     uploads: UploadService | None = None,
     preview: PreviewService | None = None,
+    depth: DepthService | None = None,
     meta: CaptureMetaService | None = None,
     rpent: RpentService | None = None,
 ) -> FastAPI:
@@ -103,6 +105,8 @@ def create_app(
     uploads: 可选 ``UploadService``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
     preview: 可选 ``PreviewService``（**独立于采集 / 推理会话**，直接读 node.frame_manager
              观测缓存）；注入后注册 ``/v1/preview`` 观测预览端点，未注入时返回 501。
+    depth: 可选 ``DepthService``（``/v1/depth`` 像素深度查询，与 preview 同源：读同一份
+           最新观测缓存 + 机器人上报的相机内参）；未注入时返回 501。
     meta: 可选 ``CaptureMetaService``（采集元信息选项，直连 ``CaptureMetaStore``）；
           未注入时 ``/v1/captures/meta*`` 返回 501。
     rpent: 可选 ``RpentService``（RPent 兼容的 RPC 面）；注入后注册 **``POST /call``**
@@ -123,6 +127,7 @@ def create_app(
         commands=commands,
         meta=meta,
         preview=preview,
+        depth=depth,
         webrtc=webrtc,
         rpent=rpent,
     )
