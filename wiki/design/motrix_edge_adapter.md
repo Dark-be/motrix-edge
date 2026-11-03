@@ -67,20 +67,20 @@ adapter discover 绑定时应用（`_probe_adapter` → `apply_adapter_config`�
 
 职责面与「角色」一一对应：
 
-| 职责面          | 方法                                 | 说明                                                                                                                                                               |
-| --------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| discover/health | `health()`                           | 健康检查；实时 `GET /v1/health`，缓存 `running`，包含 `control_hz` / `measured_hz`；新版 SDK 的 `enabled` / `mode` 用于纠正遥操作本地镜像，旧 SDK 缺字段时保留镜像 |
-|                 | `release()`                          | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                                                                                                                    |
-| capabilities    | `capabilities`（属性）               | 声明能力：动作维度 / 支持的动作空间 / 观测键布局 / 能力 dict                                                                                                       |
-| observe         | `observe()`                          | 读取**最新观测缓存**（JPEG 图像 + qpos + action；机器人声明支持时含 pose）；**不推进 / 不影响运行**                                                                |
-| execute         | `execute(action)`                    | 直接下发 raw 动作（立即执行）                                                                                                                                      |
-| teleop          | `set_teleop(enabled, mode=None)`     | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；支持者记录 `teleop_enabled` / `teleop_mode` 供 server 状态上报，不支持者默认 no-op 且保持 `False`                |
-| capture status  | `capture_status()`                   | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）                                                                                          |
-| capture sync    | `sync_capture_meta(meta)`            | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                                                                                           |
-| capture episode | `start_capture()` / `end_capture()`  | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                                                                                                                 |
-| rollout         | `rollout(action, action_space=None)` | 推理闭环：接收模型 action 经 HTTP 转发进程（`action_space` 声明动作语义）；遥操作中进程拒收 → 返回 `False`                                                         |
-| safe_stop       | `safe_stop()`                        | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**                                                                                                  |
-| 生命周期辅助    | `reset()`                            | 程序复位到 home（非阻塞）                                                                                                                                          |
+| 职责面          | 方法                                      | 说明                                                                                                                                                               |
+| --------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| discover/health | `health()`                                | 健康检查；实时 `GET /v1/health`，缓存 `running`，包含 `control_hz` / `measured_hz`；新版 SDK 的 `enabled` / `mode` 用于纠正遥操作本地镜像，旧 SDK 缺字段时保留镜像 |
+|                 | `release()`                               | 释放本地资源（惰性 HTTP 客户端 / 共享内存读者）                                                                                                                    |
+| capabilities    | `capabilities`（属性）                    | 声明能力：动作维度 / 支持的动作空间 / 观测键布局 / 能力 dict                                                                                                       |
+| observe         | `observe()`                               | 读取**最新观测缓存**（JPEG 图像 + qpos + action；机器人声明支持时含 pose）；**不推进 / 不影响运行**                                                                |
+| execute         | `execute(action, layout=None, arms=None)` | 直接下发动作；布局与作用臂显式声明，规划失败同步报错                                                                                                               |
+| teleop          | `set_teleop(enabled, mode=None)`          | 遥操作 / **人工接管**（`mode=delta` 为锚点增量）；支持者记录 `teleop_enabled` / `teleop_mode` 供 server 状态上报，不支持者默认 no-op 且保持 `False`                |
+| capture status  | `capture_status()`                        | 采集状态：运行位（是否正在采集）+ 元信息（`meta`）+ 数据目录（默认 None）                                                                                          |
+| capture sync    | `sync_capture_meta(meta)`                 | 把采集元信息同步到进程（保存一轮数据时附加）；默认 no-op                                                                                                           |
+| capture episode | `start_capture()` / `end_capture()`       | 通知进程开始 / 结束一轮采集（episode）；默认 no-op                                                                                                                 |
+| rollout         | `rollout(action, layout=None, arms=None)` | 推理闭环：按布局与作用臂转发；遥操作中进程拒收 → 返回 `False`                                                                                                      |
+| safe_stop       | `safe_stop()`                             | 安全停止（幂等、失败安全）；**软停：停发指令 + 保持位姿，不断电**                                                                                                  |
+| 生命周期辅助    | `reset()`                                 | 程序复位到 home（非阻塞）                                                                                                                                          |
 
 ### 观测键契约（standard_obs 键名）
 
@@ -100,14 +100,13 @@ adapter discover 绑定时应用（`_probe_adapter` → `apply_adapter_config`�
 布局 `pose_dim > 0`）；笛卡尔策略靠它知道自己末端在哪（见
 [边缘原语接口（primitives）](./motrix_edge_primitives.md)）。
 
-### 动作空间（ActionSpace）
+### 动作布局（layout + arms）
 
-`ActionSpace`（`base.py`）声明 flat 动作向量的**语义**：`joint`（缺省：每臂 6 关节 + 夹爪，
-绝对目标）与 `cartesian_pose`（每臂 xyz + rpy + 夹爪）。当前具体适配器只宣告 `joint`，
-`cartesian_pose` 请求返回 422；机器人侧 IK 与 pose producer 同时落地后才能开放。完整声明链路：调用方声明
-（`adapter.rollout(action, action_space=...)`，如原语接口的笛卡尔原语）
-→ 适配器校验（不在 `ACTION_SPACES` 内 → `ValueError`）→ HTTP `/v1/rollout` 的 `action_space`
-字段 → 机器人进程解释（笛卡尔走 IK）。缺省不发该字段时机器人按关节空间解释，**向后兼容**。
+下发契约由 `layout`（每臂块内的段序列）与 `arms`（作用臂及块顺序）正交组成。段类型为
+`joint` / `pose` / `pose_delta` / `gripper`，可组合为 `joint+gripper`、`pose+gripper` 等；缺省
+layout 为 `joint`。Dual Piper 已完成真机运动学核验并声明 `pose` / `pose_delta`。旧请求字段
+`action_space` 被显式拒绝，避免同维的关节值与位姿值被静默错解。完整词表、维度和部分臂语义见
+[下发契约](./robot_pipeline_action_layouts.md)。
 
 设计取舍：
 
@@ -178,26 +177,23 @@ adapter:
 
 -   **HTTP 指令下行**（`http_contract.py`）：端点路径 + body 字段**单点定义**。端点一览（前缀 `/v1`）：
 
-| 方法 | 路径                                    | 请求 body                 | 响应 body                                                                           |
-| ---- | --------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------- |
-| POST | `/v1/discover`                          | —                         | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`） |
-| GET  | `/v1/health`                            | —                         | `{ok, detail, control_hz, measured_hz, enabled, mode}`                              |
-| POST | `/v1/reset`                             | —                         | `{status}`                                                                          |
-| POST | `/v1/execute`                           | `{action, action_space?}` | `{status}`                                                                          |
-| POST | `/v1/rollout`                           | `{action, action_space?}` | `{status}`；**遥操作中 → 409**（推理让位）                                          |
-| POST | `/v1/teleop`                            | `{enabled, mode?}`        | `{status}`（`absolute` 缺省 / `delta` 人工接管）                                    |
-| POST | `/v1/safe_stop`                         | —                         | `{status}`                                                                          |
-| GET  | `/v1/capture/status`                    | —                         | `{running, meta, data_dir}`                                                         |
-| POST | `/v1/capture/sync`                      | `{meta}`                  | `{status}`                                                                          |
-| POST | `/v1/capture/start` / `/v1/capture/end` | —                         | `{status}`                                                                          |
-
-`action_space` 在本阶段只接受 `joint`；`cartesian_pose` 是预留契约，具体适配器必须等机器人侧
-IK 与 pose producer 同时落地后才可在 capabilities 中宣告支持，否则请求返回 422。
+| 方法 | 路径                                    | 请求 body                  | 响应 body                                                                           |
+| ---- | --------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
+| POST | `/v1/discover`                          | —                          | `{status, robot}`（身份 + 连接参数 `endpoint` / `shm_name` + `supported_adapters`） |
+| GET  | `/v1/health`                            | —                          | `{ok, detail, control_hz, measured_hz, enabled, mode}`                              |
+| POST | `/v1/reset`                             | —                          | `{status}`                                                                          |
+| POST | `/v1/execute`                           | `{action, layout?, arms?}` | `{status}`；规划失败 → 422，控制线程超时 → 504                                      |
+| POST | `/v1/rollout`                           | `{action, layout?, arms?}` | `{status}`；规划失败 → 422，遥操作中 → 409，控制线程超时 → 504                      |
+| POST | `/v1/teleop`                            | `{enabled, mode?}`         | `{status}`（`absolute` 缺省 / `delta` 人工接管）                                    |
+| POST | `/v1/safe_stop`                         | —                          | `{status}`                                                                          |
+| GET  | `/v1/capture/status`                    | —                          | `{running, meta, data_dir}`                                                         |
+| POST | `/v1/capture/sync`                      | `{meta}`                   | `{status}`                                                                          |
+| POST | `/v1/capture/start` / `/v1/capture/end` | —                          | `{status}`                                                                          |
 
 -   **共享内存观测上行**（`shm_contract.py`）：SDK 进程按 `run_hz` 持续把观测（qpos + 目标
-    action + raw RGB 图像）写入共享内存（`ObsShmWriter`），adapter 经 `ObsShmReader` 读取并
-    编码 JPEG 返回；布局版本随字段变化递增（v2 = qpos + action + images，v3 追加 pose；
-    新 reader 兼容旧 v2 writer，其他版本不一致时 attach 直接报错）。
+    action + pose + pose_target + raw RGB 图像）写入共享内存（`ObsShmWriter`），adapter 经
+    `ObsShmReader` 读取并编码 JPEG 返回。当前布局固定为 v6；v2–v5 均不兼容，版本不一致时
+    attach 直接报错并要求机器人进程与 Edge 同版本重启。
     `read()` 对**无帧 / 撕裂帧 / 陈旧帧**一律返回 `None`：写者每帧更新 header `timestamp`，
     超过 `STALE_AFTER`（1s）未更新即判定陈旧（写者停机、或进程重启后旧段被同名重建）——
     此时不返回冻结帧，并按同一节奏尝试重新 attach 同名新段，避免把过期观测当实时观测。

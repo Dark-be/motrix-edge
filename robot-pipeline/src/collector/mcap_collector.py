@@ -23,9 +23,14 @@
 
     topic                        schema                               内容
     ---------------------------  -----------------------------------  --------------------------
-    observations/qpos            std_msgs/msg/Float64MultiArray       qpos（float64[]）
+    observations/qpos            std_msgs/msg/Float64MultiArray       状态向量（每臂「值 + 夹爪」）
+    action                       std_msgs/msg/Float64MultiArray       同维同布局的目标向量
     observations/images/<cam>    sensor_msgs/msg/CompressedImage      JPEG（format='jpeg'）
-    action                       std_msgs/msg/Float64MultiArray       动作（float64[]）
+
+> 数采请留意：``observations/qpos`` / ``action`` **同维同布局**（每臂「值 + 夹爪」交错，双臂 7 + 7）；
+> 值段当前是关节角、夹爪是每臂块末位——**逐维含义写在同名 JSON 元信息的 ``state_space`` /
+> ``state_dims`` / ``action_space`` / ``action_dims`` 里**（机器人整体切位姿时只改 ``state_space``）。
+> 位姿**不入 mcap**（见 wiki/design/robot_pipeline_action_spaces.md）。
 
 帧时间以 obs 内 ``timestamp``（秒）为准：作消息 ``log_time``/``publish_time``（ns），
 并填入 CompressedImage 的 ``header.stamp``。可在 Foxglove 中按时间轴查看。
@@ -62,8 +67,8 @@ import numpy as np
 from utils.data_handler import debug_print
 
 # standard_obs keys (see Robot.get_standard_obs())
-KEY_QPOS = "observations/qpos"
-KEY_ACTION = "action"
+KEY_QPOS = "observations/qpos"  # 状态向量（每臂「值 + 夹爪」交错）
+KEY_ACTION = "action"  # 同维同布局的目标向量
 CAMERA_PREFIX = "observations/images/"
 KEY_TIMESTAMP = "timestamp"  # obs 内观测拍时刻（秒，float；观测线程 build_observation() 打点）
 
@@ -124,6 +129,7 @@ class ActMcapCollector:
         # 跨 episode 保留的字段（start() 时快照进新 episode）：
         self._identity: dict = {}  # 机器人身份（robot_name / robot_type），set_robot_meta() 设置
         self._pending: dict = {}  # 同步字段（operator / task_name / description ...），set_meta() 设置
+        self._state_layout: dict = {}  # 状态 / 目标向量的逐维含义，set_state_layout() 设置
         # 当前 episode 的元信息基线（created_at + identity/pending 快照）
         self._meta: dict = {}
         self._start_wall: float | None = None  # 本轮采集开始墙钟时间（duration 兜底）
@@ -151,6 +157,15 @@ class ActMcapCollector:
         """
         self._identity["robot_name"] = robot_name or ""
         self._identity["robot_type"] = robot_type or ""
+
+    def set_state_layout(self, layout: dict | None) -> None:
+        """设置状态 / 目标向量的**逐维含义**（机器人侧 ``state_layout()``，env 注入）。
+
+        写进每轮 mcap 的同名 JSON 元信息（``state_space`` / ``state_dims`` / ``action_space`` /
+        ``action_dims``，每项 = ``{index, arm, kind, name}``）：下游按 ``kind``（joint / pose /
+        gripper）解释每个下标——机器人整体切位姿时只需改 ``state_space``，下游代码不用改。
+        """
+        self._state_layout = dict(layout or {})
 
     def _image_to_jpeg(self, val) -> bytes:
         """把单帧图像统一成 JPEG bytes（CompressedImage format='jpeg'）。
@@ -221,7 +236,7 @@ class ActMcapCollector:
         seq = self._step_count
         self._step_count += 1
 
-        # qpos / action：std_msgs/msg/Float64MultiArray
+        # qpos（状态向量）/ action（同维同布局的目标向量）：std_msgs/msg/Float64MultiArray
         for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
             self._writer.write_message(
                 topic=topic,
@@ -286,6 +301,11 @@ class ActMcapCollector:
             "relative_path": self._path.name if self._path else None,
             "robot_name": self._identity.get("robot_name", ""),
             "robot_type": self._identity.get("robot_type", ""),
+            # 状态 / 目标向量的逐维含义（机器人侧自描述；下游据此解释每个下标）
+            "state_space": self._state_layout.get("state_space"),
+            "state_dims": self._state_layout.get("state_dims") or [],
+            "action_space": self._state_layout.get("action_space"),
+            "action_dims": self._state_layout.get("action_dims") or [],
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
             "frames": self._step_count,
@@ -313,6 +333,8 @@ class ActMcapCollector:
         - 自动统计：``relative_path``（mcap 文件名）/ ``robot_name`` / ``robot_type`` /
           ``frames``（帧数）/ ``size_bytes``（文件字节）/ ``duration``（秒）/ ``sha256``
           （文件哈希）/ ``created_at``（采集开始时间 ISO）；
+        - 状态 / 目标向量布局：``state_space`` / ``state_dims`` / ``action_space`` / ``action_dims``
+          （逐维 ``{index, arm, kind, name}``，见 ``set_state_layout()``）；
         - 同步字段：``operator`` / ``task_name`` 未同步以 null 占位（等待 capture sync）；
           其余同步字段（``description`` 等）附加在末尾。
         """
@@ -320,6 +342,11 @@ class ActMcapCollector:
             "relative_path": path.name,
             "robot_name": self._identity.get("robot_name", ""),
             "robot_type": self._identity.get("robot_type", ""),
+            # 状态 / 目标向量的逐维含义（机器人侧自描述）
+            "state_space": self._state_layout.get("state_space"),
+            "state_dims": self._state_layout.get("state_dims") or [],
+            "action_space": self._state_layout.get("action_space"),
+            "action_dims": self._state_layout.get("action_dims") or [],
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
             "frames": self._step_count,

@@ -102,9 +102,9 @@ flowchart LR
 | `env.get_observation`                 | `node.frame_manager` 观测帧（JPEG → uint8 RGB ndarray）                                           | 带 `states`（同帧 qpos）                                                                                       |
 | `env.get_robot_state`                 | qpos / pose / 每臂夹爪 + `wrapped_state_vector`                                                   | —                                                                                                              |
 | `env.reset`                           | 命令通道 `robot/reset`（含租约与回执）                                                            | 不隐式复位                                                                                                     |
-| `env.move_delta` / `env.rotate_delta` | `adapter.rollout(..., action_space=pose_delta)`                                                   | 增量交给机器人叠加在**关节段目标**上                                                                           |
-| `env.set_gripper`                     | `adapter.rollout(..., action_space=joint)`                                                        | 关节段取**目标**（`action`），只改夹爪位                                                                       |
-| `env.recover_joint_posture`           | `adapter.rollout(..., action_space=joint)`：每臂 `HOME["joint"]` + 保持夹爪                       | **已对齐**（无 `HOME["joint"]` 声明才退回 `adapter.reset()` 并标 `fallback`，见「与 RPent 客户端的形态对齐」） |
+| `env.move_delta` / `env.rotate_delta` | `adapter.rollout(..., layout="pose_delta")`                                                       | 增量交给机器人叠加在**关节段目标**上                                                                           |
+| `env.set_gripper`                     | `adapter.rollout(..., layout="joint+gripper")`                                                    | 关节段取**目标**（`action`），夹爪同拍落地                                                                     |
+| `env.recover_joint_posture`           | `adapter.rollout(..., layout="joint+gripper")`：每臂 `HOME["joint"]` + 保持夹爪                   | **已对齐**（无 `HOME["joint"]` 声明才退回 `adapter.reset()` 并标 `fallback`，见「与 RPent 客户端的形态对齐」） |
 | `env.step`                            | 单帧 `adapter.rollout(...)` → gym 5 元组                                                          | 遥操作中拒拍 → `ok=false`                                                                                      |
 | `env.chunk_step`                      | 逐帧 `adapter.rollout(...)`（频率由 `server.rpent.step_hz` 定，null = 机器人上报的 `control_hz`） | 回 `observation` / `terminated` / `truncated`                                                                  |
 | `env.get_task_language`               | 推理会话的 `prompt`                                                                               | 无会话 → `null`                                                                                                |
@@ -129,18 +129,19 @@ RPent vla_server（vla.predict）→ RPent primitives → env.chunk_step → edg
 ### `states` 与观测键
 
 RPent 的 `dual_franka` client 要求 `env.get_observation` 返回里带 `states`（agent 侧
-缓存为 `wrapped_state_vector`）。edge 的对应物是**同一帧的 qpos**（`observations/qpos`，
-`FrameManager.latest()` 已有）：facade 把该帧 qpos 同时按 `states` 回一份，维持 RPent
+缓存为 `wrapped_state_vector`）。edge 的对应物是**同一帧的状态向量**（`observations/qpos`，
+每臂「值 + 夹爪」交错——与 RPent 的「每臂 7 维」同构，`FrameManager.latest()` 已有）：facade
+把该帧 qpos 同时按 `states` 回一份，维持 RPent
 原样可用；`pose` 单独作为扩展键回传（RPent 侧不读、不影响其契约）。
 
 ### 动作语义与单位的边界
 
-edge 的契约是 `action_space ∈ {joint, pose, pose_delta}` + `action_dim`（每臂一段；位姿每臂
-`xyz + rpy + 夹爪` = 7）。两条路径：
+edge 的下发契约是 `layout` + `arms`（段宽见 [下发契约收敛](./robot_pipeline_action_layouts.md)；位姿
+每臂 `xyz + rpy`、夹爪 1）。两条路径：
 
--   **原语路径**：`move_delta` / `rotate_delta` 只需 **xyz / rpy 标量** → edge 只下发 `pose_delta`
-    增量（**基准归机器人**，见下「增量原语的基准与到位判定」）；`set_gripper` 走 `joint`（关节段
-    取目标、只改夹爪位）。三者都不依赖动作布局，无歧义；
+-   **原语路径**：`move_delta` / `rotate_delta` 只需 **xyz / rpy 标量** → edge 只下发 `layout="pose_delta"`
+    增量（**基准归机器人**，见下「增量原语的基准与到位判定」）；`set_gripper` 走
+    `layout="joint+gripper"`（关节段取目标、夹爪同拍落地）。三者都不依赖调用方拼布局，无歧义；
 -   **`step` / `chunk_step` 路径**：默认要求块的布局与 `action_dim` 一致（不一致 → `ok=false`，
     **不静默 reshape**）；若对方是自有布局，用下面的 `action_layout` 声明。
 
@@ -432,8 +433,8 @@ edge 回 `reached: false` + `stalled: true`（~1s 内）——这正是抓取成
 -   **VLA 由 RPent 侧自跑，edge 不提供 `vla.*` 接口**；edge→robot 进程契约不改名。
 -   **`recover_joint_posture` 的夹爪基座**：定为与 `set_gripper` 同策略——夹爪位**优先取目标**
     （`action` 的夹爪维）、实测只兜底，并在回执里给 `gripper_base`（取值 `target` /
-    `qpos`，与 `env.set_gripper` 回执的 `base` 同风格；当前实现取实测 `observations/gripper`
-    且无该字段，待随本特性 MR 对齐；理由见「同类规则」）。
+    `qpos`，与 `env.set_gripper` 回执的 `base` 同风格；当前实现取实测（状态向量
+    `observations/qpos` 的每臂夹爪槽）且无该字段，待随本特性 MR 对齐；理由见「同类规则」）。
 -   **增量原语的注释同步**：`_move_delta` / `_rotate_delta` 的 docstring 仍写「现算绝对目标下发」，
     与其调用的 `_pose_delta`（`ActionSpace.POSE_DELTA`，**本层不算绝对目标**）相反，待改成「下发
     `pose_delta` 增量（基准归机器人）」——注释与实现相反比没有注释更容易把实现改错。

@@ -12,6 +12,8 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+from motrix_edge.policy.contract import POLICY_KEY_ACTION_LAYOUT, normalize_action_layout
+
 
 class BasePolicyClient:
     """推理策略客户端基类（策略侧最小接口）。
@@ -22,6 +24,11 @@ class BasePolicyClient:
     ``requires_prompt``：该策略是否**需要文本指令（prompt）**——语言条件策略（openpi）为
     ``True``，推理前必须已 ``infer prompt <text>`` 预置非空文本（会话据此门控）；
     非语言条件策略（lerobot-act：ACT 不接受文本条件）为 ``False``，不参与 prompt 门控。
+
+    ``action_layout``（策略配置项）：策略**输出**的动作语义，决定会话走哪条下发通路——
+    ``joint``（缺省）= 每臂 6 关节角，夹爪经独立的 ``gripper`` 空间；``joint+gripper`` = 每臂
+    「6 关节角 + 1 夹爪」→ ``adapter.rollout(layout="joint+gripper", arms=...)`` 一次下发所选臂。取值与语义见
+    ``motrix_edge.policy.contract``。
     """
 
     requires_prompt: bool = False  # 是否需要 prompt（语言条件策略子类覆盖为 True）
@@ -29,6 +36,8 @@ class BasePolicyClient:
     def __init__(self, policy_config: dict) -> None:
         self.policy_config = policy_config or {}
         self.server_metadata: dict = {}
+        # 动作布局（策略配置项；缺省 joint）：非法取值在**进入会话时**就报错，不拖到每步下发。
+        self.action_layout = normalize_action_layout(self.policy_config.get(POLICY_KEY_ACTION_LAYOUT))
         # 文本指令（prompt）：**仅语言条件策略（``requires_prompt=True``，如 openpi）使用**——
         # 推理前必须非空（InferSession 门控），录制 rollout 时作 episode 的 task_name。
         # 非语言条件策略（lerobot-act）不使用 prompt：保持 None，不参与门控、不下发。
