@@ -94,8 +94,8 @@ src/lerobot/        # vendored 新版 lerobot 子集（Apache-2.0）：
 未装对应可选面时，`connect()` 在导入依赖处抛 `ModuleNotFoundError` → 该 `policy.type` 进会话
 失败，其余功能不受影响（WebRTC 同理，见
 [motrix_edge_frame_webrtc.md](motrix_edge_frame_webrtc.md)）。测试侧由 `tests/conftest.py`
-按依赖可导入性决定收集：`test_ws_transport` / `test_transport_target` / `test_infer_point` /
-`test_webrtc` / `test_lerobot_remote_client` 这五个**整文件**依赖的，缺依赖时不收集；
+按依赖可导入性决定收集：`test_ws_transport` / `test_transport_target` / `test_webrtc` /
+`test_lerobot_remote_client` 这四个**整文件**依赖的，缺依赖时不收集；
 `tests/test_policy.py` 里只有部分用例依赖 openpi，用 `@pytest.mark.optional("openpi")` 跳过。
 
 ## 共用契约层（contract.py）
@@ -329,18 +329,6 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 
 `infer rollout` / `robot execute` 在下发动作前还会自查**回执有效期**（`deadline_exceeded`）：提交方
 已超时放弃 → **丢弃动作**（真机不动）+ 回执 504，计数见 status `dropped_actions`。
-
-## 虚拟推理端点（scripts/test_infer_point.py）
-
-无真实推理的**模拟官方 `WebsocketPolicyServer`** 的联调端点：连接后先下发 metadata（
-`--publish-horizon` 可选带上 `action_horizon`），按 openpi 官方 flat 契约接收观测，返回一段
-**有界随机游走**的动作块 `{"actions": [horizon, dim]}`（块间连续），用于在无真实模型时验证
-「edge → 推理端」的传输契约与 rtc 的取块 / 切分。与 Edge 的耦合仅限 wire 契约
-（`policy/openpi/contract.py` / `transport/msgpack_numpy.py`），可独立运行：
-
-```
-uv run python scripts/test_infer_point.py --host 0.0.0.0 --port 8765 --action-dim 14 --action-horizon 16
-```
 
 ## 相关文档
 
