@@ -1,3 +1,6 @@
 include:
   - project: "devops/centralized-ci"
     file: "python/application-init.yml"
+  - project: "motphys-ai/ai-review"
+    ref: master
+    file: "templates/review-ai.yml"

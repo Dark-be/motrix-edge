@@ -9,3 +9,7 @@ docs/build/
 
 # vendored 第三方（Apache-2.0 头，非 Motphys 专有头）：lint / format / 头检查均跳过
 src/lerobot/
+
+# AI review（与 .gitignore 同步）
+/.gitlab/ai-review/review/
+/.gitlab/ai-review/source/

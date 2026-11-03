@@ -43,3 +43,7 @@ data/
 
 # vendored 第三方（lerobot 子集，Apache-2.0）：新增文件需 git add -f
 src/lerobot/
+
+# AI review
+/.gitlab/ai-review/review/
+/.gitlab/ai-review/source/
