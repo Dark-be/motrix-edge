@@ -368,11 +368,9 @@ collector:
     `std_msgs/msg/Float64MultiArray`，`observations/images/<cam>` 用
     `sensor_msgs/msg/CompressedImage`（JPEG）。**逐维含义写在同名 `{uuid}.json`**
     （`state_space` / `state_dims` / `action_space` / `action_dims`，每项 `{index, arm, kind, name}`）——
-    机器人整体切位姿时只改 `state_space`，下游不必改代码。帧时间取 obs 内 `timestamp` 作
-    `log_time`，可在 Foxglove 中按时间轴查看；该 `timestamp` 是**观测拍时刻**（观测线程
-    `build_observation()` 在取帧前打点），qpos / action 来自上一个控制拍——滞后**有界**（≤ 1/`HZ`
-    ≈ 33ms）但**逐帧小幅波动**（两条独立限速循环的调度抖动；控制拍超时会让「最近一个控制拍」
-    跳档），**不能按固定滞后做时间平移校正**。**流式写入**：`start` → `collect` 直接落盘 → `finish`。
+    机器人整体切位姿时只改 `state_space`，下游不必改代码。各话题按源头采样时间写入 MCAP，
+    图片消息头与该图片的话题时间一致，详见 [逐话题采样时间](../wiki/design/robot_pipeline_runtime.md#逐话题采样时间)。
+    **流式写入**：`start` → `collect` 直接落盘 → `finish`。
     **帧头跳过（只对遥操作录制）**：`robot teach` / `robot takeover` 开着时，capture 开始后主臂相对
     首帧未超过 `skip_until_motion` 阈值前不记录（也不创建 episode 文件），出现一次有效移动才开始；
     跳过只作用于本轮帧头，下一轮重新武装。进度见日志与 `GET /v1/capture/status` 的 `head_skip`。

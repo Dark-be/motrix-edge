@@ -12,9 +12,12 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+import time
+
 import cv2
 import numpy as np
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMP_NS
 
 from .sensor import Sensor
 
@@ -64,7 +67,7 @@ class TestVisionSensor(Sensor):
 
     def get_information(self):
         """读取完整观测（color 恒有；enable_depth 时额外合深度图），不做 collect_info 过滤。"""
-        image = {}
+        image = {KEY_TIMESTAMP_NS: time.time_ns()}
 
         self.timestep += 1  # 每帧增加
         t = self.timestep * 0.05

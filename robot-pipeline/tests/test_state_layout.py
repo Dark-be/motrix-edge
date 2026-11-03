@@ -711,7 +711,7 @@ def test_dual_hardware_connection_and_gripper_deadzone(dual_piper):
         robot.controllers[name].connect.assert_called_once_with(**kwargs)
         robot._controller_for_arm(arm).connect.assert_called_once_with(port=robot.ports[arm], gravity=None)
     for name, sensor in robot.sensors.items():
-        kwargs = {"device": robot.camera_devices[name], "pixel_format": "jpg"}
+        kwargs = {"device": robot.camera_devices[name], "pixel_format": "raw"}
         if robot.CAMERA_KINDS[name] == "realsense":
             kwargs["enable_depth"] = name in robot.depth_cameras
         sensor.connect.assert_called_once_with(**kwargs)

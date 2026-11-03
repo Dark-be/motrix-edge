@@ -16,11 +16,13 @@ import fcntl
 import mmap
 import os
 import select
+import time
 
 import cv2
 import numpy as np
 import v4l2
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMP_NS
 
 from .sensor import Sensor
 
@@ -127,7 +129,7 @@ class V4l2Sensor(Sensor):
     # 返回 ndarray：pixel_format=jpg → color 为 JPEG bytes 的 1 维 ndarray（调用方 imdecode）；
     # pixel_format=raw → color 为解码后的 RGB ndarray（HxWx3）。
     def get_information(self):
-        image = {}
+        image = {KEY_TIMESTAMP_NS: time.time_ns()}
 
         r, _, _ = select.select([self.fd], [], [], 0.2)
         if not r:

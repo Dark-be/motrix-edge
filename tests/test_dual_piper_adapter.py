@@ -613,3 +613,44 @@ def test_release_closes_local_resources():
     assert http.closed is True
     assert adapter._shm is None
     assert adapter._http is None
+
+
+def test_tracked_gripper_command_keeps_arm_scope_and_returns_robot_receipt():
+    receipt = {"command_id": "grip-1", "execution_status": "queued"}
+    http = _FakeHttp(post_body={PATH_ROLLOUT: receipt})
+    adapter = _adapter(http)
+    assert adapter.submit_motion([0.3], command_id="grip-1", layout="gripper", arms=["right"]) == receipt
+    path, body = http.posts[-1]
+    assert path == PATH_ROLLOUT and body["layout"] == "gripper"
+    assert body["arms"] == ["right"] and body["action"] == pytest.approx([0.3])
+    assert body["command_id"] == "grip-1"
+
+
+def test_motion_snapshot_selects_enabled_arms_and_accounts_for_transport_age():
+    from motrix_edge.adapter.base import KEY_POSE_ACTION
+
+    observation = {
+        KEY_QPOS: list(range(14)),
+        KEY_ACTION: list(range(14)),
+        KEY_POSE: list(range(12)),
+        KEY_POSE_ACTION: list(range(12)),
+    }
+    snapshot = {
+        "sample_age_s": 0.1,
+        "sample_seq": 5,
+        "instance_id": "robot-1",
+        "motion_revision": 3,
+        "observation": observation,
+    }
+    adapter = _adapter(_FakeHttp(get_body={"/v1/motion/state": snapshot}))
+    adapter.configure(enabled_arms=["right"])
+    result = adapter.motion_snapshot()
+    assert result["sample_age_s"] >= 0.1 and result["sample_seq"] == 5
+    assert list(result["observation"][KEY_QPOS]) == list(range(7, 14))
+    assert list(result["observation"][KEY_POSE_ACTION]) == list(range(6, 12))
+
+
+def test_tracked_motion_refusal_is_not_application():
+    adapter = _adapter(_FakeHttp(post_status={PATH_ROLLOUT: 409}))
+    result = adapter.submit_motion([0.0], command_id="grip-2", layout="gripper", arms=["left"])
+    assert result["execution_status"] == "rejected" and result["command_id"] == "grip-2"
