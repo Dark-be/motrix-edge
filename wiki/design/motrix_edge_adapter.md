@@ -33,7 +33,7 @@ adapter/
 
 ## 能力裁剪（启用臂 / 相机，RobotAdapter.configure）
 
-机器人**只运行一个进程 / 一个 adapter**（不新增单臂 adapter）：`configure()` 是 **`RobotAdapter`
+机器人**只运行一个进程 / 一个 adapter**（运行时裁剪不新增 adapter）：`configure()` 是 **`RobotAdapter`
 基类**的通用能力（`DualPiperAdapter` / `TestRobotAdapter` 声明臂布局后继承）。子类通过类常量声明
 **动作布局**（`ARM_NAMES` / `ACTION_DIM_PER_ARM`（**按空间**每臂维度）/ `HOME`（**按空间**全臂 home）/
 `DEFAULT_ENABLED_ARMS` / `IMAGES`），基类提供 `configure` / `_select_arm_segments` / `_expand_layout`：
@@ -63,6 +63,9 @@ set 时刻，而非等绑定失败、节点静默停在 IDLE）。非法配置 �
 `GET /v1/adapters/config`。缺省（全臂）行为与未裁剪一致：`action_dims = {joint: 12, pose: 12,
 gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用臂数直通），「哪条臂 / 怎么映射回全臂
 维度」全部由 adapter 承载。
+
+故障降级机型 `single_piper` 使用独立的 `SinglePiperAdapter`，原生声明右臂与两路相机；
+硬件子集与数据维度见[单臂机器档案](./robot_pipeline_action_spaces.md#单臂机型复用双臂机器档案)。
 
 ## RobotAdapter 契约
 

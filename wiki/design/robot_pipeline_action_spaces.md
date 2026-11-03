@@ -80,10 +80,16 @@ Edge 边界后，再组装成每臂 7 维 `observations/qpos`、`observations/qp
 ### 单臂机型复用双臂机器档案
 
 机器档案描述整台机器的现场接线，机型只选择自己使用的硬件子集。`single_piper` 固定使用
-`left_master + left`，臂名也保持为 `left`；因此它与 `dual_piper` 共用同一份机器档案，不再引入
-`leader / follower` 同义接线键。档案中的 `right_master / right` 与相机信息对单臂机型不生效，
-但属于已知机器资源，不应产生未知键告警；逐臂 `joint_offset` 同样只取 `left`，真正的拼写错误
-仍需告警。单臂观测和动作维度仍只由 `ARM_NAMES = ("left",)` 推导，不因档案包含右臂信息而扩成双臂。
+`left_master + right`，执行臂名保持为 `right`，头部与右腕相机为 `cam_head / cam_right_wrist`。
+它与 `dual_piper` 共用机器档案；左从臂、右主臂及左腕相机不构造、不连接，损坏或缺席不阻碍采集。
+已知但未启用的端口、相机、TCP 与深度配置可保留；未知资源名仍须报错或告警。
+逐臂遥操作偏置按执行臂 `right` 选择，左主臂与右从臂的跨侧零位差需现场核验。
+
+单臂复用双臂的观测、动作、夹爪死区、FK/IK、TCP、遥操作与相机时间戳通路，
+默认同样启用深度和采集帧头跳过。状态与 action 为右臂 7 维、pose 为 6 维；
+不填充虚构的左臂数据。Edge 为 `single_piper` 注册相同布局的薄适配器。
+机器档案用于现场接线及逐臂参数，机型配置负责单臂 home 和数据目录；不把双臂 episode
+与单臂 episode 当成相同维度的数据集。
 子类的连接、观测、遥操作读取和命令下发均按 `ARM_NAMES` 遍历，并使用
 `JOINT_DIM_PER_ARM` / `POSE_DIM_PER_ARM` 切块。控制器返回的关节块不足声明宽度时必须立即报错，
 不能静默拼成短向量。

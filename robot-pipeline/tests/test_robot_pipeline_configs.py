@@ -29,19 +29,19 @@ import yaml
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "src" / "config"
 _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
 # 需要「帧头跳过」配置的机型（遥操作系统；其余机型保留代码缺省 HEAD_SKIP_DEFAULTS）
-_HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
+_HEAD_SKIP_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml", "single_piper.yml")
 # 声明深度观测的机型（见 wiki/design/robot_pipeline_depth.md）
-_DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml")
+_DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml", "single_piper.yml")
 # 机型 → 臂名（校验 ``robot.tcp.arms`` 的键名用；与机器人类的 ``ARM_NAMES`` 一致）
 _TCP_ARMS = {
     "test_robot.yml": ("left", "right"),
     "dual_piper.yml": ("left", "right"),
     "dual_alicia_piper.yml": ("left", "right"),
-    "single_piper.yml": ("left",),
+    "single_piper.yml": ("right",),
 }
 # 出厂**开启** robot.tcp 的机型 → 公共偏移（米，法兰系；法兰 +z = 工具伸出方向）。
 # dual piper 的末端实装长度固定，故默认开启；其余机型没有确定的装配长度 → 不带该段。
-_TCP_SHIPPED_ON = {name: (0.0, 0.0, 0.12) for name in ("dual_piper.yml", "dual_alicia_piper.yml")}
+_TCP_SHIPPED_ON = {name: (0.0, 0.0, 0.12) for name in ("dual_piper.yml", "dual_alicia_piper.yml", "single_piper.yml")}
 
 
 def _load(name: str) -> dict:
@@ -52,12 +52,12 @@ def test_config_dir_is_populated():
     assert sorted(p.name for p in _CONFIG_FILES), f"未找到 robot-pipeline 机型配置：{_CONFIG_DIR}"
 
 
-def test_single_piper_reuses_dual_piper_left_port_keys():
-    """单臂与双臂机型共享机器档案键，只选择左主手 / 左从臂。"""
+def test_single_piper_reuses_dual_piper_cross_port_keys():
+    """单臂与双臂机型共享机器档案键，只选择左主手 / 右从臂。"""
     single_ports = set(_load("single_piper.yml")["robot"]["ports"])
     dual_ports = set(_load("dual_piper.yml")["robot"]["ports"])
 
-    assert single_ports == {"left_master", "left"}
+    assert single_ports == {"left_master", "right"}
     assert single_ports < dual_ports
 
 
@@ -222,3 +222,15 @@ def test_dual_piper_variants_share_execution_and_capture_defaults():
     }
     for arm in ("left", "right"):
         assert alicia["robot"]["ports"][arm] == piper["robot"]["ports"][arm]
+
+
+def test_single_piper_matches_dual_operational_defaults():
+    single = _load("single_piper.yml")
+    dual = _load("dual_piper.yml")
+    for key in ("step_rad", "tcp", "depth"):
+        assert single["robot"][key] == dual["robot"][key]
+    assert single["robot"]["init_joint"] == dual["robot"]["init_joint"][6:]
+    assert single["robot"]["teleop"]["joint_offset"]["right"] == dual["robot"]["teleop"]["joint_offset"]["right"]
+    assert {key: value for key, value in single["collector"].items() if key != "save_dir"} == {
+        key: value for key, value in dual["collector"].items() if key != "save_dir"
+    }
