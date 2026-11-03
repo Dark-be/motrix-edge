@@ -30,11 +30,10 @@ health / preview / WebRTC 信令。仅中间件（correlation / no-store）用 `
 ``{"detail": ..., "code": ...}``。
 
 信任边界（当前实现）：
-  - CORS 全放开（``allow_origins=["*"]``）+ 服务监听 ``0.0.0.0``（node 内嵌 web 线程，见 __main__.py）；
-  - 受控操作仅凭 ``X-Lease-Id`` 校验 —— 租约是 Console 前端**自行签发并下发**的本地镜像
-    （LeaseManager 只校验），无 TLS / 设备认证 / 服务端身份核验；
-  故控制面只适合**可信局域网 / 开发调试**。跨网络 / 生产部署须前置网关做 TLS + 鉴权；
-  Console 接入的鉴权（identity 上报核验）落地前，**不要**把 Edge 直接暴露到不受信网络。
+  - 飞书认证未启用时 CORS 全放开；启用时必须配置明确 origin，并使用 HttpOnly 登录 Cookie；
+  - 飞书认证只加固人工采集的 ``capture sync`` 身份，其他受控操作仍只凭 Console 下发的
+    ``X-Lease-Id`` 本地镜像校验，无设备认证；
+  故生产部署仍须使用 TLS，并按需在网关统一保护其余控制端点。
 """
 
 from __future__ import annotations
@@ -48,6 +47,7 @@ from fastapi.responses import JSONResponse
 from motrix_edge.errors import ErrorCode, ServiceError
 from motrix_edge.identity import Identity, load_identity, new_correlation_id
 from motrix_edge.lease import LeaseManager, build_lease_manager
+from motrix_edge.server.auth import AuthService, build_auth_service
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.deps import Services
 from motrix_edge.server.depth import DepthService
@@ -69,6 +69,7 @@ _HTTP_STATUS: dict[str, int] = {
     ErrorCode.CONFLICT: 409,
     ErrorCode.LEASE_REQUIRED: 409,
     ErrorCode.LEASE_EXPIRED: 410,
+    ErrorCode.UNAUTHENTICATED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.NOT_IMPLEMENTED: 501,
     ErrorCode.UPSTREAM_ERROR: 502,
@@ -89,6 +90,7 @@ def create_app(
     depth: DepthService | None = None,
     meta: CaptureMetaService | None = None,
     rpent: RpentService | None = None,
+    auth: AuthService | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
@@ -112,6 +114,8 @@ def create_app(
     rpent: 可选 ``RpentService``（RPent 兼容的 RPC 面）；注入后注册 **``POST /call``**
            （外部 agent 经它驱动 edge，见 wiki/design/motrix_edge_rpent_bridge.md），
            未注入时该端点回 ``ok=false`` 信封。
+    auth: 可选 ``AuthService``；未注入时按 ``base_cfg.auth.feishu`` 构建，配置关闭则保留
+          原有匿名采集元信息同步行为。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
@@ -119,6 +123,7 @@ def create_app(
     # 上传服务（``upload`` 段）：本地 episode 扫描 / 选择 / 打包与上传队列状态
     uploads = uploads or UploadService(base_cfg)
 
+    auth = auth or build_auth_service(base_cfg, lease_manager)
     services = Services(
         identity=identity,
         leases=lease_manager,
@@ -130,18 +135,17 @@ def create_app(
         depth=depth,
         webrtc=webrtc,
         rpent=rpent,
+        auth=auth,
     )
 
     app = FastAPI(title="MotrixEdge", version=get_package_version())
 
-    # 浏览器 viewer（file:// 或任意端口打开）跨源访问：开发/调试期放开 CORS。
-    # **信任边界**：配合服务监听 0.0.0.0（__main__.py），控制面无 TLS / 鉴权（仅
-    # X-Lease-Id 本地租约镜像，前端自签），只适合可信局域网 / 调试；对外暴露须前置
-    # 网关 TLS + 鉴权（详见本模块 docstring「信任边界」）。
+    # 匿名兼容模式允许任意前端 origin；启用 Cookie 登录后必须使用显式 origin。
+    allowed_origins = list(auth.config.allowed_origins) if auth is not None else ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,  # 用 X-Lease-Id 头，不用 cookie，可通配 origin
+        allow_origins=allowed_origins,
+        allow_credentials=auth is not None,
         allow_methods=["*"],
         allow_headers=["*"],
     )

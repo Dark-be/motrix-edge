@@ -285,13 +285,15 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiortc", marker = "extra == 'webrtc'", specifier = ">=1.15.0,<2.0.0" },
+    { name = "eclipse-zenoh", marker = "extra == 'lerobot'", specifier = ">=1.9.0,<1.11.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "grpcio", marker = "extra == 'lerobot'", specifier = ">=1.62.0" },
     { name = "httpx2", specifier = ">=2.13.1" },
     { name = "motrix-edge", extras = ["openpi", "lerobot", "webrtc"], marker = "extra == 'all'" },
+    { name = "msgpack", marker = "extra == 'lerobot'", specifier = ">=1.1.0,<2.0.0" },
     { name = "msgpack", marker = "extra == 'openpi'", specifier = ">=1.0.5" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
+    { name = "pillow", marker = "extra == 'lerobot'", specifier = ">=10.0.0,<12.0.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.53" },
     { name = "pyyaml" },
     { name = "torch", marker = "extra == 'lerobot'", specifier = "==2.9.1+cpu" },
@@ -302,8 +304,6 @@ provides-extras = ["openpi", "lerobot", "webrtc", "all"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "grpcio-tools", specifier = ">=1.62.0" },
-    { name = "protobuf", specifier = ">=4.25" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },

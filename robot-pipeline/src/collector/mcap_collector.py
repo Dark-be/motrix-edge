@@ -258,9 +258,12 @@ class ActMcapCollector:
         for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
             ts_ns = times[topic]
             self._writer.write_message(
-                topic=topic, schema=self._schema_qpos,
+                topic=topic,
+                schema=self._schema_qpos,
                 message={"layout": {"dim": [], "data_offset": 0}, "data": data},
-                log_time=ts_ns, publish_time=ts_ns, sequence=seq,
+                log_time=ts_ns,
+                publish_time=ts_ns,
+                sequence=seq,
             )
         self._step_count += 1
 
@@ -280,19 +283,23 @@ class ActMcapCollector:
         self._first_ts_ns = (
             min(times.values()) if self._first_ts_ns is None else min(self._first_ts_ns, *times.values())
         )
-        self._last_ts_ns = (
-            max(times.values()) if self._last_ts_ns is None else max(self._last_ts_ns, *times.values())
-        )
+        self._last_ts_ns = max(times.values()) if self._last_ts_ns is None else max(self._last_ts_ns, *times.values())
         seq = self._message_seq
         self._message_seq += 1
         for key in image_topics:
             ts_ns = times[key]
             sec, nanosec = divmod(ts_ns, 1_000_000_000)
             self._writer.write_message(
-                topic=f"{TOPIC_IMAGE_PREFIX}{key[len(CAMERA_PREFIX):]}", schema=self._schema_img,
-                message={"header": {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": ""},
-                         "format": "jpeg", "data": self._image_to_jpeg(standard_obs[key])},
-                log_time=ts_ns, publish_time=ts_ns, sequence=seq,
+                topic=f"{TOPIC_IMAGE_PREFIX}{key[len(CAMERA_PREFIX) :]}",
+                schema=self._schema_img,
+                message={
+                    "header": {"stamp": {"sec": sec, "nanosec": nanosec}, "frame_id": ""},
+                    "format": "jpeg",
+                    "data": self._image_to_jpeg(standard_obs[key]),
+                },
+                log_time=ts_ns,
+                publish_time=ts_ns,
+                sequence=seq,
             )
 
     def _resolve_times(self, standard_obs, topics, timestamps):

@@ -56,6 +56,7 @@ MIT_CTRL_CFG = [
 ]
 
 MIT_PROFILES = {"default": MIT_CTRL_CFG}
+CTRL_MODES = ("mit", "joint")
 
 
 def _scalar(value) -> float:
@@ -138,6 +139,8 @@ class PiperController(ArmController):
         mit_profiles: dict | None = None,
     ):
         self.port = port
+        if ctrl_mode not in CTRL_MODES:
+            raise ValueError(f"Unknown control mode {ctrl_mode!r}; available: {list(CTRL_MODES)}")
         self.ctrl_mode = ctrl_mode
         profiles = dict(MIT_PROFILES)
         profiles.update(mit_profiles or {})

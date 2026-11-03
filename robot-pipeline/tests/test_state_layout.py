@@ -714,7 +714,9 @@ def test_dual_hardware_connection_and_gripper_deadzone(dual_piper):
         if robot.PORT_KINDS[name] == "can":
             kwargs["role"] = "leader"
         robot.controllers[name].connect.assert_called_once_with(**kwargs)
-        robot._controller_for_arm(arm).connect.assert_called_once_with(port=robot.ports[arm], gravity=None)
+        robot._controller_for_arm(arm).connect.assert_called_once_with(
+            port=robot.ports[arm], ctrl_mode="mit", gravity=None
+        )
     for name, sensor in robot.sensors.items():
         kwargs = {"device": robot.camera_devices[name], "pixel_format": "raw"}
         if robot.CAMERA_KINDS[name] == "realsense":
@@ -761,7 +763,9 @@ def test_single_piper_connects_only_surviving_hardware(monkeypatch):
     assert set(robot.controllers) == {"left_master", "right_arm"}
     assert set(robot.sensors) == {"cam_head", "cam_right_wrist"}
     robot.controllers["left_master"].connect.assert_called_once_with(port="can0", role="leader", firmware="v189")
-    robot.controllers["right_arm"].connect.assert_called_once_with(port="can3", gravity=None, firmware="v188")
+    robot.controllers["right_arm"].connect.assert_called_once_with(
+        port="can3", ctrl_mode="mit", gravity=None, firmware="v188"
+    )
     for name, sensor in robot.sensors.items():
         sensor.connect.assert_called_once_with(device=_DEVICES["cameras"][name], pixel_format="raw", enable_depth=True)
     assert list(robot.tcp_offsets) == ["right"]
