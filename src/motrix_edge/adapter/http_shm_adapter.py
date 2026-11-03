@@ -36,8 +36,10 @@ import numpy as np
 from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
     KEY_ACTION,
+    KEY_POSE,
     KEY_QPOS,
     Action,
+    ActionSpace,
     CaptureStatus,
     HealthStatus,
     RobotAdapter,
@@ -45,6 +47,7 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_ACTION_SPACE,
     FIELD_CONTROL_HZ,
     FIELD_DATA_DIR,
     FIELD_DETAIL,
@@ -53,6 +56,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_OK,
     FIELD_RUNNING,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_MODE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_CAPTURE_STATUS,
@@ -115,6 +119,9 @@ class HttpShmAdapter(RobotAdapter):
         self.safe_stop_calls = 0
         self.reset_calls = 0
         self.teleop_enabled = False
+        self.teleop_mode: str | None = None  # 最近一次 set_teleop 的模式（None = 未指定，进程侧缺省）
+        self.rollout_refused_calls = 0  # 遥操作（人工接管）中 rollout 被 SDK 拒绝（409）次数
+        self._rollout_refused_logged = False  # 拒绝日志限流位（仅状态变化时各记一条）
 
     @property
     def running(self) -> bool:
@@ -139,14 +146,28 @@ class HttpShmAdapter(RobotAdapter):
 
     # ---- capabilities ----------------------------------------------------------
     @property
+    def pose_dim(self) -> int:
+        """位姿观测维度（启用臂 × 每臂位姿维数；不提供位姿的适配器为 0）。"""
+        if not self.POSE_DIM_PER_ARM:
+            return 0
+        if not self.ARM_NAMES:
+            return int(self.POSE_DIM_PER_ARM)
+        return int(self.POSE_DIM_PER_ARM) * len(self.enabled_arms)
+
+    @property
     def capabilities(self) -> RobotCapabilities:
-        # 观测键 = ``observe()`` 实际返回的键（qpos + 进程侧目标 action + 启用相机），
-        # 随 configure 实时变化
-        obs_keys = [KEY_QPOS, KEY_ACTION] + [f"{CAMERA_PREFIX}{img}" for img in self.enabled_images]
+        # 观测键 = ``observe()`` 实际返回的键（qpos + 进程侧目标 action + 位姿 + 启用相机），
+        # 随 configure 实时变化；顺序与 SHM 布局一致（qpos → action → pose → images），便于比对
+        obs_keys = [KEY_QPOS, KEY_ACTION]
+        if self.pose_dim > 0:
+            obs_keys.append(KEY_POSE)  # 提供末端位姿（笛卡尔策略的观测输入）
+        obs_keys += [f"{CAMERA_PREFIX}{img}" for img in self.enabled_images]
         return RobotCapabilities(
             robot_model_id=self.robot_model_id,
             robot_model_version=self.robot_model_version,
             action_dim=self.action_dim,
+            action_spaces=[space.value for space in self.ACTION_SPACES],
+            pose_dim=self.pose_dim,
             observation_keys=obs_keys,
             capabilities=dict(self._capabilities),
         )
@@ -155,13 +176,18 @@ class HttpShmAdapter(RobotAdapter):
     def health(self) -> HealthStatus:
         """健康检查：实时 ``GET /v1/health``（SDK 自维护硬件；Edge 只查询）。
 
-        附带 robot 名义 / 实测控制频率（control_hz / measured_hz，robot env 上报）。
+        附带 robot 名义 / 实测控制频率，并用新版 SDK 上报的遥操状态纠正本地镜像。
         """
         data = {}
         try:
             resp = self._client().get(PATH_HEALTH)
             data = resp.json() if resp.status_code == 200 else {}
             ok = resp.status_code == 200 and bool(data.get(FIELD_OK, False))
+            # SDK 是遥操状态的权威源。新版 health 携带实时值，用于在 SDK 重启后
+            # 纠正 Edge 的本地镜像；旧 SDK 不带字段时保留镜像，避免破坏向后兼容。
+            if resp.status_code == 200 and FIELD_TELEOP_ENABLED in data:
+                self.teleop_enabled = bool(data[FIELD_TELEOP_ENABLED])
+                self.teleop_mode = data.get(FIELD_TELEOP_MODE) if self.teleop_enabled else None
         except Exception as exc:  # noqa: BLE001 进程失联
             debug_print(self.name, f"health check failed: {exc}", "WARNING")
             ok = False
@@ -190,17 +216,52 @@ class HttpShmAdapter(RobotAdapter):
         debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
         self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
 
-    def set_teleop(self, enabled: bool) -> None:
-        """设置遥操作开关（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。"""
-        self.teleop_enabled = bool(enabled)
-        debug_print(self.name, f"teleop set to {self.teleop_enabled}", "INFO")
-        self._client().post(PATH_TELEOP, json={FIELD_TELEOP_ENABLED: self.teleop_enabled})
+    def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
+        """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
 
-    def rollout(self, action: Action) -> None:
-        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。"""
+        ``mode``（``absolute`` / ``delta``）: 仅开启时有意义，缺省不发送该字段（进程侧回退
+        ``absolute``，与只发 ``enabled`` 的旧调用方等价）。
+        """
+        next_enabled = bool(enabled)
+        next_mode = mode if next_enabled else None
+        body: dict = {FIELD_TELEOP_ENABLED: next_enabled}
+        if next_mode:
+            body[FIELD_TELEOP_MODE] = next_mode
+        resp = self._client().post(PATH_TELEOP, json=body)
+        resp.raise_for_status()
+        self.teleop_enabled = next_enabled
+        self.teleop_mode = next_mode
+        debug_print(self.name, f"teleop set to {self.teleop_enabled} (mode={self.teleop_mode})", "INFO")
+
+    def rollout(self, action: Action, action_space: ActionSpace | str | None = None) -> bool:
+        """推理闭环：经 ``_expand_action`` 校验 / 展开后 HTTP 转发（SDK 侧设为限速目标并逐帧靠近）。
+
+        ``action_space`` 声明 ``action`` 的语义（缺省 ``joint``，与仅下发关节动作的调用方
+        等价）；非关节空间时随 body 下发 ``action_space`` 字段，由机器人进程做 IK。
+
+        遥操作（人工接管）中 SDK 返回 **409**：本拍不下发（返回 False）。持续推理（30Hz）会反复
+        命中，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
+        """
+        space = self.normalize_action_space(action_space)
         target = self._expand_action(action, "rollout")
         self.rollout_calls += 1
-        self._client().post(PATH_ROLLOUT, json={FIELD_ACTION: target.tolist()})
+        body: dict = {FIELD_ACTION: target.tolist()}
+        if space is not ActionSpace.JOINT:
+            body[FIELD_ACTION_SPACE] = space.value
+        resp = self._client().post(PATH_ROLLOUT, json=body)
+        if resp.status_code == httpx.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
+            self.rollout_refused_calls += 1
+            if not self._rollout_refused_logged:
+                self._rollout_refused_logged = True
+                debug_print(self.name, "rollout refused: robot in teleop (human takeover)", "WARNING")
+            return False
+        # 409 是唯一的预期业务拒绝；其它 4xx / 5xx 表示动作没有成功下发，必须向上抛出，
+        # 不能返回 True 让 InferSession 谎报已执行。
+        resp.raise_for_status()
+        if self._rollout_refused_logged:  # 遥操作结束：恢复下发（状态变化才记日志）
+            self._rollout_refused_logged = False
+            debug_print(self.name, "rollout resumed (teleop off)", "INFO")
+        return True
 
     def safe_stop(self) -> None:
         """安全停止（幂等、失败安全）：本地记录 + HTTP 转发 SDK 进程。
@@ -264,6 +325,9 @@ class HttpShmAdapter(RobotAdapter):
             # 与 qpos **同一裁剪口径**（启用臂），保证观测内各臂维度自洽
             KEY_ACTION: self._select_qpos(np.asarray(frame["action"], dtype=np.float32)),
         }
+        # 末端位姿（机器人提供时）：按启用臂挑选，与 qpos / action 同一裁剪口径
+        if frame.get("pose") is not None and self.POSE_DIM_PER_ARM:
+            obs[KEY_POSE] = self._select_arm_segments(frame["pose"], self.POSE_DIM_PER_ARM)
         # strict=True：路数由两侧各自声明（SHM header 的 image_count ↔ 类常量 IMAGES），
         # 不一致时显式报错，避免静默少一路相机；只暴露 configure 启用的相机
         for image, name in zip(frame["images"], self.IMAGES, strict=True):

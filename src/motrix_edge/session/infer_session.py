@@ -40,6 +40,7 @@ from motrix_edge.utils.commands import (
     CMD_INFER_MODEL_SET,
     CMD_INFER_PROMPT,
     CMD_INFER_ROLLOUT,
+    CMD_INFER_ROLLOUT_STOP,
     CMD_INFER_RTC,
     CMD_INFER_RTC_SET,
     CMD_ROBOT_ESTOP,
@@ -138,8 +139,15 @@ class InferSession(BaseSession):
         self._warmup_cancel = threading.Event()
         # 因回执超时被丢弃的动作数（未下发到真机；诊断用，见 ``deadline_exceeded``）
         self._dropped_actions = 0
+        # 持续推理运行位（infer rollout continuous ↔ infer rollout stop）：供 server
+        # 上报（/v1/infers 的 continuous），前端据此门控「持续推理 / 停止推理」。
+        self._continuous = False
 
-        debug_print(self.name, f"Policy config: {self.policy_config} (type={self.policy_type})", "INFO")
+        debug_print(
+            self.name,
+            f"Policy config: {self.policy_config} (type={self.policy_type})",
+            "INFO",
+        )
 
     @property
     def connected(self) -> bool:
@@ -184,6 +192,11 @@ class InferSession(BaseSession):
     def dropped_actions(self) -> int:
         """因回执超时被丢弃的动作数（未下发到真机；诊断用，见 ``deadline_exceeded``）。"""
         return int(self._dropped_actions)
+
+    @property
+    def continuous(self) -> bool:
+        """持续推理是否正在运行（``infer rollout continuous`` 启动 → ``infer rollout stop`` 结束）。"""
+        return bool(self._continuous)
 
     @property
     def prompt(self) -> str | None:
@@ -490,7 +503,7 @@ class InferSession(BaseSession):
         if cmd.name == CMD_INFER_PROMPT:  # 保持既有回执形状（prompt=...）
             return ok_result(state=getattr(self, "state", "ready"), prompt=written.get("prompt"))
         extra = {"deferred": deferred} if deferred else {}
-        return ok_result(state=getattr(self, "state", "ready"), **result.data, **extra)
+        return ok_result(state=getattr(self, "state", "ready"), **(result.data or {}), **extra)
 
     def _effective_policy_type(self) -> str:
         """本会话实际使用的策略类型（显式选择优先，否则配置 ``policy.type``；非法 → 空串）。"""
@@ -605,9 +618,18 @@ class InferSession(BaseSession):
                     continue
                 if not self._ensure_connected(cmd):  # 已预热时为 no-op；warmup_required=false 才是惰性自连
                     continue
-                if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 session quit / estop
+                if mode == ROLLOUT_MODE_CONTINUOUS:  # 持续推理：启动即回执，直到 stop / session quit / estop
+                    if self._drop_expired(cmd, "continuous rollout start"):
+                        continue
+                    self._continuous = True
                     self._reply(cmd, ok_result(state="continuous", started=True))
-                    result = self._run_continuous()
+                    try:
+                        result = self._run_continuous()
+                    finally:
+                        self._continuous = False
+                    if result is None:  # infer rollout stop：回到本循环（会话保持 ACTIVE / READY）
+                        self.state = SessionState.READY
+                        continue
                     self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
                     return result
                 self._run_single(cmd)  # 单步推理（缺省）
@@ -625,6 +647,8 @@ class InferSession(BaseSession):
                 self._reply(cmd, ok_result(node_state="error"))
                 return RunResult.ERROR
             elif name == CMD_ROBOT_RESET:  # 复位（会话期间）
+                if self._drop_expired(cmd, "reset"):
+                    continue
                 self.adapter.reset()
                 self._reply(cmd, ok_result(state="ready"))
             elif name == CMD_ROBOT_EXECUTE:  # 直接下发 raw 动作（qpos 直接作为参数）
@@ -699,6 +723,9 @@ class InferSession(BaseSession):
         **下发前自查回执是否已过期**（``deadline_exceeded``）：调用方（HTTP / CLI 的 submit）
         超时放弃后，本步动作**必须丢弃**——否则就是「调用方看到失败、机器人却动了」。
         丢弃的那一步已在 RTC 里推进过步号（不自作回退，只记 ``dropped_actions`` 供诊断）。
+
+        另外两类不下发：动作块为空（``action is None``，只回执）；遥操作（人工接管）中
+        ``adapter.rollout`` 返回 False（SDK 409）→ 推理让位，回执说明原因（不回退步号）。
         """
         obs = self.adapter.observe()  # 推理输入（显示观测由节点级写入 frame_manager）
         if obs is None:
@@ -721,8 +748,17 @@ class InferSession(BaseSession):
                 ),
             )
             return
-        if action is not None:
-            self.adapter.rollout(action)  # 解析模型 action 为限速目标并推进一帧
+        if action is not None and self.adapter.rollout(action) is False:
+            # 遥操作（人工接管）中：推理让位（SDK 409）——本步不下发，回执说明原因
+            self._reply(
+                cmd,
+                CommandResult(
+                    status="rejected",
+                    error="teleop (human takeover) active: rollout refused",
+                    status_code=409,
+                ),
+            )
+            return
         repr_action = self._action_repr(action)
         debug_print(self.name, f"Rollout step executed (action={repr_action}).", "INFO")
         self._reply(
@@ -737,6 +773,8 @@ class InferSession(BaseSession):
         （含 action）。录制元信息（operator=policy、task_name=prompt）由调用方**显式**
         ``capture sync`` 同步（本会话只负责默认上报）。
         """
+        if self._drop_expired(cmd, "capture start"):
+            return
         self.adapter.start_capture()
         self._recording = True
         debug_print(self.name, "Rollout recording started (capture episode start).", "INFO")
@@ -744,6 +782,8 @@ class InferSession(BaseSession):
 
     def _end_recording(self, cmd) -> None:
         """capture episode end：结束一轮推理 rollout 录制（机器人进程保存 episode）。"""
+        if self._drop_expired(cmd, "capture end"):
+            return
         self.adapter.end_capture()
         self._recording = False
         debug_print(self.name, "Rollout recording ended (capture episode end).", "INFO")
@@ -752,9 +792,10 @@ class InferSession(BaseSession):
     def _sync_capture_meta_cmd(self, cmd) -> None:
         """capture sync --meta <json>：同步采集元信息（operator/task_name 等）到机器人进程。
 
-        推理录制时（rollout episode）由调用方显式同步：operator 暂定 "policy"、task_name =
-        prompt（会话默认上报，见 server /v1/infers status 的 capture_meta）。
+        推理录制时（rollout episode）由调用方显式同步；Edge 不代报默认元信息。
         """
+        if self._drop_expired(cmd, "capture sync"):
+            return
         try:
             meta = parse_meta(cmd.params.get("meta"))
         except ValueError as exc:
@@ -785,20 +826,25 @@ class InferSession(BaseSession):
         rtc = getattr(self, "rtc", None)
         return rtc.status() if rtc is not None else None
 
-    def _run_continuous(self) -> RunResult:
-        """infer rollout continuous：持续推理，每步轮询命令响应退出 / 复位 / 急停 / 录制。
+    def _run_continuous(self) -> RunResult | None:
+        """infer rollout continuous：持续推理，每步轮询命令响应停止 / 退出 / 复位 / 急停 / 录制。
 
-        启动命令已回执 started（prompt 已在启动前校验非空）；持续直到 session quit
+        启动命令已回执 started（prompt 已在启动前校验非空）；持续直到 ``infer rollout
+        stop``（**回到会话主循环，会话保持 ACTIVE / READY，策略连接不断**）/ session quit
         （FINISHED）/ robot estop（ERROR）/ node 失联（ERROR）。持续期间接受
         ``capture episode start/end``（录制 rollout）与 ``capture sync``（同步元信息）——
-        录制与持续推理正交（robot 不关心模式）。返回 RunResult（由调用方置会话状态）。
+        录制与持续推理正交（robot 不关心模式）。返回 ``None`` = 回到会话主循环。
         """
-        debug_print(self.name, "Continuous rollout started (session quit to stop).", "INFO")
+        debug_print(self.name, "Continuous rollout started (infer rollout stop to stop).", "INFO")
         while True:
             if self._stop_requested:  # 外部请求停止（node 失联 ERROR）：立即退出
                 return RunResult.ERROR
             cmd = self.command_source()
             name = _cmd_name(cmd)
+            if name == CMD_INFER_ROLLOUT_STOP:  # 停止持续推理：留在会话（策略连接 / 机器人状态不变）
+                self._reply(cmd, ok_result(state="ready", continuous=False))
+                debug_print(self.name, "Continuous rollout stopped by request (session kept).", "INFO")
+                return None
             if name == CMD_SESSION_QUIT:  # 停止持续推理并退出会话
                 self.cancel_warmup("session quit")  # 预热在跑也要能退出（打断在飞调用）
                 self.adapter.reset()  # 推理结束回到 home
@@ -811,8 +857,13 @@ class InferSession(BaseSession):
                 self._reply(cmd, ok_result(node_state="error"))
                 return RunResult.ERROR
             if name == CMD_ROBOT_RESET:  # 持续中复位（回执 ok，继续推理）
+                if self._drop_expired(cmd, "reset"):
+                    continue
                 self.adapter.reset()
                 self._reply(cmd, ok_result(state="continuous"))
+                continue
+            if name == CMD_ROBOT_TELEOP:  # 持续中可随时人工接管 / 交回；推理循环保持运行
+                self._set_teleop(cmd, state="continuous")
                 continue
             if name == CMD_INFER_ROLLOUT:  # 持续中重复 rollout：拒绝
                 self._reply(
@@ -837,6 +888,8 @@ class InferSession(BaseSession):
                 continue
             action = self.rtc.infer(obs)  # RTC：必要时登记预取（后台线程）→ 本步动作
             if action is not None:
+                # 遥操作（人工接管）中 SDK 拒绝本拍（409，adapter 已限流日志）：继续下一拍，
+                # 遥操作关闭（robot teleop false）后自动恢复下发。
                 self.adapter.rollout(action)
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
 

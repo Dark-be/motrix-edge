@@ -30,11 +30,12 @@ from motrix_edge.utils.commands import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
-    deadline_exceeded,
+    expired_command_result,
     handle_capture_meta,
     ok_result,
     parse_bool,
     parse_qpos,
+    parse_teleop_mode,
 )
 from motrix_edge.utils.data_handler import debug_print
 
@@ -152,6 +153,8 @@ class BaseSession:
                 self._reply(cmd, ok_result(node_state="error"))
                 return RunResult.ERROR
             if name == CMD_ROBOT_RESET:
+                if self._drop_expired(cmd, "reset"):
+                    continue
                 self.adapter.reset()
                 self._reply(cmd, ok_result(state="ready"))
             elif cmd is not None:  # 未识别命令（等待就绪阶段不适用）统一回执，避免 submit 挂起
@@ -178,21 +181,21 @@ class BaseSession:
         if cmd is not None and getattr(cmd, "reply_to", None) is not None:
             cmd.reply_to(result)
 
+    def _drop_expired(self, cmd, operation: str) -> bool:
+        """同步命令已超时则在副作用前丢弃，避免调用方看到 504 后机器人仍改变状态。"""
+        result = expired_command_result(cmd, operation)
+        if result is None:
+            return False
+        self._reply(cmd, result)
+        return True
+
     def _execute_action(self, cmd) -> None:
         """robot execute：解析 qpos 位置参数 → ``adapter.execute(qpos)``（维度校验在 adapter）。
 
         参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action）。
         **下发前自查回执是否已过期**（``deadline_exceeded``）：调用方超时放弃后不再动真机。
         """
-        if deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
-            self._reply(
-                cmd,
-                CommandResult(
-                    status="rejected",
-                    error="reply deadline exceeded: action dropped (robot not executed)",
-                    status_code=504,
-                ),
-            )
+        if self._drop_expired(cmd, "action"):
             return
         try:
             qpos = parse_qpos(cmd.params.get("qpos"))
@@ -202,18 +205,27 @@ class BaseSession:
             return
         self._reply(cmd, ok_result(state="ready", action=qpos))
 
-    def _set_teleop(self, cmd) -> None:
-        """robot teleop：解析 true/false 参数 → ``adapter.set_teleop``（遥操作开关）。
+    def _set_teleop(self, cmd, state: str = "ready") -> None:
+        """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。
 
-        参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop）。
+        ``mode=delta`` = 人工接管（接管瞬间主 / 从位姿为锚点，只叠加主臂增量）；遥操作开启
+        期间轮机侧会拒绝 ``rollout``（推理让位，见 `/v1/rollout` 契约）。
+        参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop 与模式）。
         """
+        if self._drop_expired(cmd, "teleop change"):
+            return
         try:
             enabled = parse_bool(cmd.params.get("enabled"))
-            self.adapter.set_teleop(enabled)
+            mode = parse_teleop_mode(cmd.params.get("mode"))
+            self.adapter.set_teleop(enabled, mode)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
             return
-        self._reply(cmd, ok_result(state="ready", teleop=enabled))
+        except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话或持续推理
+            debug_print(self.name, f"teleop command failed: {exc}", "WARNING")
+            self._reply(cmd, CommandResult(status="error", error=f"teleop command failed: {exc}", status_code=502))
+            return
+        self._reply(cmd, ok_result(state=state, teleop=enabled, mode=mode if enabled else None))
 
     def run(self):
         """阻塞式会话执行（节点进入 ACTIVE 时调用），返回 RunResult。"""

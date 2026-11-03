@@ -63,6 +63,7 @@ from motrix_edge.utils.commands import (
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
     CommandResult,
+    expired_command_result,
     handle_capture_meta,
     handle_infer_rtc,
     handle_policy_config,
@@ -70,6 +71,7 @@ from motrix_edge.utils.commands import (
     parse_bool,
     parse_meta,
     parse_qpos,
+    parse_teleop_mode,
 )
 from motrix_edge.utils.data_handler import debug_print
 
@@ -511,11 +513,23 @@ class EdgeNode:
 
     def _handle_adapter_command(self, cmd) -> bool:
         """处理 READY / ACTIVE 共用的 adapter 控制命令并统一回执。"""
+
+        def drop_expired(operation: str) -> bool:
+            result = expired_command_result(cmd, operation)
+            if result is None:
+                return False
+            self._reply(cmd, result)
+            return True
+
         if cmd.name == CMD_ROBOT_RESET:
+            if drop_expired("reset"):
+                return True
             self.adapter.reset()
             self._reply(cmd, ok_result(node_state=self.state))
             return True
         if cmd.name == CMD_ROBOT_EXECUTE:
+            if drop_expired("action"):
+                return True
             try:
                 qpos = parse_qpos(cmd.params.get("qpos"))
                 self.adapter.execute(qpos)  # 维度校验在 adapter.execute
@@ -525,13 +539,20 @@ class EdgeNode:
             self._reply(cmd, ok_result(node_state=self.state, action=qpos))
             return True
         if cmd.name == CMD_ROBOT_TELEOP:
+            if drop_expired("teleop change"):
+                return True
             try:
                 enabled = parse_bool(cmd.params.get("enabled"))
-                self.adapter.set_teleop(enabled)
+                mode = parse_teleop_mode(cmd.params.get("mode"))
+                self.adapter.set_teleop(enabled, mode)
             except ValueError as exc:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
                 return True
-            self._reply(cmd, ok_result(node_state=self.state, teleop=enabled))
+            except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得击穿 node 主循环
+                debug_print("EdgeNode", f"teleop command failed: {exc}", "WARNING")
+                self._reply(cmd, CommandResult(status="error", error=f"teleop command failed: {exc}", status_code=502))
+                return True
+            self._reply(cmd, ok_result(node_state=self.state, teleop=enabled, mode=mode if enabled else None))
             return True
         return False
 

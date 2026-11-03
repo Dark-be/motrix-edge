@@ -28,7 +28,7 @@
 | POST/GET              | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}` | Edge 级租约（Console 签发镜像）                       | LeaseManager   |
 | GET/POST/PATCH/DELETE | `/v1/captures` + `…/precheck` + `…/meta`、`…/sync`              | 采集会话控制 + 采集元信息选项                         | CaptureService |
 | GET/POST              | `/v1/uploads` + `/v1/uploads/select·pack·upload·retry`          | 本地 episode 扫描 / 选择 / 打包与上传队列             | UploadSession  |
-| GET/POST/DELETE       | `/v1/infers` + `/v1/infers/rollout`                             | 推理会话控制                                          | InferService   |
+| GET/POST/DELETE       | `/v1/infers` + `/v1/infers/rollout` + `…/rollout/stop`          | 推理会话控制                                          | InferService   |
 | GET                   | `/v1/preview`                                                   | 最新观测预览（独立于会话，须租约）                    | PreviewService |
 | POST                  | `/v1/webrtc/offer`                                              | WebRTC 推流信令（须租约）                             | WebRTCService  |
 
@@ -55,15 +55,15 @@ correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动�
 `idempotency_key`（**预留、未实现**：幂等去重尚未落地，字段仅回显；调用方需自行处理
 重试，勿依赖去重）。`CommandService.execute` 先校验租约，再按 capability 映射为总线命令：
 
-| capability                  | 总线命令                            | 说明                                                                          |
-| --------------------------- | ----------------------------------- | ----------------------------------------------------------------------------- |
-| `estop`                     | `robot estop`（push）               | 全局急停：安全停止 + 节点转 ERROR；走总线**旁路队列**，任务运行期间也即时生效 |
-| `reset`                     | `node reset`（push）                | 节点复位（ERROR → IDLE）                                                      |
-| `robot_reset`               | `robot reset`（push）               | 机器人复位（adapter.reset）                                                   |
-| `robot_execute`             | `robot execute`（submit）           | 直接下发 raw 动作（qpos），回执透传                                           |
-| `robot_teleop`              | `robot teleop`（push）              | 遥操作开关（enabled=true/false）                                              |
-| `capture_episode_start/end` | `capture episode start/end`（push） | 开始 / 结束一轮采集                                                           |
-| 其他                        | —（骨架）                           | 预留 Capability 校验 / 具体下发                                               |
+| capability                  | 总线命令                              | 说明                                                                          |
+| --------------------------- | ------------------------------------- | ----------------------------------------------------------------------------- |
+| `estop`                     | `robot estop`（push）                 | 全局急停：安全停止 + 节点转 ERROR；走总线**旁路队列**，任务运行期间也即时生效 |
+| `reset`                     | `node reset`（push）                  | 节点复位（ERROR → IDLE）                                                      |
+| `robot_reset`               | `robot reset`（submit）               | 机器人复位（adapter.reset），回执透传                                         |
+| `robot_execute`             | `robot execute`（submit）             | 直接下发 raw 动作（qpos），回执透传                                           |
+| `robot_teleop`              | `robot teleop`（submit）              | 遥操作 / 人工接管（enabled + 可选 mode），回执透传                            |
+| `capture_episode_start/end` | `capture episode start/end`（submit） | 开始 / 结束一轮采集，回执透传                                                 |
+| 其他                        | —（骨架）                             | 预留 Capability 校验 / 具体下发                                               |
 
 ## /v1/captures（采集会话控制）
 
@@ -129,29 +129,30 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 
 推理会话**无回合概念**（enter → 持续推理 → exit，`infer rollout` 步进），端点经 `InferService` 桥接：
 
-| 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                                                            |
-| ------ | -------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/infers`               | 必需          | `enter`：`session run infer`（可选 body `policy_type` / `config`——**整份策略配置**，含公共项端点 `host` / `port`，会话级：进入会话时固化）                                                                                                                                      |
-| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / **warmed_up / warming / warmup_error / dropped_actions** / metadata / prompt / capture_meta / capture_status / rtc / policy_config（端点 host / port 与 warmup_required 在 `policy_config.items` 里）/ lease_id |
-| POST   | `/v1/infers/connect`       | 必需          | `infer connect`：**启动 / 查询异步预热**（连接 + prepare + 取一块丢弃，不下发动作）；立即回执 `started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等；预热进度看 `GET /v1/infers`                                                                                   |
-| POST   | `/v1/infers/rollout`       | 必需          | `infer rollout`：单步（缺省）/ `continuous` 持续推理，回执含 action                                                                                                                                                                                                             |
-| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`，机器人按帧录 mcap）                                                                                                                                                                                                             |
-| POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`，进程保存 episode）                                                                                                                                                                                                                |
-| POST   | `/v1/infers/sync`          | 必需          | `capture sync`：同步采集元信息（默认 `operator=policy` / `task_name=prompt`）                                                                                                                                                                                                   |
-| POST   | `/v1/infers/rtc`           | 必需          | `infer rtc set`：运行期设置 RTC 参数（可部分；非法 / 违反交叉约束 → 400）                                                                                                                                                                                                       |
-| POST   | `/v1/infers/config`        | 必需          | `infer config set`：按**当前策略 schema** 设置配置项（含公共项端点 `host` / `port`，与其它项同一校验；未知键 / 类型不符 / 越界 / 必填为空 → 400）                                                                                                                               |
-| POST   | `/v1/infers/prompt`        | 必需          | `infer prompt`：会话内预置 / 更新文本指令（需要 prompt 的策略）                                                                                                                                                                                                                 |
-| DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                                                        |
+| 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                                                                      |
+| ------ | -------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/infers`               | 必需          | `enter`：`session run infer`（可选 body `policy_type` / `config`——**整份策略配置**，含公共项端点 `host` / `port`，会话级：进入会话时固化）                                                                                                                                                |
+| GET    | `/v1/infers`               | 无            | 状态快照：node_state / session / adapter / policy / connected / **warmed_up / warming / warmup_error / dropped_actions** / metadata / prompt / recording / continuous / capture_status / rtc / policy_config（端点 host / port 与 warmup_required 在 `policy_config.items` 里）/ lease_id |
+| POST   | `/v1/infers/connect`       | 必需          | `infer connect`：**启动 / 查询异步预热**（连接 + prepare + 取一块丢弃，不下发动作）；立即回执 `started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等；预热进度看 `GET /v1/infers`                                                                                             |
+| POST   | `/v1/infers/rollout`       | 必需          | `infer rollout`：单步（缺省）/ `continuous` 持续推理，回执含 action                                                                                                                                                                                                                       |
+| POST   | `/v1/infers/rollout/stop`  | 必需          | `infer rollout stop`：停止持续推理并回到会话 READY；不断策略连接、不退出会话                                                                                                                                                                                                              |
+| POST   | `/v1/infers/episode/start` | 必需          | 开始一轮 rollout 录制（`capture episode start`，机器人按帧录 mcap）                                                                                                                                                                                                                       |
+| POST   | `/v1/infers/episode/end`   | 必需          | 结束一轮 rollout 录制（`capture episode end`，进程保存 episode）                                                                                                                                                                                                                          |
+| POST   | `/v1/infers/sync`          | 必需          | `capture sync`：同步采集元信息（默认 `operator=policy` / `task_name=prompt`）                                                                                                                                                                                                             |
+| POST   | `/v1/infers/rtc`           | 必需          | `infer rtc set`：运行期设置 RTC 参数（可部分；非法 / 违反交叉约束 → 400）                                                                                                                                                                                                                 |
+| POST   | `/v1/infers/config`        | 必需          | `infer config set`：按**当前策略 schema** 设置配置项（含公共项端点 `host` / `port`，与其它项同一校验；未知键 / 类型不符 / 越界 / 必填为空 → 400）                                                                                                                                         |
+| POST   | `/v1/infers/prompt`        | 必需          | `infer prompt`：会话内预置 / 更新文本指令（需要 prompt 的策略）                                                                                                                                                                                                                           |
+| DELETE | `/v1/infers?lease_id=`     | 必需（query） | `exit`：`session quit`（ACTIVE → READY）                                                                                                                                                                                                                                                  |
 
 ## 状态读取（只读缓存）
 
-`/v1/captures` 与 `/v1/infers` 的 adapter / 采集状态字段（adapter 身份与心跳 `running` /
-`control_hz` / `measured_hz`、采集 `running` / `meta`）统一由 `server/state.py` 提供
-（`adapter_ref` / `adapter_state` / `capture_status` / `capture_raw`）——**同一份字段定义，
-两个服务共用**，不再各自逐字段实现。
+`/v1/captures` 与 `/v1/infers` 的状态快照都含「当前节点绑定的 adapter」与「机器人进程采集
+状态」两段，统一由 `server/state.py` 提供（`adapter_ref` / `adapter_state` /
+`capture_status` / `capture_raw`）——**同一份字段定义，两个服务共用**，不再各自逐字段实现。
 
-只读 `EdgeNode` 的**缓存**字段（由节点主循环周期刷新），**不**因前端轮询触发对机器人进程的
-实时请求：edge 运行不依赖前端。
+只读 `EdgeNode` 的**缓存**字段（adapter 身份与心跳 `running` / `control_hz` / `measured_hz`、
+遥操作位 `teleop` / `teleop_mode`、采集 `running` / `meta`；由节点主循环周期刷新），**不**因
+前端轮询触发对机器人进程的实时请求：edge 运行不依赖前端。
 
 ## 错误语义
 

@@ -28,8 +28,7 @@
 本类只声明类常量：身份（discover 解析传入，缺省回退类常量）、能力（动作维度 / 相机
 布局 / 支持的 ``AdapterCapability``）、连接参数（SDK URL / 共享内存名 / 超时）。身份由
 机器人进程 discover 解析（``name`` / ``id`` / ``type``）传入构造函数；能力与连接参数
-**全部由类级常量定义**（自包含，不随 discover 传输）；运行时能力裁剪（``configure()``：启用
-臂 / 相机）由 ``HttpShmAdapter`` / ``RobotAdapter`` 基类提供。
+**全部由类级常量定义**（自包含，不随 discover 传输、不接收 Edge 配置）。
 """
 
 from motrix_edge.adapter.base import AdapterCapability

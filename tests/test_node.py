@@ -38,6 +38,7 @@ from motrix_edge.utils.commands import (
     Command,
     CommandBus,
     CommandError,
+    _coerce_policy_config_value,
     build_command_registry,
     deadline_exceeded,
     ok_result,
@@ -477,7 +478,8 @@ class _FakeExecAdapter:
     def __init__(self):
         self.executed = []
         self.reset_calls = 0
-        self.teleop_values: list[bool] = []
+        self.teleop_calls: list[tuple[bool, str | None]] = []
+        self.teleop_error: Exception | None = None
 
     def reset(self):
         self.reset_calls += 1
@@ -485,8 +487,10 @@ class _FakeExecAdapter:
     def execute(self, action):
         self.executed.append(action)
 
-    def set_teleop(self, enabled: bool):
-        self.teleop_values.append(bool(enabled))
+    def set_teleop(self, enabled: bool, mode: str | None = None):
+        if self.teleop_error is not None:
+            raise self.teleop_error
+        self.teleop_calls.append((bool(enabled), mode))
 
 
 def _ready_node_with_exec_adapter():
@@ -595,12 +599,12 @@ def test_adapter_commands_share_behavior_in_active_state():
     assert node.state == NodeState.ACTIVE
     assert adapter.reset_calls == 1
     assert adapter.executed == [[1.0, 2.0, 3.0]]
-    assert adapter.teleop_values == [True]
+    assert adapter.teleop_calls == [(True, None)]
     assert [reply.status for reply in replies] == ["ok", "ok", "ok"]
 
 
 # ---------------------------------------------------------------------------
-# robot teleop（遥操作开关，true / false 直接作为参数）
+# robot teleop（遥操作 / 人工接管，true|false + 可选 mode）
 # ---------------------------------------------------------------------------
 
 
@@ -609,16 +613,67 @@ def test_robot_teleop_in_ready_calls_adapter():
     node, adapter = _ready_node_with_exec_adapter()
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
-    assert adapter.teleop_values == [True]
+    assert adapter.teleop_calls == [(True, None)]
     assert replies[0].status == "ok"
     assert replies[0].data["teleop"] is True
+    assert replies[0].data["mode"] is None  # 未指定模式：进程侧缺省 absolute
     assert node.state == NodeState.READY
 
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "false"}, reply_to=replies.append))
-    assert adapter.teleop_values == [True, False]
+    assert adapter.teleop_calls == [(True, None), (False, None)]
     assert replies[0].status == "ok"
     assert replies[0].data["teleop"] is False
+
+
+def test_robot_teleop_passes_mode():
+    """robot teleop true delta：人工接管（增量）模式随遥操作一起下发，回执回显 mode。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true", "mode": "delta"}, reply_to=replies.append))
+    assert adapter.teleop_calls == [(True, "delta")]
+    assert replies[0].status == "ok"
+    assert replies[0].data["mode"] == "delta"
+
+
+def test_robot_teleop_disable_omits_ignored_mode_from_reply():
+    """关闭遥操作时 mode 不生效，回执应与 health 状态一致为 None。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "false", "mode": "delta"}, reply_to=replies.append))
+
+    assert adapter.teleop_calls == [(False, "delta")]
+    assert replies[0].status == "ok"
+    assert replies[0].data == {"node_state": NodeState.READY, "teleop": False, "mode": None}
+
+
+def test_robot_teleop_drops_expired_submit_before_sdk_side_effect():
+    """submit 已超时时不得迟到切换真机遥操状态。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    cmd = Command(
+        CMD_ROBOT_TELEOP,
+        params={"enabled": "true", "mode": "delta"},
+        meta={META_REPLY_DEADLINE: time.monotonic() - 1.0},
+        reply_to=replies.append,
+    )
+
+    node._dispatch(cmd)
+
+    assert adapter.teleop_calls == []
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 504
+
+
+def test_robot_teleop_rejects_invalid_mode():
+    """robot teleop：mode 非法 → rejected（不调用 adapter）。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true", "mode": "fast"}, reply_to=replies.append))
+    assert replies[0].status == "rejected"
+    assert replies[0].status_code == 400
+    assert "invalid teleop mode" in replies[0].error
+    assert adapter.teleop_calls == []
 
 
 def test_robot_teleop_rejects_invalid_enabled():
@@ -629,13 +684,27 @@ def test_robot_teleop_rejects_invalid_enabled():
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
     assert "invalid boolean" in replies[0].error
-    assert adapter.teleop_values == []
+    assert adapter.teleop_calls == []
 
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={}, reply_to=replies.append))
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
-    assert adapter.teleop_values == []
+    assert adapter.teleop_calls == []
+
+
+def test_robot_teleop_sdk_error_replies_without_crashing_node():
+    """SDK 503 / 连接失败转为 502 回执，READY node 继续运行。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    adapter.teleop_error = OSError("robot sdk unavailable")
+    replies = []
+
+    node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
+
+    assert replies[0].status == "error"
+    assert replies[0].status_code == 502
+    assert "robot sdk unavailable" in replies[0].error
+    assert node.state == NodeState.READY
 
 
 def test_robot_teleop_not_applicable_in_idle():
@@ -815,6 +884,27 @@ def test_infer_config_set_rejects_invalid_endpoint():
     assert replies[0].status == "rejected"
     assert replies[0].status_code == 400
     assert node.base_cfg["policy"]["host"] == "0.0.0.0"
+
+
+@pytest.mark.parametrize("kind", ["int", "float"])
+@pytest.mark.parametrize("raw", [True, False])
+def test_numeric_policy_config_rejects_bool(kind, raw):
+    """bool 是 int 子类，但数值配置不得静默将 true/false 当成 1/0。"""
+    with pytest.raises(ValueError, match="must be"):
+        _coerce_policy_config_value("numeric", {"type": kind}, raw)
+
+
+@pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf"), "nan", "inf"])
+def test_float_policy_config_rejects_non_finite_values(raw):
+    """NaN 会绕过 min/max 比较，浮点配置只接受有限值。"""
+    with pytest.raises(ValueError, match="finite number"):
+        _coerce_policy_config_value("timeout", {"type": "float", "min": 0.0, "max": 10.0}, raw)
+
+
+def test_float_policy_config_accepts_finite_numeric_values():
+    item = {"type": "float", "min": 0.0, "max": 10.0}
+    assert _coerce_policy_config_value("timeout", item, 1) == 1.0
+    assert _coerce_policy_config_value("timeout", item, "1.25") == 1.25
 
 
 def test_lease_revoke_command_revokes_current():

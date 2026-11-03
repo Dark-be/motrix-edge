@@ -53,7 +53,7 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
 | `infer_chunk(observation, index=None)`   | **策略唯一职责**：真实请求一次推理，返回 `ActionChunk`（含首步绝对步号）                                            |
 | `observed_chunk_len`                     | **块长**（最近一次服务端返回的步数；lerobot-act 连接前先用请求值 `actions_per_chunk` 兜底），rtc 据此校准块长上限 H |
 | `reset()` / `disconnect()`               | 复位策略状态 / 断开连接（幂等）                                                                                     |
-| `requires_prompt` / `prompt`             | 是否语言条件策略 + 当前文本指令（仅 openpi 使用）                                                                   |
+| `requires_prompt` / `prompt`             | 是否语言条件策略 + 当前文本指令（仅语言条件策略使用）                                                               |
 
 `index` = rtc 传入的**绝对步号**：需要按步号组织请求的策略（lerobot-act 的
 `TimedObservation.timestep`）使用；openpi 忽略它，只用于回填 `start_index`。
@@ -93,6 +93,7 @@ transport/          # 传输层（与策略解耦，见 motrix_edge/transport/�
 | 相机名               | 边缘名，或服务端 metadata 声明的 `cameras`       | 边缘名 → `rename_cameras` → **checkpoint 训练名**         |
 | 块长                 | **实测**（`observed_chunk_len`）→ rtc 校准上限 H | `actions_per_chunk`（请求上界，实测块长以服务端返回为准） |
 | 文本指令             | **必需**（`requires_prompt = True`）             | 不使用（ACT 非语言条件）                                  |
+| 输出动作语义         | 关节空间                                         | 关节空间                                                  |
 | 连接后需重发策略指令 | 不涉及                                           | **是**（`Ready` 会重置服务端会话）                        |
 
 ### 图像约定（两个策略一致）
@@ -271,8 +272,8 @@ connect()  →  Ready(Empty)                     # 服务端据此重置会话�
 | 设置端点             | `infer config set '{"host":"10.0.0.9","port":9000}'`（HTTP：`POST /v1/infers/config`，会话内；或 `POST /v1/infers` 的 `config`，进入会话时） |
 | 连接 + 预热          | `infer connect`（HTTP：`POST /v1/infers/connect`，须已在推理会话）                                                                           |
 
-`host` / `port` **非必填**：`llm` 类策略走 `base_url` 不需要端点；`openpi` / `lerobot-act`
-未配置端点会在连接时报错，前端据「host 已填 + port 合法」门控「进入推理」按钮。
+`host` / `port` **非必填**（后端不硬性要求，前端按「host 已填 + port 合法」门控）：`openpi` /
+`lerobot-act` 未配置端点会在连接时报错。
 
 ### 预热（推理但不上真机）
 

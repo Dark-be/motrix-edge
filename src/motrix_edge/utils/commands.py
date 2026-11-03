@@ -28,11 +28,13 @@ HTTP 命令须持有租约（``meta.lease_id``）。校验分层：状态机校�
 """
 
 import json
+import math
 import queue
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motrix_edge.adapter.http_contract import TELEOP_MODES
 from motrix_edge.policy import (
     policy_config_items,
     policy_config_keys,
@@ -59,7 +61,7 @@ CMD_SESSION_QUIT = "session quit"  # 退出当前会话
 CMD_ROBOT_RESET = "robot reset"  # 复位机器人（仅 adapter 可用时）
 CMD_ROBOT_ESTOP = "robot estop"  # 急停（安全停止 + 转 ERROR；全局安全命令）
 CMD_ROBOT_EXECUTE = "robot execute"  # 直接下发 raw 动作（位置参数 qpos，逗号分隔数字）
-CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作开关（位置参数 enabled = true / false）
+CMD_ROBOT_TELEOP = "robot teleop"  # 设置遥操作（位置参数 enabled = true/false；可选 mode = absolute|delta 人工接管）
 CMD_CAPTURE_EPISODE_START = "capture episode start"  # 开始一轮采集（episode 开始）
 CMD_CAPTURE_EPISODE_END = "capture episode end"  # 结束一轮采集（episode 结束）
 CMD_CAPTURE_SYNC = "capture sync"  # 同步采集元信息（位置参数 meta，JSON；采集会话内消费）
@@ -74,6 +76,7 @@ CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adap
 CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
 CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；多步/drain 已取消）
+CMD_INFER_ROLLOUT_STOP = "infer rollout stop"  # 停止持续推理（回到会话 READY，不退会话也不断策略连接）
 CMD_INFER_CONNECT = "infer connect"  # 连接 + 启动异步预热（推理会话内消费；立即回执，重复调用幂等）
 
 CMD_INFER_PROMPT = "infer prompt"  # 设置推理文本指令（位置参数 prompt；会话内运行时可改）
@@ -155,6 +158,17 @@ def deadline_exceeded(cmd) -> bool:
         return time.monotonic() > float(deadline)
     except (TypeError, ValueError):  # 非法值（手工构造 meta）：按「未设置」处理
         return False
+
+
+def expired_command_result(cmd, operation: str) -> CommandResult | None:
+    """构造过期副作用命令的统一 504 回执；未过期返回 ``None``。"""
+    if not deadline_exceeded(cmd):
+        return None
+    return CommandResult(
+        status="rejected",
+        error=f"reply deadline exceeded: {operation} dropped (robot state unchanged)",
+        status_code=504,
+    )
 
 
 @dataclass
@@ -279,7 +293,9 @@ def parse_bool(raw) -> bool:
 
     缺失 / 非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
     """
-    text = str(raw or "").strip().lower()
+    if isinstance(raw, bool):
+        return raw
+    text = str("" if raw is None else raw).strip().lower()
     if text in ("true", "1", "yes", "on"):
         return True
     if text in ("false", "0", "no", "off"):
@@ -287,22 +303,41 @@ def parse_bool(raw) -> bool:
     raise ValueError(f"invalid boolean: {raw!r}")
 
 
+def parse_teleop_mode(raw) -> str | None:
+    """解析 ``robot teleop`` 的可选模式参数 → ``absolute`` / ``delta`` / ``None``。
+
+    - 缺失 / 空 → ``None``：不指定模式（进程侧缺省 ``absolute``，与旧调用方等价）；
+    - ``absolute`` → 主臂绝对位姿直连从臂 target（示教采集）；
+    - ``delta`` → **人工接管**：以接管瞬间的主 / 从位姿为锚点、只叠加主臂增量（从臂不突变）；
+    - 非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
+
+    取值单点定义在 ``motrix_edge.adapter.http_contract``（``TELEOP_MODES``，与 /v1/teleop 契约同源）。
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    text = str(raw).strip().lower()
+    if text not in TELEOP_MODES:
+        raise ValueError(f"invalid teleop mode: {raw!r} (expect {'|'.join(TELEOP_MODES)})")
+    return text
+
+
 ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
-ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 session quit / estop）
+ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 infer rollout stop / session quit / estop）
 
 
 def parse_rollout_mode(raw) -> str:
     """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续）。
 
     - 空 / ``"1"`` → ``single``：单步推理（一次 观测 → 推理 → 动作 闭环）；
-    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 session quit / estop）；
+    - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 ``infer rollout
+      stop`` / session quit / estop）；
     - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 + ``capture
       episode start/end`` 录制 rollout 回合，见 wiki/design/motrix_edge_session.md）；
     - ``"drain"`` → ``ValueError``（**缓存推理已取消**：动作块只作策略内部缓存，
       不再提供「只消费缓存块」的命令模式）。
     非法 → ``ValueError``（命令处理器回执 rejected，不崩溃）。
     """
-    text = str(raw or "").strip().lower()
+    text = str("" if raw is None else raw).strip().lower()
     if text in ("", "1"):
         return ROLLOUT_MODE_SINGLE
     if text == ROLLOUT_MODE_CONTINUOUS:
@@ -396,8 +431,9 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
     """校验 / 归一化**单个**策略配置项取值（**只校验不落地**，由调用方统一写入）。
 
     - 空值（``None`` / 空串）：必填项 → ``ValueError``；非必填 → 返回 ``None``（调用方删键回缺省）；
-    - ``int`` 项只接受整数（``bool`` / 带小数的浮点 → ``ValueError``，端口等参数不静默截断），
-      并校验 schema 的 ``min`` / ``max``；
+    - ``int`` 项只接受整数（带小数的浮点 → ``ValueError``，端口等参数不静默截断），
+      ``float`` 项接受有限数字（如 timeout / max_pose_step）；两者均拒绝 ``bool``，并校验
+      schema 的 ``min`` / ``max``；
     - ``bool`` / 文本项按声明类型归一化（文本只去空白，不做格式校验：``host`` 可为裸 host 或
       完整 ``ws://host:port``）。
     """
@@ -406,13 +442,18 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
             raise ValueError(f"{key} is required (non-empty)")
         return None
     kind = item.get("type", "text")
-    if kind == "int":
-        if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+    if kind in ("int", "float"):
+        expect = "an integer" if kind == "int" else "a number"
+        if isinstance(raw, bool):
+            raise ValueError(f"{key} must be {expect}, got {raw!r}")
+        if kind == "int" and isinstance(raw, float) and not raw.is_integer():
             raise ValueError(f"{key} must be an integer, got {raw!r}")
         try:
-            value = int(raw)
+            value = int(raw) if kind == "int" else float(raw)
         except (TypeError, ValueError):
-            raise ValueError(f"{key} must be an integer, got {raw!r}") from None
+            raise ValueError(f"{key} must be {expect}, got {raw!r}") from None
+        if kind == "float" and not math.isfinite(value):
+            raise ValueError(f"{key} must be a finite number, got {raw!r}")
         low, high = item.get("min"), item.get("max")
         if (low is not None and value < low) or (high is not None and value > high):
             raise ValueError(f"{key} must be within [{low}, {high}], got {value}")
@@ -599,7 +640,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ROBOT_RESET),
         CommandSpec(name=CMD_ROBOT_ESTOP),
         CommandSpec(name=CMD_ROBOT_EXECUTE, positional=("qpos",)),  # robot execute <qpos>
-        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled",)),  # robot teleop <true|false>
+        CommandSpec(name=CMD_ROBOT_TELEOP, positional=("enabled", "mode")),  # robot teleop <true|false> [mode]
         CommandSpec(name=CMD_CAPTURE_EPISODE_START),  # capture episode start
         CommandSpec(name=CMD_CAPTURE_EPISODE_END),  # capture episode end
         CommandSpec(name=CMD_CAPTURE_SYNC, positional=("meta",)),  # capture sync --meta <json>
@@ -614,6 +655,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
         CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
+        CommandSpec(name=CMD_INFER_ROLLOUT_STOP),  # infer rollout stop：停止持续推理（会话保持）
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：连接 + 启动异步预热（下发动作之外的推理）
         CommandSpec(name=CMD_INFER_PROMPT, positional=("prompt",)),  # infer prompt <text>：运行时改文本指令
         CommandSpec(name=CMD_INFER_RTC),  # infer rtc：查询 RTC 参数 / 运行状态

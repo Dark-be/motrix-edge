@@ -104,14 +104,20 @@ class CaptureSession(BaseSession):
             elif name == CMD_ROBOT_EXECUTE:  # 直接下发 raw 动作（qpos 直接作为参数）
                 self._execute_action(cmd)
             elif name == CMD_ROBOT_RESET:  # 复位（任务期间；adapter 可用）
+                if self._drop_expired(cmd, "reset"):
+                    continue
                 self.adapter.reset()
                 self._reply(cmd, ok_result(state="ready"))
             elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
                 self._set_teleop(cmd)
             elif name == CMD_CAPTURE_EPISODE_START:  # 开始一轮采集（episode 开始）
+                if self._drop_expired(cmd, "capture start"):
+                    continue
                 self.adapter.start_capture()
                 self._reply(cmd, ok_result(state="ready", episode="start"))
             elif name == CMD_CAPTURE_EPISODE_END:  # 结束一轮采集（episode 结束）
+                if self._drop_expired(cmd, "capture end"):
+                    continue
                 self.adapter.end_capture()
                 self._reply(cmd, ok_result(state="ready", episode="end"))
 
@@ -124,6 +130,8 @@ class CaptureSession(BaseSession):
             ):
                 self._reply(cmd, self._on_capture_meta(cmd))
             elif name == CMD_CAPTURE_SYNC:  # 同步采集元信息（采集员 / 任务名等）到机器人进程
+                if self._drop_expired(cmd, "capture sync"):
+                    continue
                 try:
                     meta = parse_meta(cmd.params.get("meta"))
                 except ValueError as exc:

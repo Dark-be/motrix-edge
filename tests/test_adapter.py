@@ -44,10 +44,14 @@ from motrix_edge.adapter.base import (
 )
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_DETAIL,
+    FIELD_OK,
     FIELD_TELEOP_ENABLED,
+    FIELD_TELEOP_MODE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
     PATH_EXECUTE,
+    PATH_HEALTH,
     PATH_TELEOP,
 )
 
@@ -219,6 +223,9 @@ def test_capabilities_declares_action_dim_and_observation_keys():
     adapter = get_adapter(make_discovered())
     caps = adapter.capabilities
     assert caps.action_dim == 14
+    # 本 MR 只建立动作空间 / pose 契约；机器人侧 IK 和 pose producer 未落地前不得宣告支持。
+    assert caps.action_spaces == ["joint"]
+    assert caps.pose_dim == 0
     assert caps.observation_keys == [
         KEY_QPOS,
         KEY_ACTION,
@@ -275,13 +282,20 @@ def test_robot_adapters_filters_by_capability():
 
 
 class _FakeHttp:
-    """adapter 的 HTTP 客户端桩：记录 post 调用（不真实发送）。"""
+    """adapter 的 HTTP 客户端桩：记录 post 调用（不真实发送），统一返回 ``status_code``。"""
 
-    def __init__(self):
+    def __init__(self, status_code=200):
         self.posts = []
+        self.status_code = status_code  # 409 = SDK 拒绝（遥操作中推理让位）
 
     def post(self, url, json=None):
         self.posts.append((url, json))
+
+        def raise_for_status():
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        return SimpleNamespace(status_code=self.status_code, raise_for_status=raise_for_status)
 
 
 def _exec_adapter():
@@ -311,22 +325,121 @@ def test_execute_sends_after_dimension_check():
     assert body == {FIELD_ACTION: qpos}
 
 
-# ---- teleop（遥操作开关）----------------------------------------------------
+# ---- teleop（遥操作 / 人工接管）----------------------------------------------
 
 
 def test_set_teleop_forwards_to_sdk():
-    """set_teleop：本地记录 + HTTP 转发 SDK /v1/teleop（enabled 为 bool）。"""
+    """set_teleop：本地记录 + HTTP 转发 SDK /v1/teleop（enabled 为 bool，mode 仅在开启时透传）。"""
     adapter = _exec_adapter()
     adapter.set_teleop(True)
     assert adapter.teleop_enabled is True  # 本地回显
+    assert adapter.teleop_mode is None  # 未指定模式 → 不发 mode 字段（进程侧缺省 absolute）
     assert len(adapter._http.posts) == 1
     url, body = adapter._http.posts[0]
     assert url == PATH_TELEOP
     assert body == {FIELD_TELEOP_ENABLED: True}
 
+    adapter.set_teleop(True, "delta")  # 人工接管（增量）
+    assert adapter.teleop_mode == "delta"
+    assert adapter._http.posts[-1] == (PATH_TELEOP, {FIELD_TELEOP_ENABLED: True, FIELD_TELEOP_MODE: "delta"})
+
     adapter.set_teleop(False)
     assert adapter.teleop_enabled is False
+    assert adapter.teleop_mode is None  # 关闭后不留模式
     assert adapter._http.posts[-1] == (PATH_TELEOP, {FIELD_TELEOP_ENABLED: False})
+
+
+def test_set_teleop_does_not_change_local_state_when_sdk_rejects():
+    """SDK 未接受切换时，Edge 本地镜像不得先行翻转。"""
+    adapter = _exec_adapter()
+    adapter._http = _FakeHttp(status_code=500)
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        adapter.set_teleop(True, "delta")
+
+    assert adapter.teleop_enabled is False
+    assert adapter.teleop_mode is None
+
+
+def test_health_reconciles_teleop_state_reported_by_sdk():
+    """SDK 重启后 health 为权威源，可纠正 Edge 残留的 teleop=True 镜像。"""
+
+    class _HealthHttp:
+        @staticmethod
+        def get(url):
+            assert url == PATH_HEALTH
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    FIELD_OK: True,
+                    FIELD_DETAIL: "",
+                    FIELD_TELEOP_ENABLED: False,
+                    FIELD_TELEOP_MODE: None,
+                },
+            )
+
+    adapter = test_adapter_mod.TestRobotAdapter()
+    adapter.teleop_enabled = True
+    adapter.teleop_mode = "delta"
+    adapter._http = _HealthHttp()
+
+    assert adapter.health().ok is True
+    assert adapter.teleop_enabled is False
+    assert adapter.teleop_mode is None
+
+
+def test_health_keeps_teleop_mirror_for_legacy_sdk_response():
+    """旧 SDK health 不带遥操字段时保持本地镜像，不把缺失误解为 False。"""
+
+    class _LegacyHealthHttp:
+        @staticmethod
+        def get(url):
+            assert url == PATH_HEALTH
+            return SimpleNamespace(status_code=200, json=lambda: {FIELD_OK: True, FIELD_DETAIL: ""})
+
+    adapter = test_adapter_mod.TestRobotAdapter()
+    adapter.teleop_enabled = True
+    adapter.teleop_mode = "delta"
+    adapter._http = _LegacyHealthHttp()
+
+    assert adapter.health().ok is True
+    assert adapter.teleop_enabled is True
+    assert adapter.teleop_mode == "delta"
+
+
+# ---- rollout（推理闭环：遥操作中 SDK 拒绝）------------------------------------
+
+
+def test_rollout_returns_true_on_accepted():
+    """rollout：SDK 接受（200）→ True（本拍已下发）。"""
+    adapter = _exec_adapter()
+    assert adapter.rollout([0.0] * 14) is True
+    assert adapter.rollout_calls == 1
+    assert adapter.rollout_refused_calls == 0
+
+
+def test_rollout_returns_false_when_sdk_refuses_teleop():
+    """rollout：SDK 返回 409（遥操作 / 人工接管中）→ False，计数与日志限流位翻转。"""
+    adapter = _exec_adapter()
+    adapter._http = _FakeHttp(status_code=409)
+    assert adapter.rollout([0.0] * 14) is False
+    assert adapter.rollout([0.0] * 14) is False
+    assert adapter.rollout_calls == 2
+    assert adapter.rollout_refused_calls == 2
+    assert adapter._rollout_refused_logged is True  # 日志只在进入拒绝时记一条
+
+    adapter._http = _FakeHttp(status_code=200)  # 遥操作结束：恢复下发
+    assert adapter.rollout([0.0] * 14) is True
+    assert adapter._rollout_refused_logged is False
+
+
+def test_rollout_raises_for_unexpected_http_error():
+    """409 以外的失败表示动作未下发，不能返回 True。"""
+    adapter = _exec_adapter()
+    adapter._http = _FakeHttp(status_code=500)
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        adapter.rollout([0.0] * 14)
 
 
 # ---- capture episode（采集回合控制）------------------------------------------
