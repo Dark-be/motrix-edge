@@ -27,7 +27,7 @@ class _Robot(BaseRobot):
     def get_observation_qpos(self):
         return np.array([1.0, 2.0])
 
-    def get_observation_images(self):
+    def get_observation_frames(self):
         return []
 
     def get_observation_pose(self, qpos=None):

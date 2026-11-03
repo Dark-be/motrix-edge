@@ -19,6 +19,10 @@ JSON 里**（`state_space` / `state_dims`）——值段当前是关节角，机
 实测关节恒落后目标一个稳态误差，拿实测当基准会把误差写进新目标、逐步累积——见
 [robot-pipeline 位姿动作（求解器）](./robot_pipeline_cartesian.md#位姿增量pose_delta)。
 
+相机观测另有**可选的深度**（`observations/depth/<cam>`，对齐到彩色图的 uint16 深度图）；它**不进**
+本条动作 / 状态向量契约，也不进数据集（采集器只收 `observations/images/`）——见
+[robot-pipeline 深度观测（depth）](./robot_pipeline_depth.md)。
+
 底层控制通路（关节目标 + MIT）与逆解时机（收到位姿目标时解一次）**不变**。
 
 ## 目标与约束

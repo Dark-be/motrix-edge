@@ -16,7 +16,8 @@
 
 覆盖：正常读帧（qpos 状态向量 + action 目标向量 + images）、写者停更时
 **不返回冻结帧**、旧段 unlink 后同名重建时 reader 自动重新 attach、位姿区（``pose_dim > 0``
-时额外给 ``pose`` 与 ``pose_target``；= 0 时两者都不占区且无对应键）、版本不符拒绝 attach。
+时额外给 ``pose`` 与 ``pose_target``；= 0 时两者都不占区且无对应键）、深度区
+（``depth_count > 0`` 时额外给 ``depths``；= 0 时无 ``depths`` 键）、版本不符拒绝 attach。
 """
 
 import time
@@ -32,7 +33,8 @@ _IMAGE_COUNT = 1
 _QPOS_DIM = 2
 _ACTION_DIM = 2
 _POSE_DIM = 6  # 位姿区（双臂量级）；0 = 本机不提供位姿
-_EXPECTED_VERSION = 6
+_DEPTH_COUNT = 2  # 深度区（两路深度相机）；0 = 本机无深度
+_EXPECTED_VERSION = 7
 _STALE = 0.05  # 测试用陈旧阈值（秒）
 
 
@@ -49,7 +51,7 @@ def _write(writer: ObsShmWriter, value: int, action: int | None = None) -> None:
     )
 
 
-def _make_writer(name: str, pose_dim: int = 0) -> ObsShmWriter:
+def _make_writer(name: str, pose_dim: int = 0, depth_count: int = 0) -> ObsShmWriter:
     return ObsShmWriter(
         name=name,
         image_count=_IMAGE_COUNT,
@@ -58,6 +60,7 @@ def _make_writer(name: str, pose_dim: int = 0) -> ObsShmWriter:
         action_dim=_ACTION_DIM,
         pose_dim=pose_dim,
         pose_target_dim=pose_dim,  # 目标位姿随实测位姿同生共死（机器人侧契约）
+        depth_count=depth_count,  # 深度图尺寸缺省跟随 image_size（已对齐到彩色图）
     )
 
 
@@ -98,6 +101,66 @@ def test_pose_dim_zero_keeps_no_pose_region():
         assert frame is not None and "pose" not in frame and "pose_target" not in frame
     finally:
         reader.close()
+        writer.close()
+        writer.unlink()
+
+
+def test_depth_region_roundtrip():
+    """depth_count > 0：读者拿到各深度相机本拍深度图（uint16，与 qpos / 图像同一帧）。"""
+    name = _new_name()
+    writer = _make_writer(name, depth_count=_DEPTH_COUNT)
+    reader = ObsShmReader(name)
+    try:
+        assert reader.depth_count == _DEPTH_COUNT
+        assert reader.depth_size == _IMAGE_SIZE
+        depths = [np.full((_IMAGE_SIZE[1], _IMAGE_SIZE[0]), 1000 + index, dtype="<u2") for index in range(_DEPTH_COUNT)]
+        writer.write(
+            np.full(_QPOS_DIM, 1, dtype="<f8"),
+            np.full(_ACTION_DIM, 2, dtype="<f8"),
+            [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+            depths=depths,
+        )
+        frame = reader.read()
+        assert frame is not None
+        assert len(frame["depths"]) == _DEPTH_COUNT
+        assert frame["depths"][0].dtype == np.uint16  # 16 位：不经 JPEG，无损
+        assert int(frame["depths"][0][0, 0]) == 1000
+        assert int(frame["depths"][1][0, 0]) == 1001
+    finally:
+        reader.close()
+        writer.close()
+        writer.unlink()
+
+
+def test_depth_count_zero_keeps_no_depth_region():
+    """depth_count = 0（无深度相机）：不占深度区，读数不含 ``depths`` 键。"""
+    name = _new_name()
+    writer = _make_writer(name)
+    reader = ObsShmReader(name)
+    try:
+        assert reader.depth_count == 0
+        _write(writer, 5)
+        frame = reader.read()
+        assert frame is not None and "depths" not in frame
+    finally:
+        reader.close()
+        writer.close()
+        writer.unlink()
+
+
+def test_depth_shape_mismatch_is_rejected():
+    """深度图尺寸与构造声明不符（未对齐 / 写错源）→ 当场拒绝，不错位写入。"""
+    name = _new_name()
+    writer = _make_writer(name, depth_count=1)
+    try:
+        with pytest.raises(ValueError, match="depth shape"):
+            writer.write(
+                np.zeros(_QPOS_DIM, dtype="<f8"),
+                np.zeros(_ACTION_DIM, dtype="<f8"),
+                [np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+                depths=[np.zeros((_IMAGE_SIZE[1] + 1, _IMAGE_SIZE[0]), dtype="<u2")],
+            )
+    finally:
         writer.close()
         writer.unlink()
 

@@ -304,6 +304,7 @@ robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 | ---- | -------------------- | --------------------------------- | ------------------------------------------------------------------------------- |
 | POST | `/v1/discover`       | —                                 | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
 | GET  | `/v1/health`         | —                                 | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
+| GET  | `/v1/cameras`        | —                                 | 相机静态元数据（尺寸 / **彩色内参** / 深度比例；Edge 侧缓存后供 `/v1/depth`）   |
 | POST | `/v1/reset`          | —                                 | 复位到 home（非阻塞）                                                           |
 | POST | `/v1/execute`        | `{action: [...], layout?, arms?}` | 直接下发 raw 动作（`layout="pose"` → 机器人侧解算）                             |
 | POST | `/v1/rollout`        | `{action: [...], layout?, arms?}` | 推理动作（**遥操作中 → 409**：推理让位；IK 失败 → 422）                         |
@@ -445,7 +446,7 @@ python scripts/verify_cartesian.py --port left           # 只读对照 + IK 往
 python scripts/verify_cartesian.py --port left --cycles 3 --role follower
 ```
 
-## 重力补偿（可选，默认占位 = 行为不变）
+## 重力补偿（可选；未标定 / 降级时行为同未补偿）
 
 MIT 的 `t_ff` 缺省是 0（不补重力），所以关节会停在 `τ_g / k_p` 的平衡点：低刚度或带负载时
 「设定什么角度就是什么角度」并不成立。重载 / 想做柔顺时，可离线标定出 `τ̂_g(q)` 并前馈：
@@ -465,7 +466,7 @@ MIT 的 `t_ff` 缺省是 0（不补重力），所以关节会停在 `τ_g / k_p
 ```yaml
 robot:
     gravity:
-        enabled: true # 缺省 true + 占位参数（全 0）→ t_ff 恒为 0，行为与未补偿完全一致
+        enabled: true # 缺省 true；参数为占位（全 0）或前馈降级时 t_ff 恒为 0，行为与未补偿完全一致
         alpha: 1.0 # 前馈比例（0 = 不补偿）
         t_ff_limit: 16.0 # 单关节前馈上限（N·m）：固件硬限幅 ±16，只能收紧
         params: gravity/piper_6dof.json # 参数文件（相对配置目录）

@@ -19,7 +19,7 @@
 [`http_contract`](./http_contract.py)（``robot-pipeline`` 契约服务为服务器 /
 ``test_adapter`` 客户端），不经过共享内存。
 
-布局（单个共享内存块，版本 **6**）：``header | qpos | action | pose | pose_target | images``
+布局（单个共享内存块，版本 **7**）：``header | qpos | action | pose | pose_target | images | depths``
 
 - ``header``：固定 numpy dtype（magic / 几何 / 动态状态），记录各数据区偏移。
 - ``qpos``：``float64[qpos_dim]`` **状态向量**——每臂「**值 + 夹爪**」交错（双臂 7 + 7 = 14、
@@ -34,6 +34,10 @@
   与 ``pose`` 同一套 FK、同一拍；增量动作（``pose_delta``）的解算结果因此对上位可见
   （``settle`` 判到位拿它当参考），「目标 − 实测」即 MIT 稳态误差。
 - ``images``：``uint8[N][H][W][3]`` **raw RGB**（N 张相机帧连续排布）。
+- ``depths``：``uint16[M][H][W]`` **深度图**（M 张，**已对齐到对应的彩色帧**，故与 ``images`` 的
+  同名相机是同一像素网格；``0`` = 该像素无有效深度）。深度值 → 米的换算比例（``depth_scale``）与
+  反投影用的**彩色内参**属静态元数据，经机器人进程的 ``GET /v1/cameras`` 提供（不占本区块）；
+  深度相机集合可与 ``images`` 不同（只有 RealSense 类相机具备深度）。
 
 一致性：无锁、单写者单读者。写者先写数据区、最后更新 header 动态字段
 （``timestamp`` / ``running`` / ``capturing`` / ``frame_seq``）；读者用
@@ -72,16 +76,21 @@ OBS_SHM_HEADER = np.dtype(
         ("pose_target_offset", "<i8"),
         ("image_data_offset", "<i8"),
         ("image_data_size", "<i8"),
+        ("depth_count", "<i8"),
+        ("depth_height", "<i8"),
+        ("depth_width", "<i8"),
+        ("depth_offset", "<i8"),
+        ("depth_data_size", "<i8"),
         ("running", "<i8"),
         ("capturing", "<i8"),
     ]
 )
 
 _OBS_SHM_MAGIC = 0x4D4F544F4E474F  # "MOTONGO"
-# 6：区域 = qpos（状态向量：每臂「值 + 夹爪」）+ action（同维同布局的目标向量）+ pose（实测位姿）+
-#    pose_target（目标位姿）+ images；v2（qpos+action+images）/ v3（位姿区在 action 后）/ v4（无
-#    目标位姿区）/ v5（夹爪单独成区）均已废弃。
-_OBS_SHM_VERSION = 6
+# 7：区域 = qpos（状态向量：每臂「值 + 夹爪」）+ action（同维同布局的目标向量）+ pose（实测位姿）+
+#    pose_target（目标位姿）+ images + depths（对齐到彩色图的深度图）；v2（qpos+action+images）/
+#    v3（位姿区在 action 后）/ v4（无目标位姿区）/ v5（夹爪单独成区）/ v6（无深度区）均已废弃。
+_OBS_SHM_VERSION = 7
 
 
 def _layout(
@@ -91,13 +100,18 @@ def _layout(
     action_dim: int,
     pose_dim: int = 0,
     pose_target_dim: int = 0,
+    depth_count: int = 0,
+    depth_size: tuple[int, int] | None = None,
 ) -> dict:
-    """计算共享内存块布局（各数据区偏移 / 大小 / 总大小）；位姿维数为 0 时不占对应区。
+    """计算共享内存块布局（各数据区偏移 / 大小 / 总大小）；维数 / 路数为 0 时不占对应区。
 
-    区域顺序固定：``qpos | action | pose | pose_target | images``。
+    区域顺序固定：``qpos | action | pose | pose_target | images | depths``。
+    深度图尺寸缺省跟随 ``image_size``（对齐到彩色图后同尺寸）。
     """
     w, h = image_size
     channels = 3
+    depth_size = tuple(image_size if depth_size is None else depth_size)
+    dw, dh = depth_size
     header_size = OBS_SHM_HEADER.itemsize
     qpos_offset = header_size
     qpos_bytes = qpos_dim * np.dtype("<f8").itemsize
@@ -109,6 +123,8 @@ def _layout(
     pose_target_bytes = pose_target_dim * np.dtype("<f8").itemsize
     image_data_offset = pose_target_offset + pose_target_bytes
     image_data_size = image_count * h * w * channels
+    depth_offset = image_data_offset + image_data_size
+    depth_data_size = depth_count * dh * dw * np.dtype("<u2").itemsize
     return {
         "header_size": header_size,
         "qpos_offset": qpos_offset,
@@ -117,16 +133,18 @@ def _layout(
         "pose_target_offset": pose_target_offset,
         "image_data_offset": image_data_offset,
         "image_data_size": image_data_size,
-        "total_size": image_data_offset + image_data_size,
+        "depth_offset": depth_offset,
+        "depth_data_size": depth_data_size,
+        "total_size": depth_offset + depth_data_size,
     }
 
 
 class ObsShmWriter:
     """共享内存观测写者（SDK 进程侧）：创建共享内存块并持续写入最新观测帧。
 
-    - ``create`` 时初始化 header 几何字段（含版本 = 6）；``write`` 每帧写
+    - ``create`` 时初始化 header 几何字段（含版本 = 7）；``write`` 每帧写
       qpos（状态向量：每臂「值 + 夹爪」）+ action（同维同布局的目标向量）+ pose（实测位姿）+
-      pose_target（目标位姿）+ raw RGB 图像。
+      pose_target（目标位姿）+ raw RGB 图像 + 深度图（对齐到彩色图，可选）。
     - ``close()`` 释放本进程句柄；``unlink()`` 删除共享内存（由 SDK 进程退出时调用）。
     """
 
@@ -139,9 +157,13 @@ class ObsShmWriter:
         action_dim: int,
         pose_dim: int = 0,
         pose_target_dim: int = 0,
+        depth_count: int = 0,
+        depth_size: tuple[int, int] | None = None,
     ):
         """``qpos_dim`` / ``action_dim`` = 状态向量维数（每臂「值 + 夹爪」× 臂数，双臂 14）；
-        ``pose_dim`` / ``pose_target_dim`` 为 0 → 不占对应区（本机不提供位姿）。"""
+        ``pose_dim`` / ``pose_target_dim`` 为 0 → 不占对应区（本机不提供位姿）；
+        ``depth_count`` 为 0 → 不占深度区（本机无深度相机）；``depth_size`` 缺省跟随
+        ``image_size``（对齐到彩色图后同尺寸）。"""
         self.name = name
         self.image_count = image_count
         self.image_size = tuple(image_size)  # (width, height)
@@ -149,6 +171,8 @@ class ObsShmWriter:
         self.action_dim = action_dim
         self.pose_dim = int(pose_dim)
         self.pose_target_dim = int(pose_target_dim)
+        self.depth_count = int(depth_count)
+        self.depth_size = tuple(self.image_size if depth_size is None else depth_size)  # (width, height)
         self._layout = _layout(
             image_count,
             self.image_size,
@@ -156,6 +180,8 @@ class ObsShmWriter:
             action_dim,
             self.pose_dim,
             self.pose_target_dim,
+            self.depth_count,
+            self.depth_size,
         )
 
         self._shm = shared_memory.SharedMemory(name=name, create=True, size=self._layout["total_size"])
@@ -177,6 +203,10 @@ class ObsShmWriter:
         h["pose_target_offset"] = self._layout["pose_target_offset"]
         h["image_data_offset"] = self._layout["image_data_offset"]
         h["image_data_size"] = self._layout["image_data_size"]
+        h["depth_count"] = self.depth_count
+        h["depth_height"], h["depth_width"] = self.depth_size[1], self.depth_size[0]
+        h["depth_offset"] = self._layout["depth_offset"]
+        h["depth_data_size"] = self._layout["depth_data_size"]
         h["running"] = 0
         h["capturing"] = 0
 
@@ -202,6 +232,16 @@ class ObsShmWriter:
             buffer=self._shm.buf,
             offset=self._layout["image_data_offset"],
         )
+        self._depths = (
+            np.ndarray(
+                (self.depth_count, self.depth_size[1], self.depth_size[0]),
+                dtype="<u2",
+                buffer=self._shm.buf,
+                offset=self._layout["depth_offset"],
+            )
+            if self.depth_count > 0
+            else None
+        )
 
     def write(
         self,
@@ -210,11 +250,14 @@ class ObsShmWriter:
         images: list[np.ndarray],
         pose: np.ndarray | None = None,
         pose_target: np.ndarray | None = None,
+        depths: list[np.ndarray] | None = None,
     ) -> None:
-        """写入最新观测帧（qpos / action / pose / pose_target / images），最后更新 header 动态字段。
+        """写入最新观测帧（qpos / action / pose / pose_target / images / depths），最后更新 header 动态字段。
 
         ``qpos`` / ``action`` = 状态 / 目标向量（每臂「值 + 夹爪」，同维）；
-        ``pose`` / ``pose_target`` 仅在构造时对应维数 > 0 时生效（``None`` → 本帧保持旧值）。
+        ``pose`` / ``pose_target`` 仅在构造时对应维数 > 0 时生效（``None`` → 本帧保持旧值）；
+        ``depths`` 仅在构造时 ``depth_count > 0`` 时生效（每张为 ``uint16[H][W]``，缺省 / ``None``
+        → 本帧保持旧值）。
         """
         self._qpos[:] = np.asarray(qpos, dtype="<f8")
         self._action[:] = np.asarray(action, dtype="<f8")
@@ -230,6 +273,12 @@ class ObsShmWriter:
             self._pose_target[:] = values
         for i, img in enumerate(images[: self.image_count]):
             self._images[i] = np.asarray(img, dtype="<u1")
+        if self._depths is not None and depths is not None:
+            for i, depth in enumerate(depths[: self.depth_count]):
+                values = np.asarray(depth, dtype="<u2")
+                if values.shape != (self.depth_size[1], self.depth_size[0]):
+                    raise ValueError(f"depth shape {values.shape} != {(self.depth_size[1], self.depth_size[0])} (H, W)")
+                self._depths[i] = values
         self._header["timestamp"] = time.time()
         self._header["frame_seq"] = self._header["frame_seq"] + 1
 
@@ -255,9 +304,10 @@ class ObsShmWriter:
 class ObsShmReader:
     """共享内存观测读者（adapter 侧）：attach 已存在的共享内存块并读取最新观测。
 
-    - 几何字段（图像数量 / 尺寸 / qpos 与 action 维度）与各数据区偏移从 header 读。
+    - 几何字段（图像数量 / 尺寸 / 深度路数 / qpos 与 action 维度）与各数据区偏移从 header 读。
     - ``read()`` 返回 ``{"qpos", "action", "images"}``（构造时 ``pose_dim > 0``
-      则额外含 ``"pose"`` / ``"pose_target"``）；无帧 / 撕裂帧 / **陈旧帧**返回 None。
+      则额外含 ``"pose"`` / ``"pose_target"``；``depth_count > 0`` 则额外含 ``"depths"``）；
+      无帧 / 撕裂帧 / **陈旧帧**返回 None。
     - ``running`` / ``capturing`` 属性：只读 SDK 侧状态位。
     - **陈旧检测**：写者每帧更新 header ``timestamp``；超过 ``STALE_AFTER`` 秒未更新即视为无帧，
       并按该节奏尝试重新 attach 同名新段（写者快速重启后旧段冻结的场景）。
@@ -326,6 +376,18 @@ class ObsShmReader:
             buffer=shm.buf,
             offset=int(header["image_data_offset"]),
         )
+        self.depth_count = int(header["depth_count"])
+        self.depth_size = (int(header["depth_width"]), int(header["depth_height"]))  # (width, height)
+        self._depths = (
+            np.ndarray(
+                (self.depth_count, self.depth_size[1], self.depth_size[0]),
+                dtype="<u2",
+                buffer=shm.buf,
+                offset=int(header["depth_offset"]),
+            )
+            if self.depth_count > 0
+            else None
+        )
 
     def _detach(self) -> None:
         """释放当前映射（不 unlink；共享内存归写者所有）；之后 ``read()`` 返回 None。"""
@@ -361,12 +423,13 @@ class ObsShmReader:
         return bool(self._header["capturing"]) if self._header is not None else False
 
     def read(self) -> dict | None:
-        """读取最新观测帧：``{"qpos", "action", "pose", "pose_target", "images"}``；
+        """读取最新观测帧：``{"qpos", "action", "pose", "pose_target", "images", "depths"}``；
         无帧 / 撕裂 / 陈旧帧返回 None。
 
         ``qpos`` = 状态向量（每臂「值 + 夹爪」）、``action`` = 同维同布局的目标向量；``pose``
         （实测位姿）与 ``pose_target``（目标位姿 = ``FK(关节段目标)``）仅在写者启用了位姿区
-        （``pose_dim > 0``）时出现。
+        （``pose_dim > 0``）时出现；``depths``（每张 ``uint16[H][W]``，已对齐到彩色图）仅在
+        写者启用了深度区（``depth_count > 0``）时出现。
 
         帧一致性用 frame_seq 乒乓校验：写者先写数据后递增 seq，若读前后 seq
         不一致说明数据写入中途被读到，丢弃。陈旧判定见 ``STALE_AFTER``：写者已停机
@@ -387,6 +450,7 @@ class ObsShmReader:
         pose = self._pose.copy() if self._pose is not None else None
         pose_target = self._pose_target.copy() if self._pose_target is not None else None
         images = [self._images[i].copy() for i in range(self.image_count)]
+        depths = [self._depths[i].copy() for i in range(self.depth_count)] if self._depths is not None else None
         if int(self._header["frame_seq"]) != seq0:
             return None  # 撕裂帧（写入中途），丢弃
         frame = {"qpos": qpos, "action": action, "images": images}
@@ -394,6 +458,8 @@ class ObsShmReader:
             frame["pose"] = pose
         if pose_target is not None:
             frame["pose_target"] = pose_target
+        if depths is not None:
+            frame["depths"] = depths
         return frame
 
     def close(self) -> None:

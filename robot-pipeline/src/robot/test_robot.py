@@ -64,6 +64,8 @@ class TestRobot(BaseRobot):
     IMAGES = {name: (640, 480) for name in IMAGE_NAMES}
     # 相机是 TestVisionSensor（无硬件）→ setup 脚本不探测（virtual）
     CAMERA_KINDS = {name: "virtual" for name in IMAGE_NAMES}
+    # 具备深度的相机：仅 cam_head（虚拟传感器**合成**深度，顺序逐列线性；见 test_vision_sensor）
+    DEPTH_CAMERAS: tuple[str, ...] = ("cam_head",)
     SHM_NAME = "test_robot_obs"
 
     def __init__(self, robot_config: dict | None = None):
@@ -183,12 +185,14 @@ class TestRobot(BaseRobot):
         return np.concatenate(joints)
 
     def connect(self):
-        """连接 test 控制器与视觉传感器（虚拟，无硬件）。"""
+        """连接 test 控制器与视觉传感器（虚拟，无硬件）。
+
+        深度只给**生效的深度相机**开（配置 robot.depth：缺省 = 该机型具备深度的相机）。
+        """
         for ctrl in self.controllers.values():
             ctrl.connect()
-        self.sensors["cam_head"].connect(is_jpeg=True, seed=0)
-        self.sensors["cam_left_wrist"].connect(is_jpeg=True, seed=1)
-        self.sensors["cam_right_wrist"].connect(is_jpeg=True, seed=2)
+        for seed, name in enumerate(self.IMAGE_NAMES):
+            self.sensors[name].connect(is_jpeg=True, seed=seed, enable_depth=name in self.depth_cameras)
         self.ready = True
         debug_print(self.name, "TestRobot connected (virtual).", "INFO")
 
@@ -202,21 +206,22 @@ class TestRobot(BaseRobot):
             sensor.disconnect()
             debug_print(self.name, f"Disconnect sensor {name} done", "INFO")
 
-    # ---- 相机（取数的一部分：由 capture_images() 组装为契约键）-------------------------
+    # ---- 相机（取数的一部分：由 capture_frames() 组装为契约键）-------------------------
 
-    def get_observation_images(self) -> list:
-        """读取各相机 raw RGB 帧（顺序对齐 IMAGE_NAMES）。
+    def get_observation_frames(self) -> list:
+        """读取各相机**本拍**帧（顺序对齐 IMAGE_NAMES）——彩色恒有，深度仅在开启时有。
 
-        从 test 视觉传感器读 color（JPEG），解码为 raw RGB——与真实 piper 接入位一致。
+        从 test 视觉传感器读 color（JPEG），解码为 raw RGB——与真实 piper 接入位一致；
+        ``cam_head`` 开启深度时一并带上（同一传感器同一次调用合成，故与彩色同拍）。
         """
-        images = []
+        frames = []
         for name in self.IMAGE_NAMES:
             info = self.sensors[name].get_information()
             color = info.get("color") if info else None
             if color is None:
-                raise RuntimeError(f"TestRobot.get_observation_images: 相机 {name} 无帧")
+                raise RuntimeError(f"TestRobot.get_observation_frames: 相机 {name} 无帧")
             decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
             if decoded is None:
-                raise RuntimeError(f"TestRobot.get_observation_images: 相机 {name} JPEG 解码失败")
-            images.append(decoded[:, :, ::-1])  # BGR → RGB
-        return images
+                raise RuntimeError(f"TestRobot.get_observation_frames: 相机 {name} JPEG 解码失败")
+            frames.append({"color": decoded[:, :, ::-1], "depth": info.get("depth")})  # BGR → RGB
+        return frames

@@ -23,12 +23,13 @@ RPent 紧接着的 ``dump_state`` 看到尚未动的那一帧 → planner 以为
 - :func:`wait_for_reached`：轮询观测误差，直到落进容差 / 停滞 / 超时 → 回执；
 - :func:`unreached`：不适用场景（``dry_run`` / 关闭 / 机器人不提供位姿）的 ``reached: null`` 回执。
 
-**容差按 MIT 实际稳态误差标定**：底层只有 P/D、**无重力 / 力矩前馈**，“设定什么关节就是什么
-关节”并不成立（关节停在 ``τ_gravity / kp`` 附近的平衡点）；容差小于稳态误差时 ``reached`` 永远
-不成立（每个原语都走满 ``stall_s`` / ``timeout_s``）。故**部署值**（``edge.yml`` 只声明这两个：
-当前 位置 5cm / 姿态 0.4rad ≈ 23°）是把静态误差先**盖住**的有意放大——宁可能判出“到位”，也别让
-agent 每次都等到超时；等补上前馈、或按 ``final_err`` 实测平台收敛后再收紧（其余键**缺键即取下方
-类默认**，不必写进 yml；标定见 ``wiki/design/motrix_edge_rpent_bridge.md``「MIT 力矩控制的容差标定」）。
+**容差按残余静态误差标定**：底层只有 P/D，未补偿（无前馈 / 参数未标定 / 前馈降级）时关节停在
+``τ_gravity / kp`` 附近、“设定什么关节就是什么关节”并不成立；容差小于残余误差时 ``reached`` 永远
+不成立（每个原语都走满 ``stall_s`` / ``timeout_s``）。**部署值**（``edge.yml`` 只声明这两个：当前
+位置 2cm / 姿态 0.2rad ≈ 11.5°）是按 ``robot.gravity`` 重力前馈**已标定接通**后的残余误差量级收敛的
+——此前为盖住未补偿的静态误差曾有意放大到 5cm / 0.4rad ≈ 23°；现场仍应按 ``final_err`` 实测平台
+值微调（其余键**缺键即取下方类默认**，不必写进 yml；标定见
+``wiki/design/motrix_edge_rpent_bridge.md``「MIT 力矩控制的容差标定」）。
 
 **回执字段**（RPent 按它判成败，勿改名）：``reached`` / ``final_err``（主误差）/ ``final_err_m``
 （位置，米；仅位姿）/ ``final_err_rad``（姿态或关节，弧度）/ ``elapsed_s`` / ``settle_timeout_s``
@@ -55,7 +56,7 @@ class SettleConfig:
     """到位等待参数（字段名与 ``server.rpent.settle`` 一致）。"""
 
     enabled: bool = True
-    # 容差：**部署值在 edge.yml**（当前 5cm / 0.4rad，按 MIT 静态误差有意放宽）；
+    # 容差：**部署值在 edge.yml**（重力前馈接通后已收紧到 2cm / 0.2rad）；
     # 下面这两个只是“配置里没写”时的兜底，且故意更紧——宁可判不出到位，也不误报到位。
     pos_tol: float = 0.01  # 米（位置）
     rot_tol: float = 0.05  # 弧度（姿态 / 关节 / 夹爪）

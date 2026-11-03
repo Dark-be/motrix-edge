@@ -63,6 +63,8 @@ class TestRobotAdapter(HttpShmAdapter):
         "cam_left_wrist": (640, 480),
         "cam_right_wrist": (640, 480),
     }
+    # 具备深度的相机（= robot-pipeline 的 ``test_robot.DEPTH_CAMERAS``：只有 cam_head 合成深度）
+    DEPTH_CAMERAS: tuple[str, ...] = ("cam_head",)
 
     # 中间件连接参数（SDK 自维护硬件与连接）
     SDK_URL = "http://127.0.0.1:8090"  # SDK HTTP 服务地址（指令下行）
