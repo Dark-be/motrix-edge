@@ -1,25 +1,25 @@
 # Edge Web Console（前端）
 
-> **状态**：前端源码**不在本仓库**（`frontend/` 未入库，控制台在独立仓库）。文中契约分两类：
+> **状态**：Console 已作为根目录 `console/` 正式子项目纳入本仓库，包含 React UI 与 Node BFF。文中契约分两类：
 > master 已提供（`/v1/leases`、`/v1/captures` 的 `capture_status`、`POST /v1/uploads/pack` 等）
 > 与**后续 MR 才提供**（`<scope>/<verb>` 能力名如 `robot/estop`、人工接管 `mode=delta`、
 > `/v1/preview` 的 `pose`·`arms` / `gripper` / `pose_target`、`infer rollout stop`、
 > 策略 schema 的 `multiline`、服务端 3 位小数取整）。未标注的均为 master 现状。
 
-> **位置比例配套状态**：本地后端已支持 `pose_position_scale`、状态与入队配置回显；
-> 独立前端的比例输入、共享/逐臂编辑仍需在控制台仓库实施。本仓库未验证控制台构建与联调。
+> **位置比例配套状态**：后端已支持 `pose_position_scale`、状态与入队配置回显；
+> Console 的比例输入、共享/逐臂编辑随本子项目维护。
 > 初始姿态通过关节遥操作建立并跟踪到位，不提供手动摆动从臂后的实测重锚定。
 
 ## 摘要
 
-Edge Web Console 是 MotrixEdge 的**浏览器调试 / 测试前端**（Vite + React + TypeScript +
-Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租约、驱动采集 / 推理会话、
+Edge Web Console 是 MotrixEdge 的**中心操作台**（Vite + React + TypeScript + Node BFF +
+Tailwind CSS）：经同源 `/api` 登录并代理 Edge HTTP API，展示 Edge 状态、管理租约、驱动采集 / 推理会话、
 发送控制信号，并经 WebRTC 播放机器人摄像头实时视频流。定位为**测试项目**——信息展示尽可能完整
 （租约到期倒计时、命令名、状态、能力、磁盘等），按钮即信号。
 
 ## 目标与原则
 
--   **纯前端、零后端改动**：只消费现有 HTTP API 契约（见 [HTTP 控制面（server）](./motrix_edge_server.md)
+-   **中心 BFF**：Node 进程托管静态页面、飞书 Session、Edge 白名单与 HMAC 身份代理；Edge 仍拥有最终租约和状态校验（见 [HTTP 控制面（server）](./motrix_edge_server.md)
     / [Edge 级租约（lease）](./motrix_edge_lease.md) / [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）。
 -   **信息尽可能完整**：每个面板展示原始契约字段 + 派生信息（如租约到期倒计时）；错误展示 HTTP status / detail。
 -   **按钮即命令**：每个控制按钮即一个 HTTP 动作，UI 标注其对应命令名。

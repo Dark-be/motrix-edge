@@ -2,10 +2,10 @@
 
 ## 摘要
 
-Edge Web Console 通过飞书 OAuth 登录识别采集员。飞书凭证只保存在 Edge 服务端内存会话中，
-浏览器仅持有不透明的 HttpOnly Cookie；采集元信息同步时，服务端根据登录会话覆盖
-`operator` 与 `operator_identity`，并校验登录主体和 Edge 租约主体一致。未配置飞书认证时，
-现有 `/v1/captures/sync` 行为保持兼容。
+固定部署的 Motrix Console 通过飞书 OAuth 识别采集员。飞书凭证只保存在 Console 内存会话中，
+浏览器仅持有 Console 的不透明 HttpOnly Cookie；Console 代理到动态 Edge 时用每台设备的共享密钥
+签署身份，Edge 验签并覆盖 `operator` / `operator_identity`，再校验登录主体与租约主体一致。
+完整拓扑见 [Motrix Console BFF](./motrix_console_bff.md)。Edge 自带 OAuth 仅保留为单机调试兼容面。
 
 ## 目标与边界
 
@@ -13,28 +13,28 @@ Edge Web Console 通过飞书 OAuth 登录识别采集员。飞书凭证只保�
 -   浏览器不能提交可信身份；它只提交任务名、标签等业务元信息。
 -   access token、refresh token、authorization code、Cookie 和 app secret 不进入采集 JSON。
 -   `EdgeNode` 与 adapter 继续把 `meta` 当作通用 JSON 对象透传，不感知 OAuth。
--   当前 Edge 单进程部署使用内存登录事务和会话；多进程部署必须把两者迁移到共享存储。
+-   当前 Console 单进程部署使用内存登录事务和会话；多进程部署必须把两者迁移到共享存储。
 
 ## 登录流程
 
-1. 前端访问 `GET /v1/auth/feishu/login?return_to=/capture`。
-2. Edge 生成一次性 `state`，保存受限的站内返回路径，并重定向到飞书授权页。
-3. 飞书携带 `code` 和 `state` 回调 `GET /v1/auth/feishu/callback`。
-4. Edge 校验并一次性消费 `state`，以 `code` 换取 user access token，再读取当前用户信息。
-5. Edge 丢弃 OAuth token，建立有期限的不透明登录会话，通过 HttpOnly Cookie 返回浏览器。
-6. 前端用 `GET /v1/auth/me` 获取展示身份；`POST /v1/auth/logout` 删除会话。
+1. 前端访问 `GET /api/auth/feishu/login?return_to=/capture`。
+2. Console 生成一次性 `state`，保存受限的站内返回路径，并重定向到飞书授权页。
+3. 飞书携带 `code` 和 `state` 回调 `GET /api/auth/feishu/callback`。
+4. Console 校验并一次性消费 `state`，以 `code` 换取 user access token，再读取当前用户信息。
+5. Console 丢弃 OAuth token，建立有期限的不透明登录会话，通过 HttpOnly Cookie 返回浏览器。
+6. 前端用 `GET /api/auth/me` 获取展示身份；`POST /api/auth/logout` 删除会话。
 
 `return_to` 只接受以单个 `/` 开头的站内路径；最终跳转固定拼接配置的 `frontend_url`，避免开放重定向。
 
 ## 采集同步
 
-启用飞书认证后，`POST /v1/captures/sync` 依次执行：
+分布式认证启用后，Console 代理的 `POST /v1/captures/sync` 依次执行：
 
-1. 校验登录 Cookie；
-2. 校验 `X-Lease-Id` 对应活跃租约；
-3. 要求租约 `holder_subject_id` 等于登录用户的 `subject`；
-4. 删除调用方提交的 `operator`、`operator_identity` 和 `capture_context`；
-5. 注入服务端生成的身份和审计上下文，再走现有 `capture sync` 命令。
+1. Console 校验登录 Cookie，并对方法 / 路径 / body hash / 用户 / 时间 / nonce 作 HMAC 签名；
+2. Edge 验证时间窗、签名与 nonce 未重放；
+3. Edge 校验 `X-Lease-Id` 对应活跃租约；
+4. 要求租约 `holder_subject_id` 等于签名用户的 `subject`；
+5. 删除调用方提交的身份字段，注入可信身份和审计上下文，再走现有 `capture sync` 命令。
 
 同步必须发生在 `capture episode start` 之前，因为机器人进程在开始录制时快照本轮元信息。
 
@@ -68,8 +68,9 @@ Edge Web Console 通过飞书 OAuth 登录识别采集员。飞书凭证只保�
 
 ## 配置与部署
 
-飞书认证配置位于 `edge.yml` 的 `auth.feishu`，包内默认开启。`app_id` / `app_secret` 默认分别通过
-`app_id_env` / `app_secret_env` 指定的环境变量读取；缺少必填部署值时启动会直接报出缺失项，避免静默
-退化成可伪造采集员的匿名模式。Cookie 模式下 CORS 不能使用通配 origin，必须配置明确的
-`allowed_origins`；生产环境同时替换回调与前端 URL、启用 HTTPS 和 Secure Cookie。只有显式配置
-`enabled: false` 才恢复原有调用方直接提交 `operator` 的兼容行为。
+飞书 App ID / Secret 位于固定主机环境变量，OAuth URI 与 Edge 注册表位于
+`console/console.config.json`，不再分发到 Edge。Console 与每台
+Edge 配置同一份设备级共享密钥：Console 注册表通过 `shared_secret_env` 读取，Edge 通过
+`auth.console_proxy.shared_secret_env` 读取。生产环境必须使用 HTTPS 与 Secure Cookie，并限制 Edge
+的网络入口只接受 Console 或可信管理网。`edge.yml.auth.feishu` 缺省关闭，仅用于浏览器、前端和 Edge
+确实同机的单机调试。

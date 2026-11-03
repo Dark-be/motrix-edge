@@ -135,6 +135,13 @@ cp .env.example .env
 
 -   Compose 自动读取项目目录的 `.env`：`docker compose up -d`。
 -   裸跑时显式加载：`uv run --env-file .env motrix-edge run`。
+-   固定网页服务器进入 `console/` 执行 `npm ci && npm run build`，再运行
+    `node --env-file=../.env server/index.mjs`，同一 Node 进程托管网页、飞书登录与 Edge 代理。
+
+分布式部署中，浏览器把 Edge Base URL 设为 Console 代理前缀（例如
+`https://console.example.com/api/edges/piper-a`），飞书只登记 Console 的固定回调
+`https://console.example.com/api/auth/feishu/callback`。配置与签名契约见
+[Motrix Console BFF](wiki/design/motrix_console_bff.md)。
 
 运行根分别由 `MOTRIX_EDGE_DIR` 和 `MOTRIX_ROBOT_PIPELINE_DIR` 指定；配置在 `<root>/config`，
 日志在 `<root>/logs`。Compose 使用单独的 `*_IN_CONTAINER` 值，避免把宿主绝对路径传入容器。

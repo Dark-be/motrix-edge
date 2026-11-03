@@ -1,0 +1,11 @@
+{
+  "host": "0.0.0.0",
+  "port": 5174,
+  "frontendUrl": "http://10.30.20.64:5174",
+  "redirectUri": "http://10.30.20.64:5174/api/auth/feishu/callback",
+  "cookieSecure": false,
+  "allowedTenants": [],
+  "sessionTtl": 28800,
+  "stateTtl": 600,
+  "edges": {}
+}

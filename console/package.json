@@ -3,11 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "MotrixEdge Web Console — 测试前端（Vite + React + TS + Tailwind）",
+  "description": "MotrixEdge Console — React UI + Node BFF for Feishu auth and Edge proxying",
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server/index.mjs",
+    "test:server": "node --test server/index.test.mjs"
   },
   "dependencies": {
     "@types/three": "^0.186.0",

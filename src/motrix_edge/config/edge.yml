@@ -41,20 +41,23 @@ server:
     # 换机型 / 换支架后必须重验：`move_delta(delta_xyz=[0, 0, 0.02])` 只动 2 cm，看实际朝哪走。
     ego_axes: { forward: "+z", left: "+y", up: "-x" }
 
-# 飞书网页登录（默认启用）：采集员须先登录，服务端据此生成可信 operator。
-# 生产环境必须使用 HTTPS、cookie_secure: true，并把 allowed_origins 收敛为前端实际 origin。
+# 分布式部署：飞书登录由固定 Node Console 持有；Edge 只验证 Console 的 HMAC 身份签名。
 auth:
   feishu:
-    enabled: true
+    enabled: false # 仅单机调试时开启；分布式 Edge 不保存飞书 App Secret
     app_id_env: MOTRIX_EDGE_FEISHU_APP_ID
     app_secret_env: MOTRIX_EDGE_FEISHU_APP_SECRET # App Secret 只放服务端环境变量
     redirect_uri: http://localhost:8000/v1/auth/feishu/callback # 须在飞书后台登记；生产改 HTTPS 域名
-    frontend_url: http://localhost:5174 # 当前本地 Console；登录完成后跳回该 origin
-    allowed_origins: [http://localhost:5173, http://localhost:5174] # Vite 默认端口及占用后的备用端口
+    frontend_url: http://localhost:5174
+    allowed_origins: [http://localhost:5173, http://localhost:5174]
     allowed_tenants: [] # 空 = 不限制；生产建议列出允许的 tenant_key
     cookie_secure: false
     session_ttl: 28800 # 8 小时
     state_ttl: 600 # OAuth state 10 分钟一次性有效
+  console_proxy:
+    enabled: false # 分布式部署改 true
+    shared_secret_env: MOTRIX_EDGE_CONSOLE_SHARED_SECRET
+    max_clock_skew_s: 30
 
 # 上传服务（UploadService，/v1/uploads/*；见 wiki/design/motrix_edge_upload.md）：
 # 本地采集 episode 的扫描 / 查看 / 选择 / 打包。

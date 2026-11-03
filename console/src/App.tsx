@@ -123,7 +123,7 @@ function ConnectGate() {
                     )}
                     {authenticated && edges.length === 0 && (
                         <p className="rounded border border-line bg-panel2 p-2 text-amber-400">
-                            Console 尚未配置 Edge；请在 console.yml 的 edges 段添加设备。
+                            Console 尚未配置 Edge；请在 console.config.json 的 edges 段添加设备。
                         </p>
                     )}
                     <div className="flex flex-wrap items-center gap-2">

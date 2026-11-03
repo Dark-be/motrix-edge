@@ -46,6 +46,7 @@ def build_router(services: Services) -> APIRouter:
     meta = services.meta
     preview = services.preview
     auth = services.auth
+    proxy_auth = services.proxy_auth
 
     def _node():
         if node is None:
@@ -125,7 +126,13 @@ def build_router(services: Services) -> APIRouter:
         受控操作：须持有有效租约（X-Lease-Id）；机器人 READY 时可提前同步，会话内也可更新。
         """
         capture_meta = req.meta
-        if auth is not None:
+        if proxy_auth is not None:
+            capture_meta = proxy_auth.bind_capture_meta(
+                capture_meta,
+                lease_id=x_lease_id,
+                identity=request.state.proxy_identity,
+            )
+        elif auth is not None:
             capture_meta = auth.bind_capture_meta(
                 capture_meta,
                 lease_id=x_lease_id,
