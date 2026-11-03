@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from motrix_edge.identity import Identity
 from motrix_edge.lease import LeaseManager
 from motrix_edge.node import EdgeNode
+from motrix_edge.server.auth import AuthService
 from motrix_edge.server.command import CommandService
 from motrix_edge.server.depth import DepthService
 from motrix_edge.server.meta import CaptureMetaService
@@ -67,6 +68,7 @@ class Services:
     depth: DepthService | None = None
     webrtc: WebRTCService | None = None
     rpent: RpentService | None = None
+    auth: AuthService | None = None
 
 
 __all__ = ["Services"]

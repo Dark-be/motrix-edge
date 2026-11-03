@@ -21,6 +21,7 @@ import pytest
 
 from motrix_edge.adapter import DEFAULT_DISCOVER_HOST, DEFAULT_DISCOVER_PORT
 from motrix_edge.command import (
+    CMD_CAPTURE_SYNC,
     CMD_INFER_CONFIG,
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL_SET,
@@ -490,6 +491,31 @@ def test_probe_failure_retries_without_error(monkeypatch):
     node._tick()
     assert node.state == NodeState.IDLE
     assert node.adapter is None
+
+
+def test_capture_meta_sync_is_available_before_entering_session():
+    """READY 下可提前同步元信息；进入采集会话不再是同步按钮的前置条件。"""
+
+    class _CaptureAdapter(_FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.synced = []
+
+        def sync_capture_meta(self, meta):
+            self.synced.append(meta)
+
+    adapter = _CaptureAdapter()
+    node = EdgeNode({}, command_source=lambda: None)
+    node.initialize()
+    node.adapter = adapter
+    node.lifecycle.transition(NodeState.READY)
+    replies = []
+
+    node._dispatch(Command(CMD_CAPTURE_SYNC, params={"meta": {"task_name": "桌面前移"}}, reply_to=replies.append))
+
+    assert adapter.synced == [{"task_name": "桌面前移"}]
+    assert replies[0].status == "ok"
+    assert replies[0].data["meta"] == {"task_name": "桌面前移"}
 
 
 def test_check_adapter_alive_detects_unreachable(monkeypatch):

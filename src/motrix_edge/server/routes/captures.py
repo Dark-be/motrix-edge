@@ -23,7 +23,7 @@
 未注入对应服务 → 501。
 """
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Request
 
 from motrix_edge.command import CMD_CAPTURE_SYNC, CMD_SESSION_QUIT, CMD_SESSION_RUN
 from motrix_edge.errors import ErrorCode, ServiceError
@@ -45,6 +45,7 @@ def build_router(services: Services) -> APIRouter:
     leases = services.leases
     meta = services.meta
     preview = services.preview
+    auth = services.auth
 
     def _node():
         if node is None:
@@ -118,12 +119,19 @@ def build_router(services: Services) -> APIRouter:
         return _meta().delete_key(key, lease_id=x_lease_id)
 
     @router.post("/v1/captures/sync")
-    def captures_sync(req: CaptureSyncRequest, x_lease_id: str | None = Header(default=None)):
+    def captures_sync(req: CaptureSyncRequest, request: Request, x_lease_id: str | None = Header(default=None)):
         """同步采集元信息（采集员 / 任务名等）到机器人进程：进程保存一轮数据时附加。
 
-        受控操作：须持有有效租约（X-Lease-Id）；采集会话内消费。
+        受控操作：须持有有效租约（X-Lease-Id）；机器人 READY 时可提前同步，会话内也可更新。
         """
-        return accepted(_commands().submit(CMD_CAPTURE_SYNC, {"meta": req.meta}, lease_id=x_lease_id))
+        capture_meta = req.meta
+        if auth is not None:
+            capture_meta = auth.bind_capture_meta(
+                capture_meta,
+                lease_id=x_lease_id,
+                session_id=request.cookies.get(auth.config.cookie_name),
+            )
+        return accepted(_commands().submit(CMD_CAPTURE_SYNC, {"meta": capture_meta}, lease_id=x_lease_id))
 
     @router.post("/v1/captures")
     def captures_enter(x_lease_id: str | None = Header(default=None)):

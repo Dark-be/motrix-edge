@@ -14,8 +14,8 @@
 
 """CaptureMetaStore —— 采集元信息选项存储（config/capture.yml）。
 
-元信息选项为**可拓展**的「分类 → 选项数组」结构（如 ``operator``=采集人员、
-``task_name``=采集任务），由 ``capture meta`` 命令族（list / add / edit / delete /
+元信息选项为**可拓展**的「业务分类 → 选项数组」结构（如 ``task_name``=采集任务），
+身份字段由飞书登录生成，不能在本文件维护。业务选项由 ``capture meta`` 命令族（list / add / edit / delete /
 delete-key）创建 / 编辑 / 删除；经 ``GET /v1/captures/meta`` 暴露给前端作为选择列表，
 选中后由 ``capture sync`` 同步到机器人进程（进程保存一轮数据时附加）。
 
@@ -54,6 +54,9 @@ class CaptureMetaStore:
     首次缺省访问时把包内默认写入该位置，
     测试可注入临时路径。``meta`` 缺失 / 非映射 / 选项非列表 → 视为空（非法键忽略）。
     """
+
+    # 身份与审计字段只允许认证服务生成；即使旧 capture.yml 仍有这些键也不向前端暴露。
+    _RESERVED_KEYS = frozenset({"operator", "operator_identity", "capture_context", "meta_schema_version"})
 
     def __init__(self, path: str | Path | None = None):
         # 实际配置路径；包内默认仍只读，首次访问时才写入运行根。
@@ -141,6 +144,7 @@ class CaptureMetaStore:
         if key is None or not str(key).strip():
             raise CaptureMetaError("capture meta requires a non-empty <key>")
         key = str(key).strip()
+        self._reject_reserved_key(key)
         with self._lock:
             meta = self._load()
             if key not in meta:
@@ -157,7 +161,11 @@ class CaptureMetaStore:
             meta = self._document().get("meta", {})
             if not isinstance(meta, dict):
                 return {}
-            return {str(k): list(v or []) for k, v in meta.items() if isinstance(v, (list, tuple))}
+            return {
+                str(k): list(v or [])
+                for k, v in meta.items()
+                if str(k) not in self._RESERVED_KEYS and isinstance(v, (list, tuple))
+            }
 
     def _document(self) -> dict:
         """当前文件的顶层文档（调用方须持锁）：缺失 → 空字典；损坏 → 也按空字典重建。"""
@@ -219,6 +227,12 @@ class CaptureMetaStore:
         value = str(value).strip()
         if not key:
             raise CaptureMetaError("capture meta requires a non-empty <key>")
+        CaptureMetaStore._reject_reserved_key(key)
         if not value:
             raise CaptureMetaError("capture meta requires a non-empty <value>")
         return key, value
+
+    @staticmethod
+    def _reject_reserved_key(key: str) -> None:
+        if key in CaptureMetaStore._RESERVED_KEYS:
+            raise CaptureMetaError(f"meta key is managed by authenticated identity: {key}")

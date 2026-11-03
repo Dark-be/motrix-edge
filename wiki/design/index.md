@@ -13,6 +13,7 @@
 -   [机器人适配器（adapter）](./motrix_edge_adapter.md)
 -   [会话（session）](./motrix_edge_session.md)
 -   [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)
+-   [飞书登录与可信采集员身份](./motrix_edge_feishu_auth.md)
 -   [上传（upload，非会话）](./motrix_edge_upload.md)
 -   [推理策略客户端（policy）](./motrix_edge_policy.md)
 -   [边缘原语接口（primitives，面向外部 agent）](./motrix_edge_primitives.md)

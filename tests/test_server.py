@@ -1406,13 +1406,13 @@ def test_captures_meta_returns_options(tmp_path):
     from motrix_edge.utils.capture_meta import CaptureMetaStore
 
     store = CaptureMetaStore(tmp_path / "capture.yml")
-    store.add("operator", "张三")
+    store.add("scene", "厨房")
     store.add("task_name", "桌面前移")
     meta = CaptureMetaService(store=store)
     client = TestClient(create_app(BASE_CFG, meta=meta))
     resp = client.get("/v1/captures/meta")
     assert resp.status_code == 200
-    assert resp.json() == {"meta": {"operator": ["张三"], "task_name": ["桌面前移"]}}
+    assert resp.json() == {"meta": {"scene": ["厨房"], "task_name": ["桌面前移"]}}
     # 未注入 meta 服务 → 501
     assert TestClient(create_app(BASE_CFG)).get("/v1/captures/meta").status_code == 501
 
@@ -1805,7 +1805,7 @@ def test_upload_pack_without_selection_returns_conflict(tmp_path):
 def _make_meta_client(tmp_path):
     """选项管理端点夹具：CaptureMetaService 与 app 共享同一 LeaseManager（否则租约互不可见）。"""
     store_path = tmp_path / "capture.yml"
-    store_path.write_text("meta:\n  operator: [张三]\n", encoding="utf-8")
+    store_path.write_text("meta:\n  scene: [厨房]\n", encoding="utf-8")
     leases = LeaseManager()
     meta = CaptureMetaService(store=CaptureMetaStore(store_path), leases=leases)
     client = TestClient(create_app(BASE_CFG, meta=meta, lease_manager=leases))
@@ -1823,37 +1823,39 @@ def test_captures_meta_management_endpoints(tmp_path):
     # 新增（分类不存在则创建）：写后直接回全量，前端不必再 GET
     added = client.post("/v1/captures/meta", json={"key": "task_name", "value": "桌面前移"}, headers=headers)
     assert added.status_code == 200
-    assert added.json()["meta"] == {"operator": ["张三"], "task_name": ["桌面前移"]}
+    assert added.json()["meta"] == {"scene": ["厨房"], "task_name": ["桌面前移"]}
     assert client.get("/v1/captures/meta").json()["meta"] == added.json()["meta"]  # 已落盘
 
     # 重命名选项
-    renamed = client.patch("/v1/captures/meta", json={"key": "operator", "old": "张三", "new": "王五"}, headers=headers)
-    assert renamed.json()["meta"]["operator"] == ["王五"]
+    renamed = client.patch(
+        "/v1/captures/meta", json={"key": "scene", "old": "厨房", "new": "厨房台面"}, headers=headers
+    )
+    assert renamed.json()["meta"]["scene"] == ["厨房台面"]
 
     # 重复新增 → 400（选项已存在）
-    duplicate = client.post("/v1/captures/meta", json={"key": "operator", "value": "王五"}, headers=headers)
+    duplicate = client.post("/v1/captures/meta", json={"key": "scene", "value": "厨房台面"}, headers=headers)
     assert duplicate.status_code == 400
 
     # 删除选项（分类清空则一并删除分类）；再删一次 → 400（不存在）
     assert client.delete("/v1/captures/meta", params={"key": "task_name", "value": "桌面前移"}, headers=headers).json()[
         "meta"
-    ] == {"operator": ["王五"]}
+    ] == {"scene": ["厨房台面"]}
     gone = client.delete("/v1/captures/meta", params={"key": "task_name", "value": "桌面前移"}, headers=headers)
     assert gone.status_code == 400
 
     # 删除整个分类
-    assert client.delete("/v1/captures/meta/operator", headers=headers).json()["meta"] == {}
+    assert client.delete("/v1/captures/meta/scene", headers=headers).json()["meta"] == {}
 
 
 def test_captures_meta_writes_require_lease(tmp_path):
     """选项写操作是受控操作（改设备配置）：无租约 → 409，且文件不被改动。"""
     client, _ = _make_meta_client(tmp_path)
 
-    assert client.post("/v1/captures/meta", json={"key": "operator", "value": "王五"}).status_code == 409
-    assert client.patch("/v1/captures/meta", json={"key": "operator", "old": "张三", "new": "王五"}).status_code == 409
-    assert client.delete("/v1/captures/meta", params={"key": "operator", "value": "张三"}).status_code == 409
-    assert client.delete("/v1/captures/meta/operator").status_code == 409
-    assert client.get("/v1/captures/meta").json()["meta"] == {"operator": ["张三"]}  # 读仍然免租约
+    assert client.post("/v1/captures/meta", json={"key": "scene", "value": "厨房台面"}).status_code == 409
+    assert client.patch("/v1/captures/meta", json={"key": "scene", "old": "厨房", "new": "厨房台面"}).status_code == 409
+    assert client.delete("/v1/captures/meta", params={"key": "scene", "value": "厨房"}).status_code == 409
+    assert client.delete("/v1/captures/meta/scene").status_code == 409
+    assert client.get("/v1/captures/meta").json()["meta"] == {"scene": ["厨房"]}  # 读仍然免租约
 
 
 def test_infers_rollout_single_and_continuous():

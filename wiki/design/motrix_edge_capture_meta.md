@@ -2,8 +2,8 @@
 
 ## 摘要
 
-采集元信息（采集人员 / 采集任务等）在 `capture.yml` 中维护为**可拓展的「分类 →
-选项数组」**。包内默认只读，可写文件固定为 `<MOTRIX_EDGE_DIR>/config/capture.yml`；环境变量
+采集任务等**业务选项**在 `capture.yml` 中维护为可拓展的「分类 → 选项数组」；采集员身份只来自
+飞书登录，不属于本文件。包内默认只读，可写文件固定为 `<MOTRIX_EDGE_DIR>/config/capture.yml`；环境变量
 未设置时根为 `<cwd>/motrix-edge`。管理入口有两条、写的是同一份数据：CLI 命令族
 `capture meta`（list / add / edit / delete /
 delete-key）与 HTTP `/v1/captures/meta`（GET 读列表，POST / PATCH / DELETE 增改删）。前端（web
@@ -15,8 +15,8 @@ console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类�
 
 -   **单一事实来源**：元信息选项存于运行根 `config/capture.yml` 的 `meta` 段，CLI / HTTP 统一经
     `CaptureMetaStore` 读写（写回保留文件其它顶层键），无内存态副本。
--   **可拓展**：任意分类（key）→ 选项数组；`capture meta add <新key> <值>` 自动创建新分类，
-    无需改代码 / 改 schema。
+-   **可拓展**：任意业务分类（key）→ 选项数组；`capture meta add <新key> <值>` 自动创建新分类。
+    身份与审计保留键由认证服务生成，Store 不读取也不允许维护。
 -   **命令化**：`capture meta` 为**配置级命令**（与 `infer config` 一致）——节点主循环（任何
     状态）与任务态会话循环共用同一处理器，保证「任何状态可用」。
 -   **线程安全**：`CaptureMetaStore` 用 `RLock` 保护读写，且**全进程只有一个实例**
@@ -27,12 +27,12 @@ console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类�
 ```yaml
 # 采集元信息选项（capture meta 命令维护；可拓展任意分类 → 选项数组）
 meta:
-    operator: [张三, 李四] # 采集人员
     task_name: [桌面前移, 双臂搬运] # 采集任务
 ```
 
-`meta` 为顶层映射：分类名 → 选项字符串数组。文件不存在时视为空（命令自动创建）；写回保留
-`meta` 之外的其它顶层键。
+`meta` 为顶层映射：分类名 → 选项字符串数组。身份与审计键（`operator` / `operator_identity` /
+`capture_context` / `meta_schema_version`）是保留键：Store 会过滤旧文件中的遗留值并拒绝维护。
+采集员只由飞书登录提供；文件不存在时视为空（命令自动创建），写回保留其它顶层键。
 
 ## 命令形式（决定）
 
@@ -50,10 +50,10 @@ meta:
 
 ```
 capture meta list
-capture meta add operator 王五
-capture meta edit operator 王五 王五（二期）
-capture meta delete operator 王五（二期）
-capture meta delete-key operator
+capture meta add scene 厨房
+capture meta edit scene 厨房 厨房台面
+capture meta delete scene 厨房台面
+capture meta delete-key scene
 ```
 
 回执统一 `ok(meta=更新后全量)`（list 时 `ok(meta=...)`）；参数缺失 / 非法 / 不存在 →
@@ -77,10 +77,9 @@ capture meta delete-key operator
 会话状态无关（未绑定 adapter、未进采集会话都能维护），也不经 `/v1/commands`（命令映射表里
 没有 `capture meta *`——那是机器人 / 会话控制通道）。
 
-`capture sync`（`POST /v1/captures/sync`）不变：只负责把选中的元信息
-（`{operator, task_name, ...}`）同步到机器人进程；它是**会话内命令**——只有在采集会话
-（ACTIVE）内提交才会成功，READY（无会话）或推理会话下被拒绝（`409 not applicable`）。
-（选项管理不受此限：见上表，配置级、任何状态可用。）
+`capture sync`（`POST /v1/captures/sync`）负责把选中的元信息同步到机器人进程。机器人已绑定的
+READY 状态即可提前同步；进入采集 / 推理会话后仍由会话消费同一命令。这样用户可以先完成登录、
+任务选择和同步，再进入会话开始录制。选项管理仍是配置级操作，任何节点状态均可用。
 
 **只读降级**：`CaptureMetaStore` 构造不做 IO（不再因配置目录不可写而让节点启动失败）；
 包内默认选项在**首次读 / 写时惰性播种**，播种失败只记 WARNING（读得到空集合），写盘失败
@@ -121,10 +120,9 @@ RPent 数采另把 `runtime_context` 作为已知 object 字段同步，用于�
 ## 未来方向（值来源可插拔）
 
 本清单是**候选值**来源之一，**实际取值**始终由调用方经 `capture sync` 提交（见上节）。
-例如 `operator`（采集人员）后续可能直接来自 Console 的**登录凭证**——那时前端把身份直接放进
-`meta` 提交即可，本地清单退化为「没有凭证时的兜底选项」；`task_name` 这类现场自由维护的分类
-仍适合放本地清单。若将来需要多来源合并（凭证 + 本地 + 远端），在 Store 前加一层 provider，
-`GET /v1/captures/meta` 合并返回即可，前端无需感知来源。
+`operator` 已可来自[飞书登录](./motrix_edge_feishu_auth.md)：启用认证时服务端根据登录会话覆盖
+调用方提交的采集员字段，本地清单退化为未启用认证时的兼容选项；`task_name` 这类现场自由维护的
+分类仍来自本地清单。
 
 ## 相关文档
 

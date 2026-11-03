@@ -44,6 +44,7 @@ class ErrorCode(str, Enum):
     CONFLICT = "conflict"  # 当前状态不适用（已在会话 / 节点未就绪 / 正在录制 …）
     LEASE_REQUIRED = "lease_required"  # 需要租约但未提供
     LEASE_EXPIRED = "lease_expired"  # 租约已过期
+    UNAUTHENTICATED = "unauthenticated"  # 缺少或失效的登录身份
     FORBIDDEN = "forbidden"  # 租约不匹配（异租约）
     NOT_IMPLEMENTED = "not_implemented"  # 服务未注入 / 未实现
     UNAVAILABLE = "unavailable"  # 依赖暂不可用（观测未就绪 / 机器人进程离线 …）

@@ -203,12 +203,21 @@ class DualPiperRobot(BaseRobot):
         # 重力前馈只装在执行臂（主手只读）
         gravity = self.robot_config.get("gravity")
         mit_profiles = self.robot_config.get("mit_profiles")
+        ctrl_mode = self.robot_config.get("ctrl_mode", "mit")
+        if isinstance(ctrl_mode, dict):
+            ctrl_mode_by_arm = {
+                arm: ctrl_mode.get(arm, ctrl_mode.get(self.ARM_CONTROLLERS[arm], ctrl_mode.get("default", "mit")))
+                for arm in self.ARM_NAMES
+            }
+        else:
+            ctrl_mode_by_arm = {arm: ctrl_mode for arm in self.ARM_NAMES}
         for arm in self.ARM_NAMES:
             profile = self.robot_config.get("mit_profile", "default")
             if isinstance(profile, dict):
                 profile = profile.get(arm, profile.get(self.ARM_CONTROLLERS[arm], profile.get("default", "default")))
             connect_kwargs = {
                 "port": self.ports[arm],
+                "ctrl_mode": str(ctrl_mode_by_arm[arm]),
                 "gravity": gravity,
                 **(
                     {"firmware": self.robot_config["follower_firmware"]}

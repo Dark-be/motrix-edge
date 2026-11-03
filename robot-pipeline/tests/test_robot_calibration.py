@@ -259,8 +259,10 @@ def test_samples_roundtrip_and_summary(samples_module, tmp_path):
         (lambda data: data.update(intrinsics={}), "intrinsics missing for camera"),
         (lambda data: data["views"][0].update(ids=[0, 1], corners=[[0.0, 0.0], [1.0, 1.0]]), "at least 4 corners"),
         (
-            lambda data: data["intrinsics"].update(cam_left_wrist={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0})
-            or data["views"][0].update(camera="cam_left_wrist", arm="left", pose=None),
+            lambda data: (
+                data["intrinsics"].update(cam_left_wrist={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0})
+                or data["views"][0].update(camera="cam_left_wrist", arm="left", pose=None)
+            ),
             "arm pose required",
         ),
         (lambda data: data["touches"][0].update(arm="middle"), "arm 'middle' not in"),

@@ -23,6 +23,7 @@
 from fastapi import APIRouter
 
 from motrix_edge.server.deps import Services
+from motrix_edge.server.routes.auth import build_router as build_auth_router
 from motrix_edge.server.routes.captures import build_router as build_captures_router
 from motrix_edge.server.routes.commands import build_router as build_commands_router
 from motrix_edge.server.routes.depth import build_router as build_depth_router
@@ -37,6 +38,7 @@ from motrix_edge.server.routes.webrtc import build_router as build_webrtc_router
 def build_routers(services: Services) -> list[APIRouter]:
     """按域构建全部 router（``create_app`` 逐个 ``include_router``）。"""
     return [
+        build_auth_router(services),  # /v1/auth/*
         build_health_router(services),  # /v1/health + /v1/adapters/*
         build_leases_router(services),  # /v1/leases/*
         build_commands_router(services),  # /v1/commands

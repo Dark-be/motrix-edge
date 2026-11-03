@@ -42,6 +42,7 @@ from motrix_edge.command import (
     CMD_CAPTURE_META_DELETE_KEY,
     CMD_CAPTURE_META_EDIT,
     CMD_CAPTURE_META_LIST,
+    CMD_CAPTURE_SYNC,
     CMD_INFER_CONFIG,
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL,
@@ -584,6 +585,16 @@ class EdgeNode:
             if expired is not None:
                 self._reply(cmd, expired)
                 return True
+        if cmd.name == CMD_CAPTURE_SYNC:
+            try:
+                meta = parse_meta(cmd.params.get("meta"))
+            except ValueError as exc:
+                self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
+                return True
+            self.adapter.sync_capture_meta(meta)
+            self.invalidate_capture_status()
+            self._reply(cmd, ok_result(node_state=self.state, meta=meta))
+            return True
         if cmd.name == CMD_ROBOT_RESET:
             self.adapter.reset()
             self._reply(cmd, ok_result(node_state=self.state))
