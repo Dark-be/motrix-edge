@@ -33,16 +33,15 @@ from pathlib import Path
 import yaml
 
 from motrix_edge.config import writable_config_path
+from motrix_edge.errors import ErrorCode, ServiceError
 from motrix_edge.utils.data_handler import debug_print
 from motrix_edge.utils.load_file import load_yaml
 
 
-class CaptureMetaError(ValueError):
-    """采集元信息操作失败（参数缺失 / 重复 / 不存在等）；携带 HTTP 语义。"""
+class CaptureMetaError(ServiceError):
+    """采集元信息操作失败（参数缺失 / 重复 / 不存在等，缺省 400）。"""
 
-    def __init__(self, message: str, status_code: int = 400):
-        super().__init__(message)
-        self.status_code = status_code
+    default_code = ErrorCode.INVALID_ARGUMENT
 
 
 class CaptureMetaStore:
@@ -70,7 +69,7 @@ class CaptureMetaStore:
         """把包内默认 ``capture.yml``（只读）播种到可写位置——**惰性**（首次读 / 写时）。
 
         构造期不做 IO：配置目录 / 状态目录不可写时（只读挂载、权限受限）不能把
-        ``EdgeNode`` / ``CaptureService`` 的构造弄挂。播种失败只记 WARNING（后续读得到
+        ``EdgeNode`` / ``CaptureMetaService`` 的构造弄挂。播种失败只记 WARNING（后续读得到
         空集合，写会以明确错误拒绝），不影响节点启动。
         """
         if not getattr(self, "_seed_on_access", False) or self.path.exists():
@@ -178,7 +177,7 @@ class CaptureMetaStore:
             try:
                 self._write_document(data)
             except OSError as exc:  # 只读 / 无权限：转成明确的 500，不让 OSError 冒到主循环
-                raise CaptureMetaError(f"capture.yml is not writable: {exc}", status_code=500) from exc
+                raise CaptureMetaError(f"capture.yml is not writable: {exc}", code=ErrorCode.INTERNAL) from exc
 
     def _write_document(self, data: dict) -> None:
         """**原子写**：先写同目录临时文件，再 ``os.replace`` 覆盖。

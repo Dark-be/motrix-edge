@@ -15,7 +15,7 @@
 """session 包 —— 会话（任务执行器）注册式工厂 + EdgeNode 节点生命周期。
 
 通过 SESSION_REGISTRY 注册会话类，由 get_session() 依据上层命令（Command.name，
-见 utils/commands.py）或配置 session.type 选择性实例化。
+见 ``motrix_edge.command``）或配置 session.type 选择性实例化。
 
 EdgeNode（node.py）在自身生命周期中，根据上层下发的命令（session run <type>）
 选择并实例化会话（选择 + 启动合并为一个流程）；会话只是被节点启停的任务执行器。

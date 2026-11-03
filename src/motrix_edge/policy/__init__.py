@@ -47,18 +47,20 @@ POLICY_REGISTRY = {
 
 #   default     代码缺省（可选；None 表示无缺省）
 #   placeholder / help  前端输入提示（可选）
-#   group       分组（"endpoint" = 推理端点：前端归入策略配置表单的公共项）
+#   group       分组（"endpoint" = 推理端点项：前端分组展示，并据此门控「进入推理」）
+#   multiline   长文本项（prompt / system_prompt 等）：前端渲染为多行 textarea（缺省 6 行）
+#   rows        multiline 的行数（可选；缺省用前端缺省值）
 #
-# 公共配置项（所有策略共有）：推理端点 host / port + 预热门控 warmup_required —— 与策略自身
-# 配置项**完全同级**：同一 schema、同一表单、同一 `infer config set` / POST /v1/infers/config
-# 通道、同一校验。它们也是**会话级**配置（runtime=False：进入会话时读取，会话内改需退出
-# 重进），**没有专用命令**——同一个键只有一套规则。
-POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
+# 端点配置项（host / port）：策略要连 TCP 端点（openpi → ws、lerobot-act → gRPC）→ 排在最前两项。
+# 与策略自身配置项**完全同级**：同一 schema、同一表单、同一 `infer config set` /
+# POST /v1/infers/config 通道、同一校验；也是**会话级**配置（runtime=False：进入会话时构造
+# 传输层，会话内改需退出重进）；**没有专用命令**（旧 `infer ip` / `infer port` 已移除）。
+POLICY_ENDPOINT_CONFIG_ITEMS: list[dict] = [
     {
         "key": "host",
         "label": "推理节点地址 host",
         "type": "text",
-        "required": False,  # 后端不硬性要求：前端按 host/port 是否填齐门控「进入推理」
+        "required": False,  # 后端不硬性要求：前端按 group=endpoint 的项是否填齐门控「进入推理」
         "runtime": False,  # 会话级：进入会话时构造传输层，会话内改需退出重进
         "group": "endpoint",
         "default": None,
@@ -78,6 +80,12 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "placeholder": "如 8080",
         "help": "推理节点端口；**进入会话时生效，会话内改需退出重进**",
     },
+]
+
+# 公共配置项（**所有策略共有**）：预热门控 warmup_required —— 与策略自身配置项**完全同级**：
+# 同一 schema、同一表单、同一 `infer config set` / POST /v1/infers/config 通道、同一校验；
+# 也是**会话级**配置（runtime=False：进入会话时读取，会话内改需退出重进）。
+POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
     {
         "key": "warmup_required",
         "label": "必须先预热 warmup_required",
@@ -98,6 +106,7 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
             "type": "text",
             "required": True,
             "runtime": True,
+            "multiline": True,
             "default": None,
             "placeholder": "如：把零件放好",
             "help": "语言条件策略：推理 / 录制前必须非空（可经 infer prompt 运行时改）",
@@ -163,12 +172,18 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
 
 
 def policy_config_items(policy_type: str) -> list[dict]:
-    """策略配置项清单 = **公共项**（推理端点 host / port）+ 该策略自身配置项（未知类型 → 仅公共项）。"""
-    return [dict(item) for item in POLICY_COMMON_CONFIG_ITEMS + POLICY_CONFIG_ITEMS.get(policy_type, [])]
+    """策略配置项清单 = 端点项（host / port）+ 公共项（warmup_required）+ 该策略自身配置项。
+
+    未知策略类型 → 仅端点项 + 公共项（无策略自身项）。
+    """
+    return [
+        dict(item)
+        for item in POLICY_ENDPOINT_CONFIG_ITEMS + POLICY_COMMON_CONFIG_ITEMS + POLICY_CONFIG_ITEMS.get(policy_type, [])
+    ]
 
 
 def policy_config_keys(policy_type: str) -> set[str]:
-    """策略可配置键集合（公共项 + 策略自身项；供运行时设置做白名单校验）。"""
+    """策略可配置键集合（端点项 + 公共项 + 策略自身项；供运行时设置做白名单校验）。"""
     return {item["key"] for item in policy_config_items(policy_type)}
 
 

@@ -22,10 +22,11 @@ capture episode / sync）；**显示观测由节点级写入 frame_manager，会
 
 from fake_robot import FakeRobotAdapter
 
+from motrix_edge.command import Command, build_command_registry
+from motrix_edge.errors import ErrorCode
 from motrix_edge.frame import FrameManager
 from motrix_edge.session import capture_session
 from motrix_edge.session.base import RunResult
-from motrix_edge.utils.commands import build_command_registry
 
 _REGISTRY = build_command_registry()
 
@@ -72,6 +73,30 @@ def test_capture_consumes_commands_until_exit(tmp_path):
     session.session_finish()
     # 会话不再 observe / 写 frame_manager（观测由节点级持续写入）
     assert fm.latest() is None
+
+
+def test_capture_sdk_error_replies_upstream_error_and_keeps_session(tmp_path):
+    """采集 SDK 命令失败须回 upstream_error，不能击穿会话循环。"""
+    adapter = FakeRobotAdapter(config={"data_dir": str(tmp_path)})
+
+    def fail_start():
+        raise RuntimeError("HTTP 500")
+
+    adapter.start_capture = fail_start
+    replies = []
+    start = Command("capture episode start", reply_to=replies.append)
+    session = capture_session.CaptureSession(
+        make_config(tmp_path),
+        command_source=make_signals(start, "session quit"),
+        frame_manager=FrameManager(),
+        adapter=adapter,
+    )
+    session.session_start()
+
+    assert session.run() == RunResult.FINISHED
+    assert replies[0].status == "error"
+    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
+    assert "HTTP 500" in replies[0].error
 
 
 def test_capture_estop_during_observe_safe_stops(tmp_path):
@@ -141,7 +166,7 @@ def test_capture_session_does_not_handle_policy_config(tmp_path):
     session.session_start()
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     session.session_finish()
 
 
@@ -224,6 +249,6 @@ def test_capture_sync_rejects_invalid_meta(tmp_path):
     session.session_start()
     assert session.run() == RunResult.FINISHED
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert adapter.capture_meta == {}
     session.session_finish()

@@ -50,10 +50,13 @@ from motrix_edge.adapter.http_contract import (
     FIELD_TELEOP_MODE,
     PATH_CAPTURE_END,
     PATH_CAPTURE_START,
+    PATH_CAPTURE_SYNC,
     PATH_EXECUTE,
     PATH_HEALTH,
+    PATH_RESET,
     PATH_TELEOP,
 )
+from motrix_edge.errors import ErrorCode
 
 # 一个标准的机器人进程 discover 响应 robot 块（身份 name / type + 自报连接参数）
 _ROBOT_DICT = {
@@ -325,6 +328,19 @@ def test_execute_sends_after_dimension_check():
     assert body == {FIELD_ACTION: qpos}
 
 
+def test_reset_and_execute_raise_when_sdk_rejects():
+    adapter = _exec_adapter()
+    adapter._http = _FakeHttp(status_code=500)
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        adapter.reset()
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        adapter.execute([0.0] * adapter.action_dim)
+
+    assert adapter.executed == []  # 失败请求不能记录成已执行动作
+    assert [path for path, _ in adapter._http.posts] == [PATH_RESET, PATH_EXECUTE]
+
+
 # ---- teleop（遥操作 / 人工接管）----------------------------------------------
 
 
@@ -421,7 +437,7 @@ def test_rollout_returns_true_on_accepted():
 def test_rollout_returns_false_when_sdk_refuses_teleop():
     """rollout：SDK 返回 409（遥操作 / 人工接管中）→ False，计数与日志限流位翻转。"""
     adapter = _exec_adapter()
-    adapter._http = _FakeHttp(status_code=409)
+    adapter._http = _FakeHttp(status_code=409)  # SDK 拒绝（遥操作中推理让位）
     assert adapter.rollout([0.0] * 14) is False
     assert adapter.rollout([0.0] * 14) is False
     assert adapter.rollout_calls == 2
@@ -451,6 +467,21 @@ def test_start_end_capture_forwards_to_sdk():
     adapter.start_capture()
     adapter.end_capture()
     assert [p[0] for p in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END]
+
+
+def test_capture_commands_raise_when_sdk_rejects():
+    adapter = _exec_adapter()
+    adapter._http = _FakeHttp(status_code=500)
+
+    for call in (
+        adapter.start_capture,
+        adapter.end_capture,
+        lambda: adapter.sync_capture_meta({"task_name": "test"}),
+    ):
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            call()
+
+    assert [path for path, _ in adapter._http.posts] == [PATH_CAPTURE_START, PATH_CAPTURE_END, PATH_CAPTURE_SYNC]
 
 
 # ---------------------------------------------------------------------------
@@ -609,8 +640,8 @@ def test_node_rejects_invalid_config_before_binding():
 
 def test_adapter_config_command_query_and_set():
     """adapter config / adapter config set <json>：查询与设置运行时 adapter 配置。"""
+    from motrix_edge.command import build_command_registry
     from motrix_edge.node import EdgeNode
-    from motrix_edge.utils.commands import build_command_registry
 
     node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
     registry = build_command_registry()
@@ -639,15 +670,15 @@ def test_adapter_config_command_query_and_set():
     cmd3.reply_to = replies3.append
     node._dispatch(cmd3)
     assert replies3[0].status == "rejected"
-    assert replies3[0].status_code == 400
+    assert replies3[0].code == ErrorCode.INVALID_ARGUMENT
     # 状态未被污染
     assert node.adapter_config["enabled_arms"] == ["right"]
 
 
 def test_adapter_config_current_reports_effective():
     """adapter config current：返回当前绑定 adapter 实际生效的启用臂 / 相机 / 动作维度 / home。"""
+    from motrix_edge.command import build_command_registry
     from motrix_edge.node import EdgeNode
-    from motrix_edge.utils.commands import build_command_registry
 
     inner = test_adapter_mod.TestRobotAdapter(name="Test Robot")
     node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
@@ -673,10 +704,10 @@ def test_adapter_config_current_reports_effective():
     assert data["home_qpos"] == [0.0] * 14  # TestRobotAdapter 缺省 HOME_QPOS 全 0
 
 
-def test_adapter_config_current_without_adapter_returns_default():
-    """adapter config current：未绑定 adapter → rejected(409)（无机型信息，不猜默认）。"""
+def test_adapter_config_current_without_adapter_is_rejected():
+    """adapter config current：未绑定 adapter → rejected（无机型信息，不猜默认）。"""
+    from motrix_edge.command import build_command_registry
     from motrix_edge.node import EdgeNode
-    from motrix_edge.utils.commands import build_command_registry
 
     node = EdgeNode({"adapter": {"host": "127.0.0.1", "port": 8090}})
     registry = build_command_registry()
@@ -685,5 +716,5 @@ def test_adapter_config_current_without_adapter_returns_default():
     cmd.reply_to = replies.append
     node._dispatch(cmd)
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert "not bound" in replies[0].error

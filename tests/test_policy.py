@@ -215,7 +215,7 @@ def test_set_policy_config_clears_empty_and_rejects_non_integer():
     - ``int`` 项只接受整数：``bool`` / 带小数的浮点 / 越界 → ``ValueError``（端口不静默截断）；
     - **全量校验通过才写入**：一批里任一项非法 → 整批拒绝，不留部分写入。
     """
-    from motrix_edge.utils.commands import set_policy_config
+    from motrix_edge.command import set_policy_config
 
     cfg = {"policy": {"type": "openpi", "host": "127.0.0.1", "port": 8000}}
     assert set_policy_config(cfg, "openpi", {"host": None, "port": 9000}) == {"host": None, "port": 9000}

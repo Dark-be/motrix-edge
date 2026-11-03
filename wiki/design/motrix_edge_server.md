@@ -3,37 +3,82 @@
 ## 摘要
 
 `server/` 用 FastAPI 暴露 MotrixEdge HTTP 控制面（`/v1/*`）。**web 是 node 进程内的独立线程**：
-`CaptureService` / `InferService` / `CommandService` 只绑定「正在运行的 node 实例 + 共享
+`CommandService` 是**唯一写通道**，绑定「正在运行的 node 实例（只读状态来源）+ 共享
 `CommandBus`」，经 `CommandBus.submit` 提交命令并**同步等待回执**驱动 EdgeNode，**不持有 / 不创建 /
-不运行 node**（观测语义唯一实现在 session，web 只做命令提交与状态读取）。
+不运行 node**（动作语义唯一实现在 session / node，web 只做命令提交与状态读取）。
+
+**HTTP 与 CLI 的机器人 / 节点 / 会话动作走同一条命令路径**：这些动作端点都映射为
+**一条命令**（与 CLI 逐条对应）；租约、上传、采集元信息等资源或配置写入各自由对应 controller
+负责，不属于命令通道。
+`/v1/commands` 的 capability 只是命令词的另一种拼写（`robot execute` ↔ `robot/execute`）——
+因此没有「只在 HTTP 侧存在的逻辑」，也没有「只在 CLI 侧存在的逻辑」。
 
 ## 目标与原则
 
--   **单点定义**：任务语义唯一实现在 session / node；server 只做「HTTP 动作 → 命令」翻译 + 状态读取。
--   **命令化驱动**：HTTP 动作经 `submit` 同步等回执（`session run` / `session quit` / `infer rollout`），
-    无需轮询节点状态伪造同步。
--   **租约校验**：受控操作（enter / exit / preview / commands / webrtc）须持有 Edge 级活跃租约
-    （`X-Lease-Id`，经 `LeaseManager` 校验）；只读操作（status / precheck / health / leases）免租约。
--   **状态校验在 HTTP 层**：提交命令前校验当前状态，非法转移返回 `409`，不污染命令队列。
--   **服务未注入 → 501**：`create_app` 未注入对应 Service 时端点返回 501。
+-   **单点定义**：动作语义唯一实现在 session / node（命令的消费方）；server 只做「HTTP 入参 →
+    命令参数」映射 + 只读快照。
+-   **命令化驱动**：HTTP 动作经 `CommandService.submit` 同步等回执（`session run` / `session quit` /
+    `infer rollout` …），无需轮询节点状态伪造同步。
+-   **状态校验在消费方**：命令是否适用于当前状态由 node / session 判定（不适用 → 回执 `409`），
+    不在 HTTP 层复制一套状态机；路由只做入参形状校验（如 prompt 非空、RTC 参数范围）。
+-   **租约校验**：受控操作（enter / exit / preview / commands / webrtc / uploads）须持有 Edge 级
+    活跃租约（`X-Lease-Id`，经 `LeaseManager` 校验）；只读操作（status / precheck / health /
+    leases / captures meta）免租约。租约是 **HTTP 入口的权限门**：本地 CLI 不经 HTTP、因而
+    不受租约约束 —— 这是 CLI 与 HTTP 的**唯一差异**，其余语义两端完全相同。
+-   **未注入 → 501**：`create_app` 未注入所需依赖（node / CommandService / …）时对应端点返回 501。
+
+## 模块分层与文件布局
+
+依赖方向单向向下，**FastAPI 只出现在最上两层**（`app.py` 装配、`routes/*` 映射）：
+
+```mermaid
+flowchart TD
+    R["routes/*（HTTP 映射：入参 → 命令 / 快照 → dict）"] --> D["deps.Services（依赖容器）"]
+    D --> CMD["CommandService（唯一写通道）"]
+    D --> S["status / state（只读快照）"]
+    D --> X["meta / preview / webrtc（各自协议面，直连依赖）"]
+    CMD --> B["CommandBus"] --> N["node / session（命令消费方，唯一副作用路径）"]
+```
+
+| 文件                       | 职责                                                                                                                   |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `app.py`                   | 应用装配：identity / 租约 / 上传会话的缺省构造、CORS 与 correlation / no-store 中间件、统一错误处理器、挂载各域 router |
+| `schemas.py`               | 请求 / 响应 Pydantic 模型（线上形状单点）                                                                              |
+| `deps.py`                  | `Services` 容器（router 工厂的唯一入参）                                                                               |
+| `routes/*`                 | 按域的 HTTP 映射（health / leases / commands / uploads / captures / infers / webrtc）；不含业务逻辑、不 try/except     |
+| `state.py`                 | node 只读视图（adapter 身份 / 心跳 / 采集状态）                                                                        |
+| `status.py`                | 只读快照组装（`/v1/captures` · `/v1/infers` · `precheck`）                                                             |
+| `command.py`               | **HTTP 命令写通道** `CommandService`：`CommandDispatcher`（与 CLI 共用）+ 租约门 + capability / 回执映射               |
+| `meta.py`                  | 采集元信息选项（`CaptureMetaService`，直连 `CaptureMetaStore`；配置级、有意不经总线）                                  |
+| `preview.py` / `webrtc.py` | 观测预览 / WebRTC 推流（各自协议面，不依赖 FastAPI）                                                                   |
+
+-   **错误处理**：各层只抛 `ServiceError` 子类（基类在顶层 `motrix_edge/errors.py`：命令层
+    `CommandError`、租约层 `LeaseError`、会话层 `UploadError`、服务层各 `*Error` —— 放顶层
+    各层才能继承而不反向依赖）；`app.py` 注册**一个**处理器渲染成 `{"detail": ...}`，
+    故路由层没有 try/except。
+-   **路由总则**：所有 HTTP handler 一律同步 `def`（FastAPI 交给线程池），因为内部都是阻塞调用
+    （`CommandBus.submit` 最长 5s、磁盘 / 文件操作、adapter 同步查询）；写成 `async def` 会占住
+    uvicorn 事件循环，连带冻结 health / preview / WebRTC 信令。
 
 ## 端点总览
 
-| 方法                  | 路径                                                            | 说明                                                  | 服务           |
-| --------------------- | --------------------------------------------------------------- | ----------------------------------------------------- | -------------- |
-| GET                   | `/v1/health`                                                    | 版本 / identity / 已绑定 adapter / 磁盘 / 时钟        | —（内建）      |
-| GET                   | `/v1/adapters`                                                  | 静态列出全部注册适配器（不 discover / 不探活）        | —（内建）      |
-| GET/POST              | `/v1/adapters/config`、`/v1/adapters/current`                   | 运行时 adapter 能力配置（启用臂 / 相机；POST 须租约） | EdgeNode       |
-| POST                  | `/v1/commands`                                                  | 受控命令（capability 映射，须租约）                   | CommandService |
-| POST/GET              | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}` | Edge 级租约（Console 签发镜像）                       | LeaseManager   |
-| GET/POST/PATCH/DELETE | `/v1/captures` + `…/precheck` + `…/meta`、`…/sync`              | 采集会话控制 + 采集元信息选项                         | CaptureService |
-| GET/POST              | `/v1/uploads` + `/v1/uploads/select·pack·upload·retry`          | 本地 episode 扫描 / 选择 / 打包与上传队列             | UploadSession  |
-| GET/POST/DELETE       | `/v1/infers` + `/v1/infers/rollout` + `…/rollout/stop`          | 推理会话控制                                          | InferService   |
-| GET                   | `/v1/preview`                                                   | 最新观测预览（独立于会话，须租约）                    | PreviewService |
-| POST                  | `/v1/webrtc/offer`                                              | WebRTC 推流信令（须租约）                             | WebRTCService  |
+| 方法            | 路径                                                                                                                                       | 说明                                                                                                                               | 服务               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| GET             | `/v1/health`                                                                                                                               | 版本 / identity / 已绑定 adapter / 磁盘 / 时钟；`adapters.policies[].config_items` = 各策略的配置项 schema（前端据此动态渲染表单） | —（内建）          |
+| GET             | `/v1/adapters`                                                                                                                             | 静态列出全部注册适配器（不 discover / 不探活）                                                                                     | —（内建）          |
+| GET/POST        | `/v1/adapters/config`、`/v1/adapters/current`                                                                                              | 运行时 adapter 能力配置（启用臂 / 相机；POST 须租约）                                                                              | EdgeNode           |
+| POST            | `/v1/commands`                                                                                                                             | 受控命令（capability 映射，须租约）                                                                                                | CommandService     |
+| POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}`                                                                            | Edge 级租约（Console 签发镜像）                                                                                                    | LeaseManager       |
+| GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                                                                                                   | 采集会话控制（写 → `session run/quit` 命令；读 → `status.py`）                                                                     | —（命令 + 快照）   |
+| POST            | `/v1/infers` + `/v1/infers/rollout·rollout/stop`、`/v1/infers/episode/start·end`、`/v1/infers/sync`、`/v1/infers/rtc`、`/v1/infers/config` | 推理会话控制（写 → 各条命令；读 → `status.py`）                                                                                    | —（命令 + 快照）   |
+| GET/POST        | `/v1/uploads` + `/v1/uploads/*`                                                                                                            | 本地 episode 扫描 / 选择 / 打包 + 上传队列                                                                                         | UploadSession      |
+| GET             | `/v1/preview`                                                                                                                              | 最新观测预览（须租约）                                                                                                             | PreviewService     |
+| POST            | `/v1/webrtc/offer`                                                                                                                         | WebRTC 推流信令（须租约）                                                                                                          | WebRTCService      |
+| GET             | `/v1/captures/meta`                                                                                                                        | 采集元信息选项（前端选择列表，免租约）                                                                                             | CaptureMetaService |
+| POST            | `/v1/captures/sync`                                                                                                                        | 同步采集元信息到机器人进程（须租约）                                                                                               | —（命令）          |
+| POST            | `/v1/infers/connect`                                                                                                                       | 启动异步预热（infer connect；立即回执）                                                                                            | —（命令）          |
 
-correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动生成）；`/v1/*` 响应一律
-`Cache-Control: no-store`（实时状态禁浏览器缓存，防轮询 GET 回放旧的 410 / 过期状态）。
+correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动生成）。
 
 ## /v1/adapters（运行时能力配置）
 
@@ -55,42 +100,56 @@ correlation 中间件：`X-Correlation-Id` 贯穿请求与响应（缺省自动�
 `idempotency_key`（**预留、未实现**：幂等去重尚未落地，字段仅回显；调用方需自行处理
 重试，勿依赖去重）。`CommandService.execute` 先校验租约，再按 capability 映射为总线命令：
 
-| capability                  | 总线命令                              | 说明                                                                          |
-| --------------------------- | ------------------------------------- | ----------------------------------------------------------------------------- |
-| `estop`                     | `robot estop`（push）                 | 全局急停：安全停止 + 节点转 ERROR；走总线**旁路队列**，任务运行期间也即时生效 |
-| `reset`                     | `node reset`（push）                  | 节点复位（ERROR → IDLE）                                                      |
-| `robot_reset`               | `robot reset`（submit）               | 机器人复位（adapter.reset），回执透传                                         |
-| `robot_execute`             | `robot execute`（submit）             | 直接下发 raw 动作（qpos），回执透传                                           |
-| `robot_teleop`              | `robot teleop`（submit）              | 遥操作 / 人工接管（enabled + 可选 mode），回执透传                            |
-| `capture_episode_start/end` | `capture episode start/end`（submit） | 开始 / 结束一轮采集，回执透传                                                 |
-| 其他                        | —（骨架）                             | 预留 Capability 校验 / 具体下发                                               |
+| capability         | 总线命令                                                                                  | 通道   | 说明                                                                          |
+| ------------------ | ----------------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------- |
+| `robot/estop`      | `robot estop`                                                                             | push   | 全局急停：安全停止 + 节点转 ERROR；走总线**旁路队列**，任务运行期间也即时生效 |
+| `node/reset`       | `node reset`                                                                              | push   | 节点复位（ERROR → IDLE）                                                      |
+| 其余全部已注册命令 | 同名词（`robot execute` / `infer rollout` / `infer rtc set` / `capture episode start` …） | submit | 同步等回执：`ok` / `rejected` / `error` 与 edge 错误码均在响应体原样返回      |
+
+-   **capability 面 = 命令面**：除两条 push 型外，**任何已注册命令**都能经 `/v1/commands`
+    提交（不再维护白名单——白名单曾带来「新增命令只对 CLI 生效」与「拼错 capability 静默
+    accepted」两个坑）。未注册的命令词 → **404**。
+-   **失败表达**：`/v1/commands` 是统一回执协议，命令消费方的业务拒绝仍返回 HTTP 200，并在
+    `status=rejected|error`、`code` 与 `error` 中表达；租约失败、未知命令、缺少 capability 或
+    submit 超时由 HTTP 错误表达。各领域 REST 端点则通过 `CommandService.submit` 把业务拒绝
+    映射成对应 HTTP 状态码。
+-   参数形状与 CLI 同义：`params` 是**原生 JSON 值**（`{"enabled": false}`、`{"meta": {...}}`），
+    命令侧解析函数（`parse_bool` / `parse_meta` …）同时接受 CLI 文本与原生值。
+-   **来源标记**：`cmd.meta.source`（`cli` / `http`）**仅用于可观测性**（日志 / 排障），
+    **不作为授权依据** —— 放行与否只看租约（`meta.lease_id`）。
+
+capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `node` /
+`lease` / `adapter`），由命令词派生（`command/naming.py::capability_for`，命令词是单一事实
+来源，不手写第二张表）；回执的 `executed` 一律回**规范 capability**。旧拼写
+（`robot_execute` / `estop` 一类）**保留一版**：仍可用，但回执带 `deprecated=true`
+（调用方据此迁移）。
 
 ## /v1/captures（采集会话控制）
 
-采集为**观测会话**，端点经 `CaptureService` 桥接：
+采集为**观测会话**：写端点（`POST` / `DELETE /v1/captures`、`/v1/captures/sync`）经
+`CommandService` 提交命令（与 CLI 同名词），读端点（status / precheck / meta）直读快照或 store：
 
-| 方法   | 路径                      | 租约          | 说明                                                                                                             |
-| ------ | ------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                |
-| GET    | `/v1/captures`            | 无            | 状态快照：node_state / session / adapter / **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id |
-| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                  |
-| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（`config/capture.yml` 的 `meta` 段，前端选择列表）                                                |
-| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                      |
-| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                        |
-| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                   |
-| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                                           |
-| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加）                         |
-| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                   |
-| GET    | `/v1/preview`             | 必需          | 最新观测预览（**不要求会话**，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）                  |
+| 方法   | 路径                      | 租约          | 说明                                                                                                                                               |
+| ------ | ------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/captures`            | 必需          | `enter`：`session run capture`（READY → ACTIVE，选择 + 启动一步）                                                                                  |
+| GET    | `/v1/captures`            | 无            | 状态快照：node_state / session_type / session state / adapter（含遥操作位）/ **capture_status**（运行位 + 元信息全集 + 数据目录）/ disk / lease_id |
+| GET    | `/v1/captures/precheck`   | 无            | 只读预检：节点 / 会话 / 机器人就绪 + 磁盘 + lease_id / leasable                                                                                    |
+| GET    | `/v1/captures/meta`       | 无            | 采集元信息选项（运行根目录 `config/capture.yml` 的 `meta` 段，前端选择列表）                                                                       |
+| POST   | `/v1/captures/meta`       | 必需          | 选项管理：新增 `{key, value}`（分类不存在则创建）；重复 400                                                                                        |
+| PATCH  | `/v1/captures/meta`       | 必需          | 选项管理：重命名选项 `{key, old, new}`；不存在 / 重复 400                                                                                          |
+| DELETE | `/v1/captures/meta`       | 必需          | 选项管理：删除选项（`?key=&value=`，分类清空则一并删除该分类）                                                                                     |
+| DELETE | `/v1/captures/meta/{key}` | 必需          | 选项管理：删除整个分类                                                                                                                             |
+| POST   | `/v1/captures/sync`       | 必需          | `sync`：把选中元信息（`{operator, task_name, …}`）同步到机器人进程（进程保存数据时附加）                                                           |
+| DELETE | `/v1/captures?lease_id=`  | 必需（query） | `exit`：`session quit`（ACTIVE → READY；**租约不随退出销毁**）                                                                                     |
+| GET    | `/v1/preview`             | 必需          | 最新观测预览（qpos / action / pose 末端位姿 + 相机名 / 臂名；**不要求会话**，见 [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）     |
 
 `POST /v1/captures` 响应：`{status: "accepted", state, lease_id, adapter}`（无请求体，单 adapter 包）。
 
-> **采集数据归属（边界）**：`capture_status`（运行位 / 元信息 / 数据目录）来自 `adapter.capture_status()`
-> （适配器 / SDK 进程自维护的**状态上报**：是否正在采集 + 数据目录）——Edge 不驱动落盘、
-> 不校验；数据的本地组织（扫描 / 选择 / 打包）见 `/v1/uploads` 小节。实际数据落盘 / 校验 / 上传
-> **待完成**：后续按 hardware adapter 契约完成
-> **CaptureBundle**（manifest / checksum → Local Spool → Uploader，服务端确认后才删），
-> 属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
+> **采集数据归属（边界）**：`capture_status.data_dir` 为适配器 / SDK 进程自维护的
+> **状态上报占位**——Edge 不驱动落盘、不校验、不上传（数据文件列表不经 HTTP 上报，
+> 本地扫描 / 打包见 `/v1/uploads`）。实际数据落盘 / 校验 / 上传 **待完成**：后续按
+> hardware adapter 契约完成 **CaptureBundle**（manifest / checksum → Local Spool →
+> Uploader，服务端确认后才删），属 M11/M12（未在仓库内保留实施计划，落地时另行立项）。
 
 ## /v1/uploads（本地 episode 扫描与打包）
 
@@ -127,7 +186,9 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 
 ## /v1/infers（推理会话控制）
 
-推理会话**无回合概念**（enter → 持续推理 → exit，`infer rollout` 步进），端点经 `InferService` 桥接：
+推理会话**无「多步推理」模式**：单步 / 持续推理经 `infer rollout` 驱动，推理时
+**rollout 录制** = `capture episode start/end`（robot 不关心推理/采集）；写端点经 `CommandService`
+提交命令（与 CLI 逐条对应），`GET /v1/infers` 读只读快照：
 
 | 方法   | 路径                       | 租约          | 说明                                                                                                                                                                                                                                                                                      |
 | ------ | -------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -156,13 +217,24 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 
 ## 错误语义
 
-| 状态码 | 含义                                                                       |
-| ------ | -------------------------------------------------------------------------- |
-| `409`  | 非法状态转移（已在会话再 enter / 未在会话 exit / 节点未就绪 / 无活跃租约） |
-| `403`  | `X-Lease-Id` 缺失或不匹配（异租约）                                        |
-| `410`  | 租约已过期                                                                 |
-| `501`  | 服务未注入（create_app 未启用对应模块）                                    |
-| `500`  | 内部异常                                                                   |
+**业务层只给 edge 错误码**（`motrix_edge.errors.ErrorCode`，见
+[命令总线 · 命令对象](./motrix_edge_command_bus.md#命令对象)）；**HTTP 状态码由 HTTP 面自己维护**
+（`app.py::_HTTP_STATUS`），并在响应体回传 code：`{"detail": "...", "code": "conflict"}`。
+
+| edge 错误码        | HTTP | 出现场景                                                                               |
+| ------------------ | ---- | -------------------------------------------------------------------------------------- |
+| `invalid_argument` | 400  | 入参非法：prompt 为空 / 策略配置项非法键或必填项为空 / RTC 参数越界 / 未注册的策略类型 |
+| `unknown_command`  | 404  | 未知命令（capability 解析出的命令词未注册）                                            |
+| `not_found`        | 404  | 目标不存在（租约镜像 `{id}` / upload 目录 / episode）                                  |
+| `conflict`         | 409  | 当前状态不适用（已在会话再 enter / 未在会话 exit / 节点未就绪 / 扫描已在进行）         |
+| `lease_required`   | 409  | 受控操作未带租约（或租约尚未安装）                                                     |
+| `forbidden`        | 403  | 租约不匹配（异租约）/ 已撤销                                                           |
+| `lease_expired`    | 410  | 租约已过期                                                                             |
+| `not_implemented`  | 501  | 服务未注入（create_app 未启用对应模块）                                                |
+| `upstream_error`   | 502  | 策略端连接失败                                                                         |
+| `unavailable`      | 503  | 依赖暂不可用（观测未就绪）                                                             |
+| `timeout`          | 504  | 命令未被消费（submit 超时）/ WebRTC 协商超时                                           |
+| `internal`         | 500  | 内部异常 / 失败回执漏给错误码（处理器疏漏）                                            |
 
 ## 相关文档
 
@@ -172,4 +244,5 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 -   WebRTC 推流：[FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)
 -   身份配置：设备身份（identity，`identity` 配置段见 [配置与命令行](./motrix_edge_config.md#配置加载)；
     经 `/v1/health` 上报）
--   代码入口：`src/motrix_edge/server/` —— 随 **feat/3**（HTTP 控制面）落地
+-   代码入口：`src/motrix_edge/server/`（装配 `app.py` + HTTP 映射 `routes/*` + controller + `state.py`）
+    —— 随 **feat/3**（HTTP 控制面）落地

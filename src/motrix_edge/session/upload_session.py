@@ -28,13 +28,13 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from motrix_edge.errors import ErrorCode, ServiceError
 
-class UploadError(Exception):
-    """上传会话操作失败；携带 HTTP 语义状态码。"""
 
-    def __init__(self, message: str, status_code: int = 400):
-        super().__init__(message)
-        self.status_code = status_code
+class UploadError(ServiceError):
+    """上传会话操作失败（缺省 400）。"""
+
+    default_code = ErrorCode.INVALID_ARGUMENT
 
 
 class UploadSession:
@@ -118,7 +118,7 @@ class UploadSession:
         if not roots:
             raise UploadError(
                 "no allowed upload root configured（请配置 upload.data_dir 或先绑定机器人进程）",
-                status_code=409,
+                code=ErrorCode.CONFLICT,
             )
         return roots
 
@@ -133,7 +133,7 @@ class UploadSession:
             return
         raise UploadError(
             f"folder_path is outside the allowed upload roots: {folder}（允许：{[str(r) for r in roots]}）",
-            status_code=400,
+            code=ErrorCode.INVALID_ARGUMENT,
         )
 
     def _begin_heavy(self, name: str) -> None:
@@ -143,7 +143,7 @@ class UploadSession:
         被重复的重 IO 拖住）。
         """
         if not self._heavy.acquire(blocking=False):
-            raise UploadError(f"another scan/pack is already in progress（{name} rejected）", status_code=409)
+            raise UploadError(f"another scan/pack is already in progress（{name} rejected）", code=ErrorCode.CONFLICT)
 
     def _end_heavy(self) -> None:
         """释放重操作位（仅持有者调用；未持有时忽略，重复调用安全）。"""
@@ -170,7 +170,7 @@ class UploadSession:
         if folder not in roots:
             self._ensure_allowed(folder)
         if not folder.exists():
-            raise UploadError(f"upload folder not found: {folder}", status_code=404)
+            raise UploadError(f"upload folder not found: {folder}", code=ErrorCode.NOT_FOUND)
         if not folder.is_dir():
             raise UploadError(f"upload path is not a directory: {folder}")
 
@@ -255,9 +255,9 @@ class UploadSession:
         """
         with self._lock:
             if not self._folder_path:
-                raise UploadError("scan a folder before packing", status_code=409)
+                raise UploadError("scan a folder before packing", code=ErrorCode.CONFLICT)
             if not self._selected:
-                raise UploadError("no episodes selected", status_code=409)
+                raise UploadError("no episodes selected", code=ErrorCode.CONFLICT)
             folder = Path(self._folder_path)
             # name=None → 缺省 pack<选中数量>；显式传入的空串 / 空白 → 400（不静默用默认名）
             pack_name = self._validate_pack_name(name if name is not None else f"pack{len(self._selected)}")
@@ -265,7 +265,7 @@ class UploadSession:
             if target.exists():
                 raise UploadError(
                     f"pack folder already exists: {target.name}（请改名后重试）",
-                    status_code=409,
+                    code=ErrorCode.CONFLICT,
                 )
             episode_ids = sorted(self._selected, key=self._episode_sort_key)
             sources: list[Path] = []
@@ -278,7 +278,7 @@ class UploadSession:
                 )
             missing = [str(path) for path in sources if not path.is_file()]
             if missing:
-                raise UploadError(f"source files missing: {missing}", status_code=404)
+                raise UploadError(f"source files missing: {missing}", code=ErrorCode.NOT_FOUND)
 
         moved: list[Path] = []
         try:
@@ -291,9 +291,9 @@ class UploadSession:
             if leftover:
                 raise UploadError(
                     f"pack failed: {exc}；以下文件移回失败，已保留在 {target}：{leftover}",
-                    status_code=500,
+                    code=ErrorCode.INTERNAL,
                 ) from exc
-            raise UploadError(f"pack failed: {exc}", status_code=500) from exc
+            raise UploadError(f"pack failed: {exc}", code=ErrorCode.INTERNAL) from exc
 
         with self._lock:
             # 只清「本次打包走的」那些：并发到来的新选择不受影响（重扫也会丢掉已消失的 id）
@@ -360,14 +360,14 @@ class UploadSession:
         with self._lock:
             missing = [episode_id for episode_id in requested if episode_id not in self._episodes]
             if missing:
-                raise UploadError(f"unknown episode_ids: {missing}", status_code=404)
+                raise UploadError(f"unknown episode_ids: {missing}", code=ErrorCode.NOT_FOUND)
             invalid = [
                 episode_id
                 for episode_id in requested
                 if self._episodes[episode_id]["status"] not in self._SELECTABLE_STATES
             ]
             if invalid:
-                raise UploadError(f"episodes are not selectable: {invalid}", status_code=409)
+                raise UploadError(f"episodes are not selectable: {invalid}", code=ErrorCode.CONFLICT)
             self._selected = set(requested)
             return self.status()
 
@@ -375,9 +375,9 @@ class UploadSession:
         """把选择集标记为 pending；未配置上传目标时返回 501。"""
         with self._lock:
             if not self._selected:
-                raise UploadError("no episodes selected", status_code=409)
+                raise UploadError("no episodes selected", code=ErrorCode.CONFLICT)
             if not self.endpoint:
-                raise UploadError("upload endpoint is not configured", status_code=501)
+                raise UploadError("upload endpoint is not configured", code=ErrorCode.NOT_IMPLEMENTED)
             for episode_id in self._selected:
                 self._episodes[episode_id]["status"] = "pending"
             return self.status()
@@ -387,9 +387,9 @@ class UploadSession:
         with self._lock:
             failed = [episode_id for episode_id in self._selected if self._episodes[episode_id]["status"] == "failed"]
             if not failed:
-                raise UploadError("no failed selected episodes", status_code=409)
+                raise UploadError("no failed selected episodes", code=ErrorCode.CONFLICT)
             if not self.endpoint:
-                raise UploadError("upload endpoint is not configured", status_code=501)
+                raise UploadError("upload endpoint is not configured", code=ErrorCode.NOT_IMPLEMENTED)
             for episode_id in failed:
                 self._episodes[episode_id]["status"] = "pending"
             return self.status()

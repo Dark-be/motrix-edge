@@ -35,6 +35,8 @@ CLI / 控制面 ──CommandBus──▶ EdgeNode（node 生命周期状态机�
 | 模块 / 子包 | 职责                                                                                                                                                |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `node.py`   | `EdgeNode` 生命周期状态机、命令分发、周期任务                                                                                                       |
+| `command/`  | 命令模型、注册与参数解析、`CommandDispatcher`、`CommandBus`                                                                                         |
+| `errors.py` | 跨层 `ServiceError` 基类与 `ErrorCode` 统一错误码词表                                                                                               |
 | `adapter/`  | RobotAdapter HAL：`HttpShmAdapter` 共享基类（HTTP 指令下行 + 共享内存观测上行）+ `DualPiperAdapter` / `TestRobotAdapter`，以及 `/v1` / 共享内存契约 |
 | `session/`  | 任务会话：`CaptureSession`（数采）/ `InferSession`（推理）；文件会话：`UploadSession`（本地 episode 扫描 / 选择 / 打包）                            |
 | `policy/`   | 推理策略客户端（openpi 等）；`InferSession` 内经 ws 请求推理节点                                                                                    |
@@ -42,7 +44,7 @@ CLI / 控制面 ──CommandBus──▶ EdgeNode（node 生命周期状态机�
 | `frame/`    | `FrameManager` 观测帧缓冲（preview / WebRTC 消费）                                                                                                  |
 | `identity/` | Edge 设备身份声明与请求元数据                                                                                                                       |
 | `lease/`    | Edge 级租约机制（`LeaseManager`）                                                                                                                   |
-| `utils/`    | 命令总线（CommandBus）/ 采集元信息选项（`capture_meta`）/ data handler 等工具                                                                       |
+| `utils/`    | 采集元信息选项（`capture_meta`）、日志与 data handler 等通用工具                                                                                    |
 | `config/`   | 运行目录解析；现场配置优先，包内 `edge.yml` / `capture.yml` 只读兜底                                                                                |
 
 > adapter 经 Python **entry point**（`motrix_edge.adapters` 组）注册接入，当前内置

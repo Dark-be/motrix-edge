@@ -15,7 +15,7 @@
 import time
 
 from motrix_edge.adapter import AdapterCapability
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -33,6 +33,7 @@ from motrix_edge.utils.commands import (
     ok_result,
     parse_meta,
 )
+from motrix_edge.errors import ErrorCode
 from motrix_edge.utils.data_handler import debug_print
 
 from .base import BaseSession, RunResult, SessionState, _cmd_name
@@ -104,21 +105,26 @@ class CaptureSession(BaseSession):
             elif name == CMD_ROBOT_EXECUTE:  # 直接下发 raw 动作（qpos 直接作为参数）
                 self._execute_action(cmd)
             elif name == CMD_ROBOT_RESET:  # 复位（任务期间；adapter 可用）
-                if self._drop_expired(cmd, "reset"):
-                    continue
-                self.adapter.reset()
-                self._reply(cmd, ok_result(state="ready"))
+                self._reset_robot(cmd)
             elif name == CMD_ROBOT_TELEOP:  # 遥操作开关（true/false 直接作为参数）
                 self._set_teleop(cmd)
             elif name == CMD_CAPTURE_EPISODE_START:  # 开始一轮采集（episode 开始）
-                if self._drop_expired(cmd, "capture start"):
+                if self._reject_expired_control(cmd, "capture start"):
                     continue
-                self.adapter.start_capture()
+                try:
+                    self.adapter.start_capture()
+                except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话
+                    self._reply_upstream_error(cmd, "capture start", exc)
+                    continue
                 self._reply(cmd, ok_result(state="ready", episode="start"))
             elif name == CMD_CAPTURE_EPISODE_END:  # 结束一轮采集（episode 结束）
-                if self._drop_expired(cmd, "capture end"):
+                if self._reject_expired_control(cmd, "capture end"):
                     continue
-                self.adapter.end_capture()
+                try:
+                    self.adapter.end_capture()
+                except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话
+                    self._reply_upstream_error(cmd, "capture end", exc)
+                    continue
                 self._reply(cmd, ok_result(state="ready", episode="end"))
 
             elif name in (  # 配置级命令：任务态也可用（capture meta list/add/edit/delete/delete-key）
@@ -130,16 +136,22 @@ class CaptureSession(BaseSession):
             ):
                 self._reply(cmd, self._on_capture_meta(cmd))
             elif name == CMD_CAPTURE_SYNC:  # 同步采集元信息（采集员 / 任务名等）到机器人进程
-                if self._drop_expired(cmd, "capture sync"):
+                if self._reject_expired_control(cmd, "capture sync"):
                     continue
                 try:
                     meta = parse_meta(cmd.params.get("meta"))
                 except ValueError as exc:
-                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+                    self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                     continue
-                self.adapter.sync_capture_meta(meta)
+                try:
+                    self.adapter.sync_capture_meta(meta)
+                except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话
+                    self._reply_upstream_error(cmd, "capture sync", exc)
+                    continue
                 self._reply(cmd, ok_result(state="ready", meta=meta))
             else:  # 未识别命令（当前任务不适用）统一回执，避免 submit 挂起
                 if cmd is not None:
-                    self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
+                    self._reply(
+                        cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
+                    )
                 time.sleep(0.02)  # 无命令轻量轮询（避免忙等）

@@ -17,6 +17,8 @@ src/motrix_edge/
 ├── __init__.py       # 公开 API：EdgeNode / NodeLifecycle / NodeState / get_adapter / get_session
 ├── __main__.py       # CLI：run / serve / adapters list / version
 ├── node.py           # EdgeNode 生命周期状态机（NodeLifecycle / NodeState）
+├── command/          # 命令模型 / 注册 / 参数解析 / 派发 / CommandBus
+├── errors.py         # 跨层 ServiceError / ErrorCode 统一词表
 ├── adapter/          # 机器人硬件适配：RobotAdapter HAL + TestRobotAdapter + 工厂
 ├── session/          # 会话：BaseSession / CaptureSession / InferSession + get_session 工厂
 ├── policy/           # 推理策略客户端：BasePolicyClient + 契约 + openpi / lerobot_act + 注册工厂
@@ -27,7 +29,7 @@ src/motrix_edge/
 ├── lease/            # Edge 级租约机制：LeaseManager
 ├── server/           # MotrixEdge HTTP 控制面：FastAPI /v1/* + WebRTC
 ├── config/           # 运行根 MOTRIX_EDGE_DIR：<根>/config + <根>/logs，包内 YAML 只读兜底
-└── utils/            # commands（命令总线）/ data_handler / load_file
+└── utils/            # data_handler / logging / load_file 等通用工具
 ```
 
 ## Workflow

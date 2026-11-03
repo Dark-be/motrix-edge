@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from motrix_edge.errors import ErrorCode
 from motrix_edge.frame import FrameManager
 from motrix_edge.lease import Lease, LeaseManager, LeaseState
 from motrix_edge.server import create_app
@@ -145,7 +146,7 @@ def test_offer_requires_lease(mock_aiortc):
     svc = WebRTCService(make_node(), leases=leases)
     with pytest.raises(WebRTCError) as ei:
         svc.offer(None, "offer-sdp")
-    assert ei.value.status_code == 409
+    assert ei.value.code == ErrorCode.LEASE_REQUIRED
 
 
 def test_offer_returns_answer(mock_aiortc):

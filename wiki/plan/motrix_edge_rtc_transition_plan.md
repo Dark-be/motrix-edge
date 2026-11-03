@@ -25,8 +25,8 @@
 -   [x] 连续过渡 `continuous`：`alpha = pos / (length - 1)`（按步号 0→1；重叠单步退化为 1.0）。
 -   [x] `RTCManager._apply_locked` 按重叠窗口逐位加权（`alpha` 裁剪到 `[0, 1]`，防自定义曲线外推），
         并在 `status().last_chunk.overlap_steps` 上报参与过渡的步数。
--   [x] 配置 / 文档同步：`edge.yml` 注释、`POST /v1/infers/rtc` 字段描述、`server/infer.py` docstring、
-        wiki 设计文档、前端面板下拉。
+-   [x] 配置 / 文档同步：`edge.yml` 注释、`POST /v1/infers/rtc` 字段描述、
+        `server/routes/infers.py` / `server/schemas.py`、wiki 设计文档、前端面板下拉。
 -   [x] 单元用例：连续过渡端到端（重叠 3 步 → 取值 1.0 / 1.5 / 2.0）+ 策略表「权重曲线」语义。
 -   [ ] 实机验证：在 dual_piper 上对比 `weighted_average`（固定搭配）与 `continuous`（连续过渡）
         在块边界的动作连续性（观察 `rtc.last_chunk.overlap_steps` 与关节轨迹抖动）。

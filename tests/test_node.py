@@ -20,9 +20,7 @@ import time
 import pytest
 
 from motrix_edge.adapter import DEFAULT_DISCOVER_HOST, DEFAULT_DISCOVER_PORT
-from motrix_edge.node import EdgeNode, NodeLifecycle, NodeState
-from motrix_edge.session.base import RunResult
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_INFER_CONFIG,
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL_SET,
@@ -43,6 +41,9 @@ from motrix_edge.utils.commands import (
     deadline_exceeded,
     ok_result,
 )
+from motrix_edge.errors import ErrorCode
+from motrix_edge.node import EdgeNode, NodeLifecycle, NodeState
+from motrix_edge.session.base import RunResult
 
 
 class _FakeSession:
@@ -123,7 +124,7 @@ def test_dispatch_replies_rejected_for_not_applicable_command():
     node._dispatch(Command(CMD_NODE_RESET, reply_to=replies.append))
     assert len(replies) == 1
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert "not applicable" in replies[0].error
     assert node.state == NodeState.READY  # 状态不受影响
 
@@ -291,11 +292,11 @@ def test_enter_error_without_session_no_crash():
 
 
 # ---------------------------------------------------------------------------
-# adapter 选择：adapter_selector（CLI 交互）/ pending_adapter_id（HTTP 预留）
+# 会话启动：复用节点当前绑定的单一 adapter
 # ---------------------------------------------------------------------------
 
 
-class _FakeSelectSession:
+class _FakeRunSession:
     name = "FakeSession"
 
     def __init__(self):
@@ -328,7 +329,7 @@ def _patch_get_session(monkeypatch, captured):
         captured["adapter"] = adapter
         captured["policy_type"] = policy_type
         captured["capture_meta_store"] = capture_meta_store
-        return _FakeSelectSession()
+        return _FakeRunSession()
 
     monkeypatch.setattr(node_mod, "get_session", fake_get_session)
 
@@ -391,7 +392,7 @@ def test_session_run_infer_rejects_unregistered_policy_type(monkeypatch):
     )
     result = replies[-1]
     assert result.status == "rejected"
-    assert result.status_code == 400
+    assert result.code == ErrorCode.INVALID_ARGUMENT
     assert captured.get("session_type") is None  # 被拒前短路，未启动会话
     assert node.state == NodeState.READY  # 状态不受影响
 
@@ -479,12 +480,18 @@ class _FakeExecAdapter:
         self.executed = []
         self.reset_calls = 0
         self.teleop_calls: list[tuple[bool, str | None]] = []
+        self.reset_error: Exception | None = None
+        self.execute_error: Exception | None = None
         self.teleop_error: Exception | None = None
 
     def reset(self):
+        if self.reset_error is not None:
+            raise self.reset_error
         self.reset_calls += 1
 
     def execute(self, action):
+        if self.execute_error is not None:
+            raise self.execute_error
         self.executed.append(action)
 
     def set_teleop(self, enabled: bool, mode: str | None = None):
@@ -515,6 +522,26 @@ def test_robot_execute_in_ready_calls_adapter():
     assert node.state == NodeState.READY
 
 
+@pytest.mark.parametrize("name", [CMD_ROBOT_RESET, CMD_ROBOT_EXECUTE])
+def test_adapter_http_errors_return_upstream_error_without_stopping_node(name):
+    """SDK 拒绝 reset / execute 时返回 upstream_error，节点主循环语义保持 READY。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    if name == CMD_ROBOT_RESET:
+        adapter.reset_error = RuntimeError("HTTP 500")
+        params = {}
+    else:
+        adapter.execute_error = RuntimeError("HTTP 500")
+        params = {"qpos": "0,0,0,0,0,0,0"}
+    replies = []
+
+    node._dispatch(Command(name, params=params, reply_to=replies.append))
+
+    assert replies[0].status == "error"
+    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
+    assert "HTTP 500" in replies[0].error
+    assert node.state == NodeState.READY
+
+
 def test_robot_execute_supports_brackets_and_spaces():
     """robot execute：兼容方括号 / 空白分隔的 qpos 参数。"""
     node, adapter = _ready_node_with_exec_adapter()
@@ -532,6 +559,38 @@ def test_robot_execute_supports_fullwidth_commas():
     assert adapter.executed == [[1.0] * 7]
     assert replies[0].status == "ok"
 
+
+@pytest.mark.parametrize(
+    ("name", "params"),
+    [
+        (CMD_ROBOT_RESET, {}),
+        (CMD_ROBOT_EXECUTE, {"qpos": "1,2,3"}),
+        (CMD_ROBOT_TELEOP, {"enabled": "true", "mode": "delta"}),
+    ],
+)
+def test_expired_adapter_commands_do_not_change_robot(name, params):
+    """submit 已超时的 reset / execute / teleop 到达 READY 后必须丢弃，不产生真机副作用。"""
+    node, adapter = _ready_node_with_exec_adapter()
+    replies = []
+    cmd = Command(
+        name,
+        params=params,
+        meta={META_REPLY_DEADLINE: time.monotonic() - 1},
+        reply_to=replies.append,
+    )
+
+    node._dispatch(cmd)
+
+    assert adapter.reset_calls == 0
+    assert adapter.executed == []
+    assert adapter.teleop_calls == []
+    assert replies[0].status == "rejected"
+    assert replies[0].code == ErrorCode.TIMEOUT
+
+
+def test_robot_execute_supports_semicolon_separated_qpos():
+    """robot execute：兼容分号分隔的 qpos。"""
+    node, adapter = _ready_node_with_exec_adapter()
     replies = []
     node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "1;2;3"}, reply_to=replies.append))
     assert adapter.executed[-1] == [1.0, 2.0, 3.0]
@@ -545,13 +604,13 @@ def test_robot_execute_rejects_invalid_qpos():
     node._dispatch(Command(CMD_ROBOT_EXECUTE, params={}, reply_to=replies.append))
     assert len(replies) == 1
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert adapter.executed == []
 
     replies = []
     node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "a,b,c"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert adapter.executed == []
 
 
@@ -571,7 +630,7 @@ def test_robot_execute_rejected_when_adapter_dim_mismatch():
     replies = []
     node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "0,0,0,0,0,0,0"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "execute action dim" in replies[0].error
     assert node.state == NodeState.READY
 
@@ -583,7 +642,7 @@ def test_robot_execute_not_applicable_in_idle():
     replies = []
     node._dispatch(Command(CMD_ROBOT_EXECUTE, params={"qpos": "0,0,0,0,0,0,0"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
 
 
 def test_adapter_commands_share_behavior_in_active_state():
@@ -662,7 +721,7 @@ def test_robot_teleop_drops_expired_submit_before_sdk_side_effect():
 
     assert adapter.teleop_calls == []
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 504
+    assert replies[0].code == ErrorCode.TIMEOUT
 
 
 def test_robot_teleop_rejects_invalid_mode():
@@ -671,7 +730,7 @@ def test_robot_teleop_rejects_invalid_mode():
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true", "mode": "fast"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "invalid teleop mode" in replies[0].error
     assert adapter.teleop_calls == []
 
@@ -682,14 +741,14 @@ def test_robot_teleop_rejects_invalid_enabled():
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "maybe"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "invalid boolean" in replies[0].error
     assert adapter.teleop_calls == []
 
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert adapter.teleop_calls == []
 
 
@@ -702,7 +761,7 @@ def test_robot_teleop_sdk_error_replies_without_crashing_node():
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
 
     assert replies[0].status == "error"
-    assert replies[0].status_code == 502
+    assert replies[0].code == ErrorCode.UPSTREAM_ERROR
     assert "robot sdk unavailable" in replies[0].error
     assert node.state == NodeState.READY
 
@@ -714,7 +773,7 @@ def test_robot_teleop_not_applicable_in_idle():
     replies = []
     node._dispatch(Command(CMD_ROBOT_TELEOP, params={"enabled": "true"}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
 
 
 def test_recover_releases_adapter_and_goes_idle(monkeypatch):
@@ -830,15 +889,40 @@ def test_command_bus_submit_marks_deadline_and_drops_late_reply():
     timed_out = Command(CMD_NODE_RESET)
     with pytest.raises(CommandError) as exc:
         bus.submit(timed_out, timeout=0.05)  # 无消费方 → 超时
-    assert exc.value.status_code == 504
+    assert exc.value.code == ErrorCode.TIMEOUT
     assert META_REPLY_DEADLINE in timed_out.meta  # 提交时已写入截止时刻
     assert deadline_exceeded(timed_out)  # 超时后自查为真（处理器据此丢弃动作）
-    # 迟到回执：调用方已放弃 → 丢弃（连续两次也不会抛 queue.Full / 不阻塞）
+    # 超时后 sink 已关闭：迟到与重复回执均直接丢弃、不阻塞。
     timed_out.reply_to(ok_result())
     timed_out.reply_to(ok_result())
     # 未到期的 deadline / 无 deadline（push 或手工构造）→ 不门控，保持既有语义
     assert not deadline_exceeded(Command(CMD_NODE_RESET, meta={META_REPLY_DEADLINE: time.monotonic() + 5}))
     assert not deadline_exceeded(Command(CMD_NODE_RESET))
+
+
+def test_session_run_infer_parses_cli_json_config(monkeypatch):
+    """CLI 的 config=<json> 文本须先解析为对象，再按策略 schema 应用。"""
+    node, _adapter = _ready_node_with_exec_adapter()
+    captured = {}
+
+    def fake_start(session_type, policy_type=None):
+        captured.update(session_type=session_type, policy_type=policy_type)
+        return ok_result()
+
+    monkeypatch.setattr(node, "_start_session", fake_start)
+    replies = []
+    node._dispatch(
+        Command(
+            CMD_SESSION_RUN,
+            params={"session": "infer", "config": '{"host":"10.0.0.8","port":9000}'},
+            reply_to=replies.append,
+        )
+    )
+
+    assert replies[0].status == "ok"
+    assert captured == {"session_type": "infer", "policy_type": "openpi"}
+    assert node.base_cfg["policy"]["host"] == "10.0.0.8"
+    assert node.base_cfg["policy"]["port"] == 9000
 
 
 def test_infer_config_reports_endpoint_values():
@@ -874,7 +958,7 @@ def test_infer_config_set_rejects_invalid_endpoint():
         replies = []
         node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": bad}, reply_to=replies.append))
         assert replies[0].status == "rejected", f"{bad} should be rejected"
-        assert replies[0].status_code == 400
+        assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert node.base_cfg["policy"]["port"] == 8765  # 配置未被污染
     assert node.base_cfg["policy"]["host"] == "0.0.0.0"
     # 一批里先合法后非法 → 整批拒绝（全量校验通过才写，host 的清除也不落地）
@@ -882,7 +966,7 @@ def test_infer_config_set_rejects_invalid_endpoint():
     payload = '{"host": null, "port": 0}'
     node._dispatch(Command(CMD_INFER_CONFIG_SET, params={"json": payload}, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert node.base_cfg["policy"]["host"] == "0.0.0.0"
 
 
@@ -946,14 +1030,14 @@ def test_lease_revoke_without_manager_rejected():
     replies = []
     node._dispatch(Command(CMD_LEASE_REVOKE, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 501
+    assert replies[0].code == ErrorCode.NOT_IMPLEMENTED
 
 
 def test_adapter_config_set_rejected_during_session():
     """会话进行中 `adapter config set` → rejected(409)：布局不能在 episode 中途变化。"""
     from types import SimpleNamespace
 
-    from motrix_edge.utils.commands import CMD_ADAPTER_CONFIG_SET
+    from motrix_edge.command import CMD_ADAPTER_CONFIG_SET
 
     node = EdgeNode({}, command_source=lambda: None)
     node.initialize()
@@ -963,7 +1047,7 @@ def test_adapter_config_set_rejected_during_session():
         Command(CMD_ADAPTER_CONFIG_SET, params={"json": '{"enabled_arms": ["right"]}'}, reply_to=replies.append)
     )
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 409
+    assert replies[0].code == ErrorCode.CONFLICT
     assert node.adapter_config == {}  # 状态未更新
 
 
@@ -993,7 +1077,7 @@ def test_infer_prompt_without_text_is_rejected():
     replies = []
     node._dispatch(Command(CMD_INFER_PROMPT, reply_to=replies.append))
     assert replies[0].status == "rejected"
-    assert replies[0].status_code == 400
+    assert replies[0].code == ErrorCode.INVALID_ARGUMENT
     assert "prompt" not in node.base_cfg["policy"]
 
 

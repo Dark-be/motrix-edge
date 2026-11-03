@@ -14,7 +14,7 @@
 
 """frame 子包 —— Edge 侧观测帧缓存管理（FrameManager）。
 
-单点管理「最新观测帧」（观测图像 jpeg + qpos，线程安全）：session 每帧写入，preview /
+单点管理「最新观测帧」（观测图像 jpeg + qpos，线程安全）：node 持续观测写入，preview /
 WebRTC 推流读取。观测图像在 Edge 侧降采样为 ``DEFAULT_IMAGE_SIZE`` JPEG，方便内网传输。
 """
 
@@ -66,7 +66,7 @@ class FrameManager:
 
     - ``update(obs)``：写入最新观测（``adapter.observe()`` 返回；图像降采样为 jpeg）。
     - ``latest()``：读取最新观测帧（供 preview / WebRTC 推流）；无帧返回 None。
-    - ``clear()``：清空缓存（会话结束 / 退出时）。
+    - ``clear()``：供调用方显式清空缓存。
     """
 
     def __init__(self, image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE):

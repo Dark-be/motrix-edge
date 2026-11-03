@@ -203,7 +203,8 @@ class HttpShmAdapter(RobotAdapter):
     def reset(self) -> None:
         """程序复位到 home（非阻塞）：HTTP 转发 SDK 进程。"""
         self.reset_calls += 1
-        self._client().post(PATH_RESET)
+        response = self._client().post(PATH_RESET)
+        response.raise_for_status()
 
     def execute(self, action: Action) -> None:
         """直接下发动作指令（raw）：本地记录 + HTTP 转发 SDK 进程。
@@ -212,9 +213,10 @@ class HttpShmAdapter(RobotAdapter):
         填充）再发送。
         """
         target = self._expand_action(action, "execute")
-        self.executed.append(target.tolist())
+        response = self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
+        response.raise_for_status()
+        self.executed.append(target.tolist())  # 仅记录 SDK 已接受的动作，失败请求不能伪装成已执行
         debug_print(self.name, f"execute sent: {target.tolist()}", "INFO")
-        self._client().post(PATH_EXECUTE, json={FIELD_ACTION: target.tolist()})
 
     def set_teleop(self, enabled: bool, mode: str | None = None) -> None:
         """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
@@ -292,18 +294,21 @@ class HttpShmAdapter(RobotAdapter):
 
     def sync_capture_meta(self, meta: dict) -> None:
         """同步采集元信息到 SDK 进程（进程保存一轮数据时附加）。"""
+        response = self._client().post(PATH_CAPTURE_SYNC, json={FIELD_META: meta})
+        response.raise_for_status()
         debug_print(self.name, f"capture meta sync: {meta}", "INFO")
-        self._client().post(PATH_CAPTURE_SYNC, json={FIELD_META: meta})
 
     def start_capture(self) -> None:
         """开始一轮采集：HTTP 转发 SDK 进程（episode 开始）。"""
+        response = self._client().post(PATH_CAPTURE_START)
+        response.raise_for_status()
         debug_print(self.name, "capture episode start", "INFO")
-        self._client().post(PATH_CAPTURE_START)
 
     def end_capture(self) -> None:
         """结束一轮采集：HTTP 转发 SDK 进程（episode 结束）。"""
+        response = self._client().post(PATH_CAPTURE_END)
+        response.raise_for_status()
         debug_print(self.name, "capture episode end", "INFO")
-        self._client().post(PATH_CAPTURE_END)
 
     # ---- observe（共享内存观测上行）---------------------------------------------
     def observe(self) -> dict | None:

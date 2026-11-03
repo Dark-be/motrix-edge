@@ -27,8 +27,8 @@ import numpy as np
 
 from motrix_edge.transport import WsTransport
 
-# scripts/ 非安装包：把仓库根加入 sys.path 以便导入虚拟端点模块（与 test_robot_sdk 同为
-# 独立运行的联调脚本，非 src-layout 包内模块）。
+# scripts/ 非安装包：把仓库根加入 sys.path 以便导入虚拟端点模块（独立运行的联调脚本，
+# 非 src-layout 包内模块）。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.test_infer_point import (  # noqa: E402
     DEFAULT_RANGE,

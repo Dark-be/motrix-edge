@@ -51,7 +51,7 @@ import numpy as np
 # ---- 观测键契约（standard_obs 字典的键名，与 ACT 采集格式一致）----------------
 KEY_QPOS = "observations/qpos"
 KEY_ACTION = "action"
-# 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ARM_NAMES；单位米 / 弧度）——笛卡尔原语
+# 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ARM_NAMES；单位米 / 弧度）——笛卡尔策略
 # （见 wiki/design/motrix_edge_primitives.md）的输入；机器人不提供位姿时该键不出现。
 KEY_POSE = "observations/pose"
 CAMERA_PREFIX = "observations/images/"
@@ -75,7 +75,7 @@ class ActionSpace(str, Enum):
 class AdapterCapability(str, Enum):
     """适配器能力标识（能力描述 dict 的键）。
 
-    会话按能力选择适配器：CaptureSession 要求 CAPTURE，InferSession 要求 EXECUTE。
+    会话启动时校验节点已绑定 adapter 的能力：CaptureSession 要求 CAPTURE，InferSession 要求 EXECUTE。
     """
 
     CAPTURE = "capture"  # 支持数据采集（数据生产者，被采集控制）

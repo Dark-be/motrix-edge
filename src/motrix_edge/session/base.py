@@ -24,9 +24,7 @@
 
 import time
 
-from motrix_edge.frame import FrameManager
-from motrix_edge.utils.capture_meta import CaptureMetaStore
-from motrix_edge.utils.commands import (
+from motrix_edge.command import (
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CommandResult,
@@ -37,7 +35,10 @@ from motrix_edge.utils.commands import (
     parse_qpos,
     parse_teleop_mode,
 )
-from motrix_edge.utils.data_handler import debug_print
+from motrix_edge.errors import ErrorCode
+from motrix_edge.frame import FrameManager
+from motrix_edge.utils.capture_meta import CaptureMetaStore
+from motrix_edge.utils.data_handler import debug_print, round_floats
 
 
 def _noop_command_source():
@@ -153,12 +154,11 @@ class BaseSession:
                 self._reply(cmd, ok_result(node_state="error"))
                 return RunResult.ERROR
             if name == CMD_ROBOT_RESET:
-                if self._drop_expired(cmd, "reset"):
-                    continue
-                self.adapter.reset()
-                self._reply(cmd, ok_result(state="ready"))
+                self._reset_robot(cmd)
             elif cmd is not None:  # 未识别命令（等待就绪阶段不适用）统一回执，避免 submit 挂起
-                self._reply(cmd, CommandResult(status="rejected", error=f"{name} not applicable", status_code=409))
+                self._reply(
+                    cmd, CommandResult(status="rejected", error=f"{name} not applicable", code=ErrorCode.CONFLICT)
+                )
             time.sleep(1)
         return None
 
@@ -166,7 +166,8 @@ class BaseSession:
         """处理采集元信息选项命令（capture meta list/add/edit/delete/delete-key）。
 
         会话运行期间（ACTIVE）命令由会话循环 poll，本方法让配置命令在任务态也可用——
-        委托 ``utils.commands.handle_capture_meta``（读写 config/capture.yml），与节点
+        委托 ``command.config_commands.handle_capture_meta``（读写运行根目录下的
+        ``config/capture.yml``），与节点
         主循环（非任务态）共用同一逻辑，保证「任何状态可用」。
         """
         return handle_capture_meta(cmd, self.capture_meta_store)
@@ -181,29 +182,24 @@ class BaseSession:
         if cmd is not None and getattr(cmd, "reply_to", None) is not None:
             cmd.reply_to(result)
 
-    def _drop_expired(self, cmd, operation: str) -> bool:
-        """同步命令已超时则在副作用前丢弃，避免调用方看到 504 后机器人仍改变状态。"""
-        result = expired_command_result(cmd, operation)
-        if result is None:
-            return False
-        self._reply(cmd, result)
-        return True
-
     def _execute_action(self, cmd) -> None:
         """robot execute：解析 qpos 位置参数 → ``adapter.execute(qpos)``（维度校验在 adapter）。
 
-        参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action）。
+        参数缺失 / 非法 / 维度不符 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 action，3 位小数）。
         **下发前自查回执是否已过期**（``deadline_exceeded``）：调用方超时放弃后不再动真机。
         """
-        if self._drop_expired(cmd, "action"):
+        if self._reject_expired_control(cmd, "action"):
             return
         try:
             qpos = parse_qpos(cmd.params.get("qpos"))
             self.adapter.execute(qpos)
         except ValueError as exc:
-            self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+            self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return
-        self._reply(cmd, ok_result(state="ready", action=qpos))
+        except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话
+            self._reply_upstream_error(cmd, "execute", exc)
+            return
+        self._reply(cmd, ok_result(state="ready", action=round_floats(qpos)))
 
     def _set_teleop(self, cmd, state: str = "ready") -> None:
         """robot teleop：解析 enabled（+ 可选 mode）→ ``adapter.set_teleop``（遥操作 / 人工接管）。
@@ -212,20 +208,50 @@ class BaseSession:
         期间轮机侧会拒绝 ``rollout``（推理让位，见 `/v1/rollout` 契约）。
         参数缺失 / 非法 → 回执 rejected（不崩溃）；成功 → 回执 ok（回显 teleop 与模式）。
         """
-        if self._drop_expired(cmd, "teleop change"):
+        if self._reject_expired_control(cmd, "teleop"):
             return
         try:
             enabled = parse_bool(cmd.params.get("enabled"))
             mode = parse_teleop_mode(cmd.params.get("mode"))
             self.adapter.set_teleop(enabled, mode)
         except ValueError as exc:
-            self._reply(cmd, CommandResult(status="rejected", error=str(exc), status_code=400))
+            self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return
         except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话或持续推理
             debug_print(self.name, f"teleop command failed: {exc}", "WARNING")
-            self._reply(cmd, CommandResult(status="error", error=f"teleop command failed: {exc}", status_code=502))
+            self._reply(
+                cmd,
+                CommandResult(status="error", error=f"teleop command failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
+            )
             return
         self._reply(cmd, ok_result(state=state, teleop=enabled, mode=mode if enabled else None))
+
+    def _reset_robot(self, cmd, state: str = "ready") -> None:
+        """robot reset：截止时间已过则丢弃，否则复位并回执。"""
+        if self._reject_expired_control(cmd, "reset"):
+            return
+        try:
+            self.adapter.reset()
+        except Exception as exc:  # noqa: BLE001 SDK HTTP / 连接失败不得终止会话
+            self._reply_upstream_error(cmd, "reset", exc)
+            return
+        self._reply(cmd, ok_result(state=state))
+
+    def _reply_upstream_error(self, cmd, operation: str, exc: Exception) -> None:
+        """把 adapter / SDK 异常转成统一回执，避免击穿 node 或会话循环。"""
+        debug_print(self.name, f"{operation} failed: {exc}", "WARNING")
+        self._reply(
+            cmd,
+            CommandResult(status="error", error=f"{operation} failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
+        )
+
+    def _reject_expired_control(self, cmd, operation: str) -> bool:
+        """调用方已超时则拒绝迟到的机器人副作用；急停是 push 通道，不走此门。"""
+        result = expired_command_result(cmd, operation)
+        if result is None:
+            return False
+        self._reply(cmd, result)
+        return True
 
     def run(self):
         """阻塞式会话执行（节点进入 ACTIVE 时调用），返回 RunResult。"""

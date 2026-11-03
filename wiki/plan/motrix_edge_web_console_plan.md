@@ -22,7 +22,8 @@ webrtc）。纯前端、零后端改动。功能完整落地后删除本文档�
 -   [ ] `frontend/edge-console/src/api.ts` + `.../types.ts`：API client（`X-Lease-Id` 注入、错误 `{status, detail}` 解析）
     -   契约类型（health / adapters / leases / captures / preview / webrtc）
 -   [ ] Lease 管理：`useLease`（激活 / 续租 / 释放 / 自动续租定时器 / 到期倒计时）
--   [ ] Adapter 列表：`GET /v1/adapters` 展示能力 + 选择（进入会话提交 `adapter_id`）
+-   [ ] Adapter 信息：`GET /v1/adapters` 展示已注册能力，`GET /v1/health` 展示节点当前绑定的
+        单一 adapter；进入会话不提交 adapter id
 -   [ ] 会话控制 + 信号按钮（采集：进入 / 退出 / 采集开始 / 采集结束；推理：进入 / 连接 /
         推理一步 / 持续推理 / 停止推理 / 录制开始 / 录制结束 / 退出）+ 顶部全局急停，
         按钮标注底层命令；状态轮询 `GET /v1/captures` + `GET /v1/health`

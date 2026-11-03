@@ -19,14 +19,14 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 -   `update(obs)`：写入最新观测（`adapter.observe()` 返回）；摄像头帧**降采样为 Edge 侧尺寸
     `DEFAULT_IMAGE_SIZE = (320, 240)` JPEG**（`cache_observation`，质量 80）后缓存，方便内网传输。
 -   `latest()`：读取最新观测帧（供 preview / WebRTC）；无帧返回 `None`。
--   `clear()`：清空缓存（会话结束 / 退出时）。
+-   `clear()`：显式清空缓存；节点持续观测期间通常由后续帧自然覆盖。
 -   线程安全（`Lock`），单活跃最新帧。`image_size` 属性供 WebRTC 兜底空白帧用。
 
 ## 预览（GET /v1/preview）
 
-| 端点              | 说明                                                                                                            |
-| ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| `GET /v1/preview` | 最新观测：状态（有会话取会话状态，无会话 → `init`）/ adapter 身份 / observation（qpos + action + 摄像头名列表） |
+| 端点              | 说明                                                                                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /v1/preview` | 最新观测：状态（有会话取会话状态，无会话 → `init`）/ adapter 身份 / observation（qpos + action + **pose 末端位姿** + 摄像头名列表 + **arms 臂名**） |
 
 响应：
 
@@ -37,6 +37,8 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
     "observation": {
         "qpos": [0.1, 0.2],
         "action": [0.1, 0.2],
+        "pose": [0.3, 0.0, 0.2, 0.0, 1.57, 0.0],
+        "arms": ["left"],
         "images": ["cam_head", "cam_left_wrist"]
     }
 }
@@ -83,8 +85,8 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 
 ## 浏览器端查看
 
-1. 启动 Edge：`uv run motrix-edge run`；进入任意会话（`session run capture` / `session run infer`）
-   使 FrameManager 持续写入观测帧。
+1. 启动 Edge：`uv run motrix-edge run`；节点绑定 adapter 进入 READY 后即持续写入观测帧，
+   无需先进入 capture / infer 会话。
 2. 前端 `edge-console`（或自包含 `frontend/webrtc_viewer.html`）创建 `RTCPeerConnection`
    （recvonly 视频）→ `createOffer` → `POST /v1/webrtc/offer`（头 `X-Lease-Id`）→ 拿 answer
    完成协商 → `<video>` 播放。
@@ -97,5 +99,5 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 ## 相关文档
 
 -   观测语义：[机器人适配器（adapter）](./motrix_edge_adapter.md)
--   会话写入帧缓存：[会话（session）](./motrix_edge_session.md)
+-   节点持续观测与会话边界：[会话（session）](./motrix_edge_session.md)
 -   代码入口：`src/motrix_edge/frame/`（**feat/6**）；WebRTC 推流（`server/webrtc.py`）随 **feat/3** 落地

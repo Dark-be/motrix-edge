@@ -12,21 +12,22 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""MotrixEdge HTTP API（FastAPI）—— 契约见 wiki/design「后续阶段（M11/M12）」。
+"""MotrixEdge HTTP API（FastAPI）—— 应用装配 + 中间件 + 统一错误处理。
 
-当前提供：
-  GET /v1/health    版本 / identity / 当前配置选中的适配器（robot / policy）/ 机器人配置 / 磁盘 / 时钟
-  POST /v1/commands 命令骨架（accepted）：身份随请求上报，具体执行/校验留待后续
-  /v1/captures/*   数据采集会话控制（web 是 node 进程内的独立线程：注入 CaptureService 绑定
-                   正在运行的 EdgeNode + 共享 CommandBus，见 wiki/design/motrix_edge_server.md）
-  /v1/uploads/*    本地采集 episode 扫描 / 选择 / 打包与上传队列状态（UploadSession，不占
-                    RobotAdapter；见 wiki/design/motrix_edge_upload_session.md）
-  /v1/infers/*     推理会话控制（无回合概念：enter → 持续推理 → exit；注入 InferService 绑定
-                   正在运行的 EdgeNode + 共享 CommandBus）
-  /v1/uploads/*    本地采集 episode 扫描、选择、上传队列与打包（pack）
+端点按域拆在 ``server/routes/*``（每个模块只做 HTTP 映射：入参 → controller → dict）；
+controller 在 ``server/*.py``（域语义，不依赖 FastAPI；分层见 ``server/deps.py``）。
+本模块只做四件事：缺省构造 identity / 租约 / 上传会话、挂中间件、注册统一错误处理器、
+挂载各域 router。端点清单见 wiki/design/motrix_edge_server.md。
 
-identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` 作为请求元数据上报，
-具体发送（访问控制面 / 推理 / 上传）由后续客户端层实现。
+**路由总则**：所有 HTTP handler 一律同步 ``def``（FastAPI 交给线程池）——它们内部都是
+**阻塞调用**（``CommandBus.submit`` 同步等回执，最长 5s；磁盘 / 文件操作算哈希、搬文件；
+adapter 的同步 HTTP 查询）。写成 ``async def`` 会占住 uvicorn 事件循环，连带冻结
+health / preview / WebRTC 信令。仅中间件（correlation / no-store）用 ``async def``）。
+
+**错误处理**：各层只抛 ``ServiceError`` 子类（``motrix_edge.errors``）且只讲 **edge 错误码**
+（``ErrorCode``）——命令层 ``CommandError``、租约层 ``LeaseError``、会话层 ``UploadError``、
+服务层各 ``*Error``；**HTTP 状态码由本层维护**（``_HTTP_STATUS`` 映射），响应体回传 code：
+``{"detail": ..., "code": ...}``。
 
 信任边界（当前实现）：
   - CORS 全放开（``allow_origins=["*"]``）+ 服务监听 ``0.0.0.0``（node 内嵌 web 线程，见 __main__.py）；
@@ -36,265 +37,57 @@ identity（edge_id / edge_name / edge_version）通过 ``Identity.headers()`` �
   Console 接入的鉴权（identity 上报核验）落地前，**不要**把 Edge 直接暴露到不受信网络。
 """
 
-import shutil
-from datetime import datetime
-from typing import Literal
-
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
 
+from motrix_edge.errors import ErrorCode, ServiceError
 from motrix_edge.identity import Identity, load_identity, new_correlation_id
-from motrix_edge.lease import BEIJING_TZ, Lease, LeaseError, LeaseManager, LeaseState, build_lease_manager
-from motrix_edge.server.capture import CaptureError, CaptureService
-from motrix_edge.server.command import CommandError, CommandService
-from motrix_edge.server.infer import InferError, InferService
-from motrix_edge.server.preview import PreviewError, PreviewService
-from motrix_edge.server.state import adapter_ref
-from motrix_edge.server.webrtc import WebRTCError, WebRTCService
-from motrix_edge.session.upload_session import UploadError, UploadSession
+from motrix_edge.lease import LeaseManager, build_lease_manager
+from motrix_edge.server.command import CommandService
+from motrix_edge.server.deps import Services
+from motrix_edge.server.meta import CaptureMetaService
+from motrix_edge.server.preview import PreviewService
+from motrix_edge.server.routes import build_routers
+from motrix_edge.server.webrtc import WebRTCService
+from motrix_edge.session.upload_session import UploadSession
 from motrix_edge.utils.version import get_package_version
 
-
-def _default_robot(node) -> dict:
-    """node 当前绑定的唯一机器人身份（name / type）；**未绑定 → ``{name: None, type: None}``**。
-
-    只读 node 内存状态（node 主循环已周期 discover 并绑定 adapter），**不实时
-    discover**——避免前端轮询 /v1/health 时持续对 SDK 进程发 /v1/discover。
-    身份读取单点 = ``server.state.adapter_ref``（与 /v1/captures · /v1/infers 同源）。
-    """
-    return adapter_ref(node)
-
-
-def _adapters(node) -> dict:
-    """Edge 适配器列表（health 展示 / 客户端选择）。
-
-    - robots：node 当前绑定的唯一机器人（``[{name, type}]``，单 adapter 包；只读
-      node 内存状态，**不实时 discover**）。
-    - policies：全部已注册策略适配器（``[{type, class, module, config_items}]``，前端策略
-      选择用；``config_items`` 为该策略的配置项 schema——前端选择策略后**动态渲染表单**、
-      进入会话前即可填写；不触发第三方包导入）。
-    """
-    from motrix_edge.policy import policy_adapters, policy_config_items
-
-    # robots = 当前绑定的唯一机器人（单 adapter 包）；未绑定 → 空列表
-    robots = [adapter_ref(node)] if getattr(node, "adapter", None) is not None else []
-
-    policies = [
-        {"type": t, "class": c, "module": m, "config_items": policy_config_items(t)} for t, c, m in policy_adapters()
-    ]
-
-    return {"robots": robots, "policies": policies}
-
-
-class CommandRequest(BaseModel):
-    """POST /v1/commands 请求体（契约：lease_id / command_id / capability / 参数 / 现场在场）。
-
-    ``idempotency_key``：**预留、未实现** —— 幂等去重尚未落地（见 server/command.py），
-    字段仅作调用方关联回显；调用方需自行处理重试，勿依赖去重。
-    """
-
-    command_id: str = Field(..., description="Edge 侧命令 ID")
-    lease_id: str | None = None
-    capability: str | None = None
-    params: dict = Field(default_factory=dict)
-    idempotency_key: str | None = Field(default=None, description="预留：幂等未实现，仅回显关联")
-    onsite_presence_context: str | None = None
-
-
-class CommandResponse(BaseModel):
-    command_id: str
-    # 命令回执状态：ok（执行成功）/ rejected（业务拒绝，如参数非法 / 状态不符）/ error /
-    # accepted（push 型命令：已入总线，无回执；未被 CommandService 消费时的骨架）
-    status: str
-    idempotency_key: str | None
-    correlation_id: str
-    # 命令执行结果（CommandService 返回透传；push 型命令为 None）：
-    # executed=执行的 capability / error=执行错误（如 robot execute 维度不符）
-    executed: str | None = None
-    error: str | None = None
-    data: dict | None = None
-
-
-class LeaseInstallRequest(BaseModel):
-    """POST /v1/leases 请求体：Console 签发并下发的租约**镜像**（权威在 Console）。
-
-    字段见 wiki/design/motrix_edge_lease.md「lease 信息」：lease_id / edge_id /
-    holder_subject_id / purpose / state / expires_at / lease_version；``ttl`` 为
-    有效期（秒，信息字段）。``expires_at`` 由 Console 决定并随镜像下发。
-    """
-
-    lease_id: str = Field(..., description="Console 生成的租约 id")
-    edge_id: str = Field(..., description="租约所属 edge 设备")
-    holder_subject_id: str = Field(..., description="租约所属操作员")
-    purpose: str = Field(..., description="租约用途（如 capture / rollout / maintenance）")
-    state: LeaseState = Field(default=LeaseState.ACTIVE, description="签发状态（reserved / active）")
-    expires_at: datetime = Field(..., description="过期时间（ISO 8601，北京时间；Console 决定）")
-    lease_version: int = Field(default=1, ge=1, description="租约版本；续约时递增")
-    ttl: float | None = Field(default=None, gt=0, description="有效期（秒，信息字段）")
-
-
-class LeaseRenewRequest(BaseModel):
-    """POST /v1/leases/{id}:renew 请求体：Console 续约 —— 更高 lease_version + 新 expires_at。"""
-
-    lease_version: int = Field(..., ge=1, description="新租约版本（须高于当前，版本回退拒绝）")
-    expires_at: datetime = Field(..., description="续约后的过期时间（ISO 8601，北京时间；Console 决定）")
-
-
-class WebRTCOfferRequest(BaseModel):
-    """POST /v1/webrtc/offer 请求体：网页 SDP offer。"""
-
-    sdp: str = Field(..., description="网页端 SDP offer")
-    type: str = Field(default="offer", description="SDP 类型（offer）")
-
-
-class InferEnterRequest(BaseModel):
-    """POST /v1/infers 请求体：可选推理策略类型 + 进入会话前的策略配置项。
-
-    ``config`` 为**该策略的配置项**（含公共项 ``host`` / ``port`` 推理节点端点；openpi → prompt；
-    lerobot-act → pretrained_name_or_path / device / actions_per_chunk），见
-    ``policy.POLICY_CONFIG_ITEMS``；前端按 ``/v1/health`` 的 ``policy_config_items``
-    （或在会话内按 ``GET /v1/infers`` 的 ``policy_config.items``）动态渲染表单，提交时随本字段下发。
-    """
-
-    policy_type: str | None = Field(default=None, description="推理策略类型（注册表键），如 openpi")
-    config: dict | None = Field(default=None, description="策略配置项（含 host / port；按所选策略 schema 校验）")
-
-
-class InferRolloutRequest(BaseModel):
-    """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续）。
-
-    多步（count）与 drain（缓存推理）模式已取消（多余字段被忽略）；prompt 不随 rollout 传，
-    由会话内 ``infer prompt`` 预置（为空不能开始推理 / 录制）。
-    """
-
-    mode: Literal["single", "continuous"] | None = Field(
-        default=None, description="推理模式：single（缺省）/ continuous"
-    )
-
-
-class InferPromptRequest(BaseModel):
-    """POST /v1/infers/prompt 请求体：文本指令（仅需要 prompt 的策略，如 openpi）。"""
-
-    prompt: str = Field(..., min_length=1, description="文本指令（需要 prompt 的策略推理前必须设置）")
-
-
-class InferSyncRequest(BaseModel):
-    """POST /v1/infers/sync 请求体：录制 rollout 时同步的采集元信息（operator / task_name 等）。"""
-
-    meta: dict = Field(default_factory=dict, description="采集元信息（默认 operator=policy、task_name=prompt）")
-
-
-class InferRTCRequest(BaseModel):
-    """POST /v1/infers/rtc 请求体：RTC（实时动作块）参数（可部分更新）。
-
-    对应命令 ``infer rtc set <json>``；参数写入内存态 ``policy.rtc`` 并应用到正在运行的
-    RTCManager（下一块起生效）；见 wiki/design/motrix_edge_rtc.md。
-    """
-
-    enabled: bool | None = Field(default=None, description="是否启用 RTC（关闭 → 每步一次推理只取块首步）")
-    action_horizon: int | None = Field(default=None, ge=1, description="块长上限 H（一次推理只取块的前 H 步）")
-    prefix_len: int | None = Field(
-        default=None, ge=0, description="前置段 P（额外强制跳过的前 P 步；真实过期步自动跳过）"
-    )
-    execution_horizon: int | None = Field(default=None, ge=1, description="执行段 E（缺省 = H - P - S）；须 > P")
-    suffix_len: int | None = Field(
-        default=None, ge=0, description="后缀段 S（与下一块执行段的重叠窗口，也是预取提前量）；须满足 P + S < H"
-    )
-    aggregate_fn: str | None = Field(
-        default=None,
-        description=(
-            "重叠过渡策略：weighted_average(0.3 本段+0.7 下一段)/conservative(0.7+0.3)/"
-            "average/latest_only/continuous(按步号 0→1 线性过渡)"
-        ),
-    )
-
-
-class InferConfigRequest(BaseModel):
-    """POST /v1/infers/config 请求体：策略配置项（可部分更新）。
-
-    对应命令 ``infer config set <json>``；按**当前策略**的配置项 schema 白名单校验并写入
-    内存态 ``policy`` 段：``runtime: True`` 的键立即应用到运行中的策略客户端（下一请求生效），
-    ``runtime: False`` 的键（host / port、模型路径…）要退出会话重进才生效，回执 ``deferred``
-    列出这些键。未知键 / 类型不符 / 必填为空 → 400；空值（``null`` / 空串）表示清除该项。
-    仅需 prompt 的策略也可用 ``POST /v1/infers/prompt`` 快捷入口。
-    """
-
-    config: dict = Field(default_factory=dict, description="策略配置项（按当前策略 schema 校验）")
-
-
-class UploadScanRequest(BaseModel):
-    """POST /v1/uploads 请求体：可覆盖配置的默认采集目录。"""
-
-    folder_path: str | None = Field(default=None, description="待扫描目录；缺省使用 upload.data_dir")
-
-
-class CaptureSyncRequest(BaseModel):
-    """POST /v1/captures/sync 请求体：采集元信息（采集员 / 任务名等，进程保存数据时附加）。"""
-
-    meta: dict = Field(default_factory=dict, description="采集元信息（operator / task_name 等）")
-
-
-class AdapterConfigRequest(BaseModel):
-    """POST /v1/adapters/config 请求体：运行时 adapter 能力配置（可部分更新）。"""
-
-    enabled_arms: list[str] | None = Field(default=None, description="启用的机械臂（right / left）；缺省全部")
-    enabled_cameras: list[str] | None = Field(default=None, description="启用的相机（IMAGES 子集）")
-
-
-class UploadSelectRequest(BaseModel):
-    """POST /v1/uploads/select 请求体：按 episode id 替换选择集。"""
-
-    episode_ids: list[str] = Field(default_factory=list)
-
-
-class UploadPackRequest(BaseModel):
-    """POST /v1/uploads/pack 请求体：打包（移动）选中 episode 的包名。
-
-    包目录建在当前扫描目录下（``<folder_path>/<name>/``）；缺省 ``pack<选中数量>``；
-    目录同名已存在 → 409（需改名）；见 wiki/design/motrix_edge_upload_session.md。
-    """
-
-    name: str | None = Field(default=None, description="包名（单个目录名）；缺省 pack<选中数量>")
-
-
-class CaptureMetaAddRequest(BaseModel):
-    """POST /v1/captures/meta 请求体：新增采集元信息选项（分类不存在则自动创建）。"""
-
-    key: str = Field(..., description="分类（如 operator / task_name）")
-    value: str = Field(..., description="选项值")
-
-
-class CaptureMetaEditRequest(BaseModel):
-    """PATCH /v1/captures/meta 请求体：重命名采集元信息选项（``old`` → ``new``）。"""
-
-    key: str = Field(..., description="分类")
-    old: str = Field(..., description="原选项值")
-    new: str = Field(..., description="新选项值")
+# edge 错误码 → HTTP 状态码（**HTTP 面自行维护**：业务层只给 code，不认状态码）
+_HTTP_STATUS: dict[str, int] = {
+    ErrorCode.INVALID_ARGUMENT: 400,
+    ErrorCode.UNKNOWN_COMMAND: 404,
+    ErrorCode.NOT_FOUND: 404,
+    ErrorCode.CONFLICT: 409,
+    ErrorCode.LEASE_REQUIRED: 409,
+    ErrorCode.LEASE_EXPIRED: 410,
+    ErrorCode.FORBIDDEN: 403,
+    ErrorCode.NOT_IMPLEMENTED: 501,
+    ErrorCode.UPSTREAM_ERROR: 502,
+    ErrorCode.UNAVAILABLE: 503,
+    ErrorCode.TIMEOUT: 504,
+    ErrorCode.INTERNAL: 500,
+}
 
 
 def create_app(
     base_cfg: dict,
     node=None,
-    captures: CaptureService | None = None,
-    infers: InferService | None = None,
     commands: CommandService | None = None,
     lease_manager: LeaseManager | None = None,
     webrtc: WebRTCService | None = None,
     uploads: UploadSession | None = None,
     preview: PreviewService | None = None,
+    meta: CaptureMetaService | None = None,
 ) -> FastAPI:
     """构建 MotrixEdge FastAPI 应用。base_cfg 加载一次 identity 与 robot 配置。
 
-    node: 可选 ``EdgeNode``（正在运行的节点实例）。注入后 ``/v1/health`` 从 node
-          内存状态读已绑定 adapter（**不实时 discover**，避免前端轮询持续发
-          /v1/discover）；未注入时 health 的 robot / robots 返回空。
-    captures: 可选 ``CaptureService``（绑定正在运行的 EdgeNode + 共享 CommandBus）；
-              注入后注册 ``/v1/captures/*`` 数据采集回合接口，未注入时这些端点返回 501。
-    infers: 可选 ``InferService``（绑定正在运行的 EdgeNode + 共享 CommandBus）；注入后
-              注册 ``/v1/infers/*`` 推理会话接口，未注入时这些端点返回 501。
-    commands: 可选 ``CommandService``（受控命令：租约校验 + estop）；未注入时
-              ``/v1/commands`` 保持骨架（accepted）。
+    node: 可选 ``EdgeNode``（正在运行的节点实例）。注入后 ``/v1/health`` 与各状态快照
+          （``/v1/captures`` · ``/v1/infers`` · ``precheck``）从 node 内存状态读已绑定
+          adapter（**不实时 discover**，避免前端轮询持续发 /v1/discover）；未注入时读端点
+          返回 501。
+    commands: 可选 ``CommandService``（**唯一写通道**：受控命令 + 全部会话动作）；
+              未注入时写端点返回 501。
     lease_manager: 可选 ``LeaseManager``（Edge 级租约，独立于任务）；缺省自建，
                    ``/v1/leases/*`` 总可用。
     webrtc: 可选 ``WebRTCService``（aiortc 推流，视频轨道从 FrameManager 取帧）；
@@ -302,12 +95,25 @@ def create_app(
     uploads: 可选 ``UploadSession``；缺省按 ``base_cfg.upload`` 创建，用于本地 episode 扫描与选择。
     preview: 可选 ``PreviewService``（**独立于采集 / 推理会话**，直接读 node.frame_manager
              观测缓存）；注入后注册 ``/v1/preview`` 观测预览端点，未注入时返回 501。
+    meta: 可选 ``CaptureMetaService``（采集元信息选项，直连 ``CaptureMetaStore``）；
+          未注入时 ``/v1/captures/meta*`` 返回 501。
     """
     identity: Identity = load_identity(base_cfg)
     # 租约配置（``lease`` 段）：ttl = 租约有效期，renew_interval = 建议续租间隔
     lease_manager = lease_manager or build_lease_manager(base_cfg)
     # 上传会话（``upload`` 段）：本地 episode 扫描 / 选择 / 打包与上传队列状态
     uploads = uploads or UploadSession(base_cfg)
+
+    services = Services(
+        identity=identity,
+        leases=lease_manager,
+        uploads=uploads,
+        node=node,
+        commands=commands,
+        meta=meta,
+        preview=preview,
+        webrtc=webrtc,
+    )
 
     app = FastAPI(title="MotrixEdge", version=get_package_version())
 
@@ -331,13 +137,6 @@ def create_app(
         response.headers["X-Correlation-Id"] = corr
         return response
 
-    # ---- 路由总则：所有 HTTP handler 一律同步 ``def``（FastAPI 交给线程池）--------
-    #
-    # 这些 handler 内部都是**阻塞调用**：``CommandBus.submit`` 同步等回执（最长 5s）、
-    # 磁盘 / 文件操作（scan 算 SHA-256、pack 搬文件）、adapter 的同步 HTTP 查询。写成
-    # ``async def`` 会占住 uvicorn 事件循环，连带冻结 health / preview / WebRTC 信令。
-    # 仅中间件（correlation / no-store）用 ``async def``。
-
     @app.middleware("http")
     async def _no_store_cache(request: Request, call_next):
         """控制面（/v1/*）响应一律 ``Cache-Control: no-store``：实时状态禁止浏览器缓存。
@@ -350,523 +149,26 @@ def create_app(
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    @app.get("/v1/health")
-    def health():
-        """探活：版本 / identity / 已绑定适配器 / 磁盘 / 时钟。
-
-        已绑定适配器只读 node 内存状态（node 主循环已周期 discover 并绑定），
-        **不实时 discover**，避免前端轮询本端点时持续对 SDK 进程发 /v1/discover。
-        """
-        disk = {}
-        try:
-            usage = shutil.disk_usage("/")
-            disk = {"total": usage.total, "used": usage.used, "free": usage.free}
-        except OSError:
-            disk = {"error": "unavailable"}
-        return {
-            "status": "ok",
-            "version": get_package_version(),
-            "identity": identity.headers(),
-            "robot": _default_robot(node),
-            "adapters": _adapters(node),
-            "disk": disk,
-            "time": datetime.now(BEIJING_TZ).isoformat(),
-        }
-
-    @app.get("/v1/adapters")
-    def adapters_info():
-        """Edge 包内**全部已注册**适配器（静态列表，不 discover / 不探活），供 Console 查看。
-
-        与 discover 无关：SDK 进程未启动也应列出全部注册适配器（缺失 SDK / 导入失败
-        的跳过）。探活职责归节点（IDLE 探测 / READY 心跳），此处只列静态身份与能力。
-        """
-        from motrix_edge.adapter import adapter_details
-
-        return {"adapters": adapter_details()}
-
-    @app.get("/v1/adapters/config")
-    def adapters_config():
-        """运行时 adapter 能力配置（enabled_arms / enabled_cameras）。
-
-        由 ``adapter config`` 命令 / 前端设置，adapter discover 绑定时应用；此处只读。
-        """
-        if node is None:
-            return {}
-        return node.adapter_config
-
-    @app.get("/v1/adapters/current")
-    def adapters_current():
-        """当前绑定 adapter **实际生效**的能力配置（启用的臂 / 相机 / 动作维度 / home）。
-
-        只读（无需租约）：读 adapter 实例实际生效值（``configure()`` 应用后），与
-        ``GET /v1/adapters/config``（运行时配置状态）区分。**未绑定 adapter → 404**
-        （能力布局是 adapter 类常量、discover 不传，未绑定就没有机型信息，不猜默认）。
-        """
-        if node is None:
-            raise HTTPException(status_code=501, detail="node not initialized")
-        cfg = node.adapter_config_effective()
-        if cfg is None:
-            raise HTTPException(status_code=404, detail="adapter not bound")
-        return cfg
-
-    @app.post("/v1/adapters/config")
-    def adapters_config_set(req: AdapterConfigRequest, x_lease_id: str | None = Header(default=None)):
-        """设置运行时 adapter 能力配置（可部分更新；应用到当前已绑定 adapter）。
-
-        受控操作：须持有有效租约（X-Lease-Id）。非法配置 → 400（状态不更新）；
-        **会话进行中（采集 / 推理）→ 409**：布局在 episode 中途变化会让同一 episode 的
-        qpos / action 维度不一致（mcap 下游按固定维度解析），先退出会话再改。
-        """
-        if node is None:
-            raise HTTPException(status_code=501, detail="node not initialized")
-        try:
-            lease_manager.require(x_lease_id)
-        except LeaseError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-        if node.session is not None:
-            raise HTTPException(
-                status_code=409, detail="adapter config rejected (session active: quit the session first)"
-            )
-        applied = node.apply_adapter_config(
-            {
-                "enabled_arms": req.enabled_arms,
-                "enabled_cameras": req.enabled_cameras,
-            }
-        )
-        if not applied:
-            raise HTTPException(status_code=400, detail="adapter config rejected (invalid arms/cameras)")
-        return node.adapter_config
-
-    @app.post("/v1/webrtc/offer")
-    def webrtc_offer(req: WebRTCOfferRequest, x_lease_id: str | None = Header(default=None)):
-        """WebRTC 推流：接收网页 SDP offer，返回 Edge answer。受控操作：须持有有效租约。"""
-        if webrtc is None:
-            raise HTTPException(status_code=501, detail="webrtc not enabled")
-        try:
-            return webrtc.offer(lease_id=x_lease_id, sdp=req.sdp, sdp_type=req.type)
-        except WebRTCError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    @app.post("/v1/commands")
-    def command(req: CommandRequest, request: Request):
-        """受控命令：须持有有效租约（``lease_id``）；``capability=estop`` → 全局急停。
-
-        回执状态直接反映命令执行结果（``ok`` / ``rejected`` / ``error``）；``push`` 型命令
-        （estop / node reset）无回执通道 → ``accepted``。未注入 CommandService 时保持骨架。
-        """
-        corr = getattr(request.state, "correlation_id", None) or new_correlation_id()
-        if commands is None:  # 骨架：无 CommandService → accepted（具体执行 / 校验留待注入）
-            return CommandResponse(
-                command_id=req.command_id,
-                status="accepted",
-                idempotency_key=req.idempotency_key,
-                correlation_id=corr,
-            )
-        try:
-            result = commands.execute(
-                command_id=req.command_id,
-                lease_id=req.lease_id,
-                capability=req.capability,
-                params=req.params,
-            )
-        except CommandError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-        return CommandResponse(
-            command_id=req.command_id,
-            status=result.get("status", "accepted"),
-            idempotency_key=req.idempotency_key,
-            correlation_id=corr,
-            executed=result.get("executed"),
-            error=result.get("error"),
-            data=result.get("data"),
-        )
-
-    # ---- /v1/leases/*：Edge 级租约（独立于机器人 / 任务；受控操作须持有）----
-
-    def _leases_call(fn):
-        try:
-            return fn()
-        except LeaseError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    @app.post("/v1/leases")
-    def leases_install(req: LeaseInstallRequest):
-        """Console 生成租约并下发，Edge 接收保存本地**镜像**（Console 权威）。
-
-        Edge 不生成 lease_id，只保留 + 校验；已有活跃控制租约 → 409。
-        """
-        _leases_call(
-            lambda: lease_manager.install(
-                Lease(
-                    lease_id=req.lease_id,
-                    edge_id=req.edge_id,
-                    holder_subject_id=req.holder_subject_id,
-                    purpose=req.purpose,
-                    state=req.state,
-                    expires_at=req.expires_at,
-                    lease_version=req.lease_version,
-                    ttl=req.ttl,
-                )
-            )
-        )
-        return {"status": "accepted", **lease_manager.status()}
-
-    @app.post("/v1/leases/{lease_id}:renew")
-    def leases_renew(lease_id: str, req: LeaseRenewRequest):
-        """Console 续约：lease_version 递增（版本回退拒绝），Edge 更新本地镜像。
-
-        续约 = 以更高 ``lease_version`` 原地延长 ``expires_at``；Edge 在旧租约到期前
-        收到新镜像即可保持控制。
-        """
-        lease = _leases_call(lambda: lease_manager.renew(lease_id, req.lease_version, req.expires_at))
-        return {
-            "status": "accepted",
-            "lease_id": lease.lease_id,
-            "lease_version": lease.lease_version,
-            "state": lease.state.value,
-            "expires_at": lease.expires_at.astimezone(BEIJING_TZ).isoformat(),
-        }
-
-    @app.get("/v1/leases/{lease_id}")
-    def leases_get(lease_id: str):
-        """查询 Edge 本地 lease 镜像状态：``200``（返回 lease 信息）/ ``404``（不存在）。"""
-        return _leases_call(lambda: lease_manager.mirror(lease_id))
-
-    @app.post("/v1/leases/{lease_id}:revoke")
-    def leases_revoke(lease_id: str):
-        """Console 撤销租约：Edge 进入无效状态（Revoked），不能执行受限操作。"""
-        lease = _leases_call(lambda: lease_manager.revoke(lease_id))
-        return {"status": "accepted", "lease_id": lease.lease_id, "state": lease.state.value}
-
-    @app.get("/v1/leases")
-    def leases_status():
-        """租约状态汇总（只读，Edge 侧）：当前租约 / leasable / renew_interval。"""
-        return lease_manager.status()
-
-    # ---- /v1/uploads/*：本地采集 episode 扫描、选择与上传队列 --------------------
+    # ---- 统一错误处理 ----------------------------------------------------------
     #
-    # 受控操作（与 captures 同规则）：**全部端点须持有效租约**（``X-Lease-Id``）——pack 会
-    # 移动文件、scan 会读目录内容，均为敏感操作。
-    # 扫描目录限定在「数据目录」白名单内（adapter 上报的采集目录 / ``upload.data_dir``）。
-    # 重 IO（算哈希 / 搬文件）→ handler 必须是同步 ``def``，见上面「路由总则」。
+    # 各层只抛自己的错误类型（``motrix_edge.errors.ServiceError`` 子类：命令层 ``CommandError``、
+    # 租约层 ``LeaseError``、会话层 ``UploadError``、服务层各 ``*Error``）且只讲 **edge 错误码**；
+    # **HTTP 状态码由本层维护**（:data:`_HTTP_STATUS`）—— 此处注册**一个**处理器，把 code 与
+    # 人读原因一起渲染成 ``{"detail": ..., "code": ...}``。故路由层只需直接调 service。
+    def _service_error_handler(request: Request, exc: Exception):
+        code = getattr(exc, "code", ErrorCode.INTERNAL)
+        return JSONResponse(
+            status_code=_HTTP_STATUS.get(code, 500),
+            content={"detail": str(exc), "code": getattr(code, "value", str(code))},
+        )
 
-    def _ensure_upload_lease(lease_id: str | None) -> None:
-        """上传端点统一租约校验（语义与 captures 一致：缺失 409 / 不匹配 403 / 过期 410）。"""
-        try:
-            lease_manager.require(lease_id)
-        except LeaseError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    app.add_exception_handler(ServiceError, _service_error_handler)
 
-    def _upload_allowed_roots() -> list[str]:
-        """允许扫描的目录白名单：adapter 上报的数据目录 + ``upload.data_dir``。"""
-        roots: list[str] = []
-        if node is not None:
-            capture = getattr(node, "capture_status", None)
-            data_dir = getattr(capture, "data_dir", None) if capture is not None else None
-            if data_dir:
-                roots.append(str(data_dir))
-        if uploads.default_folder:
-            roots.append(str(uploads.default_folder))
-        return roots
-
-    uploads.set_allowed_roots(_upload_allowed_roots)
-
-    def _upload_call(fn):
-        try:
-            return fn()
-        except UploadError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    def _upload_default_folder() -> str | None:
-        """缺省扫描目录回退链：请求 ``folder_path`` → **adapter 数据目录** → ``upload.data_dir``。
-
-        adapter 数据目录来自节点缓存的采集状态（``node.capture_status.data_dir``），与前端
-        「获取数据目录」按钮（``GET /v1/captures``）**同源**；未绑定 / 无数据目录时回退配置
-        目录。
-        """
-        if node is not None:
-            capture = getattr(node, "capture_status", None)
-            data_dir = getattr(capture, "data_dir", None) if capture is not None else None
-            if data_dir:
-                return str(data_dir)
-        return uploads.default_folder
-
-    @app.get("/v1/uploads")
-    def uploads_status(x_lease_id: str | None = Header(default=None)):
-        """当前扫描汇总、episode 状态与选择集（受控：须持租约）。"""
-        _ensure_upload_lease(x_lease_id)
-        return uploads.status()
-
-    @app.post("/v1/uploads")
-    def uploads_scan(req: UploadScanRequest | None = None, x_lease_id: str | None = Header(default=None)):
-        """扫描请求目录（缺省回退链：adapter 数据目录 → upload.data_dir）；须持租约。
-
-        目录必须落在允许白名单内（数据目录及其子目录），越界 → 400。
-        """
-        _ensure_upload_lease(x_lease_id)
-        folder_path = req.folder_path if req is not None else None
-        return _upload_call(lambda: uploads.scan(folder_path or _upload_default_folder()))
-
-    @app.post("/v1/uploads/select")
-    def uploads_select(req: UploadSelectRequest, x_lease_id: str | None = Header(default=None)):
-        """按 episode id 替换待选选择集（受控：须持租约）。"""
-        _ensure_upload_lease(x_lease_id)
-        return _upload_call(lambda: uploads.select(req.episode_ids))
-
-    @app.post("/v1/uploads/pack")
-    def uploads_pack(req: UploadPackRequest | None = None, x_lease_id: str | None = Header(default=None)):
-        """打包（**移动**）选中 episode 到 ``<扫描目录>/<包名>/``，并返回重扫结果。
-
-        body 可选 ``name``（缺省 ``pack<选中数量>``）；目录同名已存在 → 409（改名后重试）；
-        非法包名 → 400；未扫描 / 未选择 → 409；源文件缺失 → 404；移动失败回滚 → 500。
-        受控操作（移动数据）：须持租约；同时只允许一个 scan / pack 在跑 → 否则 409。
-
-        回执的 ``scan`` 为收尾重扫结果（前端直接替换列表）；重扫失败时降级为 ``scan=null`` +
-        ``warnings``（此时打包**已经成功**，仍回 200）——前端据 ``warnings`` 提示重新扫描。
-        """
-        _ensure_upload_lease(x_lease_id)
-        name = req.name if req is not None else None
-        return _upload_call(lambda: uploads.pack(name))
-
-    @app.post("/v1/uploads/upload")
-    def uploads_enqueue(x_lease_id: str | None = Header(default=None)):
-        """把选择集加入上传队列；未配置上传目标时返回 501（须持租约）。"""
-        _ensure_upload_lease(x_lease_id)
-        return _upload_call(uploads.enqueue)
-
-    @app.post("/v1/uploads/retry")
-    def uploads_retry(x_lease_id: str | None = Header(default=None)):
-        """把选择集中失败项重置为 pending；实际 uploader 后续实现（须持租约）。"""
-        _ensure_upload_lease(x_lease_id)
-        return _upload_call(uploads.retry)
-
-    # ---- /v1/captures/*：数据采集回合控制（web 线程 → CaptureService → CommandBus）----
-
-    def _captures():
-        if captures is None:
-            raise HTTPException(
-                status_code=501,
-                detail="captures not enabled (run 'motrix-edge serve' with capture service)",
-            )
-        return captures
-
-    def _capture_call(fn):
-        try:
-            return fn()
-        except CaptureError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    @app.get("/v1/captures")
-    def captures_status():
-        """状态快照：node_state / session / adapter / **capture_status** / disk / lease_id。"""
-        return _captures().status()
-
-    @app.get("/v1/captures/precheck")
-    def captures_precheck():
-        """预检（只读）：机器人就绪 + 磁盘 + 当前租约 / 可租状态。"""
-        return _captures().precheck()
-
-    @app.get("/v1/preview")
-    def captures_preview(x_lease_id: str | None = Header(default=None)):
-        """最新观测预览：qpos / action 状态 + 摄像头名列表（图像走 WebRTC，不内联）。
-
-        独立于采集 / 推理会话（PreviewService 直接读 node.frame_manager 观测缓存）：
-        不要求会话，预览随时可开；受控操作：须持有有效租约（X-Lease-Id）。
-        """
-        if preview is None:
-            raise HTTPException(status_code=501, detail="preview not enabled")
-        try:
-            return preview.preview(lease_id=x_lease_id)
-        except PreviewError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    @app.get("/v1/captures/meta")
-    def captures_meta():
-        """采集元信息选项（config/capture.yml 的 ``meta`` 段；前端选择列表用，只读）。"""
-        return _capture_call(lambda: _captures().meta())
-
-    @app.post("/v1/captures/meta")
-    def captures_meta_add(req: CaptureMetaAddRequest, x_lease_id: str | None = Header(default=None)):
-        """新增采集元信息选项（分类不存在则自动创建）；重复 → 400。须持租约。
-
-        回执与 ``GET /v1/captures/meta`` 同构（``{meta: 全量}``），前端写后无需再拉取。
-        选项管理是**配置级**操作，与机器人进程 / 会话状态无关（不进状态机）。
-        """
-        return _capture_call(lambda: _captures().meta_add(req.key, req.value, lease_id=x_lease_id))
-
-    @app.patch("/v1/captures/meta")
-    def captures_meta_edit(req: CaptureMetaEditRequest, x_lease_id: str | None = Header(default=None)):
-        """重命名采集元信息选项（``key`` 下 ``old`` → ``new``）；不存在 / 重复 → 400。须持租约。"""
-        return _capture_call(lambda: _captures().meta_edit(req.key, req.old, req.new, lease_id=x_lease_id))
-
-    @app.delete("/v1/captures/meta")
-    def captures_meta_delete(key: str, value: str, x_lease_id: str | None = Header(default=None)):
-        """删除采集元信息选项（分类清空则一并删除该分类）；不存在 → 400。须持租约。
-
-        ``key`` / ``value`` 经 **query 参数**提交（选项值可能含空格 / 中文）。
-        删除整个分类见 ``DELETE /v1/captures/meta/{key}``。
-        """
-        return _capture_call(lambda: _captures().meta_delete(key, value, lease_id=x_lease_id))
-
-    @app.delete("/v1/captures/meta/{key}")
-    def captures_meta_delete_key(key: str, x_lease_id: str | None = Header(default=None)):
-        """删除整个采集元信息分类；分类不存在 → 400。须持租约。"""
-        return _capture_call(lambda: _captures().meta_delete_key(key, lease_id=x_lease_id))
-
-    @app.post("/v1/captures/sync")
-    def captures_sync(req: CaptureSyncRequest, x_lease_id: str | None = Header(default=None)):
-        """同步采集元信息（采集员 / 任务名等）到机器人进程：进程保存一轮数据时附加。
-
-        受控操作：须持有有效租约（X-Lease-Id）；采集会话内消费。
-        """
-        return _capture_call(lambda: _captures().sync(req.meta, lease_id=x_lease_id))
-
-    @app.post("/v1/captures")
-    def captures_enter(x_lease_id: str | None = Header(default=None)):
-        """创建采集会话（进入任务环境）：READY → ACTIVE，需先持有有效租约（X-Lease-Id）。
-
-        单 adapter 包：无 adapter 选择，采集基于节点绑定的唯一 adapter；已在环境中 → 409。
-        采集为观测会话（无回合流程控制）：进入后持续读共享内存观测，session quit 退出。
-        """
-        return _capture_call(lambda: _captures().enter(lease_id=x_lease_id))
-
-    @app.delete("/v1/captures")
-    def captures_exit(lease_id: str | None = None):
-        """退出采集任务环境（ACTIVE → IDLE）。租约经 query 参数 `lease_id` 提交校验。
-
-        租约不随退出销毁 —— 生命周期由 Edge 级 `/v1/leases/*`（activate / renew / release /
-        revoke）管理，session 只消费（校验）租约。
-        """
-        return _capture_call(lambda: _captures().exit(lease_id=lease_id))
-
-    # ---- /v1/infers/*：推理会话控制（无回合概念：enter → 持续推理 → exit）----
-
-    def _infers():
-        if infers is None:
-            raise HTTPException(
-                status_code=501,
-                detail="infers not enabled (run 'motrix-edge serve' with infer service)",
-            )
-        return infers
-
-    def _infer_call(fn):
-        try:
-            return fn()
-        except InferError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-        except CommandError as exc:
-            # 命令总线 submit 超时（如 infer connect 预热超时）：透出 504 而不是未处理异常 500
-            raise HTTPException(status_code=exc.status_code or 504, detail=str(exc)) from exc
-
-    @app.get("/v1/infers")
-    def infers_status():
-        """状态快照：node_state / adapter / policy / running / lease_id。"""
-        return _infers().status()
-
-    @app.post("/v1/infers")
-    def infers_enter(req: InferEnterRequest | None = None, x_lease_id: str | None = Header(default=None)):
-        """进入推理会话（READY → ACTIVE）：连接推理会话并启动任务循环，需先持有有效租约。
-
-        请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）、``config`` 指定
-        **该策略的配置项**（含公共项 ``host`` / ``port`` 推理节点端点，如 lerobot-act 的模型路径 /
-        openpi 的 prompt）；非法键、类型不符、越界或必填项为空 → 400。
-        """
-        policy_type = req.policy_type if req is not None else None
-        config = req.config if req is not None else None
-        return _infer_call(lambda: _infers().enter(lease_id=x_lease_id, policy_type=policy_type, config=config))
-
-    @app.post("/v1/infers/connect")
-    def infers_connect(x_lease_id: str | None = Header(default=None)):
-        """启动 / 查询**异步预热**（infer connect）。须已在推理会话且持有租约。
-
-        立即回执（`started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等）：预热可能
-        持续几十秒～几分钟（加载 checkpoint），进度由 `GET /v1/infers` 轮询；预热**不下发动作**，
-        且可被急停（`POST /v1/commands` capability=estop）或退出会话立即中断。
-        """
-        return _infer_call(lambda: _infers().connect(lease_id=x_lease_id))
-
-    @app.post("/v1/infers/rollout")
-    def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
-        """推理闭环（infer rollout）：单步（缺省）或 continuous 持续。
-
-        body：``mode``（single 缺省 / continuous）。
-        需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（会话内 ``infer prompt`` 预置）；lerobot-act 不需要。
-        须已在推理会话且持有租约；continuous 启动即回执 started，直到 ``infer rollout stop`` /
-        session quit / estop。
-        """
-        mode = req.mode if req is not None else None
-        return _infer_call(lambda: _infers().rollout(lease_id=x_lease_id, mode=mode))
-
-    @app.post("/v1/infers/rollout/stop")
-    def infers_rollout_stop(x_lease_id: str | None = Header(default=None)):
-        """停止持续推理（``infer rollout stop``）：回到会话 READY，**不退会话、不断策略连接**。
-
-        与 ``DELETE /v1/infers``（session quit）的区别：会话与策略连接保留，仍可再次
-        ``infer rollout`` / 改配置。未在持续推理中 → 409。受控操作：须持有租约。
-        """
-        return _infer_call(lambda: _infers().rollout_stop(lease_id=x_lease_id))
-
-    @app.post("/v1/infers/episode/start")
-    def infers_episode_start(x_lease_id: str | None = Header(default=None)):
-        """开始一轮推理 rollout 录制（capture episode start）：robot 开始录 mcap（含 action）。
-
-        需要 prompt 的策略（如 openpi）：prompt 为空 → 400（先 ``infer prompt`` 预置）；lerobot-act 不需要。
-        录制前由调用方 ``POST /v1/infers/sync`` 显式同步采集元信息（默认 operator=policy、
-        task_name=prompt）。受控操作：须持有租约。
-        """
-        return _infer_call(lambda: _infers().episode_start(lease_id=x_lease_id))
-
-    @app.post("/v1/infers/episode/end")
-    def infers_episode_end(x_lease_id: str | None = Header(default=None)):
-        """结束一轮推理 rollout 录制（capture episode end）：robot 保存该 episode。受控操作。"""
-        return _infer_call(lambda: _infers().episode_end(lease_id=x_lease_id))
-
-    @app.post("/v1/infers/sync")
-    def infers_sync(req: InferSyncRequest, x_lease_id: str | None = Header(default=None)):
-        """同步采集元信息（capture sync）：录制 rollout 时把 operator/task_name 同步到进程。
-
-        默认元信息 = ``{operator: "policy", task_name: <prompt>}``，**由调用方自行组装并显式**
-        提交本端点（Edge 不自动 sync；也不在状态里代报默认值）。受控操作：须持有租约。
-        """
-        return _infer_call(lambda: _infers().sync(meta=req.meta, lease_id=x_lease_id))
-
-    @app.post("/v1/infers/rtc")
-    def infers_rtc(req: InferRTCRequest, x_lease_id: str | None = Header(default=None)):
-        """运行期设置 RTC（实时动作块）参数（``infer rtc set``）。
-
-        body 为参数对象（可部分：enabled / action_horizon / prefix_len / execution_horizon /
-        suffix_len / aggregate_fn）→ 写入内存态 ``policy.rtc`` 并应用到正在运行的
-        RTCManager（下一块起生效）；非法参数或违反交叉约束（P + S < H、E > P）→ 400。
-        受控操作：须持有租约。
-        """
-        params = {key: value for key, value in req.model_dump().items() if value is not None}
-        return _infer_call(lambda: _infers().configure_rtc(params=params, lease_id=x_lease_id))
-
-    @app.post("/v1/infers/config")
-    def infers_config(req: InferConfigRequest, x_lease_id: str | None = Header(default=None)):
-        """运行期设置**策略配置项**（``infer config set``）。
-
-        body 为配置项对象（可部分：openpi → prompt；lerobot-act → pretrained_name_or_path / device /
-        actions_per_chunk）→ 按当前策略 schema 白名单校验并写入内存态 ``policy`` 段：
-        ``runtime: True`` 的键同样应用到运行中的策略客户端（下一请求生效），``runtime: False``
-        的键（host / port、模型路径…）退出会话重进才生效并在回执 ``deferred`` 列出。
-        未知键 / 类型不符 / 必填为空 → 400。受控操作：须已在推理会话且持有租约。
-        """
-        return _infer_call(lambda: _infers().configure_policy_config(params=dict(req.config), lease_id=x_lease_id))
-
-    @app.post("/v1/infers/prompt")
-    def infers_prompt(req: InferPromptRequest, x_lease_id: str | None = Header(default=None)):
-        """会话内预置/更新推理文本指令（统一 prompt；推理/录制前必须非空）。
-
-        须已在推理会话且持有租约；持续推理中亦可修改（下个请求生效）。仅对声明 prompt
-        配置项的策略（语言条件，如 openpi）有效；等价于 ``POST /v1/infers/config``
-        提交 ``{"prompt": ...}``。
-        """
-        return _infer_call(lambda: _infers().set_prompt(lease_id=x_lease_id, prompt=req.prompt))
-
-    @app.delete("/v1/infers")
-    def infers_exit(lease_id: str | None = None):
-        """退出推理会话（ACTIVE → READY）。租约经 query 参数 `lease_id` 提交校验。"""
-        return _infer_call(lambda: _infers().exit(lease_id=lease_id))
+    # ---- 挂载各域 router（HTTP 映射见 server/routes/*）--------------------------
+    for router in build_routers(services):
+        app.include_router(router)
 
     return app
+
+
+__all__ = ["create_app"]
