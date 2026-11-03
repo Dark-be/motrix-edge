@@ -38,7 +38,6 @@ _OPTIONAL_DEPS: dict[str, tuple[str, ...]] = {
 _OPTIONAL_FILES: dict[str, str] = {
     "test_ws_transport.py": "openpi",
     "test_transport_target.py": "openpi",
-    "test_infer_point.py": "openpi",
     "test_webrtc.py": "webrtc",
     "test_lerobot_remote_client.py": "lerobot",
 }

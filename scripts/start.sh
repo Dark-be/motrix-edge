@@ -15,11 +15,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 ENV_FILE="${MOTRIX_EDGE_ENV_FILE:-$ROOT_DIR/.env}"
+UV_ARGS=()
 if [ -f "$ENV_FILE" ]; then
-    echo "==> 启动 Motrix Edge"
-    echo "==> env: $ENV_FILE"
-    echo "==> 命令: uv run --env-file $ENV_FILE motrix-edge run $*"
-    exec uv run --env-file "$ENV_FILE" motrix-edge run "$@"
+    UV_ARGS+=(--env-file "$ENV_FILE")
 elif [ -n "${MOTRIX_EDGE_ENV_FILE:-}" ]; then
     echo "错误：MOTRIX_EDGE_ENV_FILE 指定的文件不存在：$ENV_FILE" >&2
     exit 1
@@ -28,5 +26,9 @@ else
 fi
 
 echo "==> 启动 Motrix Edge"
-echo "==> 命令: uv run motrix-edge run $*"
-exec uv run motrix-edge run "$@"
+if [ "${#UV_ARGS[@]}" -gt 0 ]; then
+    echo "==> env: $ENV_FILE"
+fi
+echo "==> 命令: uv run ${UV_ARGS[*]} motrix-edge run $*"
+
+exec uv run "${UV_ARGS[@]}" motrix-edge run "$@"

@@ -94,8 +94,8 @@ src/lerobot/        # vendored 新版 lerobot 子集（Apache-2.0）：
 未装对应可选面时，`connect()` 在导入依赖处抛 `ModuleNotFoundError` → 该 `policy.type` 进会话
 失败，其余功能不受影响（WebRTC 同理，见
 [motrix_edge_frame_webrtc.md](motrix_edge_frame_webrtc.md)）。测试侧由 `tests/conftest.py`
-按依赖可导入性决定收集：`test_ws_transport` / `test_transport_target` / `test_infer_point` /
-`test_webrtc` / `test_lerobot_remote_client` 这五个**整文件**依赖的，缺依赖时不收集；
+按依赖可导入性决定收集：`test_ws_transport` / `test_transport_target` / `test_webrtc` /
+`test_lerobot_remote_client` 这四个**整文件**依赖的，缺依赖时不收集；
 `tests/test_policy.py` 里只有部分用例依赖 openpi，用 `@pytest.mark.optional("openpi")` 跳过。
 
 ## 共用契约层（contract.py）
