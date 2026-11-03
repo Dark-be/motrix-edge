@@ -2,7 +2,7 @@
 
 ## 摘要
 
-`pose` / `pose_delta` 动作与 `observations/pose` / `pose_target` 观测的**原点**可从法兰（缺省）切到
+`pose` / `pose_delta` 动作与 robot 原始观测 `pose` / `pose_action` 的**原点**可从法兰（缺省）切到
 **工具末端（TCP）**：TCP 相对法兰的偏移写在机器人配置（`robot.tcp`），纯平移、可逐臂覆盖。读数与写数
 **仍是同一个坐标系**（既有契约「读与写必须同系」不变），只是系名随开关从 `flange` 变成 `tcp`；帧名与
 偏移量由机器人进程**上报**给 Edge（Edge 不重复配置）。开关关闭（缺省）时行为与现在完全一致。
@@ -79,7 +79,7 @@ robot:
 | 写（绝对 / 增量） | `DualPiperRobot._solve_pose()` / `TestRobot` 同名方法     | 喂 `pose_to_joint` 前还原成法兰             |
 | 增量基准          | `BaseRobot._absolute_pose_target()`                       | **不动**（基准取目标位姿，自动是 TCP 位姿） |
 
--   **两个观测键同生共死**：`observations/pose` 与 `pose_target` 共用同一换算层，故始终同系、可直接比较
+-   **两个观测键同生共死**：robot 原始键 `pose` 与 `pose_action` 共用同一换算层，故始终同系、可直接比较
     （「目标 − 实测」仍是 MIT 稳态误差）。
 -   **`pose_delta` 语义不变**：仍是**基座系**的 `[Δxyz, wrap(Δrpy)]` chart 相加（不是 TCP 系相加），
     只是基准量从法兰位姿换成 TCP 位姿。上位按工具系给增量时的换算链（见 RPent 对接契约「增量」一节）

@@ -31,7 +31,7 @@
         （条件数、位姿角展度、固定相机散布等可用性判据）
 -   [x] `robot-pipeline/src/robot/calibration/store.py`：`<根>/config/calibration/frames.json` 读写
         （不播种；不合法 → 整份忽略 + 一条 WARNING，坐标功能静默降级）
--   [x] `tests/test_robot_calibration.py` / `tests/test_robot_calibration_pipeline.py`：虚拟 `AX = XB`
+-   [x] `robot-pipeline/tests/test_robot_calibration.py` / `robot-pipeline/tests/test_robot_calibration_pipeline.py`：虚拟 `AX = XB`
         复现、探针求解复现、合成板投影 → PnP 复现、三相机一致性、样本 / 产物读写与校验失败路径
 
 ### 运行期接线
@@ -42,7 +42,7 @@
         `/v1/cameras` 按 `{cameras, frames}` 收口
 -   [x] Edge：`adapter.frame_set()` 暂存产物，`server/depth.py` 增 `xyz_camera` / `xyz_world` /
         `frame` / `world`（无外参 → null，不报错；腕相机用同拍位姿）
--   [x] 测试：`tests/test_robot_depth.py`（装配事实段）/ `tests/test_server.py`（`/v1/depth` 坐标字段：
+-   [x] 测试：`robot-pipeline/tests/test_robot_depth.py`（装配事实段）/ `tests/test_server.py`（`/v1/depth` 坐标字段：
         有外参 / 无外参 / 无深度 / 腕相机缺位姿）
 
 ### 工具
@@ -58,7 +58,7 @@
         factory 内参）+ 单臂 `world` 锚定（镜像 + 同向；`vertical` / `camera` 两种对称面）
 -   [x] `robot-pipeline/scripts/import_external_frames.py`：CLI（`--root` 自动探测）+ 判读 +
         `--out` / `--install`
--   [x] `tests/test_robot_calibration_external.py`：虚拟外部会话端到端复现（腕相机 / 固定相机 /
+-   [x] `robot-pipeline/tests/test_robot_calibration_external.py`：虚拟外部会话端到端复现（腕相机 / 固定相机 /
         锚定）+ 锚定数学 + 外部格式失败路径
 -   [x] 设计文档「外部数据导入（跨工具）」章节 + 分层表一行 + 「未做」补实测替代
 -   [x] 随仓库分发实测产物：`robot-pipeline/src/config/calibration/frames.json` + `store` 改走

@@ -47,7 +47,7 @@ KEY_OBS_IMAGE_PREFIX = "observations/images/"
 # 策略配置项 ``policy.action_layout`` 的取值 = **下发布局词表**（与 adapter / robot 契约同一套，单点定义
 # 在 ``motrix_edge.adapter.http_contract``）：段名用 ``+`` 连接，**书写顺序即块内顺序**：
 #   joint          每臂 6 关节角（缺省；夹爪另经 ``gripper`` 段下发）；
-#   joint+gripper  每臂「6 关节角 + 1 夹爪」（与 observations/qpos 的每臂块**同构**）→ 一条请求
+#   joint+gripper  每臂「6 关节角 + 1 夹爪」→ 一条原子请求
 #                  同时写关节与夹爪（未选臂由机器人保持；见 wiki/design/robot_pipeline_action_layouts.md）。
 POLICY_KEY_ACTION_LAYOUT = "action_layout"
 ACTION_LAYOUT_JOINT = VALUE_LAYOUT_JOINT

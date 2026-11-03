@@ -12,27 +12,11 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""BaseRobot —— 机器人基类（obs / action 形态由各机器人类常量固定，无 profile）。
+"""机器人控制骨架。
 
-机器人持有 ``action``（当前指令）与 ``target_action``（目标），由 env 控制线程每拍调用
-``step()`` 限速逼近 target 并下发；本层不碰运动学（FK / IK / 限位都在 ``robot/controller``）。
-
-- **动作空间**（``ACTION_SPACES``，值均按臂展开）：``joint`` 每臂 6 关节角、``pose`` /
-  ``pose_delta`` 每臂 ``xyz + rpy``（绝对 / 增量）、``gripper`` 每臂 1 夹爪。``pose`` /
-  ``pose_delta`` 只是动作语义：收到位姿目标时由子类 ``_prepare_target()`` 解算成关节目标，
-  之后与关节目标走同一条通路。
-- **状态向量**（``observations/qpos`` 与 ``action``）：每臂「值 + 夹爪」交错，同维同布局；
-  值段语义由 ``STATE_SPACE`` 决定，逐维含义见 ``state_layout()``。
-- **下发布局**（``layout``）：每臂块内的段序列（如 ``joint+gripper``），``arms`` 限定作用域。
-  校验见 ``parse_layout()`` / ``plan_layout()``，写入见 ``apply_layout()``（唯一写目标处）。
-- **线程模型**：控制线程每拍 ``step()`` + ``sample_qpos()`` 缓存状态；观测线程每拍
-  ``build_observation()``（缓存状态 + 本拍相机帧）；单线程脚本用 ``get_observation()``。
-- **遥操作**（``teleop_enabled``）：``robot.teleop.follow_space`` 选择关节直连或位姿 FK→IK，
-  ``follow_axes`` 可把未跟随的位姿轴锁在从臂首拍锚点；``absolute`` / ``delta`` 决定绝对或
-  锚点增量映射。遥操作期间 ``rollout()`` 一律被拒，``execute()`` / ``reset()`` /
-  ``safe_stop()`` 可抢回。主臂常量偏置由基类在 FK / 取锚点前叠加。
-
-设计背景见 ``wiki/design/robot_pipeline_*.md``。
+所有输入最终收敛为关节目标：``pose`` 先做 TCP→法兰换算和 IK，再进入与 ``joint`` 相同的
+限速、MIT 下发链。原始观测按 ``joint`` / ``gripper`` / ``pose`` 物理量发布；融合的 qpos / action
+由 server 在跨进程边界组装。
 """
 
 import time
@@ -68,13 +52,13 @@ class BaseRobot:
     CAPABILITIES: dict[str, bool] = {}
 
     # ---- 布局 / 特性（子类覆盖）----
-    # 各动作空间的值按臂展开，维度 = 每臂维数 × 臂数
-    QPOS = 12  # joint：每臂 6 关节角
-    POSE = 12  # pose / pose_delta：每臂 xyz + rpy；0 = 不提供位姿
-    POSE_DIM_PER_ARM = 6  # 每臂位姿维数
-    GRIPPER = 2  # gripper：每臂 1 夹爪
-    ARM_NAMES: tuple[str, ...] = ()  # 物理臂序（子类声明；未声明时退回 arm_1 / arm_2 序号）
+    # 只声明每臂宽度；整机维度由 ARM_NAMES 推导。
+    JOINT_DIM_PER_ARM = 6
+    POSE_DIM_PER_ARM = 0  # 0 = 该机型不提供位姿
+    ARM_NAMES: tuple[str, ...] = ()  # 物理臂序（所有具体机型必须声明）
+    PROFILE_ARM_NAMES: tuple[str, ...] = ()  # 共享机器档案可声明的臂；空 = 与 ARM_NAMES 相同
     ARM_CONTROLLERS: dict[str, str] = {}  # 臂名 -> controllers 键（子类声明）
+    MASTER_CONTROLLERS: dict[str, str] = {}  # 臂名 -> 遥操作输入控制器键（有主手的子类声明）
     IMAGE_NAMES: list[str] = []  # 相机名（observations/images/<name>）
     IMAGES: dict[str, tuple[int, int]] = {name: (640, 480) for name in IMAGE_NAMES}  # 相机名 -> (w, h)
     DEPTH_CAMERAS: tuple[str, ...] = ()  # 具备深度的相机（IMAGE_NAMES 子序；硬件事实）
@@ -82,28 +66,33 @@ class BaseRobot:
     SHM_NAME = "robot_obs"  # 观测共享内存名（server 侧发布）
 
     # ---- 动作空间（取值与 edge 契约 ActionSpace 同名）----
-    ACTION_SPACE_JOINT = "joint"  # 每臂 6 关节角（绝对目标）
+    ACTION_SPACE_JOINT = "joint"  # 每臂关节角（绝对目标）
+    ACTION_SPACE_JOINT_DELTA = "joint_delta"  # 每臂关节角增量（基准为当前关节目标）
     ACTION_SPACE_POSE = "pose"  # 每臂 xyz + rpy（绝对目标）
     ACTION_SPACE_POSE_DELTA = "pose_delta"  # 每臂 xyz + rpy（增量，基准为关节段目标的正解位姿）
-    ACTION_SPACE_GRIPPER = "gripper"  # 每臂 1 夹爪（归一化 [0, 1]）
-    ACTION_SPACES: tuple[str, ...] = (ACTION_SPACE_JOINT, ACTION_SPACE_GRIPPER)
+    ACTION_SPACE_GRIPPER = "gripper"  # 每臂夹爪值（归一化 [0, 1]）
+    ACTION_SPACE_GRIPPER_DELTA = "gripper_delta"  # 每臂夹爪增量（基准为当前夹爪目标）
+    MOTION_ACTION_SPACES = (ACTION_SPACE_JOINT, ACTION_SPACE_JOINT_DELTA, ACTION_SPACE_POSE, ACTION_SPACE_POSE_DELTA)
+    GRIPPER_ACTION_SPACES = (ACTION_SPACE_GRIPPER, ACTION_SPACE_GRIPPER_DELTA)
+    ACTION_SPACES: tuple[str, ...] = (
+        ACTION_SPACE_JOINT,
+        ACTION_SPACE_JOINT_DELTA,
+        ACTION_SPACE_GRIPPER,
+        ACTION_SPACE_GRIPPER_DELTA,
+    )
 
-    # ---- 观测键（adapter 契约约定；勿改）----
-    KEY_QPOS = "observations/qpos"  # 状态向量（每臂「值 + 夹爪」）
-    KEY_POSE = "observations/pose"  # 实测末端位姿（POSE > 0；每臂 xyz + rpy，不交错）
-    KEY_POSE_TARGET = "observations/pose_target"  # 目标位姿 = FK(关节段目标)（POSE > 0）
-    KEY_ACTION = "action"  # 目标向量键（无指令时回退 qpos）
+    # ---- robot 原始观测键（跨进程契约由 server 转换）----
+    KEY_JOINT = "joint"  # 实测绝对关节角
+    KEY_GRIPPER = "gripper"  # 实测夹爪开合
+    KEY_POSE = "pose"  # 实测末端位姿（pose_dim() > 0；每臂 xyz + rpy）
+    KEY_JOINT_ACTION = "joint_action"  # 采集用关节目标；无目标时回退实测
+    KEY_GRIPPER_ACTION = "gripper_action"  # 采集用夹爪目标；无目标时回退实测
+    KEY_POSE_ACTION = "pose_action"  # 关节目标的 FK 位姿（pose_dim() > 0）
     KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打点）
     CAMERA_PREFIX = "observations/images/"  # 彩色图像键前缀
     DEPTH_PREFIX = "observations/depth/"  # 深度图键前缀（uint16，已对齐同名彩色图；仅生效的深度相机）
 
-    # ---- 状态向量的布局 ----
-    # 每臂「值 + 夹爪」交错（双臂 14、单臂 7）；切位姿只改 STATE_SPACE，维度不变
-    STATE_SPACE = ACTION_SPACE_JOINT  # 值段语义
-    VALUE_LABELS = {  # 值段每臂的逐维名
-        ACTION_SPACE_JOINT: ("j1", "j2", "j3", "j4", "j5", "j6"),
-        ACTION_SPACE_POSE: ("x", "y", "z", "rx", "ry", "rz"),
-    }
+    JOINT_LABELS = ("j1", "j2", "j3", "j4", "j5", "j6")
 
     # ---- 遥操作模式（取值与 /v1/teleop 的 mode 同名）----
     TELEOP_MODE_ABSOLUTE = "absolute"  # 主臂绝对读数直连从臂 target
@@ -115,24 +104,27 @@ class BaseRobot:
     TELEOP_POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
     def __init__(self, robot_config: dict | None = None):
+        self._validate_dimensions()
         self.robot_config = dict(robot_config or {})
         self.name = str(self.robot_config.get("name", self.NAME))
         self.step_rad = float(self.robot_config.get("step_rad", 0.1))  # 每拍最大关节增量（rad）
         self.ready = False
         self.last_error = None
 
-        # 控制状态：单条底层向量 [关节段 | 夹爪段]（关节段在前，长度 QPOS / GRIPPER）
-        # action = 当前位置，target_action = 目标；reset / execute / rollout 只覆盖对应段
-        self.action: np.ndarray | None = None
-        self.target_action: np.ndarray | None = None
-        self.init_joint = self._init_vector("init_joint", self.QPOS, required=True)
-        self.init_gripper = self._init_vector("init_gripper", self.GRIPPER, required=False, fill=1.0)
+        # command = 本控制拍实际下发值；target = 最新请求的最终目标。
+        self.joint_command: np.ndarray | None = None
+        self.joint_target: np.ndarray | None = None
+        self.gripper_command: np.ndarray | None = None
+        self.gripper_target: np.ndarray | None = None
+        self.init_joint = self._init_vector("init_joint", self.joint_dim(), required=True)
+        self.init_gripper = self._init_vector("init_gripper", self.gripper_dim(), required=False, fill=1.0)
 
-        # 遥操作跟随空间 / 位姿轴白名单 + 主臂读数常量偏置（均为 robot-pipeline 内部配置）
+        # 遥操作跟随空间 / 位姿轴白名单 + 主臂关节、位姿常量偏置。
         self.teleop_follow_space, self.teleop_follow_axes = self._resolve_teleop_follow()
         self._configured_teleop_follow_space = self.teleop_follow_space
         self._configured_teleop_follow_axes = self.teleop_follow_axes
         self.teleop_joint_offset = self._resolve_teleop_joint_offset()
+        self.teleop_pose_offset = self._resolve_teleop_pose_offset()
 
         # 遥操作：开关 + 映射模式 + 增量锚点（锚点在接管后首拍采样，见 _capture_teleop_anchor）
         self.teleop_enabled = False
@@ -152,13 +144,13 @@ class BaseRobot:
         self.teleop_master_now: np.ndarray | None = None
         self.teleop_master_gripper_now: np.ndarray | None = None
 
-        self.seq = 0  # 帧计数（sample_qpos() 每帧自增）
+        self.seq = 0  # 帧计数（sample_state() 每帧自增）
 
         # 控制器 / 传感器（真实机器人填充；虚拟机器人为空）
         self.controllers: dict = {}
         self.sensors: dict = {}
 
-        # 机械臂侧状态缓存（控制线程每拍 sample_qpos() 覆盖；观测线程只读）
+        # 机械臂侧状态缓存（控制线程每拍 sample_state() 覆盖；观测线程只读）
         self.motion_state: dict | None = None
 
         # 生效的深度相机（顺序 = IMAGE_NAMES 子序；空 = 不开深度），由 robot.depth 决定
@@ -168,7 +160,7 @@ class BaseRobot:
         tcp_section = self.robot_config.get(tcp.SECTION)
         self.tcp_offsets = tcp.resolve_tcp(tcp_section, tuple(self.ARM_NAMES))
         self.pose_frame = tcp.FRAME_TCP if self.tcp_offsets else tcp.FRAME_FLANGE
-        if bool((tcp_section or {}).get("enabled", False)) and not (self.tcp_offsets and self.POSE > 0):
+        if bool((tcp_section or {}).get("enabled", False)) and not (self.tcp_offsets and self.pose_dim() > 0):
             debug_print(self.name, f"robot.{tcp.SECTION} 已开启但不生效（不提供位姿 / 未声明臂名），已忽略", "WARNING")
 
     # ---- 硬件设备类型（机器档案探测用：键 = PORT_ROLES / IMAGE_NAMES；值 = config.probe 的 kind）----
@@ -183,7 +175,7 @@ class BaseRobot:
         位姿锚点。配置错误在构造期响亮失败，避免真机以错误语义启动。
         """
         section = self.robot_config.get("teleop") or {}
-        allowed = {"joint_offset", "follow_space", "follow_axes"}
+        allowed = {"joint_offset", "pose_offset", "follow_space", "follow_axes"}
         unknown = [key for key in section if key not in allowed]
         if unknown:
             debug_print(self.name, f"robot.teleop 未知键 {unknown}（可用：{sorted(allowed)}），已忽略", "WARNING")
@@ -197,13 +189,13 @@ class BaseRobot:
             if raw_axes is not None:
                 raise ValueError(f"{self.name}: robot.teleop.follow_axes is only valid for follow_space='pose'")
             return follow_space, ()
-        if self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.POSE <= 0:
+        if self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.pose_dim() <= 0:
             raise ValueError(f"{self.name}: robot.teleop.follow_space='pose' needs pose action capability")
         expected_pose = self.POSE_DIM_PER_ARM * len(self.ARM_NAMES)
-        if self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES) or self.POSE != expected_pose:
+        if self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES) or self.pose_dim() != expected_pose:
             raise ValueError(
                 f"{self.name}: pose teleop needs {len(self.TELEOP_POSE_AXES)} pose dims per arm"
-                f" and POSE={expected_pose} (got per_arm={self.POSE_DIM_PER_ARM}, POSE={self.POSE})"
+                f" and pose_dim()={expected_pose} (got per_arm={self.POSE_DIM_PER_ARM}, pose_dim()={self.pose_dim()})"
             )
         if raw_axes is not None and not isinstance(raw_axes, (list, tuple)):
             raise ValueError(f"{self.name}: robot.teleop.follow_axes must be a list (got {raw_axes!r})")
@@ -216,27 +208,36 @@ class BaseRobot:
         return follow_space, tuple(axes)
 
     def _resolve_teleop_joint_offset(self) -> np.ndarray:
-        """解析 ``robot.teleop.joint_offset`` → 扁平 ``QPOS`` 维偏置（缺省全 0）。
+        """解析逐关节 rad 偏置；缺省全 0。"""
+        return self._resolve_teleop_offset("joint_offset", self.JOINT_DIM_PER_ARM, self.joint_dim())
 
-        取值为逐关节的 rad 偏置：一个长度 = 每臂关节数的列表（各臂共用），或
-        ``{<臂名>: [每关节偏置]}``（逐臂，臂名取 ``state_arms()``）。长度不符 / 含非有限值 /
-        未知臂名 → ``ValueError``。
-        """
+    def _resolve_teleop_pose_offset(self) -> np.ndarray:
+        """解析每臂 ``xyz + rpy`` 位姿偏置；缺省全 0。"""
         section = self.robot_config.get("teleop") or {}
-        raw = section.get("joint_offset")
+        if section.get("pose_offset") is not None and (
+            self.ACTION_SPACE_POSE not in self.ACTION_SPACES
+            or self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES)
+            or self.pose_dim() <= 0
+        ):
+            raise ValueError(f"{self.name}: robot.teleop.pose_offset needs pose action capability")
+        return self._resolve_teleop_offset("pose_offset", self.POSE_DIM_PER_ARM, self.pose_dim())
+
+    def _resolve_teleop_offset(self, key: str, per_arm: int, total_dim: int) -> np.ndarray:
+        """解析可全臂共用或按臂给出的 teleop 常量偏置。"""
+        section = self.robot_config.get("teleop") or {}
+        raw = section.get(key)
         if raw is None:
-            return np.zeros(self.QPOS)
-        arms, per_arm = self.state_arm_count(), self.QPOS // self.state_arm_count()
+            return np.zeros(total_dim)
+        arms = self.state_arm_count()
         if isinstance(raw, dict):
-            extra = [str(arm) for arm in raw if str(arm) not in self.state_arms()]
+            known_arms = self.PROFILE_ARM_NAMES or tuple(self.state_arms())
+            extra = [str(arm) for arm in raw if str(arm) not in known_arms]
             if extra:
-                raise ValueError(
-                    f"{self.name}: robot.teleop.joint_offset 含未知臂 {extra}（可用：{self.state_arms()}）"
-                )
+                raise ValueError(f"{self.name}: robot.teleop.{key} 含未知臂 {extra}（可用：{list(known_arms)}）")
             per_arm_values = {arm: raw.get(arm) for arm in self.state_arms()}
         else:
             per_arm_values = dict.fromkeys(self.state_arms(), raw)
-        offset = np.zeros(self.QPOS)
+        offset = np.zeros(total_dim)
         for index, arm in enumerate(self.state_arms()):
             values = per_arm_values[arm]
             if values is None:
@@ -244,24 +245,32 @@ class BaseRobot:
             block = np.asarray(values, dtype=np.float64).reshape(-1)
             if block.shape[0] != per_arm:
                 raise ValueError(
-                    f"{self.name}: robot.teleop.joint_offset[{arm}] dim {block.shape[0]} != {per_arm}"
-                    f"（每臂关节数 × {arms} 臂 = QPOS {self.QPOS}）"
+                    f"{self.name}: robot.teleop.{key}[{arm}] dim {block.shape[0]} != {per_arm}"
+                    f"（每臂维数 × {arms} 臂 = {total_dim}）"
                 )
             if not np.all(np.isfinite(block)):
-                raise ValueError(f"{self.name}: robot.teleop.joint_offset[{arm}] contains non-finite values")
+                raise ValueError(f"{self.name}: robot.teleop.{key}[{arm}] contains non-finite values")
             offset[index * per_arm : (index + 1) * per_arm] = block
         return offset
 
     # ---- 硬件接线（robot.ports / robot.cameras：值必填，代码内不存现场值）----
-    def _required_devices(self, section: str, keys: tuple[str, ...]) -> dict[str, str]:
+    def _required_devices(
+        self,
+        section: str,
+        keys: tuple[str, ...],
+        *,
+        known_keys: tuple[str, ...] | None = None,
+    ) -> dict[str, str]:
         """读取必填的硬件接线 ``robot.<section>.<key>``；缺失 / 空串 → ValueError。
 
-        端口与相机设备只在配置里给，代码不存现场值。未知键名打 WARNING。
+        端口与相机设备只在配置里给，代码不存现场值。``known_keys`` 可包含同一机器档案中当前
+        机型不使用的资源；它们不返回也不告警，真正的未知键仍打 WARNING。
         """
         values = self.robot_config.get(section) or {}
-        unknown = [key for key in values if key not in keys]
+        allowed = known_keys or keys
+        unknown = [key for key in values if key not in allowed]
         if unknown:
-            debug_print(self.name, f"robot.{section} 未知键 {unknown}（可用：{list(keys)}），已忽略", "WARNING")
+            debug_print(self.name, f"robot.{section} 未知键 {unknown}（可用：{list(allowed)}），已忽略", "WARNING")
         missing = [key for key in keys if not str(values.get(key) or "").strip()]
         if missing:
             raise ValueError(f"配置缺少 robot.{section}：{missing}（必填，无代码缺省值；请按现场接线填写）")
@@ -269,7 +278,7 @@ class BaseRobot:
 
     # ---- 布局 / 解析（无 profile；obs/action 形态由类常量固定）------------------
     def _init_vector(self, key: str, dim: int, *, required: bool, fill: float = 0.0) -> np.ndarray:
-        """读复位向量 ``init_joint`` / ``init_gripper``；长度必须等于 ``QPOS`` / ``GRIPPER``。"""
+        """读复位向量 ``init_joint`` / ``init_gripper``；长度必须等于 ``joint_dim()`` / ``gripper_dim()``。"""
         raw = self.robot_config.get(key)
         if raw is None:
             if required:
@@ -281,17 +290,87 @@ class BaseRobot:
         return values
 
     @classmethod
-    def action_dim(cls, action_space: str | None = None) -> int:
-        """该动作空间的值维度（缺省 ``joint``）：``QPOS`` / ``POSE`` / ``GRIPPER``。
+    def arm_count(cls) -> int:
+        """物理臂数；具体机型必须用 ``ARM_NAMES`` 明确声明。"""
+        if not cls.ARM_NAMES:
+            raise ValueError(f"{cls.__name__}: ARM_NAMES must declare at least one physical arm")
+        return len(cls.ARM_NAMES)
 
-        ``pose_delta`` 与 ``pose`` 同形，靠空间名区分。
+    @classmethod
+    def _validate_dimensions(cls) -> None:
+        """校验机型的维度声明，避免能力与物理布局不一致。"""
+        cls.arm_count()
+        if len(set(cls.ARM_NAMES)) != len(cls.ARM_NAMES):
+            raise ValueError(f"{cls.__name__}: ARM_NAMES must be unique")
+        if cls.PROFILE_ARM_NAMES and not set(cls.ARM_NAMES) <= set(cls.PROFILE_ARM_NAMES):
+            raise ValueError(f"{cls.__name__}: ARM_NAMES must be a subset of PROFILE_ARM_NAMES")
+        if set(cls.ARM_CONTROLLERS) != set(cls.ARM_NAMES):
+            raise ValueError(f"{cls.__name__}: ARM_CONTROLLERS keys must exactly match ARM_NAMES")
+        if len(set(cls.ARM_CONTROLLERS.values())) != len(cls.ARM_CONTROLLERS):
+            raise ValueError(f"{cls.__name__}: ARM_CONTROLLERS values must be unique")
+        if cls.MASTER_CONTROLLERS and set(cls.MASTER_CONTROLLERS) != set(cls.ARM_NAMES):
+            raise ValueError(f"{cls.__name__}: MASTER_CONTROLLERS keys must exactly match ARM_NAMES")
+        if len(set(cls.MASTER_CONTROLLERS.values())) != len(cls.MASTER_CONTROLLERS):
+            raise ValueError(f"{cls.__name__}: MASTER_CONTROLLERS values must be unique")
+        if int(cls.JOINT_DIM_PER_ARM) <= 0:
+            raise ValueError(f"{cls.__name__}: JOINT_DIM_PER_ARM must be positive")
+        pose_declared = {cls.ACTION_SPACE_POSE, cls.ACTION_SPACE_POSE_DELTA} & set(cls.ACTION_SPACES)
+        if pose_declared and int(cls.POSE_DIM_PER_ARM) <= 0:
+            raise ValueError(f"{cls.__name__}: pose action spaces require POSE_DIM_PER_ARM > 0")
+
+    @classmethod
+    def joint_dim(cls) -> int:
+        """整机关节维度。"""
+        return int(cls.JOINT_DIM_PER_ARM) * cls.arm_count()
+
+    @classmethod
+    def pose_dim(cls) -> int:
+        """整机位姿维度；``POSE_DIM_PER_ARM = 0`` 时不提供位姿。"""
+        return int(cls.POSE_DIM_PER_ARM) * cls.arm_count()
+
+    @classmethod
+    def gripper_dim(cls) -> int:
+        """整机夹爪维度；契约固定每臂一个开合值。"""
+        return cls.arm_count()
+
+    def _controller_for_arm(self, arm: str):
+        """按机型声明取得物理臂的执行控制器。"""
+        key = self.ARM_CONTROLLERS.get(arm)
+        if key is None or key not in self.controllers:
+            raise RuntimeError(f"{self.name}: controller {key!r} for arm {arm!r} is not assembled")
+        return self.controllers[key]
+
+    def _master_controller_for_arm(self, arm: str):
+        """按机型声明取得物理臂对应的遥操作输入控制器。"""
+        key = self.MASTER_CONTROLLERS.get(arm)
+        if key is None or key not in self.controllers:
+            raise RuntimeError(f"{self.name}: master controller {key!r} for arm {arm!r} is not assembled")
+        return self.controllers[key]
+
+    def _joint_block(self, value, *, source: str) -> np.ndarray:
+        """规范化单臂关节读数；不足声明宽度时立即报错。"""
+        values = np.asarray(value, dtype=np.float64).reshape(-1)
+        if values.shape[0] < self.JOINT_DIM_PER_ARM:
+            raise RuntimeError(
+                f"{self.name}: {source} joint dim {values.shape[0]} < JOINT_DIM_PER_ARM {self.JOINT_DIM_PER_ARM}"
+            )
+        return values[: self.JOINT_DIM_PER_ARM].copy()
+
+    @classmethod
+    def action_dim(cls, action_space: str | None = None) -> int:
+        """该动作空间的整机值维度（缺省 ``joint``）。
+
+        ``joint_delta`` 与 ``joint``、``pose_delta`` 与 ``pose``、``gripper_delta`` 与 ``gripper``
+        分别同形，靠空间名区分。
         """
         space = cls.normalize_action_space(action_space)
         return {
-            cls.ACTION_SPACE_JOINT: cls.QPOS,
-            cls.ACTION_SPACE_POSE: cls.POSE,
-            cls.ACTION_SPACE_POSE_DELTA: cls.POSE,
-            cls.ACTION_SPACE_GRIPPER: cls.GRIPPER,
+            cls.ACTION_SPACE_JOINT: cls.joint_dim(),
+            cls.ACTION_SPACE_JOINT_DELTA: cls.joint_dim(),
+            cls.ACTION_SPACE_POSE: cls.pose_dim(),
+            cls.ACTION_SPACE_POSE_DELTA: cls.pose_dim(),
+            cls.ACTION_SPACE_GRIPPER: cls.gripper_dim(),
+            cls.ACTION_SPACE_GRIPPER_DELTA: cls.gripper_dim(),
         }[space]
 
     @classmethod
@@ -300,18 +379,19 @@ class BaseRobot:
         return {space: cls.action_dim(space) for space in cls.ACTION_SPACES}
 
     # ---- 下发布局（layout）：每臂块内的段序列，如 joint+gripper（书写顺序即块内顺序）----
-    # 段类型（kind）= 动作空间名；约束：至多一个值段（joint / pose / pose_delta）+ 可选 gripper
+    # 段类型（kind）= 动作空间名；约束：至多一个运动段 + 至多一个夹爪段
     LAYOUT_SEPARATOR = "+"
 
     @classmethod
     def segment_dims(cls) -> dict[str, int]:
         """每个段类型的每臂维数（只含本机器人已声明的段）。"""
-        arms = max(cls.state_arm_count(), 1)
         dims = {
-            cls.ACTION_SPACE_JOINT: cls.QPOS // arms,
+            cls.ACTION_SPACE_JOINT: cls.JOINT_DIM_PER_ARM,
+            cls.ACTION_SPACE_JOINT_DELTA: cls.JOINT_DIM_PER_ARM,
             cls.ACTION_SPACE_POSE: cls.POSE_DIM_PER_ARM,
             cls.ACTION_SPACE_POSE_DELTA: cls.POSE_DIM_PER_ARM,
-            cls.ACTION_SPACE_GRIPPER: cls.GRIPPER // arms,
+            cls.ACTION_SPACE_GRIPPER: 1,
+            cls.ACTION_SPACE_GRIPPER_DELTA: 1,
         }
         return {kind: int(dim) for kind, dim in dims.items() if kind in cls.ACTION_SPACES and int(dim) > 0}
 
@@ -319,15 +399,19 @@ class BaseRobot:
     def action_layouts(cls) -> dict[str, tuple[tuple[str, int], ...]]:
         """本机器人支持的 layout → 段序列 ``((kind, 每臂维数), ...)``（供能力上报）。
 
-        规范名 = 单段 layout +「值段 + gripper」组合；``parse_layout()`` 另接受任意段序。
+        规范名 = 单段 layout +「运动段 + 夹爪段」组合；``parse_layout()`` 另接受任意段序。
         """
         dims = cls.segment_dims()
         layouts: dict[str, tuple[tuple[str, int], ...]] = {kind: ((kind, dim),) for kind, dim in dims.items()}
-        gripper = cls.ACTION_SPACE_GRIPPER
-        if gripper in dims:
-            for kind, dim in dims.items():
-                if kind != gripper:
-                    layouts[f"{kind}{cls.LAYOUT_SEPARATOR}{gripper}"] = ((kind, dim), (gripper, dims[gripper]))
+        for motion in cls.MOTION_ACTION_SPACES:
+            if motion not in dims:
+                continue
+            for gripper in cls.GRIPPER_ACTION_SPACES:
+                if gripper in dims:
+                    layouts[f"{motion}{cls.LAYOUT_SEPARATOR}{gripper}"] = (
+                        (motion, dims[motion]),
+                        (gripper, dims[gripper]),
+                    )
         return layouts
 
     @classmethod
@@ -339,7 +423,8 @@ class BaseRobot:
         name = cls.ACTION_SPACE_JOINT if not layout else str(layout).strip()
         parts = [part.strip() for part in name.split(cls.LAYOUT_SEPARATOR)]
         dims = cls.segment_dims()
-        value_kinds = {kind for kind in dims if kind != cls.ACTION_SPACE_GRIPPER}
+        motion_kinds = set(cls.MOTION_ACTION_SPACES) & dims.keys()
+        gripper_kinds = set(cls.GRIPPER_ACTION_SPACES) & dims.keys()
         segments: list[tuple[str, int]] = []
         invalid: str | None = None
         if not parts or any(not part for part in parts):
@@ -348,8 +433,10 @@ class BaseRobot:
             invalid = "duplicate segment"
         elif any(part not in dims for part in parts):
             invalid = f"unknown segment (available: {sorted(dims)})"
-        elif len([part for part in parts if part in value_kinds]) > 1:
-            invalid = "at most one value segment (joint / pose / pose_delta)"
+        elif len([part for part in parts if part in motion_kinds]) > 1:
+            invalid = "at most one motion segment"
+        elif len([part for part in parts if part in gripper_kinds]) > 1:
+            invalid = "at most one gripper segment"
         else:
             segments = [(part, dims[part]) for part in parts]
         if invalid is not None:
@@ -369,85 +456,45 @@ class BaseRobot:
             raise ValueError(f"action space {space!r} not supported (available: {list(cls.ACTION_SPACES)})")
         return space
 
-    # ---- 状态向量（observations/qpos / action）：每臂「值 + 夹爪」交错 ----
-    # 内部（target_action）是分段排布：关节段在前、夹爪段在后。
+    # ---- 关节观测布局 ------------------------------------------------------------
     @classmethod
     def state_arm_count(cls) -> int:
-        """状态向量的臂数（每臂 1 夹爪，恒等于 ``GRIPPER`` 维数）。"""
-        return max(int(cls.GRIPPER), 1)
+        """物理臂数。"""
+        return cls.arm_count()
 
     @classmethod
     def state_value_dim_per_arm(cls) -> int:
-        """状态向量值段的每臂维数（joint / pose 各 6）。"""
-        total = int(cls.QPOS if cls.STATE_SPACE == cls.ACTION_SPACE_JOINT else cls.POSE)
-        return total // cls.state_arm_count()
+        """每臂关节数。"""
+        return int(cls.JOINT_DIM_PER_ARM)
 
     @classmethod
     def state_vector_dim(cls) -> int:
-        """状态向量总维数 = 臂数 ×（值每臂维数 + 1 夹爪）。"""
-        return cls.state_arm_count() * (cls.state_value_dim_per_arm() + 1)
-
-    @classmethod
-    def interleave_state(cls, values, gripper) -> np.ndarray:
-        """「值段（每臂等长）+ 夹爪段（每臂 1，分段排布）」→ 状态向量（每臂「值 + 夹爪」交错）。"""
-        values = np.asarray(values, dtype=np.float64).reshape(-1)
-        gripper = np.asarray(gripper, dtype=np.float64).reshape(-1)
-        arms, per_arm = cls.state_arm_count(), cls.state_value_dim_per_arm()
-        if values.size != arms * per_arm or gripper.size != arms:
-            raise ValueError(
-                f"{cls.__name__}: state vector needs values {arms * per_arm} + gripper {arms},"
-                f" got values {values.size} + gripper {gripper.size}"
-            )
-        return np.concatenate(
-            [
-                np.concatenate([values[index * per_arm : (index + 1) * per_arm], [gripper[index]]])
-                for index in range(arms)
-            ]
-        )
-
-    @classmethod
-    def split_state(cls, vector) -> tuple[np.ndarray, np.ndarray]:
-        """状态向量 → ``(值段扁平, 夹爪段扁平)``（``interleave_state()`` 的逆）。"""
-        values = np.asarray(vector, dtype=np.float64).reshape(-1)
-        arms, per_arm = cls.state_arm_count(), cls.state_value_dim_per_arm()
-        if values.size != arms * (per_arm + 1):
-            raise ValueError(f"{cls.__name__}: state vector dim {values.size} != {arms * (per_arm + 1)}")
-        blocks = values.reshape(arms, per_arm + 1)
-        return blocks[:, :per_arm].reshape(-1), blocks[:, per_arm].copy()
+        """采集边界的 qpos / action 维数（每臂 joint + gripper）。"""
+        return cls.joint_dim() + cls.gripper_dim()
 
     def state_arms(self) -> list[str]:
-        """状态向量的臂名：``ARM_NAMES`` 声明齐全时用它，否则退 ``arm_1`` / ``arm_2`` 序号。"""
-        names = [str(arm) for arm in self.ARM_NAMES]
-        count = self.state_arm_count()
-        if len(names) == count:
-            return names
-        return [f"arm_{index + 1}" for index in range(count)]
+        """状态向量的物理臂顺序。"""
+        return [str(arm) for arm in self.ARM_NAMES]
 
     def state_layout(self) -> dict:
-        """状态 / 目标向量的逐维含义（自描述），写进采集 JSON 与 ``/v1/capture/status``。
-
-        每项 = ``{index, arm, kind, name}``；``kind`` ∈ ``joint`` / ``pose`` / ``gripper``。
-        值段语义由 ``STATE_SPACE`` 决定，``action`` 恒为关节目标。
-        """
+        """采集边界 qpos / action 的逐维含义。"""
         arms = self.state_arms()
-
-        def dims(space: str) -> list[dict]:
-            labels = self.VALUE_LABELS[space]
-            entries: list[dict] = []
-            for index, arm in enumerate(arms):
-                base = index * (len(labels) + 1)
-                entries.extend(
-                    {"index": base + offset, "arm": arm, "kind": space, "name": name}
-                    for offset, name in enumerate(labels)
-                )
-                entries.append({"index": base + len(labels), "arm": arm, "kind": "gripper", "name": "gripper"})
-            return entries
+        per_arm = self.state_value_dim_per_arm()
+        labels = self.JOINT_LABELS[:per_arm]
+        dims: list[dict] = []
+        for arm_index, arm in enumerate(arms):
+            base = arm_index * (per_arm + 1)
+            dims.extend(
+                {"index": base + offset, "arm": arm, "kind": "joint", "name": name}
+                for offset, name in enumerate(labels)
+            )
+            dims.append({"index": base + per_arm, "arm": arm, "kind": "gripper", "name": "gripper"})
 
         return {
-            "state_space": self.STATE_SPACE,
-            "state_dims": dims(self.STATE_SPACE),
+            "state_space": self.ACTION_SPACE_JOINT,
+            "state_dims": dims,
             "action_space": self.ACTION_SPACE_JOINT,
-            "action_dims": dims(self.ACTION_SPACE_JOINT),
+            "action_dims": list(dims),
         }
 
     def control_layout(self) -> dict:
@@ -470,8 +517,8 @@ class BaseRobot:
     def reset(self):
         """程序复位到 home（非阻塞）：关节段 = ``init_joint``，夹爪段 = ``init_gripper``。"""
         self.disable_teleop()
-        self.set_target_action(self.init_joint)
-        self.set_target_gripper(self.init_gripper)
+        self.set_joint_target(self.init_joint)
+        self.set_gripper_target(self.init_gripper)
 
     # ---- 下发内核（唯一写目标处）：layout + arms → 目标向量 ----------------
     def plan_layout(self, action, layout: str | None = None, arms: list[str] | None = None) -> LayoutPlan:
@@ -511,50 +558,60 @@ class BaseRobot:
     def apply_layout(self, action, layout: str | None = None, arms: list[str] | None = None) -> None:
         """按 ``layout`` / ``arms`` 写目标。
 
-        - 值段（``joint`` / ``pose`` / ``pose_delta``）→ 关节段：未选臂保持当前目标，选中臂用本次
-          值；位姿类先用目标 FK / 零增量补齐未选臂，再在子类 ``_prepare_target()`` 里整体解算；
-        - ``gripper`` → 夹爪段（钳到 ``[0, 1]``）；
-        - 整条 ``target_action`` 一次赋值，多段同一控制拍生效。
+        - 运动段写关节目标：绝对段覆盖，delta 段叠加在当前目标；位姿类先完成 FK / IK；
+        - 夹爪段写夹爪目标：绝对段覆盖，delta 段叠加，最终钳到 ``[0, 1]``；
+        - ``joint_target`` / ``gripper_target`` 仅在所有转换成功后一起提交。
 
         解算失败（超限位 / 不收敛）→ ``CartesianActionError`` 且不改目标。
         """
         plan = self.plan_layout(action, layout, arms)
-        target = self._target_snapshot()
+        joint_target = self._joint_target_snapshot()
+        gripper_target = self._gripper_target_snapshot()
         offsets: dict[str, tuple[int, int]] = {}
         cursor = 0
         for kind, dim in plan.segments:
             offsets[kind] = (cursor, dim)
             cursor += dim
         names = self.state_arms()
-        joint_per_arm = self.QPOS // len(names)
-        value_kind = next((kind for kind, _ in plan.segments if kind != self.ACTION_SPACE_GRIPPER), None)
-        if value_kind is not None:
-            offset, dim = offsets[value_kind]
-            if value_kind == self.ACTION_SPACE_JOINT:
-                full = target[: self.QPOS].copy()  # 未选臂保持当前关节目标
-            elif value_kind == self.ACTION_SPACE_POSE:
-                pose = self.get_target_pose()
+        joint_per_arm = self.joint_dim() // len(names)
+        motion_kind = next((kind for kind, _ in plan.segments if kind in self.MOTION_ACTION_SPACES), None)
+        if motion_kind is not None:
+            offset, dim = offsets[motion_kind]
+            if motion_kind in (self.ACTION_SPACE_JOINT, self.ACTION_SPACE_JOINT_DELTA):
+                full = joint_target.copy()
+            elif motion_kind == self.ACTION_SPACE_POSE:
+                pose = self.get_pose_action()
                 if pose is None:
                     raise CartesianActionError(f"{self.name}: pose target base is unavailable")
                 full = np.asarray(pose, dtype=np.float64).reshape(-1).copy()
             else:
                 # pose_delta 的未选臂增量必须是 0；不能把该臂的关节目标误当成位姿增量。
-                full = np.zeros(self.POSE, dtype=np.float64)
+                full = np.zeros(self.pose_dim(), dtype=np.float64)
             for row, arm in enumerate(plan.scope):
                 index = names.index(arm)
-                full[index * dim : (index + 1) * dim] = plan.blocks[row][offset : offset + dim]
-            solved = self._prepare_target(full, value_kind)  # 位姿类在这里解算（失败 → 不写目标）
+                values = plan.blocks[row][offset : offset + dim]
+                span = slice(index * dim, (index + 1) * dim)
+                if motion_kind == self.ACTION_SPACE_JOINT_DELTA:
+                    full[span] += values
+                else:
+                    full[span] = values
+            solved = full if motion_kind == self.ACTION_SPACE_JOINT_DELTA else self._prepare_target(full, motion_kind)
             for arm in plan.scope:
                 index = names.index(arm)
-                target[index * joint_per_arm : (index + 1) * joint_per_arm] = solved[
+                joint_target[index * joint_per_arm : (index + 1) * joint_per_arm] = solved[
                     index * joint_per_arm : (index + 1) * joint_per_arm
                 ]
-        if self.ACTION_SPACE_GRIPPER in offsets:
-            offset, _ = offsets[self.ACTION_SPACE_GRIPPER]
+        gripper_kind = next((kind for kind, _ in plan.segments if kind in self.GRIPPER_ACTION_SPACES), None)
+        if gripper_kind is not None:
+            offset, _ = offsets[gripper_kind]
             for row, arm in enumerate(plan.scope):
                 index = names.index(arm)
-                target[self.QPOS + index] = float(np.clip(plan.blocks[row][offset], 0.0, 1.0))
-        self.target_action = target
+                value = float(plan.blocks[row][offset])
+                if gripper_kind == self.ACTION_SPACE_GRIPPER_DELTA:
+                    value += gripper_target[index]
+                gripper_target[index] = float(np.clip(value, 0.0, 1.0))
+        self.joint_target = joint_target
+        self.gripper_target = gripper_target
         debug_print(self.name, f"layout {plan.layout} applied (arms={plan.scope})", "DEBUG")
 
     def execute(
@@ -566,8 +623,8 @@ class BaseRobot:
     ):
         """直接下发动作指令（程控抢回：会结束遥操作）：按 ``layout`` 写目标。
 
-        - ``layout``（缺省 ``joint``）：每臂块内的段序列，如 ``joint+gripper``；``joint`` 直写、
-          ``pose`` / ``pose_delta`` 先解算成关节目标、``gripper`` 只写夹爪段，各段同一拍落地。
+        - ``layout``（缺省 ``joint``）：每臂块内的段序列；绝对段覆盖目标，``*_delta`` 叠加目标，
+          ``pose`` / ``pose_delta`` 先解算成关节目标，各段同一拍落地。
         - ``arms``（缺省 = 全部臂）：只写这些臂，其余臂目标原样保留；给出时 ``action`` 维度按
           所选臂算（要「只控部分臂」必须显式给 ``arms``）。
         """
@@ -600,24 +657,27 @@ class BaseRobot:
         （``PiperController.emergency_stop``）不在这条路径上。
         """
         self.disable_teleop()  # 退出遥操作（含清空增量锚点）
-        self.target_action = None  # 清空整条目标：不再下发新目标（保持当前位姿）
+        self.joint_target = None
+        self.gripper_target = None
         debug_print(self.name, "Safe stop executed.", "WARNING")
 
-    def _prepare_target(self, qpos: np.ndarray, kind: str | None) -> np.ndarray:
-        """把下发动作归一成关节段目标；支持位姿目标的子类覆盖本方法。
-
-        缺省：``joint`` 直通（校验维度 = ``QPOS``）；其余空间 → ``CartesianActionError``。
-        子类在声明位姿空间后，这里把每臂位姿解算成关节目标（调控制器的静态转换函数）。
-        """
+    def _prepare_target(self, motion_target: np.ndarray, kind: str | None) -> np.ndarray:
+        """把 joint / pose / pose_delta 统一转换为关节目标。"""
         space = self.normalize_action_space(kind)
-        if space != self.ACTION_SPACE_JOINT:
-            raise CartesianActionError(
-                f"{self.name}: action space {space!r} is not supported (supported: {list(self.ACTION_SPACES)})"
-            )
-        values = np.asarray(qpos, dtype=np.float64).reshape(-1)
-        if values.shape[0] != self.QPOS:
-            raise ValueError(f"{self.name}: joint action dim {values.shape[0]} != QPOS {self.QPOS}")
-        return values
+        values = np.asarray(motion_target, dtype=np.float64).reshape(-1)
+        if space == self.ACTION_SPACE_JOINT:
+            if values.shape[0] != self.joint_dim():
+                raise ValueError(f"{self.name}: joint action dim {values.shape[0]} != joint_dim() {self.joint_dim()}")
+            return values
+        if space not in (self.ACTION_SPACE_POSE, self.ACTION_SPACE_POSE_DELTA):
+            raise CartesianActionError(f"{self.name}: cannot convert {space!r} to joints")
+        target_pose = self._absolute_pose_target(space, values)
+        seed = (
+            self._joint_target_or_command()
+            if space == self.ACTION_SPACE_POSE_DELTA
+            else self._joint_command_or_fallback()
+        )
+        return self._solve_pose(target_pose, seed)
 
     # ---- 末端 TCP 帧换算（位姿读 / 写各自的唯一进出口）----
     def tcp_offset_of(self, arm: str) -> np.ndarray | None:
@@ -707,7 +767,7 @@ class BaseRobot:
 
     # ---- 位姿类动作的公共实现（``pose`` / ``pose_delta``；子类提供 FK / IK 接入）----
     def _absolute_pose_target(self, space: str, values: np.ndarray) -> np.ndarray:
-        """位姿类动作 → 绝对目标位姿（每臂 ``xyz + rpy``，扁平 ``POSE`` 维）。
+        """位姿类动作 → 绝对目标位姿（每臂 ``xyz + rpy``，扁平 ``pose_dim()`` 维）。
 
         - ``pose``：值就是绝对目标，直用；
         - ``pose_delta``：``target = FK(关节段目标) + [Δxyz, wrap(Δrpy)]``；基准不可用 →
@@ -723,7 +783,7 @@ class BaseRobot:
             raise CartesianActionError(f"{self.name}: {space} action contains non-finite values")
         if space == self.ACTION_SPACE_POSE:
             return values
-        base = self.get_target_pose()
+        base = self.get_pose_action()
         if base is None or not np.all(np.isfinite(np.asarray(base).reshape(-1)[:expected])):
             raise CartesianActionError(
                 f"{self.name}: {space} needs a valid target pose as its base (FK of the joint target)"
@@ -738,59 +798,54 @@ class BaseRobot:
             )
         return target
 
-    def _target_joints(self) -> np.ndarray:
-        """关节段目标（``target_action[:QPOS]``；未下发过指令 → 当前指令位置 ``action``）。
+    def _joint_target_or_command(self) -> np.ndarray:
+        """关节目标（未下发过指令时取当前关节指令）。
 
         增量动作的基准与逆解起点都取它（不是实测关节角）。
         """
-        if self.target_action is not None:
-            return np.array(self.target_action[: self.QPOS], dtype=np.float64)
-        return np.asarray(self.current_action(), dtype=np.float64)
+        if self.joint_target is not None:
+            return np.array(self.joint_target, dtype=np.float64)
+        return np.asarray(self._joint_command_or_fallback(), dtype=np.float64)
 
-    def set_target_action(self, target_action: np.ndarray | None):
+    def set_joint_target(self, joint_target: np.ndarray | None):
         """写关节段目标（绝对值）：``step()`` 每帧把关节段朝它限速移动。
 
-        ``None`` = 清空整条目标（安全停止）。增量（人工接管）写入用 ``set_target_action_delta()``。
+        ``None`` = 清空整条目标（安全停止）。增量（人工接管）写入用 ``set_joint_target_delta()``。
         """
-        if target_action is None:
-            self.target_action = None
+        if joint_target is None:
+            self.joint_target = None
             return
-        target = self._ensure_target()
-        target[: self.QPOS] = np.asarray(target_action, dtype=np.float64).reshape(-1)
+        values = np.asarray(joint_target, dtype=np.float64).reshape(-1)
+        if values.shape[0] != self.joint_dim():
+            raise ValueError(f"{self.name}: joint action dim {values.shape[0]} != joint_dim() {self.joint_dim()}")
+        self.joint_target = values.copy()
 
-    def set_target_gripper(self, target_gripper: np.ndarray | None):
+    def set_gripper_target(self, gripper_target: np.ndarray | None):
         """写夹爪段目标（绝对值，每臂 1 维）：``step()`` 每拍直接跟随（不插值）。
 
-        维度必须等于 ``GRIPPER``；取值钳到 ``[0, 1]``（钳到时告警一条）。
+        维度必须等于 ``gripper_dim()``；取值钳到 ``[0, 1]``（钳到时告警一条）。
         """
-        if target_gripper is None:
+        if gripper_target is None:
             return  # None = 不改夹爪段（要复位用 reset()）
-        values = np.asarray(target_gripper, dtype=np.float64).reshape(-1)
-        if values.shape[0] != self.GRIPPER:
-            raise ValueError(f"{self.name}: gripper action dim {values.shape[0]} != GRIPPER {self.GRIPPER}")
+        values = np.asarray(gripper_target, dtype=np.float64).reshape(-1)
+        if values.shape[0] != self.gripper_dim():
+            raise ValueError(f"{self.name}: gripper action dim {values.shape[0]} != gripper_dim() {self.gripper_dim()}")
         clipped = np.clip(values, 0.0, 1.0)
         if not np.allclose(clipped, values):
             debug_print(self.name, f"gripper target clipped to [0, 1]: {values.tolist()}", "WARNING")
-        self._ensure_target()[self.QPOS :] = clipped
+        self.gripper_target = clipped.copy()
 
-    def _ensure_target(self) -> np.ndarray:
-        """取底层目标向量 ``[关节段 | 夹爪段]``；未初始化时以当前实际状态初始化。
-
-        以当前状态（而非 ``init_joint``）初始化，保证「只改一段」的命令不会把另一段拉回 home。
-        """
-        if self.target_action is None:
-            self.target_action = np.concatenate([self.current_action(), self.current_gripper()])
-        return self.target_action
-
-    def _target_snapshot(self) -> np.ndarray:
-        """构造本次下发的局部目标副本；不修改 ``target_action``。
+    def _joint_target_snapshot(self) -> np.ndarray:
+        """构造本次下发的局部目标副本；不修改 ``joint_target``。
 
         ``apply_layout()`` 在局部副本上完成补段与 FK / IK，全部成功后才一次提交。这样首条命令
-        解算失败时，``target_action`` 仍保持 ``None``，符合失败零副作用契约。
+        解算失败时，``joint_target`` 仍保持 ``None``，符合失败零副作用契约。
         """
-        if self.target_action is not None:
-            return self.target_action.copy()
-        return np.concatenate([self.current_action(), self.current_gripper()])
+        return self.joint_target.copy() if self.joint_target is not None else self._joint_command_or_fallback()
+
+    def _gripper_target_snapshot(self) -> np.ndarray:
+        """构造夹爪目标副本，供组合 layout 原子提交。"""
+        return self.gripper_target.copy() if self.gripper_target is not None else self._gripper_command_or_fallback()
 
     # ---- 遥操作（模式 / 锚点）----
     def resolve_teleop_follow(self, follow_space=None, follow_axes=None) -> tuple[str, tuple[str, ...]]:
@@ -802,13 +857,13 @@ class BaseRobot:
             if follow_axes is not None:
                 raise ValueError(f"{self.name}: follow_axes is only valid for pose teleop")
             return space, ()
-        if self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.POSE <= 0:
+        if self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.pose_dim() <= 0:
             raise ValueError(f"{self.name}: follow_space='pose' needs pose action capability")
         expected_pose = self.POSE_DIM_PER_ARM * len(self.ARM_NAMES)
-        if self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES) or self.POSE != expected_pose:
+        if self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES) or self.pose_dim() != expected_pose:
             raise ValueError(
                 f"{self.name}: pose teleop needs {len(self.TELEOP_POSE_AXES)} pose dims per arm"
-                f" and POSE={expected_pose} (got per_arm={self.POSE_DIM_PER_ARM}, POSE={self.POSE})"
+                f" and pose_dim()={expected_pose} (got per_arm={self.POSE_DIM_PER_ARM}, pose_dim()={self.pose_dim()})"
             )
         if follow_axes is None:
             axes = (
@@ -849,14 +904,14 @@ class BaseRobot:
         return True
 
     def disable_teleop(self):
-        """关闭遥操作：回到程序控制，``step()`` 不再刷新 target_action（清空增量锚点）。"""
+        """关闭遥操作：回到程序控制，不再由主臂刷新目标（并清空增量锚点）。"""
         if not self.teleop_enabled:
             return  # reset / execute / rollout 每次都会调用：未开启时静默
         self.teleop_enabled = False
         self._clear_teleop_anchor()
         debug_print(self.name, f"Teleop disabled (mode={self.teleop_mode})", "INFO")
 
-    def set_target_action_delta(self, delta: np.ndarray) -> bool:
+    def set_joint_target_delta(self, delta: np.ndarray) -> bool:
         """在增量锚点（接管瞬间的从臂关节角）上叠加增量，写关节段目标。
 
         ``delta`` = 主臂读数 − 主臂锚点；限速仍由 ``step()`` 完成，本接口不限幅。
@@ -864,33 +919,33 @@ class BaseRobot:
         """
         if self.teleop_slave_ref is None:
             return False
-        self.set_target_action(self.teleop_slave_ref + np.asarray(delta, dtype=np.float64))
+        self.set_joint_target(self.teleop_slave_ref + np.asarray(delta, dtype=np.float64))
         return True
 
-    def set_target_gripper_delta(self, delta: np.ndarray) -> bool:
+    def set_gripper_target_delta(self, delta: np.ndarray) -> bool:
         """在夹爪锚点上叠加增量（与关节段同一套语义）；锚点未采样 → False。"""
         if self.teleop_slave_gripper_ref is None:
             return False
-        self.set_target_gripper(self.teleop_slave_gripper_ref + np.asarray(delta, dtype=np.float64))
+        self.set_gripper_target(self.teleop_slave_gripper_ref + np.asarray(delta, dtype=np.float64))
         return True
 
-    def current_action(self) -> np.ndarray:
-        """从臂当前关节段（``action`` → ``target_action`` → ``init_joint``）。
+    def _joint_command_or_fallback(self) -> np.ndarray:
+        """当前关节命令；尚未产生控制拍时依次回退目标与初始值。
 
         供增量接管采样从臂锚点：接管后 target 从该位姿出发，此前残留的推理 target 被丢弃。
         """
-        if self.action is not None:
-            return self.action[: self.QPOS].copy()
-        if self.target_action is not None:
-            return self.target_action[: self.QPOS].copy()
+        if self.joint_command is not None:
+            return self.joint_command.copy()
+        if self.joint_target is not None:
+            return self.joint_target.copy()
         return np.asarray(self.init_joint, dtype=np.float64)
 
-    def current_gripper(self) -> np.ndarray:
-        """从臂当前夹爪段（``action`` → ``target_action`` → ``init_gripper``）。"""
-        if self.action is not None:
-            return self.action[self.QPOS :].copy()
-        if self.target_action is not None:
-            return self.target_action[self.QPOS :].copy()
+    def _gripper_command_or_fallback(self) -> np.ndarray:
+        """当前夹爪命令；尚未产生控制拍时依次回退目标与初始值。"""
+        if self.gripper_command is not None:
+            return self.gripper_command.copy()
+        if self.gripper_target is not None:
+            return self.gripper_target.copy()
         return np.asarray(self.init_gripper, dtype=np.float64)
 
     def _capture_teleop_anchor(self, master_joints: np.ndarray, master_gripper: np.ndarray):
@@ -900,12 +955,12 @@ class BaseRobot:
         其余组合均在首次有效读数拍调用。
         """
         master_ref = np.asarray(master_joints, dtype=np.float64).reshape(-1).copy()
-        slave_ref = self.current_action()
+        slave_ref = self._joint_command_or_fallback()
         master_gripper_ref = np.asarray(master_gripper, dtype=np.float64).reshape(-1).copy()
-        slave_gripper_ref = self.current_gripper()
+        slave_gripper_ref = self._gripper_command_or_fallback()
         master_pose_ref = slave_pose_ref = None
         if self.teleop_follow_space == self.TELEOP_FOLLOW_POSE:
-            master_pose_ref = self._valid_teleop_pose(self._pose_of_joints(master_ref), "master")
+            master_pose_ref = self._teleop_master_pose(master_ref)
             slave_pose_ref = self._valid_teleop_pose(self._pose_of_joints(slave_ref), "slave")
         self.teleop_master_ref = master_ref
         self.teleop_slave_ref = slave_ref
@@ -920,13 +975,24 @@ class BaseRobot:
         )
 
     def _valid_teleop_pose(self, pose, side: str) -> np.ndarray:
-        """校验 teleop FK 结果为完整、有限的 ``POSE`` 维向量。"""
+        """校验 teleop FK 结果为完整、有限的 ``pose_dim()`` 维向量。"""
         values = np.asarray(pose, dtype=np.float64).reshape(-1)
-        if values.shape[0] != self.POSE or not np.all(np.isfinite(values)):
+        if values.shape[0] != self.pose_dim() or not np.all(np.isfinite(values)):
             raise CartesianActionError(
-                f"{self.name}: teleop {side} pose invalid (dim={values.shape[0]}, expected={self.POSE})"
+                f"{self.name}: teleop {side} pose invalid (dim={values.shape[0]}, expected={self.pose_dim()})"
             )
         return values.copy()
+
+    def _teleop_master_pose(self, master_joints: np.ndarray) -> np.ndarray:
+        """主臂 FK 位姿叠加配置偏置，并规范化各臂 RPY。"""
+        pose = self._valid_teleop_pose(self._pose_of_joints(master_joints), "master")
+        pose += self.teleop_pose_offset
+        for arm_index in range(len(self.ARM_NAMES)):
+            start = arm_index * self.POSE_DIM_PER_ARM
+            pose[start + 3 : start + self.POSE_DIM_PER_ARM] = wrap_angles(
+                pose[start + 3 : start + self.POSE_DIM_PER_ARM]
+            )
+        return pose
 
     def _pose_teleop_target(self, master_joints: np.ndarray) -> np.ndarray:
         """按映射模式与轴白名单合成目标位姿并 IK，返回关节段目标。
@@ -936,7 +1002,7 @@ class BaseRobot:
         """
         if self.teleop_master_pose_ref is None or self.teleop_slave_pose_ref is None:
             raise CartesianActionError(f"{self.name}: pose teleop anchor is unavailable")
-        master_pose = self._valid_teleop_pose(self._pose_of_joints(master_joints), "master")
+        master_pose = self._teleop_master_pose(master_joints)
         target = self.teleop_slave_pose_ref.copy()
         followed = set(self.teleop_follow_axes)
         per_arm = self.POSE_DIM_PER_ARM
@@ -954,10 +1020,11 @@ class BaseRobot:
                 else:
                     target[index] = master_pose[index]
             target[start + 3 : start + per_arm] = wrap_angles(target[start + 3 : start + per_arm])
-        solved = np.asarray(self._solve_pose(target, self._target_joints()), dtype=np.float64).reshape(-1)
-        if solved.shape[0] != self.QPOS or not np.all(np.isfinite(solved)):
+        solved = np.asarray(self._solve_pose(target, self._joint_target_or_command()), dtype=np.float64).reshape(-1)
+        if solved.shape[0] != self.joint_dim() or not np.all(np.isfinite(solved)):
             raise CartesianActionError(
-                f"{self.name}: pose teleop IK returned invalid joints (dim={solved.shape[0]}, expected={self.QPOS})"
+                f"{self.name}: pose teleop IK returned invalid joints "
+                f"(dim={solved.shape[0]}, expected={self.joint_dim()})"
             )
         return solved
 
@@ -973,20 +1040,20 @@ class BaseRobot:
         self.teleop_master_gripper_now = None
         self._teleop_mapping_error = None
 
-    def _refresh_teleop_target(self):
+    def _refresh_teleop_targets(self):
         """本拍遥操作 target 刷新（``step()`` 调用；未开启 / 读不到 / 读取异常 → 保持原 target）。
 
         joint 跟随沿用既有 absolute / delta；pose 跟随先 FK，再按轴白名单合成位姿并 IK。锚点尚未
         采样时本拍先原子采样。主臂读不到或位姿映射失败都只让本拍保持原目标，不置 ``last_error``。
 
-        常量偏置（``teleop_joint_offset``）在取锚点前叠加，故 ``absolute`` 下可见、``delta`` 下被
-        锚点抵消。
+        关节偏置在 FK 前、位姿偏置在 FK 后叠加；两者都早于锚点，故 ``absolute`` 下可见、
+        ``delta`` 下被锚点抵消。位姿偏置不参与 joint 跟随。
         """
         if not self.teleop_enabled:
             return
         try:
-            master = self._get_teleop_target()
-            master_gripper = self._get_teleop_gripper()
+            master = self._read_teleop_joint()
+            master_gripper = self._read_teleop_gripper()
         except Exception as exc:  # noqa: BLE001 主臂读取异常：本拍保持原 target，下一拍重试
             self._note_teleop_read_failure(exc)
             return
@@ -1009,19 +1076,19 @@ class BaseRobot:
                 return
         try:
             if self.teleop_follow_space == self.TELEOP_FOLLOW_POSE:
-                self.set_target_action(self._pose_teleop_target(master))
+                self.set_joint_target(self._pose_teleop_target(master))
             elif self.teleop_mode == self.TELEOP_MODE_DELTA:
-                self.set_target_action_delta(master - self.teleop_master_ref)
+                self.set_joint_target_delta(master - self.teleop_master_ref)
             else:
-                self.set_target_action(master)
+                self.set_joint_target(master)
         except Exception as exc:  # noqa: BLE001 IK / 位姿合成失败：保持上一目标，下一拍重试
             self._note_teleop_mapping_failure(exc)
             return
         self._teleop_mapping_error = None
         if self.teleop_mode != self.TELEOP_MODE_DELTA:
-            self.set_target_gripper(master_gripper)
+            self.set_gripper_target(master_gripper)
             return
-        self.set_target_gripper_delta(master_gripper - self.teleop_master_gripper_ref)
+        self.set_gripper_target_delta(master_gripper - self.teleop_master_gripper_ref)
 
     def _note_teleop_mapping_failure(self, reason) -> None:
         """FK / IK / 位姿合成失败：累计 + 同原因限流告警，不改变目标与 health。"""
@@ -1054,78 +1121,64 @@ class BaseRobot:
     def teleop_master_sample(self) -> tuple[np.ndarray, np.ndarray] | None:
         """最近一次成功的主臂读数 ``(关节, 夹爪)``；未开启遥操作 / 还没读到 → ``None``。
 
-        与 ``_get_teleop_target()`` 同源（控制线程每拍刷新），供采集侧「帧头跳过」复用。
+        与 ``_read_teleop_joint()`` 同源（控制线程每拍刷新），供采集侧「帧头跳过」复用。
         返回的数组只读使用。
         """
         if not self.teleop_enabled or self.teleop_master_now is None or self.teleop_master_gripper_now is None:
             return None
         return self.teleop_master_now, self.teleop_master_gripper_now
 
-    def _get_teleop_target(self) -> np.ndarray | None:
+    def _read_teleop_joint(self) -> np.ndarray | None:
         """遥操作关节段目标源：返回主臂关节角读数；默认 None（无遥操作源）。
 
         子类只需实现「读主臂」，``absolute`` / ``delta`` 的差异全部由本基类映射。
         """
         return None
 
-    def _get_teleop_gripper(self) -> np.ndarray | None:
+    def _read_teleop_gripper(self) -> np.ndarray | None:
         """遥操作夹爪段目标源：返回主臂夹爪读数（每臂 1 维）；默认 None。"""
         return None
 
     # ---- 每帧推进 --------------------------------------------------------------------
     def step(self):
-        """每拍：刷新遥操作 target（若开启）→ 关节段限速前进、夹爪段直接跟随，然后下发。
-
-        只碰 ``action / target_action`` 这一条 ``[关节段 | 夹爪段]`` 向量：关节段按 ``step_rad``
-        插值（防跳变，底层始终关节控制），夹爪段直接跟随目标（不插值）。
-        """
-        self._refresh_teleop_target()
-        if self.target_action is None:
+        """刷新目标，关节限速前进，夹爪直接跟随，再下发本拍指令。"""
+        self._refresh_teleop_targets()
+        if self.joint_target is None and self.gripper_target is None:
             return
-        if self.action is None:
-            # 以实际状态初始化，避免开始时跳变
-            self.action = np.concatenate([self.get_observation_qpos(), self.get_observation_gripper()])
-        self.action[: self.QPOS] = self._step_toward(
-            self.action[: self.QPOS], self.target_action[: self.QPOS], self.step_rad
-        )
-        self.action[self.QPOS :] = self.target_action[self.QPOS :]  # 夹爪直接跟随（不插值）
-        self._apply_action(self.action)
+        if self.joint_command is None:
+            self.joint_command = self.get_observation_joint()
+        if self.gripper_command is None:
+            self.gripper_command = self.get_observation_gripper()
+        if self.joint_target is not None:
+            self.joint_command = self._step_toward(self.joint_command, self.joint_target, self.step_rad)
+        if self.gripper_target is not None:
+            self.gripper_command = self.gripper_target.copy()
+        self._apply_commands(self.joint_command, self.gripper_command)
 
-    def _apply_action(self, action: np.ndarray):
-        """把底层目标向量 ``[关节段 | 夹爪段]`` 下发到硬件（控制线程每拍；限速已在 ``step()`` 完成）
-        ——子类实现。
-
-        典型实现：拆出每臂关节段调 ``controller.set_joint(关节)``（限位在控制器里），
-        夹爪段（``action[QPOS + i]``）调 ``controller.set_gripper(夹爪)``。
-        """
+    def _apply_commands(self, joints: np.ndarray, gripper: np.ndarray):
+        """下发本拍关节与夹爪指令。"""
         raise NotImplementedError
 
     # ---- 每拍状态采样 / 观测组装（**原始数据，无契约键**；由 robot server 组装 standard_obs）----
-    def sample_qpos(self) -> dict:
-        """采样机械臂侧状态并缓存进 ``motion_state``：状态向量 + 目标向量 + 实测 / 目标位姿。
-
-        由 env 控制线程每拍调用（本线程是控制器唯一写者 / 读者）；seq 自增，供 server 上报。
-        ``observations/qpos`` = 状态向量（每臂「值 + 夹爪」交错），``action`` = 目标向量（同维同
-        布局，无指令时回退状态）；``observations/pose`` / ``pose_target`` 由同一拍关节角 / 关节段
-        目标正解（``POSE = 0`` 的机器人不提供）。帧时刻不在这里写入，而由 ``build_observation()``
-        打点。
-        """
+    def sample_state(self) -> dict:
+        """采样并缓存分离的关节、夹爪及其目标；位姿由同拍关节正解。"""
         self.seq += 1
-        joints = self.get_observation_qpos()  # 关节角（每臂 6，分段排布）
-        gripper = self.get_observation_gripper()  # 夹爪（每臂 1，分段排布）
-        qpos = self.interleave_state(joints, gripper)  # 状态向量（每臂「值 + 夹爪」）
-        action_joints, action_gripper = self.get_action(), self.get_gripper_action()
-        if action_joints is None or action_gripper is None:
-            action = qpos.copy()  # 无指令时以当前状态作为 action（保证观测含有效 action）
-        else:
-            action = self.interleave_state(action_joints, action_gripper)  # 同维同布局的目标向量
-        state = {self.KEY_QPOS: qpos, self.KEY_ACTION: action}
-        pose = self.get_observation_pose(joints)
+        joint = self.get_observation_joint()
+        gripper = self.get_observation_gripper()
+        joint_target = self.get_joint_target()
+        gripper_target = self.get_gripper_target()
+        state = {
+            self.KEY_JOINT: joint,
+            self.KEY_GRIPPER: gripper,
+            self.KEY_JOINT_ACTION: joint.copy() if joint_target is None else joint_target,
+            self.KEY_GRIPPER_ACTION: gripper.copy() if gripper_target is None else gripper_target,
+        }
+        pose = self.get_observation_pose(joint)
         if pose is not None:
             state[self.KEY_POSE] = pose
-        target_pose = self.get_target_pose()
+        target_pose = self.get_pose_action()
         if target_pose is not None:
-            state[self.KEY_POSE_TARGET] = target_pose
+            state[self.KEY_POSE_ACTION] = target_pose
         self.motion_state = state
         return self.motion_state
 
@@ -1216,30 +1269,29 @@ class BaseRobot:
 
         相机取帧会阻塞，勿在控制线程调用（会拖慢机械臂步进）；供单线程脚本 / 调试整体取一帧。
         """
-        state = self.sample_qpos()
+        state = self.sample_state()
         timestamp = time.time()  # 帧时刻（取帧前打点，与 build_observation 同口径）
         return {**state, **self.capture_frames(), self.KEY_TIMESTAMP: timestamp}
 
-    def get_observation_qpos(self) -> np.ndarray:
-        """当前帧关节角（扁平 ``QPOS`` 维，每臂 6）——子类实现。
+    def get_observation_joint(self) -> np.ndarray:
+        """当前帧关节角（扁平 ``joint_dim()`` 维，每臂 6）——子类实现。
 
-        ``observations/qpos`` 的值段始终是关节角（与当前动作空间无关）；读不到可信读数时应抛
-        ``RuntimeError``。
+        返回值写入原始观测的 ``joint`` 键；读不到可信读数时应抛 ``RuntimeError``。
         """
         raise NotImplementedError
 
-    def get_observation_pose(self, qpos: np.ndarray | None = None) -> np.ndarray | None:
-        """末端位姿（扁平 ``POSE`` 维：各臂 ``xyz + rpy``）——子类按需实现，缺省不提供。
+    def get_observation_pose(self, joint: np.ndarray | None = None) -> np.ndarray | None:
+        """末端位姿（扁平 ``pose_dim()`` 维：各臂 ``xyz + rpy``）——子类按需实现，缺省不提供。
 
         提供位姿的机器人用同一拍关节角让控制器的静态正解函数正算；关节读数缺失 / 非法时可返回
         NaN 向量（下游丢弃该帧位姿）。不提供位姿的机器人返回 ``None``（观测里没有该键）。
         """
         return None
 
-    def get_target_pose(self) -> np.ndarray | None:
-        """目标位姿 = ``FK(关节段目标)``（扁平 ``POSE`` 维）——子类按需实现，缺省不提供。
+    def get_pose_action(self) -> np.ndarray | None:
+        """目标位姿 = ``FK(关节段目标)``（扁平 ``pose_dim()`` 维）——子类按需实现，缺省不提供。
 
-        与 ``get_observation_pose()`` 同一套静态正解，喂进去的是 ``_target_joints()``；与
+        与 ``get_observation_pose()`` 同一套静态正解，喂进去的是 ``_joint_target_or_command()``；与
         ``observations/pose`` 同系可比，「目标 − 实测」即稳态误差。``pose_delta`` 的基准与解算
         结果都靠它。不提供位姿的机器人返回 ``None``。
         """
@@ -1254,10 +1306,10 @@ class BaseRobot:
         raise CartesianActionError(f"{self.name}: pose-to-joint conversion is not supported")
 
     def get_observation_gripper(self) -> np.ndarray:
-        """当前帧夹爪（扁平 ``GRIPPER`` 维 = 每臂 1，分段排布）——子类实现。
+        """当前帧夹爪（扁平 ``gripper_dim()`` 维 = 每臂 1，分段排布）——子类实现。
 
-        夹爪是状态向量的每臂末位（``observations/qpos``）；本钩子供 ``sample_qpos()`` 拼装状态
-        向量用，仍是控制器实测值。读不到时可返回 NaN 向量。
+        返回值写入原始观测的 ``gripper`` 键，之后由 server 与 joint 组装为采集 qpos。读不到时可
+        返回 NaN 向量。
         """
         raise NotImplementedError
 
@@ -1285,24 +1337,17 @@ class BaseRobot:
                 out[f"{self.DEPTH_PREFIX}{name}"] = depth
         return out
 
-    def get_action(self) -> np.ndarray | None:
-        """当前关节段目标（底层实际控制量；分段排布）；未下发过 → None。
-
-        ``sample_qpos()`` 把它与 ``get_gripper_action()`` 交错成观测里的 ``action``。``pose`` 空间
-        下给的是解算后的关节目标，不是位姿目标。
-        """
-        if self.target_action is None:
+    def get_joint_target(self) -> np.ndarray | None:
+        """当前关节目标；位姿输入已在写目标前转换为关节。"""
+        if self.joint_target is None:
             return None
-        return self.target_action[: self.QPOS].copy()
+        return self.joint_target.copy()
 
-    def get_gripper_action(self) -> np.ndarray | None:
-        """当前夹爪段目标（分段排布；每臂 1 维）；未下发过 → None。
-
-        观测里的 ``action`` 靠它补齐每臂的夹爪槽（``sample_qpos()``）。
-        """
-        if self.target_action is None:
+    def get_gripper_target(self) -> np.ndarray | None:
+        """当前夹爪目标；未下发过则返回 None。"""
+        if self.gripper_target is None:
             return None
-        return self.target_action[self.QPOS :].copy()
+        return self.gripper_target.copy()
 
     # ---- 生命周期（env / server 调用）----------------------------------------------------
     def connect(self):

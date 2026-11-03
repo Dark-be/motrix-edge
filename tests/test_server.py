@@ -202,7 +202,14 @@ def test_adapters_info_returns_capabilities():
         assert info["available"] is True
         caps = info["capabilities"]
         assert caps["action_dim"] == 12  # 兼容字段 = 关节空间维度（双臂 6 × 2）
-        assert caps["action_dims"] == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+        assert caps["action_dims"] == {
+            "joint": 12,
+            "joint_delta": 12,
+            "pose": 12,
+            "pose_delta": 12,
+            "gripper": 2,
+            "gripper_delta": 2,
+        }
         assert "image_names" in caps and "capabilities" in caps
 
 
@@ -742,7 +749,7 @@ def test_preview_returns_latest_observation():
     node.frame_manager.update(
         {
             "observations/qpos": np.array([0.1, 0.2]),  # float64：float 转换精确
-            "observations/pose_target": np.array([0.3, 0.4]),  # 目标位姿（= FK(关节段目标)）
+            "observations/pose_action": np.array([0.3, 0.4]),  # 目标位姿（= FK(关节段目标)）
             "observations/images/cam_head": np.full((8, 8, 3), 128, dtype=np.uint8),
         }
     )
@@ -1106,8 +1113,7 @@ def test_leases_expired_rejected_410():
     """租约超期未续约 → 失效：受控操作拒绝（410），需重新签发。"""
     node = FakeNode()
     client = make_captures_client(node)
-    lease = install_lease(client, ttl=1)
-    time.sleep(1.2)  # ttl=1s 到期
+    lease = install_lease(client, ttl=1, expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
     # GET 保留过期状态：expired 且 leasable（可重新签发）
     snap = client.get("/v1/leases").json()
     assert snap["lease_id"] == lease
@@ -1547,22 +1553,10 @@ def test_captures_exit_finishes_session():
     assert lease2 != lease
 
 
-@pytest.mark.skip(
-    reason="临时跳过：真实节点观测会遗留原生帧线程，进程退出时偶发 SIGABRT "
-    "(`terminate called without an active exception`，exit 134)，本地/CI 间歇失败。"
-    "待实现线程安全 teardown 后再启用。"
-)
 def test_captures_real_node_observes_until_exit(tmp_path):
     """端到端：web（CommandService）驱动真实 EdgeNode + FakeRobotAdapter，enter → 持续观测 → exit。"""
     cfg = {
         **BASE_CFG,
-        "adapter": [
-            {
-                "name": "Test Robot",
-                "type": "test_robot",
-                "data_dir": str(tmp_path),  # 运行时行为参数（适配器特有）；能力由适配器返回
-            }
-        ],
         "capture": {"obs_freq": 30},
     }
     from motrix_edge.node import EdgeNode, NodeState
@@ -1577,7 +1571,8 @@ def test_captures_real_node_observes_until_exit(tmp_path):
     node.initialize()  # INIT → IDLE（构造后默认 INIT，先完成初始化再置 READY）
     node.lifecycle.transition(NodeState.READY)
     leases = LeaseManager()
-    threading.Thread(target=node.run, name="node", daemon=True).start()
+    node_thread = threading.Thread(target=node.run, name="node", daemon=True)
+    node_thread.start()
     client = TestClient(
         create_app(BASE_CFG, node=node, commands=CommandService(bus, leases=leases), lease_manager=leases)
     )
@@ -1617,6 +1612,10 @@ def test_captures_real_node_observes_until_exit(tmp_path):
                 leases.revoke(active)
         except Exception:  # noqa: BLE001
             pass
+        client.close()
+        node.stop()
+        node_thread.join(timeout=2.0)
+        assert not node_thread.is_alive()
 
 
 def wait_capture_state(client, state, timeout=5.0):

@@ -13,7 +13,7 @@
 
 ## TODO
 
--   [x] **阶段 0-a** `robot/gravity.py`：标定期纯逻辑（位形规划 / 判稳 / 窗口统计 / 摩擦估计 /
+-   [x] **阶段 0-a** `robot/calibration/gravity.py`：标定期纯逻辑（位形规划 / 判稳 / 窗口统计 / 摩擦估计 /
         样本汇总 / 存取）+ 单测
 -   [x] **阶段 0-b** `scripts/verify_gravity.py`：现场脚本（`--read` 只读自检 / `--hold` 符号单位
         自检 / `--sweep` 采样落盘）
@@ -45,7 +45,7 @@
 
 ## 阶段 0：标定工具（本次）
 
-### 0-a 纯逻辑 `robot/gravity.py`
+### 0-a 纯逻辑 `robot/calibration/gravity.py`
 
 只依赖 numpy（现场脚本要能在没有 SDK 的环境里被单测导入）。
 
@@ -90,7 +90,8 @@
 ## 阶段 2：接入控制环（已完成，现场验收待做）
 
 -   `PiperController.get_motor_states()`（返回 `q` / `vel` / `tau` 数据类）；
--   注入在**控制器内部**（`set_joint`）：显式 `torque_ff` 优先；否则装载过 `robot.gravity` 时每拍读
+-   注入在**控制器内部**（`set_joint`）：显式 `torque_ff` 优先；否则装载过
+    `robot.dynamics.gravity` 模型时每拍读
     实测 `q` 算 `α·τ̂_g(q_meas)`——所有机器人类零改动，主臂（只读）不装载；
 -   **降级规则**：读数 `None` / 非有限 / 模型异常 → 本拍 `t_ff = 0` + 同原因只告警一条，不中断控制；
 -   限幅：`|τ_ff| ≤ min(16 N·m, 配置上限)`；

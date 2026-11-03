@@ -161,7 +161,7 @@ capability 命名 `<scope>/<verb>`（scope = `robot` / `capture` / `infer` / `no
     `settle_pos_tol` / `settle_rot_tol`——外部 agent 靠它判成败，不等就会读到未动的那一帧，
     凭 `final_err` 与容差又能区分「还差一点」与「`stalled` 受阻」。**位置与姿态分别比容差**
     （不把米和弧度混进一个阈值）。**位姿增量（`move_delta` / `rotate_delta`）的到位参考取
-    `observations/pose_target`**（机器人解算出的绝对目标）：下发后先等它从快照跃迁（命令走队列 + 观测
+    `observations/pose_action`**（机器人解算出的绝对目标）：下发后先等它从快照跃迁（命令走队列 + 观测
     按观察频率发布，不等就会拿旧目标当参考而误判到位），一直未跃迁 → `reached: null` +
     `not_applied`；跃迁后与「快照 + 增量」不符 → `base_changed`（基准被第三方改动）。
     可**逐次覆盖**：`settle=False` 不阻塞（`reached: null` + `reason`，

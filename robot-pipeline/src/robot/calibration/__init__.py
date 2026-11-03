@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""robot.calibration —— 手眼标定与外参（**纯 numpy + 仅标定板检测用 OpenCV**）。
+"""机器人标定工具：外参与重力模型辨识。
 
 分工（见 ``wiki/design/robot_pipeline_frames.md``「分层与归属」）：
 
@@ -22,6 +22,7 @@
 -   :mod:`~robot.calibration.samples`：采集样本 JSON 的结构与读写（采集与解算之间的唯一接口）；
 -   :mod:`~robot.calibration.store`：产物 ``<根>/config/calibration/frames.json`` 读写（机器人进程与
       标定脚本共用）。
+-   :mod:`~robot.calibration.gravity`：重力采样的位形规划、判稳、统计与参数拟合（纯 numpy）。
 
 帧模型（``FrameSet`` / 变换数学）在 ``motrix_edge.geometry``——Edge 运行期要用同一份，故不在这里另写。
 """

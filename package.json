@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "format": "uv run ruff format . && npx prettier --write .",
-    "add-header": "unified-ci add-header --replace --ignore .prettierignore --extensions py,pyi --comment \"#\""
+    "add-header": "unified-ci add-header --replace --ignore .prettierignore --extensions py,pyi --comment \"#\"",
+    "test": "uv run pytest",
+    "test:fast": "uv run pytest -o addopts='' -q"
   },
   "devDependencies": {
     "@motphys/unified-ci-dev": "1.15.0-alpha.2"

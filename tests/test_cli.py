@@ -79,6 +79,8 @@ def test_parse_layout_defaults_and_validates():
     assert parse_layout("") == "joint"
     assert parse_layout("POSE") == "pose"
     assert parse_layout("joint") == "joint"
+    assert parse_layout("joint_delta") == "joint_delta"
+    assert parse_layout("gripper_delta") == "gripper_delta"
     with pytest.raises(ValueError, match="invalid layout"):
         parse_layout("cartesian")
 

@@ -112,7 +112,8 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
         `pose_dim` 为准（机器人没写位姿区 = 0，不谎报）；位姿量纲 / 形状防护（`|xyz| ≤ 10 m`、
         `|rpy| ≤ 7 rad`，不合格丢弃并记一条 ERROR）；新增 `POSE_FRAME`（dual piper = `flange`）
         并在 `env.get_env_meta` 暴露 `pose_frame`；facade 各处的每臂位姿判断统一走同一口径。
--   [x] **机器人侧位姿观测（robotics 侧）**：`DualPiperRobot` 已加 `POSE = 12` +
+-   [x] **机器人侧位姿观测（robotics 侧）**：`DualPiperRobot` 已加 `POSE_DIM_PER_ARM = 6`（双臂
+        `pose_dim() = 12`）+
         `get_observation_pose()`（由**同一拍关节角**经 `robot/kinematics` 的正解解算；SDK 法兰位姿
         **不在运行时链路**，只在现场标定时读作对照）——RPent 启动自检的 `pose_dim_per_arm` 因此为 6。
 -   [x] **机器人侧位姿动作下发（求解器，不经 `move_p`）**：`layout="pose"` 时

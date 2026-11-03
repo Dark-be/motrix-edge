@@ -51,7 +51,14 @@ class TestRobotAdapter(HttpShmAdapter):
     ACTION_DIM_PER_ARM = DUAL_ARM_ACTION_DIM_PER_ARM  # 各空间每臂维度
     # 臂布局（与 DualPiperAdapter 同一组常量：双臂结构一致，避免两处重复声明）
     # 支持的动作空间：关节 + 末端位姿（绝对 / 增量）+ 夹爪（位姿由机器人进程 IK 转关节后执行）
-    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.POSE, ActionSpace.POSE_DELTA, ActionSpace.GRIPPER)
+    ACTION_SPACES = (
+        ActionSpace.JOINT,
+        ActionSpace.JOINT_DELTA,
+        ActionSpace.POSE,
+        ActionSpace.POSE_DELTA,
+        ActionSpace.GRIPPER,
+        ActionSpace.GRIPPER_DELTA,
+    )
     # test robot 无真实运动学：位姿由同一拍 qpos 经固定映射派生
     POSE_FRAME = "fk"
     ARM_NAMES = DUAL_ARM_NAMES

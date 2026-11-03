@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 _Q0 = np.array([0.1] * 12)
 _G0 = np.array([1.0, 1.0])
@@ -40,6 +40,7 @@ class _FakeCollector:
         self.meta = dict(self.cfg.get("meta") or {})
         self.save_dir = Path(self.cfg.get("save_dir") or ".")
         self.calls: list[str] = []
+        self.control_layout: dict = {}
 
     def start(self):
         self.calls.append("start")
@@ -55,6 +56,9 @@ class _FakeCollector:
 
     def set_meta(self, meta):
         self.meta.update(meta or {})
+
+    def set_control_layout(self, layout):
+        self.control_layout = dict(layout or {})
 
 
 class _FakeRobot:

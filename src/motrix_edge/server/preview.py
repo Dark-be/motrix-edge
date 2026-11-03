@@ -25,7 +25,7 @@
 from motrix_edge.adapter.base import (
     KEY_ACTION,
     KEY_POSE,
-    KEY_POSE_TARGET,
+    KEY_POSE_ACTION,
     KEY_QPOS,
     depth_names_of,
     image_names_of,
@@ -59,8 +59,7 @@ class PreviewService:
         pose_target / action + 臂名）。
 
         不要求会话 —— 无会话时返回当前观测缓存（可能为空），预览随时可开。
-        〚qpos〛/〚gripper〛是**同一条状态向量**（``observations/qpos``，每臂「值 + 夹爪」交错）在
-        **展示层**的拆分（值段 / 每臂夹爪槽），**不是**两个观测键；〚pose〛= **实测**末端位姿、
+        〚qpos〛/〚gripper〛由融合状态向量在展示层拆分；〚pose〛= **实测**末端位姿、
         〚pose_target〛= **目标**位姿（每臂 ``xyz + rpy``，米 / 弧度；机器人提供时才有）——
         「目标 − 实测」即当前稳态误差；它们**与动作空间无关**（下发什么都不会改）。
         ``arms`` = adapter 的启用臂名（前端据此分行，不自带布局知识）。
@@ -85,7 +84,7 @@ class PreviewService:
                 "qpos": self._to_float_list(values),
                 "gripper": self._to_float_list(gripper),
                 "pose": self._to_float_list(latest.get(KEY_POSE)),
-                "pose_target": self._to_float_list(latest.get(KEY_POSE_TARGET)),
+                "pose_target": self._to_float_list(latest.get(KEY_POSE_ACTION)),
                 "action": self._to_float_list(latest.get(KEY_ACTION)),
                 "images": image_names_of(latest),
                 "depth": depth_names_of(latest),
@@ -95,7 +94,7 @@ class PreviewService:
 
     @staticmethod
     def _split_state(node, state) -> tuple[object, object]:
-        """状态向量 → ``(值段, 夹爪段)``（**展示层**拆分；无 adapter / 形状不符 → 原样 + None）。"""
+        """融合状态向量拆为关节与夹爪；布局不可用时保留原值。"""
         if state is None:
             return None, None
         adapter = getattr(node, "adapter", None)

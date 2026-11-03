@@ -31,6 +31,8 @@ src/                      # robot-pipeline 包（src 布局，包名 config/env/
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
     kinematics/           # 运动学（纯 numpy Modified DH）：正解 / 雅可比 / 逆解
+    dynamics/             # 动力学模型与运行期前馈（纯 numpy）
+    calibration/          # 外参及重力标定的采样、求解与产物
   server/                 # robot_server.py 入口 + contract_server.py（/v1 契约服务器）
   collector/              # 数据采集（act_mcap：MCAP 流式写入 + 元信息 JSON）
   utils/                  # 工具（data_handler / load_file）
@@ -51,23 +53,23 @@ robot server（contract_server：HTTP + 共享内存发布）
         │
         ▼
 env（BaseEnv：控制线程 / 观测线程 + 命令队列 + 采集控制）
-        │  控制拍 step() + sample_qpos()；观测拍 build_observation()
+        │  控制拍 step() + sample_state()；观测拍 build_observation()
         ▼
-robot（BaseRobot：action / target_action 限速逼近）
-        │  get_observation_qpos()（控制线程）/ get_observation_images()（观测线程）
+robot（BaseRobot：joint/gripper command 与 target 分离）
+        │  get_observation_joint()（控制线程）/ get_observation_frames()（观测线程）
         ▼
 collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 ```
 
 **控制 / 观测分线程**：`BaseEnv` 起**控制线程**（`HZ`=30Hz：运动指令 → `step()` 限速步进 →
-`sample_qpos()` 采样机械臂状态）与**观测线程**（`OBS_HZ`=10Hz，**真实取观测的频率**：取相机帧 + 拼装观测 →
+`sample_state()` 采样机械臂状态）与**观测线程**（`OBS_HZ`=10Hz，**真实取观测的频率**：取相机帧 + 拼装观测 →
 共享内存发布 → 采集落盘）；相机或磁盘卡顿只表现为观测丢帧，机械臂仍按 30Hz 稳定步进。
 **队列 / 单写者 / 频率与诊断 / 停机语义等设计细节**见
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
 一个 robot server 对应一个 Edge adapter：观测键（`observations/qpos` **状态向量** = 每臂「值 +
 夹爪」交错、`action` **目标向量** = 同维同布局、`observations/images/<cam>`，机器人提供末端位姿时
-另有 `observations/pose` / `observations/pose_target`）、HTTP 端点、共享内存布局都由
+另有 `observations/pose` / `observations/pose_action`）、HTTP 端点、共享内存布局都由
 **motrix_edge.adapter** 下的契约文件单点定义；robot server 复用这些定义，env 只负责控制 robot，
 不碰 HTTP / 共享内存。
 
@@ -101,7 +103,7 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 | `test_robot`              | `robot.test_robot.TestRobot`                         | 虚拟（无硬件，离线联调）             |
 | `dual_piper_robot`        | `robot.dual_piper_robot.DualPiperRobot`              | 真实双臂接入位                       |
 | `dual_alicia_piper_robot` | `robot.dual_alicia_piper_robot.DualAliciaPiperRobot` | 双臂：Alicia 主手 + Piper 从手遥操作 |
-| `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂 Leader+Follower 遥操作          |
+| `single_piper_robot`      | `robot.single_piper_robot.SinglePiperRobot`          | 单臂遥操作（共用档案的左主手+左从臂） |
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
 `INFO_LEVEL`（日志级别 DEBUG / INFO / ERROR，robot server 启动时读）、`server`（监听
@@ -137,7 +139,7 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
 
 ## 接入机器人
 
-**职责边界（依赖方向：robot → controller → kinematics）**：`robot/kinematics` 是纯运动学 / 求解器
+**职责边界（依赖方向：robot → controller → dynamics → kinematics）**：`robot/kinematics` 是纯运动学 / 求解器
 （无状态）；`PiperController` 只管**关节 / 夹爪读写 + 限位把关**，并对外提供**静态**位姿转换
 （`joint_to_pose` / `pose_to_joint`）；`BaseRobot` **只有骨架**（目标状态机、逐拍限速、遥操作映射、
 观测组装）；机器人类**编排**——robot 收到 `pose` 目标时自己调解算得到关节角，再进同一条控制通路。
@@ -146,16 +148,19 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
     `set_gripper`；要支持 `pose` 动作还需**静态** `joint_to_pose`（正解）/ `pose_to_joint`（解算，
     只解算不下发）），在 `src/robot/sensor/` 接入传感器；
 2.  在 `src/robot/` 组装机器人（`BaseRobot` 子类），用**类常量**固定 obs/action 形态：
-    -   `QPOS` / `GRIPPER`：`joint` 空间维度（各臂关节角拼接）与 `gripper` 空间维度（每臂 1 夹爪）
+    -   `JOINT_DIM_PER_ARM`：每臂关节宽度；`joint_dim()` 根据 `ARM_NAMES` 推导整机长度；夹爪固定
+        每臂一个开合值，`gripper_dim()` 直接等于臂数
     -   `ARM_NAMES` / `ARM_CONTROLLERS`：臂名（物理顺序）与「臂 → `controllers` 键」映射——自己的取数 /
         下发按它遍历
-    -   `JOINTS_PER_ARM` / `POSE_DIM_PER_ARM`：每臂关节数（6）与每臂位姿维数（6）；每臂夹爪 1
-    -   `POSE`：扁平末端位姿维度（各臂 `xyz + rpy`；**0 = 不提供位姿观测**）——由静态正解给出，
-        robot server 据此把**实测位姿**与**目标位姿**写入共享内存（布局 v5 的 pose / pose_target 区）
+    -   `POSE_DIM_PER_ARM`：每臂末端位姿宽度（`xyz + rpy`；**0 = 不提供位姿观测**）；整机长度由
+        `pose_dim()` 推导，并由静态正解给出，
+        robot server 据此把**实测位姿**与**动作位姿**写入共享内存（布局 v7 的
+        `pose` / `pose_target` 传输区）
     -   `GRIPPER_DEADZONE`：夹爪死区（piper 为 0.2；缺省 0）
     -   `IMAGE_NAMES` / `IMAGES`：相机名与分辨率
     -   `SHM_NAME`：观测共享内存名
-    -   `ACTION_SPACES`：支持的动作空间（四个：`joint` / `pose` / `pose_delta` / `gripper`；缺省
+    -   `ACTION_SPACES`：支持的动作空间（`joint` / `joint_delta` / `pose` / `pose_delta` /
+        `gripper` / `gripper_delta`；缺省
         `joint` + `gripper`）——控制器能解算 `pose` 时才声明它（`pose_delta` 依赖
         `get_target_pose()`），Edge 侧 adapter 才能宣称
     -   `CAPABILITIES`：能力声明（capture / execute / streaming）
@@ -189,7 +194,7 @@ robot:
 
 ### 末端 TCP（可选）
 
-位姿（`pose` / `pose_delta` 动作与 `observations/pose` / `pose_target` 观测）的原点可以配成**工具末端**
+位姿（`pose` / `pose_delta` 动作与 `observations/pose` / `pose_action` 观测）的原点可以配成**工具末端**
 （腕相机 / 探针 / 吸盘支架的实装长度），而不是法兰：
 
 ```yaml
@@ -246,6 +251,8 @@ can:
     `config` 行给出实际读到的文件（本地副本 / 包内示例），`machine` 行给出实际用的档案
     （如 `pc16（档案 …/pc16.yml）` / `pc16（无档案 → 按机型默认）`），`robot` 行给出类型与接线
     摘要，`collect` 行给出**绝对**落盘目录（相对路径按启动时 cwd 解析）。
+-   **单臂复用**：`single_piper` 直接使用同一档案里的 `left_master / left`，右侧端口与相机信息
+    保留但不装配；无需再维护 `leader / follower` 同义键或第二份机器档案。
 
 ### 一键生成：`scripts/setup_robot.sh`
 
@@ -431,7 +438,8 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 编排（按臂拆包 → 解算 → 写目标）——新增带位姿动作的机器人只需提供同形静态函数，不碰控制循环。
 
 -   `POST /v1/execute` / `POST /v1/rollout` 的 body 用 `layout` 声明动作语义
-    （缺省 `joint`）：单段 `joint` / `pose` / `pose_delta` / `gripper` 各自只写自己那一段，
+    （缺省 `joint`）：绝对段覆盖对应 target，`joint_delta` / `gripper_delta` 叠加对应 target，
+    `pose` / `pose_delta` 在写入前解算为关节；各段只写自己的目标链，
     组合段用 `+` 连接（如 `joint+gripper`），**各段在同一控制拍落地**。
 -   **只控部分臂**时加 `arms`（如 `layout="joint+gripper"` + `arms=["right"]`）：`action` 按
     `arms` 顺序逐臂块拼接，每臂块 = 按 `layout` 段序（如 6 关节 + 1 夹爪）——**未选臂不补 home**
@@ -510,8 +518,9 @@ robot:
     夹爪同一套增量语义。模型即将失败时人工介入：先把主臂摆到与从臂相近的位姿，再
     `POST /v1/teleop {"enabled": true, "mode": "delta"}`。
 
-主从零位差用 `robot.teleop.joint_offset`（逐关节 rad 的常量偏置）补：`absolute` 下直接体现，
-`delta` 下由锚点抵消、不进入增量。属现场值，按机器档案覆盖。
+主从零位差可用两层常量偏置补偿：`joint_offset` 在主臂 FK 前按关节叠加（rad），`pose_offset`
+在 FK 后按 `xyz`（m）+ `rpy`（rad）叠加。两者在 `absolute` 下直接体现、`delta` 下由锚点抵消；
+`pose_offset` 只影响 pose 跟随。它们都属现场值，可写一组供全臂共用，也可按臂名分别覆盖。
 
 跟随空间与位姿轴锁定只在 robot-pipeline 配置，不改变 Edge 的 `rollout` / `execute`：
 
@@ -520,6 +529,8 @@ robot:
     teleop:
         follow_space: pose # joint（缺省）| pose
         follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在 teleop 首拍的从臂位姿
+        joint_offset: [0, 0.1, 0, 0, 0, 0] # 每臂关节偏置（rad）
+        pose_offset: [0, 0, 0.02, 0, 0, 0] # 每臂 xyz（m）+ rpy（rad）偏置
 ```
 
 `pose` 跟随每拍执行「主臂 FK → absolute/delta + 轴白名单 → IK」，得到的关节目标仍经

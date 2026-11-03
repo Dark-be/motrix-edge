@@ -19,15 +19,10 @@
 [`http_contract`](./http_contract.py)（``robot-pipeline`` 契约服务为服务器 /
 ``test_adapter`` 客户端），不经过共享内存。
 
-布局（单个共享内存块，版本 **7**）：``header | qpos | action | pose | pose_target | images | depths``
+布局（版本 **7**）：``header | qpos | action | pose | pose_target | images | depths``
 
 - ``header``：固定 numpy dtype（magic / 几何 / 动态状态），记录各数据区偏移。
-- ``qpos``：``float64[qpos_dim]`` **状态向量**——每臂「**值 + 夹爪**」交错（双臂 7 + 7 = 14、
-  单臂 7）；值段当前是关节角（机器人整体切位姿时只改语义、维度不变，逐维含义见采集 JSON 的
-  ``state_space`` / ``state_dims``）。与动作空间无关（数采 / VLA 要的就是它）。
-- ``action``：``float64[action_dim]`` **目标向量**（**同维同布局**：每臂「关节目标 + 夹爪目标」，
-  SDK 侧 "正在执行的指令"，无指令时回退 qpos）——与 qpos 分开传输，edge 侧观测的 ``action``
-  才是真指令，而不是实测值的副本。
+- ``qpos`` / ``action``：每臂 ``[joint..., gripper]`` 交错的实测 / 目标向量。
 - ``pose``：``float64[pose_dim]`` **实测末端位姿**（每臂 ``xyz + rpy``，单位米 / 弧度）——由机器人
   用与位姿目标同一套运动学正解得出（``pose_dim = 0`` = 本机不提供位姿，不占位姿区）。
 - ``pose_target``：``float64[pose_target_dim]`` **目标位姿** = ``FK(关节段目标)``——底层位姿目标，
@@ -87,9 +82,7 @@ OBS_SHM_HEADER = np.dtype(
 )
 
 _OBS_SHM_MAGIC = 0x4D4F544F4E474F  # "MOTONGO"
-# 7：区域 = qpos（状态向量：每臂「值 + 夹爪」）+ action（同维同布局的目标向量）+ pose（实测位姿）+
-#    pose_target（目标位姿）+ images + depths（对齐到彩色图的深度图）；v2（qpos+action+images）/
-#    v3（位姿区在 action 后）/ v4（无目标位姿区）/ v5（夹爪单独成区）/ v6（无深度区）均已废弃。
+# v7：qpos / action 均为每臂 joint + gripper 的融合向量。
 _OBS_SHM_VERSION = 7
 
 
@@ -142,9 +135,7 @@ def _layout(
 class ObsShmWriter:
     """共享内存观测写者（SDK 进程侧）：创建共享内存块并持续写入最新观测帧。
 
-    - ``create`` 时初始化 header 几何字段（含版本 = 7）；``write`` 每帧写
-      qpos（状态向量：每臂「值 + 夹爪」）+ action（同维同布局的目标向量）+ pose（实测位姿）+
-      pose_target（目标位姿）+ raw RGB 图像 + 深度图（对齐到彩色图，可选）。
+    - ``create`` 时初始化 header 几何字段；``write`` 每帧写融合状态、位姿、图像与深度。
     - ``close()`` 释放本进程句柄；``unlink()`` 删除共享内存（由 SDK 进程退出时调用）。
     """
 
@@ -160,7 +151,7 @@ class ObsShmWriter:
         depth_count: int = 0,
         depth_size: tuple[int, int] | None = None,
     ):
-        """``qpos_dim`` / ``action_dim`` = 状态向量维数（每臂「值 + 夹爪」× 臂数，双臂 14）；
+        """``qpos_dim`` / ``action_dim`` = 每臂 joint + gripper 的融合向量维数；
         ``pose_dim`` / ``pose_target_dim`` 为 0 → 不占对应区（本机不提供位姿）；
         ``depth_count`` 为 0 → 不占深度区（本机无深度相机）；``depth_size`` 缺省跟随
         ``image_size``（对齐到彩色图后同尺寸）。"""
@@ -178,10 +169,10 @@ class ObsShmWriter:
             self.image_size,
             qpos_dim,
             action_dim,
-            self.pose_dim,
-            self.pose_target_dim,
-            self.depth_count,
-            self.depth_size,
+            pose_dim=self.pose_dim,
+            pose_target_dim=self.pose_target_dim,
+            depth_count=self.depth_count,
+            depth_size=self.depth_size,
         )
 
         self._shm = shared_memory.SharedMemory(name=name, create=True, size=self._layout["total_size"])
@@ -254,7 +245,7 @@ class ObsShmWriter:
     ) -> None:
         """写入最新观测帧（qpos / action / pose / pose_target / images / depths），最后更新 header 动态字段。
 
-        ``qpos`` / ``action`` = 状态 / 目标向量（每臂「值 + 夹爪」，同维）；
+        ``qpos`` / ``action`` = 每臂 ``[joint..., gripper]`` 的状态 / 目标；
         ``pose`` / ``pose_target`` 仅在构造时对应维数 > 0 时生效（``None`` → 本帧保持旧值）；
         ``depths`` 仅在构造时 ``depth_count > 0`` 时生效（每张为 ``uint16[H][W]``，缺省 / ``None``
         → 本帧保持旧值）。
@@ -426,7 +417,7 @@ class ObsShmReader:
         """读取最新观测帧：``{"qpos", "action", "pose", "pose_target", "images", "depths"}``；
         无帧 / 撕裂 / 陈旧帧返回 None。
 
-        ``qpos`` = 状态向量（每臂「值 + 夹爪」）、``action`` = 同维同布局的目标向量；``pose``
+        ``qpos`` / ``action`` = 每臂 ``[joint..., gripper]`` 的实测 / 目标向量；``pose``
         （实测位姿）与 ``pose_target``（目标位姿 = ``FK(关节段目标)``）仅在写者启用了位姿区
         （``pose_dim > 0``）时出现；``depths``（每张 ``uint16[H][W]``，已对齐到彩色图）仅在
         写者启用了深度区（``depth_count > 0``）时出现。

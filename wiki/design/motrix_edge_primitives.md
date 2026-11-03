@@ -2,7 +2,7 @@
 
 > **状态**：**设计定稿，代码未实现**——本仓库当前没有 `server/primitives.py`、`/v1/primitives`
 > 或单帧取图端点，本文通篇是**目标态**（分期见文末「分期」，未决项见文末「未决项」）。
-> 它依赖的位姿 / 动作空间契约（`observations/pose` / `observations/pose_target` /
+> 它依赖的位姿 / 动作空间契约（`observations/pose` / `observations/pose_action` /
 > `observations/qpos`（**状态向量**：每臂「值 + 夹爪」，夹爪不再单独成键）、`ActionSpace.POSE` /
 > `ActionSpace.POSE_DELTA`、`/v1/preview` 的 `pose` / `pose_target` / `gripper` / `arms`）来自**位姿动作 MR**，
 > **已合入 `dev`**（edge 侧 `ActionSpace.POSE` / `POSE_DELTA` 与 robot 侧 `kinematics` 齐备）。
@@ -46,7 +46,7 @@ edge 不提供 `vla.*` 接口**）；本文只定义原语语义。
 -   **不做 agent session**：原语挂在 node 级（像 `/v1/preview` 一样），只须持 Edge 租约——
     edge 不提供内建循环 / 记忆 / SSE 对话流，也不需要新会话类型；
 -   依赖的既有契约（**随位姿动作 MR 引入，尚未在 master**）：观测键 `observations/pose`（实测位姿）、
-    `observations/pose_target`（= `FK(关节段目标)`，`target` 与到位判定必需）、
+    `observations/pose_action`（= `FK(关节段目标)`，`target` 与到位判定必需）、
     `observations/qpos`（**状态向量**：每臂「值 + 夹爪」交错，夹爪实测在每臂末位）；动作空间
     `ActionSpace.POSE`（= `"pose"`，绝对目标）与
     `ActionSpace.POSE_DELTA`（= `"pose_delta"`，增量原语）；`/v1/preview` 的 `pose` /
@@ -157,7 +157,7 @@ flowchart LR
 `final_err_m` / `final_err_rad` 同口径，agent 据此看出「差在哪一项」）、`elapsed`、`reason`（人读说明）。
 
 `target` 指**本原语下发目标在机器人侧的落点**：`move_to` 是 edge 指定的绝对位姿；
-`move_rel` / `rotate_rel` 是机器人按增量叠加出的目标位姿（读 `observations/pose_target`）。
+`move_rel` / `rotate_rel` 是机器人按增量叠加出的目标位姿（读 `observations/pose_action`）。
 edge **不自己算绝对目标**——理由（稳态误差逐条累积、读-算-写竞态窗口）见
 [RPent 对接契约](./motrix_edge_rpent_bridge.md)「增量原语的基准与到位判定」。
 
