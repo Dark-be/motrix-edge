@@ -47,6 +47,7 @@ class SinglePiperRobot(BaseRobot):
     GRIPPER = 1  # Follower 单臂：1 夹爪（gripper 空间）
     IMAGE_NAMES: list[str] = []  # 无相机
     IMAGES: dict[str, tuple[int, int]] = {}
+    CAMERA_KINDS: dict[str, str] = {}
     SHM_NAME = "single_piper_obs"
 
     # 默认复位目标（config 未提供时使用）：6 关节 0 + 夹爪张开 1
@@ -54,6 +55,7 @@ class SinglePiperRobot(BaseRobot):
     DEFAULT_INIT_GRIPPER = [1.0]
     # ---- 硬件接线键清单（**值必填、只在配置里给**：robot.ports）----
     PORT_ROLES = ("leader", "follower")  # 主 / 从臂 CAN 接口名
+    PORT_KINDS = {role: "can" for role in PORT_ROLES}
 
     def __init__(self, robot_config: dict | None = None):
         robot_config = dict(robot_config or {})
@@ -71,10 +73,16 @@ class SinglePiperRobot(BaseRobot):
         }
 
     def connect(self):
-        """连接：Leader 主臂（role=leader）+ Follower 从臂（role=follower，执行）。"""
+        """连接：Leader 主臂（role=leader）+ Follower 从臂（role=follower，执行）。
+
+        重力前馈（``robot.gravity``）只装在**执行**臂上：主臂只读，不会被 ``set_joint`` 下发。
+        """
         self.controllers["leader"].connect(port=self.ports["leader"], role="leader", firmware=self.leader_firmware)
         self.controllers["follower"].connect(
-            port=self.ports["follower"], role="follower", firmware=self.follower_firmware
+            port=self.ports["follower"],
+            role="follower",
+            firmware=self.follower_firmware,
+            gravity=self.robot_config.get("gravity"),
         )
         debug_print(self.name, "Setup controllers done", "INFO")
         self.ready = True

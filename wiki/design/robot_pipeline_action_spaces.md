@@ -12,6 +12,8 @@
 `observations/pose` = 实测末端位姿、`observations/pose_target` = 目标位姿（每臂 `xyz + rpy`，
 **不交错**）。数采 / VLA 拿到的就是「值 + 夹爪」那一条向量，**逐维含义写在同一轮 mcap 的同名
 JSON 里**（`state_space` / `state_dims`）——值段当前是关节角，机器人整体切位姿时只改语义、维度不变。
+同一 JSON 还记**控制模式**（`control_mode` / `control`：`mit` / `mit+gravity` / `joint`，主手不记录），
+见 [重力补偿](./robot_pipeline_impedance.md)。
 
 `pose_delta` 的增量**叠加在机器人自己的关节段目标上**（不是实测位姿）：底层是 MIT 力矩控制，
 实测关节恒落后目标一个稳态误差，拿实测当基准会把误差写进新目标、逐步累积——见
@@ -31,6 +33,10 @@ JSON 里**（`state_space` / `state_dims`）——值段当前是关节角，机
 -   **状态向量自描述**：`state_layout()` 给出逐维含义（`state_space` + 每维 `{index, arm, kind,
 name}`），写入每轮 mcap 的同名 JSON（`state_space` / `state_dims` / `action_space` /
     `action_dims`）——下游按 `kind`（`joint` / `pose` / `gripper`）解释每个下标。
+-   **控制模式可追溯**：`control_layout()` 给出各**执行**控制器的控制模式（`mit` /
+    `mit+gravity` / `joint`；主手不记录），写入同一 JSON 的 `control_mode`（聚合值，双臂不同 →
+    `mixed`）与 `control`（逐控制器明细：`ctrl_mode` / `role` / `gravity`）——下游据此判断这段
+    数据是否带重力前馈。
 -   **增量只叠在目标上**：`pose_delta` 以**当前关节段目标**的正解位姿为基准，不是实测位姿
     （见 [位姿增量](./robot_pipeline_cartesian.md#位姿增量pose_delta)）——底层 MIT 无重力前馈，
     实测恒落后目标一个稳态误差，以实测为基准会把误差逐步累积进目标。
@@ -128,8 +134,8 @@ name}`），写入每轮 mcap 的同名 JSON（`state_space` / `state_dims` / `a
 
 -   **没有第二种控制模式**：`step()` 每拍只做「关节段按 `step_rad` 限速插值 + 夹爪段直接跟随」，
     然后 `_apply_action()` 拆段下发；不引入 `move_p` / 力控，`set_joint` 只给 MIT 的
-    `p_des`（`kp` / `kd` / `t_ff` 全用缺省值）——**本次位姿（阻抗）控制无力矩前馈**：
-    `t_ff = 0` / `v_des = 0`，既不补重力 / 摩擦，也不做力控。
+    `p_des`（`kp` / `kd` 用缺省值，`t_ff` 缺省为 0）——**不做力控**；重力前馈是可选的、
+    属于控制器内部的取数，不改动作空间契约（见 [重力补偿与阻抗控制](./robot_pipeline_impedance.md)）。
 -   **下发空间只是“目标怎么写”**：`joint` 直写关节段、`pose` 解算后写关节段、`gripper` 写夹爪段；
     三者落地后完全同一条通路，观测也不会因此改变。
 -   **目标只有一条**：底层目标向量 = `[关节段 | 夹爪段]`（关节段在前），各空间只写自己那段，
