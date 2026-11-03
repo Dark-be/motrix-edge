@@ -19,7 +19,8 @@ Tailwind CSS）：经同源 `/api` 登录并代理 Edge HTTP API，展示 Edge �
 
 ## 目标与原则
 
--   **中心 BFF**：Node 进程托管静态页面、飞书 Session、Edge 白名单与 HMAC 身份代理；Edge 仍拥有最终租约和状态校验（见 [HTTP 控制面（server）](./motrix_edge_server.md)
+-   **中心 BFF**：Node 进程托管静态页面、飞书 Session 与 Edge 静态白名单；HMAC 设备由 Edge 验签，
+    固定可信局域网设备由 Console Session 覆盖采集身份并依赖网络 ACL；Edge 仍拥有最终租约和状态校验（见 [HTTP 控制面（server）](./motrix_edge_server.md)
     / [Edge 级租约（lease）](./motrix_edge_lease.md) / [FrameManager 与 WebRTC 推流](./motrix_edge_frame_webrtc.md)）。
 -   **信息尽可能完整**：每个面板展示原始契约字段 + 派生信息（如租约到期倒计时）；错误展示 HTTP status / detail。
 -   **按钮即命令**：每个控制按钮即一个 HTTP 动作，UI 标注其对应命令名。
