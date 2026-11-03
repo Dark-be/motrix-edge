@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""uvicorn 日志配置 —— 由 ``MOTRIX_LOG_FILE`` 开关决定是否写文件（缺省关闭）。
+"""uvicorn 日志配置 —— 由 ``MOTRIX_EDGE_LOG_FILE`` 开关决定是否写文件（缺省关闭）。
 
 开启：HTTP access 写 ``logs/uvicorn.log``、启动 / 错误日志终端 + 文件；关闭：只有 HTTP
 access 静默，启动 / 错误日志仍写终端（不写文件）。
@@ -29,7 +29,7 @@ from motrix_edge.utils.data_handler import file_log_enabled
 def uvicorn_log_config(log_file: str, file_enabled: bool | None = None) -> dict:
     """构建 uvicorn 日志配置（经 ``uvicorn.Config(log_config=...)`` 生效）。
 
-    ``file_enabled`` 缺省读 ``MOTRIX_LOG_FILE``（与 ``debug_print`` 同一开关，**缺省关闭**）：
+    ``file_enabled`` 缺省读 ``MOTRIX_EDGE_LOG_FILE``（与 ``debug_print`` 同一开关，**缺省关闭**）：
 
     - 开启：HTTP access → **只写文件**（``logs/uvicorn.log``，RotatingFileHandler 10MB × 5），
       uvicorn 启动 / 错误 → 终端 + 文件；不刷终端；

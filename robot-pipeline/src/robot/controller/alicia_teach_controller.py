@@ -16,7 +16,7 @@ import time
 from multiprocessing import Event, Process, shared_memory
 
 import numpy as np
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .alicia_controller import AliciaController
 from .arm_controller import ArmController

@@ -26,7 +26,7 @@ pyrealsense2 / v4l2）**仅在机器人端安装**，接入时在 ``connect()`` 
 
 import cv2
 import numpy as np
-from utils.base.data_handler import debug_print  # noqa: E402
+from utils.data_handler import debug_print  # noqa: E402
 
 from robot.base_robot import BaseRobot
 from robot.controller.alicia_teach_controller import AliciaTeachController  # noqa: E402

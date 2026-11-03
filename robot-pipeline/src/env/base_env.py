@@ -45,7 +45,7 @@ import time
 from collections import deque
 
 from collector import get_collector
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 
 class BaseEnv:

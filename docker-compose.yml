@@ -12,11 +12,19 @@ services:
     # environment:
     #   - NVIDIA_VISIBLE_DEVICES=all
     #   - NVIDIA_DRIVER_CAPABILITIES=all
+    environment:
+      MOTRIX_EDGE_DIR: ${MOTRIX_EDGE_DIR_IN_CONTAINER:-/root/workspace/motrix-edge}
+      MOTRIX_ROBOT_PIPELINE_DIR: ${MOTRIX_ROBOT_PIPELINE_DIR_IN_CONTAINER:-/root/workspace/robot-pipeline/motrix-robot-pipeline}
+      MOTRIX_EDGE_LOG_FILE: ${MOTRIX_EDGE_LOG_FILE:-0}
     volumes:
       - /run/udev:/run/udev:ro
       - /sys/bus/usb:/sys/bus/usb:ro
       - /dev:/dev:rw
-      - /home/pc16/project:/root/workspace:rw
+      - type: bind
+        source: ${MOTRIX_EDGE_WORKSPACE_DIR:-.}
+        target: /root/workspace
+        bind:
+          create_host_path: false
     stdin_open: true
     tty: true
     command: "/bin/bash"

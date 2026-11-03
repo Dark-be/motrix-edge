@@ -17,7 +17,7 @@ import time
 import cv2
 import numpy as np
 import pyrealsense2 as rs
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .sensor import Sensor
 

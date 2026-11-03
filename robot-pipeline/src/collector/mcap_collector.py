@@ -59,7 +59,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 # standard_obs keys (see Robot.get_standard_obs())
 KEY_QPOS = "observations/qpos"

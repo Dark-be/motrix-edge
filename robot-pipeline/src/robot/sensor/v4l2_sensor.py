@@ -20,7 +20,7 @@ import select
 import cv2
 import numpy as np
 import v4l2
-from utils.base.data_handler import debug_print
+from utils.data_handler import debug_print
 
 from .sensor import Sensor
 
