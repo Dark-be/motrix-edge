@@ -29,6 +29,7 @@
 import cv2
 import numpy as np
 from utils.data_handler import debug_print  # noqa: E402
+from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
 from robot.base_robot import BaseRobot, CartesianActionError
 from robot.controller.piper_controller import PiperController  # noqa: E402
@@ -209,7 +210,9 @@ class DualPiperRobot(BaseRobot):
         for name in self.IMAGE_NAMES:
             self.sensors[name].connect(
                 device=self.camera_devices[name],
-                pixel_format="jpg",
+                # RealSense 硬件色彩流本身就是 BGR8：用 raw 直接得到 ndarray，
+                # 避免 sensor 先 JPEG 编码、get_observation_frames 再解码回来（每路每拍白跑一遍编解码）。
+                pixel_format="raw",
                 enable_depth=name in self.depth_cameras,  # 只有生效的深度相机开深度流
             )
         debug_print(self.name, "Setup sensors done", "INFO")
@@ -253,7 +256,15 @@ class DualPiperRobot(BaseRobot):
                     debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
                     decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
                 decoded = decoded[:, :, ::-1]  # BGR → RGB
-            frames.append({"color": decoded, "depth": info.get("depth")})
+            frames.append(
+                {
+                    "color": decoded,
+                    "depth": info.get("depth"),
+                    KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
+                    KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
+                    KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
+                }
+            )
         return frames
 
     def _read_teleop_joint(self) -> np.ndarray | None:

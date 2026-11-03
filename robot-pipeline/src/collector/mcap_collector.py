@@ -32,15 +32,10 @@
 > ``state_dims`` / ``action_space`` / ``action_dims`` 里**（机器人整体切位姿时只改 ``state_space``）。
 > 位姿**不入 mcap**（见 wiki/design/robot_pipeline_action_spaces.md）。
 
-帧时间以 obs 内 ``timestamp``（秒）为准：作消息 ``log_time``/``publish_time``（ns），
-并填入 CompressedImage 的 ``header.stamp``。可在 Foxglove 中按时间轴查看。
-
-⚠️ 该 ``timestamp`` 是**观测拍时刻**（观测线程 ``build_observation()`` 在取帧前打点）：
-相机帧即本拍取，机械臂状态（qpos / action）来自**上一个控制拍**——与该时刻的偏移**有界**
-（≤ ``1/HZ`` ≈ 33ms）但**逐帧小幅波动**（控制 / 观测是两条独立限速循环，线程唤醒抖动逐帧
-不同；控制拍超时会让「最近一个控制拍」跳档）。故对 ``dt`` 推导与 episode 时长（末帧 −
-首帧）无影响；但下游（ACT / LeRobot 转换）**不要按固定滞后做时间平移校正**，需要严格对齐时
-须知该滞后并非定值。
+每条消息按 ``timestamps_ns[topic]``（源头采样的 Unix 纳秒时间）写入
+``log_time`` / ``publish_time``，图片 ``header.stamp`` 使用同一时间。
+旧观测缺少话题时间时回退帧级 ``timestamp``（秒），再缺则用当前墙钟。
+采样时机与时钟语义见 wiki/design/robot_pipeline_runtime.md「逐话题采样时间」。
 
 **流式写入**：``start()`` 打开文件 → 每次 ``collect()`` 直接落盘（不缓冲整段 episode，
 内存开销只随单帧大小）→ ``finish()`` 写入 footer 并返回文件路径：:
@@ -62,11 +57,14 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
+from numbers import Integral
 from pathlib import Path
 
 import numpy as np
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMPS_NS
 
 # standard_obs keys（见 ``BaseRobot.standard_observation()``）
 KEY_QPOS = "observations/qpos"  # 每臂「关节 + 夹爪」交错
@@ -137,8 +135,8 @@ class ActMcapCollector:
         # 当前 episode 的元信息基线（created_at + identity/pending 快照）
         self._meta: dict = {}
         self._start_wall: float | None = None  # 本轮采集开始墙钟时间（duration 兜底）
-        self._first_ts: float | None = None  # 首帧 timestamp（秒）
-        self._last_ts: float | None = None  # 末帧 timestamp（秒）
+        self._first_ts_ns: int | None = None  # 已写话题的最早采样时间
+        self._last_ts_ns: int | None = None  # 已写话题的最晚采样时间
         # DEBUG：同一事实已由 robot server 的启动清单（``collect`` 行）汇总打印，
         # 默认不重复刷两处（需要细节时把该机型 yml 的 ``INFO_LEVEL`` 改成 ``DEBUG``）。
         debug_print(
@@ -221,8 +219,8 @@ class ActMcapCollector:
         self._meta.update(self._identity)
         self._meta.update(self._pending)
         self._start_wall = time.time()
-        self._first_ts = None
-        self._last_ts = None
+        self._first_ts_ns = None
+        self._last_ts_ns = None
         debug_print(
             self.name,
             f"Collector start: {self._path.name}",
@@ -232,21 +230,35 @@ class ActMcapCollector:
     def collect(self, standard_obs: dict):
         """写入一帧观测（**直接落盘**，不缓冲内存）。需先 ``start()``。
 
-        帧时间以 obs 内 ``timestamp``（秒）为准（= **观测拍时刻**，由观测线程打点，见模块
-        docstring），转 ns 作 MCAP log_time / header.stamp；obs 缺失 timestamp 时回退本地时钟。
+        每话题使用源头纳秒时间；旧观测兼容帧级秒时间。图片头与 MCAP 消息时间一致。
         """
         if self._writer is None:
             raise RuntimeError("ActMcapCollector not started; call start() first")
 
-        timestamp_s = standard_obs.get(KEY_TIMESTAMP)
-        if timestamp_s is None:
-            timestamp_s = time.time()
-        # 首末帧时间戳：duration（采集时长）= 末帧 - 首帧
-        if self._first_ts is None:
-            self._first_ts = timestamp_s
-        self._last_ts = timestamp_s
-        ts_ns = int(timestamp_s * 1e9)
-        sec, nanosec = divmod(ts_ns, 1_000_000_000)
+        topics = [TOPIC_QPOS, TOPIC_ACTION] + [
+            key for key, value in standard_obs.items() if key.startswith(CAMERA_PREFIX) and value is not None
+        ]
+        timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
+        if not isinstance(timestamps, Mapping):
+            raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
+        fallback_ns = None
+        times = {}
+        for topic in topics:
+            if topic in timestamps:
+                value = timestamps[topic]
+                if isinstance(value, bool) or not isinstance(value, Integral) or not 0 <= value < 2**64:
+                    raise ValueError(f"invalid timestamp_ns for {topic}: {value!r}")
+                times[topic] = int(value)
+            else:
+                if fallback_ns is None:
+                    seconds = standard_obs.get(KEY_TIMESTAMP)
+                    fallback_ns = time.time_ns() if seconds is None else int(seconds * 1_000_000_000)
+                    if not 0 <= fallback_ns < 2**64:
+                        raise ValueError("invalid fallback timestamp")
+                times[topic] = fallback_ns
+        earliest, latest = min(times.values()), max(times.values())
+        self._first_ts_ns = earliest if self._first_ts_ns is None else min(self._first_ts_ns, earliest)
+        self._last_ts_ns = latest if self._last_ts_ns is None else max(self._last_ts_ns, latest)
         qpos = np.asarray(standard_obs[KEY_QPOS], dtype=np.float64).tolist()
         action = np.asarray(standard_obs[KEY_ACTION], dtype=np.float64).tolist()
         seq = self._step_count
@@ -254,6 +266,7 @@ class ActMcapCollector:
 
         # qpos（状态向量）/ action（同维同布局的目标向量）：std_msgs/msg/Float64MultiArray
         for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
+            ts_ns = times[topic]
             self._writer.write_message(
                 topic=topic,
                 schema=self._schema_qpos,
@@ -266,6 +279,8 @@ class ActMcapCollector:
         for key, val in standard_obs.items():
             if key.startswith(CAMERA_PREFIX) and val is not None:
                 cam_name = key[len(CAMERA_PREFIX) :]
+                ts_ns = times[key]
+                sec, nanosec = divmod(ts_ns, 1_000_000_000)
                 self._writer.write_message(
                     topic=f"{TOPIC_IMAGE_PREFIX}{cam_name}",
                     schema=self._schema_img,
@@ -354,9 +369,9 @@ class ActMcapCollector:
         return meta
 
     def _duration_seconds(self) -> float:
-        """本轮采集时长（秒）：首帧 → 末帧 timestamp 之差；无帧时回退墙钟。"""
-        if self._first_ts is not None and self._last_ts is not None:
-            return max(0.0, self._last_ts - self._first_ts)
+        """本轮采集时长（秒）：已写话题采样时间的最大值减最小值；无帧时回退墙钟。"""
+        if self._first_ts_ns is not None and self._last_ts_ns is not None:
+            return (self._last_ts_ns - self._first_ts_ns) / 1_000_000_000
         if self._start_wall is not None:
             return max(0.0, time.time() - self._start_wall)
         return 0.0

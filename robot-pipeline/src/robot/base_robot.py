@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
 from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
 
@@ -1171,13 +1172,20 @@ class BaseRobot:
     def sample_state(self) -> dict:
         """采样并缓存分离的关节、夹爪及其目标；位姿由同拍关节正解。"""
         self.seq += 1
+        state_timestamp_ns = time.time_ns()
         joint = self.get_observation_joint()
         gripper = self.get_observation_gripper()
+        action_timestamp_ns = time.time_ns()
         joint_target = self.get_joint_target()
         gripper_target = self.get_gripper_target()
         joint_action = joint.copy() if joint_target is None else joint_target
         gripper_action = gripper.copy() if gripper_target is None else gripper_target
         state = {
+            KEY_TIMESTAMPS_NS: {
+                KEY_QPOS: state_timestamp_ns,
+                KEY_QPOS_ERR: state_timestamp_ns,
+                KEY_ACTION: action_timestamp_ns,
+            },
             self.KEY_JOINT: joint,
             self.KEY_GRIPPER: gripper,
             self.KEY_JOINT_ACTION: joint_action,
@@ -1188,9 +1196,11 @@ class BaseRobot:
         pose = self.get_observation_pose(joint)
         if pose is not None:
             state[self.KEY_POSE] = pose
+            state[KEY_TIMESTAMPS_NS][OBSERVATION_POSE_KEY] = state_timestamp_ns
         target_pose = self.get_pose_action()
         if target_pose is not None:
             state[self.KEY_POSE_ACTION] = target_pose
+            state[KEY_TIMESTAMPS_NS][OBSERVATION_POSE_ACTION_KEY] = action_timestamp_ns
         self.motion_state = state
         return self.motion_state
 
@@ -1245,7 +1255,11 @@ class BaseRobot:
         if values.get(self.KEY_POSE_ACTION) is not None:
             fused[OBSERVATION_POSE_ACTION_KEY] = values[self.KEY_POSE_ACTION]
         for key, value in values.items():
-            if key.startswith((self.CAMERA_PREFIX, self.DEPTH_PREFIX)) or key == self.KEY_TIMESTAMP:
+            if key.startswith((self.CAMERA_PREFIX, self.DEPTH_PREFIX)) or key in (
+                self.KEY_TIMESTAMP,
+                KEY_TIMESTAMPS_NS,
+                KEY_TIMESTAMP_METADATA,
+            ):
                 fused[key] = value
         return fused
 
@@ -1329,7 +1343,13 @@ class BaseRobot:
         if state is None:
             return None
         timestamp = time.time()  # 观测拍时刻（取帧前打点；取帧 / 落盘耗时不计入）
-        return {**state, **self.capture_frames(), self.KEY_TIMESTAMP: timestamp}
+        frames = self.capture_frames()
+        return {
+            **state,
+            **frames,
+            self.KEY_TIMESTAMP: timestamp,
+            KEY_TIMESTAMPS_NS: {**state.get(KEY_TIMESTAMPS_NS, {}), **frames.get(KEY_TIMESTAMPS_NS, {})},
+        }
 
     def get_observation(self) -> dict:
         """完整观测 = 现场采样机械臂状态 + 相机帧（彩色 + 深度，单线程调用）。
@@ -1338,7 +1358,13 @@ class BaseRobot:
         """
         state = self.sample_state()
         timestamp = time.time()  # 帧时刻（取帧前打点，与 build_observation 同口径）
-        return {**state, **self.capture_frames(), self.KEY_TIMESTAMP: timestamp}
+        frames = self.capture_frames()
+        return {
+            **state,
+            **frames,
+            self.KEY_TIMESTAMP: timestamp,
+            KEY_TIMESTAMPS_NS: {**state.get(KEY_TIMESTAMPS_NS, {}), **frames.get(KEY_TIMESTAMPS_NS, {})},
+        }
 
     def get_observation_joint(self) -> np.ndarray:
         """当前帧关节角（扁平 ``joint_dim()`` 维，每臂 6）——子类实现。
@@ -1395,13 +1421,24 @@ class BaseRobot:
         （``depth_camera_names()``）且该拍确实拿到深度时写入。
         """
         depth_names = self.depth_camera_names()
+        fallback_timestamp_ns = time.time_ns()  # 旧 sensor 无时间字段时的兼容值
         frames = self.get_observation_frames()
-        out: dict = {}
+        timestamps: dict = {}
+        out: dict = {KEY_TIMESTAMPS_NS: timestamps, KEY_TIMESTAMP_METADATA: {}}
         for name, frame in zip(self.IMAGE_NAMES, frames, strict=True):
+            timestamp_ns = frame.get(KEY_TIMESTAMP_NS)
+            if timestamp_ns is None:
+                timestamp_ns = fallback_timestamp_ns
             out[f"{self.CAMERA_PREFIX}{name}"] = frame["color"]
+            timestamps[f"{self.CAMERA_PREFIX}{name}"] = frame.get(KEY_TIMESTAMPS_NS, {}).get("color", timestamp_ns)
+            for stream, prefix in (("color", self.CAMERA_PREFIX), ("depth", self.DEPTH_PREFIX)):
+                metadata = frame.get(KEY_TIMESTAMP_METADATA, {}).get(stream)
+                if metadata is not None:
+                    out[KEY_TIMESTAMP_METADATA][f"{prefix}{name}"] = metadata
             depth = frame.get("depth")
             if depth is not None and name in depth_names:
                 out[f"{self.DEPTH_PREFIX}{name}"] = depth
+                timestamps[f"{self.DEPTH_PREFIX}{name}"] = frame.get(KEY_TIMESTAMPS_NS, {}).get("depth", timestamp_ns)
         return out
 
     def get_joint_target(self) -> np.ndarray | None:

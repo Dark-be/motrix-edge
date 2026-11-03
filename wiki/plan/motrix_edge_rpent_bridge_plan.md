@@ -30,6 +30,15 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 
 ## Phase B —— `POST /call` facade
 
+-   [x] 执行机制：控制线程命令 ID 回执与有界去重；低频无图像运动采样查询；Edge 确认应用后
+        使用连续新鲜采样判到位；夹爪独立段下发、独立容差及未知抓取状态；同步 RPent 队列与经验。
+
+-   [x] 统一全部动作原语名称，保留 RPC 兼容入口；同步 RPent 工具、任务、描述与本地记忆，
+        将夹爪操作转换为显式开合度，并验证队列行为和动作参数保持不变。
+
+-   [x] 明确旋转参考系：新增 `rotate_tool` 兼容入口与 `rotate_world`，更新环境自描述；
+        覆盖倾斜姿态、右臂外参、位置保持、缺失能力、租约及 dry-run 的离线测试。
+
 -   [x] 新增 `server/rpent/` 包（`service` 方法分派 / `wire` 编解码 / `coerce` 规范化 / `errors`
         分类 / `layout` 布局换算 / `node_view` 窄读 / `settle` 到位等待）+ 路由
         `server/routes/rpent.py`：`POST /call` 信封解析（`{method, args, kwargs, session_id}`）、
@@ -199,3 +208,5 @@ RPC facade，把 RPent 的 `env.*` 映射到 edge 原生路径（**VLA 由 RPent
 2. ~~**位姿 / 状态形态**~~：**已定**——回执同时给扁平与每臂块（quat `tcp_pose`）。
 3. ~~**`recover_joint_posture`**~~：**已定**——关节回 home + 保持夹爪，无 `HOME_QPOS` 才弃守回 `adapter.reset()`。
 4. **其他机器人布局**：若对方的块是归一化增量（另一套机器人包），需新增布局名并显式声明语义。
+
+-   [x] 抓取开合差规则：闭爪停稳后以新鲜同修订 action / 实测的正向差严格大于 0.02 判抓取，适配 RPent 队列并覆盖阈值与异常边界。
