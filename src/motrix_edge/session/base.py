@@ -26,6 +26,7 @@ import time
 
 from motrix_edge.adapter import AdapterCapability
 from motrix_edge.command import (
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_EPISODE_END,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_META_ADD,
@@ -38,6 +39,7 @@ from motrix_edge.command import (
     CMD_ROBOT_EXECUTE,
     CMD_ROBOT_RESET,
     CMD_SESSION_QUIT,
+    SWITCH_COMMANDS,
     TELEOP_COMMANDS,
     CommandResult,
     apply_teleop,
@@ -87,17 +89,18 @@ _CAPTURE_META_COMMANDS = (
     CMD_CAPTURE_META_DELETE_KEY,
 )
 
-# **步进循环**（RL 闭环 / 持续推理）内允许安全、“本轮边界”与人工接管命令。
-# ``robot execute`` / 元信息选项仍按「本轮不适用」拒绝：外来程控动作会破坏
-# 「下一步观测由本步动作产生」的数据链；teleop / teach / takeover 则是显式人工接管边界。
+# **步进循环**（RL 闭环 / 持续推理）内允许的公共命令：只留安全与“本轮边界”类。
+# 其余（`robot execute` / 遥操作 / 元信息选项）在步进中途一律按「本轮不适用」拒绘：
+# 中途插入外来动作会破坏「下一步观测由本步动作产生」的数据链，而元信息选项 在数采会话里改即可。
 STEP_LOOP_COMMANDS = (
     CMD_SESSION_QUIT,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_RESET,
     CMD_CAPTURE_EPISODE_START,
     CMD_CAPTURE_EPISODE_END,
+    CMD_CAPTURE_EPISODE_CANCEL,
     CMD_CAPTURE_SYNC,
-) + TELEOP_COMMANDS
+)
 
 
 class RunResult:
@@ -143,6 +146,7 @@ class BaseSession:
         frame_manager=None,
         adapter=None,
         capture_meta_store=None,
+        on_capture_status_dirty=None,
     ):
         self.name = name
         self.base_cfg = base_cfg
@@ -156,6 +160,9 @@ class BaseSession:
         # 进程内单实例——节点注入同一份（与 /v1/captures/meta 共用同一把锁）；
         # 缺省 None 表示会话自行按需创建，测试可注入临时 store。
         self.capture_meta_store = capture_meta_store or CaptureMetaStore()
+        # 采集命令（episode start/end、sync）落地的瞬间通知节点作废采集状态缓存：这些命令由会话
+        # 消费，节点主循环看不到，否则状态查询要等一整个刷新周期（见 ``EdgeNode.invalidate_capture_status``）。
+        self._on_capture_status_dirty = on_capture_status_dirty
         # 退出命令（session quit）：submit 通道命令由节点任务结束后补发回执
         self.exit_command = None
         # 外部请求停止标志（node 失联 ERROR 时终止仍在运行的任务线程用）
@@ -298,6 +305,11 @@ class BaseSession:
         if name in TELEOP_COMMANDS:
             self._set_teleop(cmd)
             return CommonDispatch.HANDLED
+        if name in SWITCH_COMMANDS:
+            # robot tcp / robot gravity：运行位开关**离开会话才能切**（tcp 换 observations/pose
+            # 的原点、gravity 改 control_mode；robot teleop 不受此限——人工接管是会话中的操作）。
+            self.reject_not_applicable(cmd, "during a session (quit the session first)")
+            return CommonDispatch.HANDLED
         if name == CMD_CAPTURE_EPISODE_START:
             if self._reject_expired_control(cmd, "capture start"):
                 return CommonDispatch.HANDLED
@@ -339,6 +351,15 @@ class BaseSession:
             return CommonDispatch.HANDLED
         return CommonDispatch.UNHANDLED
 
+    def _mark_capture_status_dirty(self) -> None:
+        """告知节点「采集状态可能已变」→ 节点作废缓存，下一拍立即重查（见 ``EdgeNode``）。
+
+        采集命令由会话消费（节点主循环此时不 poll），所以这个通知由会话发；未注入回调（测试 /
+        自定义会话）时为 no-op。
+        """
+        if self._on_capture_status_dirty is not None:
+            self._on_capture_status_dirty()
+
     def _reply_upstream_error(self, cmd, operation: str, exc: Exception) -> None:
         """把 adapter/SDK 异常转换为统一回执，避免终止会话命令循环。"""
         debug_print(self.name, f"{operation} failed: {exc}", "WARNING")
@@ -346,11 +367,6 @@ class BaseSession:
             cmd,
             CommandResult(status="error", error=f"{operation} failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
         )
-
-    def _mark_capture_status_dirty(self) -> None:
-        """作废节点采集状态缓存，使下一拍立即重新读取。"""
-        if self._on_capture_status_dirty is not None:
-            self._on_capture_status_dirty()
 
     def reject_not_applicable(self, cmd, scope: str | None = None) -> None:
         """未识别 / 当前循环不适用命令的统一回执（``<cmd> not applicable``）。
@@ -382,13 +398,18 @@ class BaseSession:
         推理会话在此加 prompt 门控（录制 ``task_name`` = prompt）；RL 会话在此清空过渡缓冲并记回合号。
         """
         self.recorder.start()
-        self._reply(cmd, ok_result(state="ready", episode="start"))
+        self._reply(cmd, ok_result(state="ready", episode="start", recording=True))
         return True
 
     def _on_episode_end(self, cmd) -> None:
         """``capture episode end``：默认实现 = **采集会话**（通知机器人保存 episode + 回执）。"""
         self.recorder.end()
-        self._reply(cmd, ok_result(state="ready", episode="end"))
+        self._reply(cmd, ok_result(state="ready", episode="end", recording=False))
+
+    def _on_episode_cancel(self, cmd) -> None:
+        """``capture episode cancel``：停止当前录制并丢弃本轮文件。"""
+        self.recorder.cancel()
+        self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
 
     def _on_capture_sync(self, cmd) -> None:
         """``capture sync --meta <json>``：同步采集元信息到机器人进程（三个会话同款）。"""
@@ -446,7 +467,7 @@ class BaseSession:
         if self._reject_expired_control(cmd, "teleop"):
             return False, None
         try:
-            enabled, mode = apply_teleop(self.adapter, cmd)
+            enabled, mode, follow_space, follow_axes, scale = apply_teleop(self.adapter, cmd)
         except ValueError as exc:
             self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
             return False, None
@@ -457,7 +478,18 @@ class BaseSession:
                 CommandResult(status="error", error=f"teleop command failed: {exc}", code=ErrorCode.UPSTREAM_ERROR),
             )
             return False, None
-        self._reply(cmd, ok_result(state=state, teleop=enabled, mode=mode if enabled else None))
+        self._reply(
+            cmd,
+            ok_result(
+                state=state,
+                teleop=enabled,
+                mode=mode if enabled else None,
+                follow_space=follow_space,
+                follow_axes=follow_axes,
+                pose_position_scale=scale,
+                configuration_status="queued",
+            ),
+        )
         return enabled, mode
 
     def _reject_expired_control(self, cmd, operation: str) -> bool:
@@ -532,6 +564,9 @@ class BaseSession:
 
 class CaptureSession(BaseSession):
     """数据采集会话 —— **基座装配**（无步进引擎）。
+
+    纯遥操作采集不创建 RTC / 推理引擎，不涉及模型动作缓存或交回模型；
+    InferSession 中的 episode 录制仍属于推理会话，不适用这一边界。
 
     生命周期由 EdgeNode 管理（session_start → run → session_finish）：进入会话后持续消费公共
     命令（session quit 退出、robot estop 急停、robot execute / teleop、capture episode / sync）。

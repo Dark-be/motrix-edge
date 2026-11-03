@@ -19,17 +19,18 @@ Edge 的控制入口统一为**命令总线**（`command/` 包）：命令对象
 ```python
 @dataclass
 class Command:
-    name: str                                   # 命令名（空格分隔多词，如 "session run"）
+    name: str  # 命令名（空格分隔多词，如 "session run"）
     params: dict = field(default_factory=dict)  # 业务参数
-    meta: dict = field(default_factory=dict)    # 授权元数据（lease_id / requester / idempotency_key）
-    reply_to: Callable | None = None            # 回执回调（None = fire-and-forget）
+    meta: dict = field(default_factory=dict)  # 授权元数据（lease_id / requester / idempotency_key）
+    reply_to: Callable | None = None  # 回执回调（None = fire-and-forget）
+
 
 @dataclass
 class CommandResult:
-    status: str = "ok"        # ok / rejected / error —— **判成败只看它**
+    status: str = "ok"  # ok / rejected / error —— **判成败只看它**
     data: dict = field(default_factory=dict)
     error: str | None = None
-    code: str | None = None   # edge 错误码（失败必填），见 errors.ErrorCode
+    code: str | None = None  # edge 错误码（失败必填），见 errors.ErrorCode
 ```
 
 -   **判成败只看 `status`**（`ok` / `accepted` 为成功）—— HTTP 与 CLI 一致；`code` 不参与判断，
@@ -91,6 +92,10 @@ class CommandResult:
 | `capture meta edit`       | `key, old, new`            | 配置级 | 重命名采集元信息选项（不存在 → rejected）                                                                                          | none |
 | `capture meta delete`     | `key, value`               | 配置级 | 删除某分类下的采集元信息选项（分类清空则删除分类）                                                                                 | none |
 | `capture meta delete-key` | `key`                      | 配置级 | 删除整个采集元信息分类                                                                                                             | none |
+
+末端位置比例已在本地后端接通；配置回显标为 queued，不代表锚点或 IK 就绪。遥操作映射的可选 CLI `key=value` 参数（跟随空间、轴白名单和末端位置比例）及其组合校验见
+[robot-pipeline 遥操作设计](./robot_pipeline_teleop.md)。示例：
+`robot takeover true follow_space=pose pose_position_scale=0.5,0.5,0.5`。
 
 可用性：robot / session 命令**仅在 adapter 可用（READY / ACTIVE）时可用**（IDLE / ERROR 下被拒）；
 `node reset` 仅 ERROR 下恢复回 IDLE；`robot estop` 与 `infer config`、`capture meta *`

@@ -6,6 +6,10 @@
 > `/v1/preview` 的 `pose`·`arms` / `gripper` / `pose_target`、`infer rollout stop`、
 > 策略 schema 的 `multiline`、服务端 3 位小数取整）。未标注的均为 master 现状。
 
+> **位置比例配套状态**：本地后端已支持 `pose_position_scale`、状态与入队配置回显；
+> 独立前端的比例输入、共享/逐臂编辑仍需在控制台仓库实施。本仓库未验证控制台构建与联调。
+> 初始姿态通过关节遥操作建立并跟踪到位，不提供手动摆动从臂后的实测重锚定。
+
 ## 摘要
 
 Edge Web Console 是 MotrixEdge 的**浏览器调试 / 测试前端**（Vite + React + TypeScript +
@@ -56,7 +60,7 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 
 3. **采集会话面板**：进入采集（enter）/ 退出采集（exit）；**采集开始 / 结束 / 取消（`capture episode start/end/cancel`）按采集运行位互锁**——未录制时显示“开始录制”，录制中并排显示“停止录制”和“取消录制”；停止会保存本轮文件，取消经确认后结束当前录制并删除本轮文件。另提供「预检」（`GET /v1/captures/precheck`：节点 / 会话 / 机器人就绪 + 磁盘 + 可否签发租约）。**采集元信息**（`capture meta`）按 `GET /v1/captures/meta` 返回的**分类动态渲染**（不硬编码其它分类，`capture.yml` 新增分类即出现），其中 `operator`（采集人）与 `task_name`（采集任务）是开始录制的前端必填项：两项都选中后才能同步，且机器人进程回报的已同步 meta 中两项都非空时「开始录制」才使能；缺失时按钮置灰并提示先选择、同步。选中后 `POST /v1/captures/sync` 同步到机器人进程（进程保存数据时附加）；同一面板的「管理选项」展开后可直接增 / 改 / 删选项与分类（`POST` / `PATCH` / `DELETE /v1/captures/meta`，配置级、与机器人进程 / 会话状态无关，写操作须持租约，回执 `{meta: 全量}` 就地刷新列表）。面板另展示 `GET /v1/captures` 的 `capture_status`（运行位 + 已同步的 `meta` 元信息全集 + 数据目录）。
 
-4. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制；头部显示**当前遥操作位**（程控 / 遥操作（absolute）/ 人工接管（增量）），关遥操作在未开启时置灰。
+4. **机器人命令卡片**：estop / reset / execute / teleop / **人工接管（`mode=delta` 增量）** 命令控制；头部显示**当前遥操作位**（程控 / 遥操作（absolute）/ 人工接管（增量）），关闭按钮在未开启时置灰。teleop 关闭时可选择跟随空间与映射模式；`pose + delta` 时显示 xyz 三轴位置比例输入与轴锁定选项，旋转始终按 1:1 映射。双臂可选择共用比例或分别设置。操作顺序：通过关节遥操作建立初始姿态并跟踪到位；**先关闭，再重新映射设置新的锚点**：确认 teleop 关闭后，选择 `pose + delta` 并设置比例，再点击启用；请求携带本次 `follow_space` / `mode` / `follow_axes` / `pose_position_scale`，机器人在控制线程首个有效样本处采集主从锚点。运行中锁定这些输入；当前后端重复启用仍会重锚定，不能将启用作为幂等重试。配置回执与状态轮询展示映射配置；入队成功不表示锚点或 IK 已成功。
 
 5. **像素深度 + 3D 坐标卡片（紧跟机器人命令之后）**：输入**归一化**坐标（`u` / `v`，0–1，0.5 = 画面中心；预览是 320×240 降采样图，故不直接填预览像素）→ `GET /v1/depth` 回显该像素的深度（米）+ **3D 坐标**：`xyz_camera`（相机光学系）与 `xyz_world`（`world` = 左臂基座，帧名与物理别名一并展示）。坐标由 Edge 侧用**同相机彩色内参 + 标定外参**算好（腕相机还要用**同一拍**臂位姿），不可用一律 `null`（不是 `0`）：卡片按「无有效深度 / 未标定 / 腕相机缺同拍位姿」分别说明，且外参缺失时深度仍照常给。可用深度相机列表来自 `/v1/preview` 的 `observation.depth`（与预览同源）。**放在机器人命令下方**：先摆好物 / 动完臂，再读像素的 3D 坐标。
 6. **租约面板（右栏）**：租约状态 + 到期倒计时 + 签发 / 续租 / 撤销 + 自动续租开关（默认开）。
@@ -133,9 +137,9 @@ Tailwind CSS）：经 Edge HTTP API（`/v1/*`）展示 Edge 状态、管理租�
 ## 契约要点（前端实现，单点定义）
 
 -   受控请求封装：统一注入 `X-Lease-Id`；非 2xx 抛出 `{ status, detail }`；**请求带超时**（缺省 15s，上传扫描 / 打包 120s），超时抛明确文案而不是永久 busy。
--   命令回执 `POST /v1/commands`：`status` 即命令结果（`ok` / `rejected` / `error`；`accepted` = push 型无回执），`data` 带结果字段（teleop 的 `teleop`/`mode`/`follow_space`/`follow_axes`、episode 的 `episode`/`recording`）；前端据此判定成功并即时翻转按钮状态（不等下一次轮询）。
+-   命令回执 `POST /v1/commands`：`status` 即命令结果（`ok` / `rejected` / `error`；`accepted` = push 型无回执），`data` 带结果字段（teleop 当前的 `teleop`/`mode`/`follow_space`/`follow_axes`，以及本地后端已支持的 `pose_position_scale`、episode 的 `episode`/`recording`）；前端据此展示命令处理结果；teleop `data.configuration_status=queued` 的配置回显不代表锚点或 IK 就绪，运行位由状态轮询确认。
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
--   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集，推理状态同构，分类可拓展，前端按 key 逐行展示）；adapter 段带**遥操作位**（`teleop` / `teleop_mode` / `teleop_follow_space` / `teleop_follow_axes`）。teleop 关闭时可选择 `joint` / `pose`，启用时冻结，并在下次开启时发送 `follow_space`；pose 时显示六轴锁定复选框并发送 `follow_axes`。不支持 pose 的机型由机器人进程明确拒绝。推理状态额外返回连接成功后的 `metadata`、`prompt` / `recording` / **`continuous`**（持续推理运行位）。
+-   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集，推理状态同构，分类可拓展，前端按 key 逐行展示）；adapter 段带**遥操作位**（`teleop` / `teleop_mode` / `teleop_follow_space` / `teleop_follow_axes`，以及本地后端已支持的 `teleop_pose_position_scale`）。teleop 关闭时可选择空间与模式；pose + delta 时提供 xyz 三轴位置比例输入与锁轴选项，双臂支持共用或分臂，旋转固定 1:1，启用请求发送 `mode` / `follow_space` / `pose_position_scale` / `follow_axes`。位置比例只对 pose + delta 有效。不支持 pose 的机型由机器人进程明确拒绝。推理状态额外返回连接成功后的 `metadata`、`prompt` / `recording` / **`continuous`**（持续推理运行位）。
 -   采集元信息选项：`GET /v1/captures/meta` 读列表（免租约）与写回执同构 `{meta: {分类: [选项]}}`；前端按返回的分类动态渲染选择框与管理的下拉（不硬编码分类，新分类无需改前端）。
 -   推理面板提供 Prompt 输入（经 `POST /v1/infers/config` 写入策略配置项 `prompt`，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
 -   **RTC 卡片**：展示 `GET /v1/infers` 的 `rtc`（enabled / 块长 H / 执行段 E / 后缀 S / 聚合函数 /

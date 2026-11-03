@@ -79,6 +79,8 @@ robot:
     joint_offset:
       left: [0, 0.1, 0, 0, 0, 0]
       right: [0, 0.1, 0, 0, 0, 0]
+    # pose+delta 的 xyz 比例（旋转固定 1:1）；可按臂覆盖。
+    pose_position_scale: [1, 1, 1]
     # 主臂 FK 后的位姿常量偏置：每臂 xyz（m）+ rpy（rad）。仅 pose 跟随使用；姿态会 wrap。
     # 与 joint_offset 一样，absolute 下可见、delta 下由锚点抵消；未列出的臂缺省全 0。
     pose_offset:

@@ -74,13 +74,16 @@ robot:
     # follow_axes: [x, y, z, pitch, yaw]
     follow_space: joint
     # 主臂读数的**常量偏置**（rad，逐关节 = 主从零位差；装配差异属于现场值，按机器档案覆盖）：
-    # absolute（示教）下直接体现；delta（人工接管）下由锚点自动抵消，不进入增量。
+    # absolute 下直接体现；joint+delta 下抵消，pose+delta 下 FK 非线性，仍影响末端增量。
     # 每臂一份（键 = 臂名 left / right）；也可给一个长度 = 每臂关节数的列表，全臂共用同一组偏置。
     joint_offset:
       left: [0, 0.1, 0, 0, 0, 0]
       right: [0, 0.1, 0, 0, 0, 0]
-    # 主臂 FK 后的位姿常量偏置：每臂 xyz（m）+ rpy（rad）。仅 pose 跟随使用；姿态会 wrap。
-    # 与 joint_offset 一样，absolute 下可见、delta 下由锚点抵消；未列出的臂缺省全 0。
+    # pose+delta 的 xyz 比例（旋转固定 1:1）；先关闭，再重新映射设置新的锚点。
+    # 可按臂配置，例如 {left: [0.5, 0.5, 0.5], right: [0.7, 0.7, 0.7]}。
+    pose_position_scale: [1, 1, 1]
+    # 主臂 FK 后每臂 xyz（m）+ rpy（rad）偏置：absolute 下可见；
+    # delta 下固定 xyz 偏置在差分中抵消，RPY 按 wrap 语义处理；未列出的臂缺省全 0。
     pose_offset:
       left: [0, 0, 0, 0, 0, 0]
       right: [0, 0, 0, 0, 0, 0]

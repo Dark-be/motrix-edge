@@ -139,6 +139,7 @@ class HealthStatus:
     tcp_offset: dict | None = None  # TCP 在法兰系下的位置（米，逐臂；非 tcp 时 None）
     gravity: dict | None = None  # 重力前馈状态（control_mode + 逐臂 active/alpha/params）
     teleop_follow_space: str | None = None  # joint | pose
+    teleop_pose_position_scale: dict[str, list[float]] | None = None
     teleop_follow_axes: list[str] | None = None  # pose 跟随轴白名单；未列轴锁定
 
 
@@ -655,12 +656,14 @@ class RobotAdapter(ABC):
         mode: str | None = None,
         follow_axes: list[str] | tuple[str, ...] | None = None,
         follow_space: str | None = None,
-    ) -> None:
+        pose_position_scale=None,
+    ) -> dict | None:
         """设置遥操作（``True``=遥操作 / ``False``=程控 / 推理控制）。
 
         ``mode`` 为遥操作映射模式（``absolute`` 缺省 / ``delta`` = **人工接管**：以接管瞬间
         的主 / 从位姿为锚点、只叠加主臂增量）；``follow_space`` 是本次 joint / pose 选择，
-        ``follow_axes`` 是 pose 轴白名单，未列轴锁在启用拍的从臂锚点。这些参数仅在
+        ``follow_axes`` 是 pose 轴白名单，未列轴锁在启用拍的从臂锚点；
+        ``pose_position_scale`` 只缩放 pose+delta 的 xyz，旋转仍 1:1。这些参数在
         ``enabled=True`` 时有意义；``None`` 表示沿用进程侧缺省。遥操作开启即视为人工接管，
         进程侧会拒绝 ``rollout``（见
         `wiki/design/robot_pipeline_teleop.md`）。

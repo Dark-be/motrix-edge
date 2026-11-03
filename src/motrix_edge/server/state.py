@@ -70,6 +70,9 @@ def adapter_state(node) -> dict:
         "teleop": teleop,
         "teleop_mode": getattr(adapter, "teleop_mode", None) if teleop else None,
         "teleop_follow_space": getattr(health, "teleop_follow_space", None) if health is not None else None,
+        "teleop_pose_position_scale": getattr(health, "teleop_pose_position_scale", None)
+        if health is not None
+        else None,
         "teleop_follow_axes": getattr(health, "teleop_follow_axes", None) if health is not None else None,
         "pose_frame": getattr(health, "pose_frame", None) if health is not None else None,
         "tcp_offset": getattr(health, "tcp_offset", None) if health is not None else None,

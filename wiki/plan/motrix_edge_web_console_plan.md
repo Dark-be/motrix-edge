@@ -4,6 +4,10 @@
 > （health / leases / captures / preview / webrtc，以及 `capture_status`、`POST /v1/uploads/pack`）；
 > TODO 里未勾的实现项属控制台仓库，不代表后端缺接口。
 
+> **位置比例配套状态**：本地后端已支持 `pose_position_scale`、状态与入队配置回显；
+> 独立前端的比例输入、共享/逐臂编辑仍需在控制台仓库实施。本仓库未验证控制台构建与联调。
+> 初始姿态通过关节遥操作建立并跟踪到位，不提供手动摆动从臂后的实测重锚定。
+
 ## 摘要
 
 基于 [Edge Web Console（前端）](../design/motrix_edge_web_console.md)：Vite + React + TS +
@@ -27,6 +31,10 @@ webrtc）。纯前端、零后端改动。功能完整落地后删除本文档�
 -   [ ] 会话控制 + 信号按钮（采集：进入 / 退出 / 采集开始 / 采集结束；推理：进入 / 连接 /
         推理一步 / 持续推理 / 停止推理 / 录制开始 / 录制结束 / 退出）+ 顶部全局急停，
         按钮标注底层命令；状态轮询 `GET /v1/captures` + `GET /v1/health`
+-   [ ] 机器人遥操作卡片：teleop 关闭时设置映射；pose + delta 时提供 xyz 三轴位置比例，双臂支持共用或逐臂，
+        旋转固定 1:1。操作顺序为通过关节遥操作建立初始姿态并跟踪到位；
+        **先关闭，再重新映射设置新的锚点**：确认关闭后选择 pose + delta 和比例，再开启；
+        启用请求提交 `follow_space` / `follow_axes` / `pose_position_scale`，开启期间冻结输入，状态 / 回执显示生效配置。
 -   [ ] WebRTC 视频：`POST /v1/webrtc/offer` 协商 + `<video>` 播放 + 连接状态
 -   [ ] 预览面板：`GET /v1/preview` 的数值字段（qpos / gripper / action / EEF 实测与目标）+ **WebRTC 视频**（图像不内联）——形态见 [Edge Web Console](../design/motrix_edge_web_console.md) 第 1 条
 -   [ ] `npm install` + `npm run build`（tsc + vite build）通过

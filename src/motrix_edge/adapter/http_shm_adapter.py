@@ -81,10 +81,12 @@ from motrix_edge.adapter.http_contract import (
     FIELD_RUNNING,
     FIELD_TCP_OFFSET,
     FIELD_TELEOP_ACTIVE_AXES,
+    FIELD_TELEOP_ACTIVE_SCALE,
     FIELD_TELEOP_ENABLED,
     FIELD_TELEOP_FOLLOW_AXES,
     FIELD_TELEOP_FOLLOW_SPACE,
     FIELD_TELEOP_MODE,
+    FIELD_TELEOP_POSITION_SCALE,
     FIELD_TELEOP_SPACE,
     PATH_CAMERAS,
     PATH_CAPTURE_CANCEL,
@@ -267,6 +269,7 @@ class HttpShmAdapter(RobotAdapter):
             tcp_offset=_parse_tcp_offset(data.get(FIELD_TCP_OFFSET)),
             gravity=data.get(FIELD_GRAVITY) or None,
             teleop_follow_space=str(data.get(FIELD_TELEOP_FOLLOW_SPACE) or "") or None,
+            teleop_pose_position_scale=data.get(FIELD_TELEOP_ACTIVE_SCALE),
             teleop_follow_axes=(
                 [str(axis) for axis in data.get(FIELD_TELEOP_ACTIVE_AXES)]
                 if isinstance(data.get(FIELD_TELEOP_ACTIVE_AXES), list)
@@ -307,7 +310,7 @@ class HttpShmAdapter(RobotAdapter):
         self.executed.append(target.tolist())  # 仅记录 SDK 已接受的动作，失败请求不能伪装成已执行
         debug_print(self.name, f"execute sent: {target.tolist()} layout={name}", "INFO")
 
-    def _post_switch(self, path: str, body: dict, what: str) -> None:
+    def _post_switch(self, path: str, body: dict, what: str) -> dict:
         """下发运行位开关并**检查回执**：4xx/5xx → ``ValueError``（回执 rejected）。
 
         与动作指令（``execute`` / ``rollout``：失败只影响那一条，且新旧状态都能从 health 看到）
@@ -322,6 +325,8 @@ class HttpShmAdapter(RobotAdapter):
             except Exception:  # noqa: BLE001 非 JSON 回包（网关 / 代理页）
                 detail = ""
             raise ValueError(f"robot refused {what}: HTTP {resp.status_code}{f' ({detail})' if detail else ''}")
+
+        return resp.json()
 
     def set_tcp(self, enabled: bool, offset=None) -> None:
         """运行期切换位姿系（法兰 ↔ 工具末端）：HTTP 转发 SDK 进程。
@@ -356,7 +361,8 @@ class HttpShmAdapter(RobotAdapter):
         mode: str | None = None,
         follow_axes: list[str] | tuple[str, ...] | None = None,
         follow_space: str | None = None,
-    ) -> None:
+        pose_position_scale=None,
+    ) -> dict:
         """设置遥操作（true=遥操作 / false=程控）：本地记录 + HTTP 转发 SDK 进程。
 
         ``mode``（``absolute`` / ``delta``）: 仅开启时有意义，缺省不发送该字段（进程侧回退
@@ -376,9 +382,12 @@ class HttpShmAdapter(RobotAdapter):
             f"teleop set to {next_enabled} (mode={next_mode}, follow_space={follow_space}, follow_axes={follow_axes})",
             "INFO",
         )
-        self._post_switch(PATH_TELEOP, body, "teleop switch")
+        if next_enabled and pose_position_scale is not None:
+            body[FIELD_TELEOP_POSITION_SCALE] = pose_position_scale
+        response = self._post_switch(PATH_TELEOP, body, "teleop switch")
         self.teleop_enabled = next_enabled
         self.teleop_mode = next_mode
+        return response
 
     def rollout(
         self,

@@ -243,21 +243,34 @@ class BaseEnv:
         mode: str | None = None,
         follow_axes=None,
         follow_space: str | None = None,
+        pose_position_scale=None,
     ):
         """设置遥操作（``enabled``：True=遥操作 / False=程控；``mode``：映射模式）：入队，控制线程执行。
 
         ``mode`` 为 ``absolute``（缺省，主臂绝对位姿直连）或 ``delta``（**人工接管**：以接管
         瞬间的主 / 从位姿为锚点，只叠加主臂增量）——具体语义与锚点采样见 ``BaseRobot``。
         """
-        if enabled and (follow_space is not None or follow_axes is not None):
-            self.robot.resolve_teleop_follow(follow_space, follow_axes)
+        config = None
+        if enabled:
+            resolved_mode, space, axes, scale = self.robot.resolve_teleop_config(
+                mode, follow_axes, follow_space, pose_position_scale
+            )
+            config = {
+                "mode": resolved_mode,
+                "follow_space": space,
+                "follow_axes": list(axes),
+                "pose_position_scale": {
+                    arm: scale[i * 3 : i * 3 + 3].tolist() for i, arm in enumerate(self.robot.state_arms())
+                },
+            }
         debug_print(
             self.robot.name,
             f"HTTP 收到命令: teleop enabled={bool(enabled)} mode={mode}"
             f" follow_space={follow_space} follow_axes={follow_axes}",
             "INFO",
         )
-        self.commands.put(("teleop", (bool(enabled), mode, follow_axes, follow_space)))
+        self.commands.put(("teleop", (bool(enabled), mode, follow_axes, follow_space, pose_position_scale)))
+        return config
 
     def robot_set_tcp(self, enabled: bool, offset=None):
         """运行期切换位姿系（法兰 ↔ 工具末端）：**直接同步切换**（HTTP 线程调 ``BaseRobot.set_tcp``）。
@@ -342,6 +355,7 @@ class BaseEnv:
             "gravity": self.robot.control_layout(),
             "teleop_follow_space": self.robot.teleop_follow_space,
             "teleop_follow_axes": list(self.robot.teleop_follow_axes),
+            "teleop_pose_position_scale": self.robot.teleop_scale_status(),
         }
 
     @property
@@ -564,15 +578,18 @@ class BaseEnv:
                 elif cmd == "safe_stop":
                     self.robot.safe_stop()
                 elif cmd == "teleop":
-                    enabled, mode, follow_axes, follow_space = payload
+                    enabled, mode, follow_axes, follow_space, pose_position_scale = payload
                     if not enabled:
                         self.robot.disable_teleop()
                     elif mode:
-                        self.robot.enable_teleop(mode, follow_axes, follow_space)  # 显式模式（delta = 人工接管）
+                        self.robot.enable_teleop(
+                            mode, follow_axes, follow_space, pose_position_scale
+                        )  # 显式模式（delta = 人工接管）
                     else:
                         self.robot.enable_teleop(
                             follow_axes=follow_axes,
                             follow_space=follow_space,
+                            pose_position_scale=pose_position_scale,
                         )  # 缺省 absolute（兼容旧调用方）
                 else:
                     debug_print(self.robot.name, f"unknown command '{cmd}' ignored", "WARNING")

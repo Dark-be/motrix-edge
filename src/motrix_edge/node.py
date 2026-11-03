@@ -619,7 +619,7 @@ class EdgeNode:
             return True
         if cmd.name in TELEOP_COMMANDS:  # robot teleop / robot teach / robot takeover
             try:
-                enabled, mode, follow_space, follow_axes = apply_teleop(self.adapter, cmd)
+                enabled, mode, follow_space, follow_axes, scale = apply_teleop(self.adapter, cmd)
             except ValueError as exc:
                 self._reply(cmd, CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT))
                 return True
@@ -631,6 +631,8 @@ class EdgeNode:
                     mode=mode if enabled else None,
                     follow_space=follow_space,
                     follow_axes=follow_axes,
+                    pose_position_scale=scale,
+                    configuration_status="queued",
                 ),
             )
             return True

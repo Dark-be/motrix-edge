@@ -135,6 +135,10 @@ class BaseRobot:
         self._configured_teleop_follow_axes = self.teleop_follow_axes
         self.teleop_joint_offset = self._resolve_teleop_joint_offset()
         self.teleop_pose_offset = self._resolve_teleop_pose_offset()
+        self._configured_teleop_pose_position_scale = self._parse_pose_position_scale(
+            (self.robot_config.get("teleop") or {}).get("pose_position_scale")
+        )
+        self.teleop_pose_position_scale = self._configured_teleop_pose_position_scale.copy()
 
         # 遥操作：开关 + 映射模式 + 增量锚点（锚点在接管后首拍采样，见 _capture_teleop_anchor）
         self.teleop_enabled = False
@@ -186,7 +190,7 @@ class BaseRobot:
         位姿锚点。配置错误在构造期响亮失败，避免真机以错误语义启动。
         """
         section = self.robot_config.get("teleop") or {}
-        allowed = {"joint_offset", "pose_offset", "follow_space", "follow_axes"}
+        allowed = {"joint_offset", "pose_offset", "follow_space", "follow_axes", "pose_position_scale"}
         unknown = [key for key in section if key not in allowed]
         if unknown:
             debug_print(self.name, f"robot.teleop 未知键 {unknown}（可用：{sorted(allowed)}），已忽略", "WARNING")
@@ -893,18 +897,59 @@ class BaseRobot:
             )
         return space, axes
 
-    def enable_teleop(self, mode: str = TELEOP_MODE_ABSOLUTE, follow_axes=None, follow_space=None) -> bool:
+    def _parse_pose_position_scale(self, raw) -> np.ndarray:
+        from motrix_edge.adapter.teleop import parse_position_scale
+
+        if raw is not None and (
+            self.ACTION_SPACE_POSE not in self.ACTION_SPACES or self.POSE_DIM_PER_ARM != len(self.TELEOP_POSE_AXES)
+        ):
+            raise ValueError(f"{self.name}: pose_position_scale needs pose action capability")
+        parsed = parse_position_scale(raw, arms=self.PROFILE_ARM_NAMES or self.state_arms())
+        return np.concatenate(
+            [
+                np.asarray(parsed.get(arm, [1.0] * 3) if isinstance(parsed, dict) else parsed or [1.0] * 3)
+                for arm in self.state_arms()
+            ]
+        )
+
+    def resolve_teleop_config(self, mode=None, follow_axes=None, follow_space=None, pose_position_scale=None):
+        """Resolve without mutation; HTTP validation and control thread share this path."""
+        mode = self.TELEOP_MODE_ABSOLUTE if mode is None else mode
+        if mode not in self.TELEOP_MODES:
+            raise ValueError(f"{self.name}: unknown teleop mode {mode!r}")
+        space, axes = self.resolve_teleop_follow(follow_space, follow_axes)
+        scale = (
+            self._configured_teleop_pose_position_scale.copy()
+            if pose_position_scale is None
+            else self._parse_pose_position_scale(pose_position_scale)
+        )
+        if pose_position_scale is not None and (space != self.TELEOP_FOLLOW_POSE or mode != self.TELEOP_MODE_DELTA):
+            raise ValueError("pose_position_scale is only valid for pose + delta")
+        if space == self.TELEOP_FOLLOW_POSE and mode != self.TELEOP_MODE_DELTA and np.any(scale != 1.0):
+            raise ValueError("non-unit configured pose_position_scale requires delta mode")
+        return mode, space, axes, scale
+
+    def teleop_scale_status(self) -> dict:
+        return {
+            arm: self.teleop_pose_position_scale[i * 3 : i * 3 + 3].tolist() for i, arm in enumerate(self.state_arms())
+        }
+
+    def enable_teleop(
+        self, mode: str = TELEOP_MODE_ABSOLUTE, follow_axes=None, follow_space=None, pose_position_scale=None
+    ) -> bool:
         """启用遥操作（``mode`` 决定主臂读数 → 从臂 target 的映射）。
 
         ``robot.teleop.follow_space`` 决定关节映射或 pose FK→IK；``mode`` 决定 absolute / delta。
-        pose 的未跟随轴锁在启用后首拍的从臂位姿锚点。HTTP / Edge 契约仍只有既有 ``mode``。
+        pose 的未跟随轴锁在启用后首拍的从臂位姿锚点；位置比例只缩放 pose+delta 的 xyz 增量。
+        用户先关闭，再重新映射设置新的锚点；重复启用的既有重锚定行为保留。
 
         返回是否切换成功（模式名非法 → False，保持原模式与 target 不变）。
         """
         if mode not in self.TELEOP_MODES:
             debug_print(self.name, f"Unknown teleop mode {mode!r} (expect {self.TELEOP_MODES})", "ERROR")
             return False
-        space, axes = self.resolve_teleop_follow(follow_space, follow_axes)
+        mode, space, axes, scale = self.resolve_teleop_config(mode, follow_axes, follow_space, pose_position_scale)
+        self.teleop_pose_position_scale = scale
         self.teleop_mode = mode
         self.teleop_follow_space = space
         self.teleop_follow_axes = axes
@@ -1027,6 +1072,8 @@ class BaseRobot:
                     delta = master_pose[index] - self.teleop_master_pose_ref[index]
                     if axis_index >= 3:
                         delta = float(wrap_angles([delta])[0])
+                    else:
+                        delta *= self.teleop_pose_position_scale[arm_index * 3 + axis_index]
                     target[index] = self.teleop_slave_pose_ref[index] + delta
                 else:
                     target[index] = master_pose[index]
@@ -1057,8 +1104,9 @@ class BaseRobot:
         joint 跟随沿用既有 absolute / delta；pose 跟随先 FK，再按轴白名单合成位姿并 IK。锚点尚未
         采样时本拍先原子采样。主臂读不到或位姿映射失败都只让本拍保持原目标，不置 ``last_error``。
 
-        关节偏置在 FK 前、位姿偏置在 FK 后叠加；两者都早于锚点，故 ``absolute`` 下可见、
-        ``delta`` 下被锚点抵消。位姿偏置不参与 joint 跟随。
+        关节偏置在 FK 前、位姿偏置在 FK 后叠加。joint+delta 的常量关节偏置会抵消；
+        pose+delta 中 FK 非线性，关节偏置仍影响末端增量。FK 后的常量位置偏置在差分中抵消，
+        姿态偏置按 RPY wrap 语义计算。位姿偏置不参与 joint 跟随。
         """
         if not self.teleop_enabled:
             return
