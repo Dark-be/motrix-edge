@@ -117,6 +117,37 @@ def test_initialize_enters_idle_and_is_idempotent():
     assert node.initialize() == NodeState.IDLE  # 幂等：不再回 INIT
 
 
+def test_stop_terminates_run_and_releases_adapter():
+    """stop() 让后台主循环走统一 teardown，不遗留访问 adapter 的 daemon 线程。"""
+    node = EdgeNode({}, command_source=lambda: None, poll_interval=0.001)
+    adapter = _FakeAdapter()
+    node.initialize()
+    node.adapter = adapter
+    node.lifecycle.transition(NodeState.READY)
+    thread = threading.Thread(target=node.run, name="edge-node-test", daemon=True)
+    thread.start()
+
+    node.stop()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert adapter.release_calls == 1
+    assert node.adapter is None
+
+
+def test_stop_is_idempotent_before_run():
+    """提前或重复 stop 均安全；run 不会进入循环，仍执行统一资源释放。"""
+    node = EdgeNode({}, command_source=lambda: None)
+    adapter = _FakeAdapter()
+    node.adapter = adapter
+
+    node.stop()
+    node.stop()
+
+    assert node.run() == NodeState.IDLE
+    assert adapter.release_calls == 1
+
+
 def test_dispatch_replies_rejected_for_not_applicable_command():
     """READY 下不适用命令（如 node reset）→ 兜底回执 rejected，避免 submit 挂起。"""
     node = EdgeNode({}, command_source=lambda: None)

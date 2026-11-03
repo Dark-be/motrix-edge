@@ -69,7 +69,7 @@ import numpy as np
 from utils.data_handler import debug_print
 
 # standard_obs keys (see Robot.get_standard_obs())
-KEY_QPOS = "observations/qpos"  # 状态向量（每臂「值 + 夹爪」交错）
+KEY_QPOS = "observations/qpos"  # 每臂「关节 + 夹爪」交错
 KEY_ACTION = "action"  # 同维同布局的目标向量
 CAMERA_PREFIX = "observations/images/"
 KEY_TIMESTAMP = "timestamp"  # obs 内观测拍时刻（秒，float；观测线程 build_observation() 打点）

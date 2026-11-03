@@ -44,8 +44,8 @@
 -   [x] `tests/test_server.py` + `tests/fake_robot.py`：`/v1/depth`（正常 / 0 像素 / 未知相机 /
         越界坐标 / 租约三态 / 未注入 501）
 -   [x] `tests/test_dual_piper_adapter.py`：深度读取 + 元数据缓存 + 路数不符丢弃 + 相机裁剪跟随
--   [x] `tests/test_robot_depth.py`：相机声明 / 配置解析 / 取帧组装 / 相机元数据（离线虚拟机器人）
--   [x] `tests/test_robot_pipeline_configs.py`：`robot.depth` 段形状
+-   [x] `robot-pipeline/tests/test_robot_depth.py`：相机声明 / 配置解析 / 取帧组装 / 相机元数据（离线虚拟机器人）
+-   [x] `robot-pipeline/tests/test_robot_pipeline_configs.py`：`robot.depth` 段形状
 -   [x] ruff check/format + `pytest -q` = **662 passed / 1 skipped**
 
 ### 文档

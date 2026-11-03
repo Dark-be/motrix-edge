@@ -29,7 +29,7 @@
 
 from importlib.metadata import entry_points
 
-import httpx
+import httpx2
 
 from motrix_edge.utils.data_handler import debug_print
 
@@ -78,7 +78,7 @@ def discover_adapter(
     """
     url = f"http://{host}:{port}"
     try:
-        with httpx.Client(base_url=url, timeout=1.0) as client:
+        with httpx2.Client(base_url=url, timeout=1.0) as client:
             resp = client.post(PATH_DISCOVER)
             resp.raise_for_status()
             robot = resp.json().get(FIELD_ROBOT, {})
@@ -204,9 +204,9 @@ def adapter_details() -> list[dict]:
                     "robot_model_id": caps.robot_model_id,
                     "robot_model_version": caps.robot_model_version,
                     "action_dim": caps.action_dim,
-                    # 各动作空间维度（joint / pose / gripper）：调用方据此判断能否下发该空间
+                    # 各绝对 / 增量动作空间维度：调用方据此判断能否下发该空间
                     "action_dims": dict(caps.action_dims),
-                    # 支持的动作空间（joint / pose / gripper）
+                    # 支持的动作空间
                     "action_spaces": list(caps.action_spaces),
                     "observation_keys": caps.observation_keys,
                     "image_names": caps.image_names,

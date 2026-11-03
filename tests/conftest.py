@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""pytest 全局配置：可选面测试的收集开关。
+"""Edge 测试配置：可选面测试的收集开关。
 
 策略客户端 / 服务按**引入的第三方依赖**分组为 pyproject 的可选面（``--extra``）。这些
 测试文件在 **import 阶段**就会触碰可选依赖（``websockets`` / ``aiortc`` / ``torch`` +
@@ -24,7 +24,6 @@ vendored ``lerobot``），若不预判，缺依赖时会在 collection 阶段直
 """
 
 import importlib.util
-import os
 
 import pytest
 
@@ -43,31 +42,6 @@ _OPTIONAL_FILES: dict[str, str] = {
     "test_webrtc.py": "webrtc",
     "test_lerobot_act_client.py": "lerobot",
 }
-
-#: 两个项目的「根目录」环境变量（配置 + 日志）：测试里指到临时目录，见下面的 autouse fixture。
-_ROOT_ENV_VARS = ("MOTRIX_EDGE_DIR", "MOTRIX_ROBOT_PIPELINE_DIR")
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _isolate_state_roots(tmp_path_factory):
-    """把两个项目的根目录指到临时目录——**防测试往 CWD 播种配置 / 写日志**。
-
-    新配置流程：``<根>`` = ``$MOTRIX_EDGE_DIR`` / ``$MOTRIX_ROBOT_PIPELINE_DIR``，未设时回落
-    ``<cwd>/motrix-edge`` / ``<cwd>/motrix-robot-pipeline``，且首次读配置会把包内示例**播种**过去。
-    不隔离的话，任何读配置的用例都会在仓库根建出这两个目录（.gitignore 虽覆盖，仍会污染工作区）。
-    """
-    roots = tmp_path_factory.mktemp("roots")
-    saved = {name: os.environ.get(name) for name in _ROOT_ENV_VARS}
-    for name in _ROOT_ENV_VARS:
-        os.environ[name] = str(roots / name.lower())
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
 
 
 def _missing(extra: str) -> list[str]:

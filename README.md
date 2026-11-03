@@ -59,9 +59,9 @@ edge `adapter` 的真实承载端——robot server 对外提供统一 `/v1` 指
 edge 经 `RobotAdapter` 下发指令（`execute` / `rollout` / `safe_stop` / `reset` / 采集回合
 控制等）并读取观测。
 
--   **控制循环**：`env`（BaseEnv）30Hz 主循环 + 命令队列；`robot`（BaseRobot）按
-    `step_rad` 对 action / target_action **限速逼近**，每帧 `step()` 后回读
-    `get_observation()`（qpos + images）；
+-   **控制循环**：`env`（BaseEnv）30Hz 主循环 + 命令队列；`robot`（BaseRobot）分别维护
+    joint/gripper 的 command 与 target，按 `step_rad` 生成关节 command，并用 `sample_state()`
+    缓存分离的物理量观测；
 -   **数据采集**：`collector`（act_mcap）把每轮 episode 流式写为 Foxglove MCAP + 同名
     JSON 元信息；
 -   **遥操作**：Leader→Follower / master→slave 主从跟随；
@@ -118,7 +118,7 @@ uv sync --extra webrtc   # 只补 WebRTC 预览
 > （**仅 torch**；其余依赖走内网 `pypi.mp` 索引，带 sha256）。取舍与核对依据见 `pyproject.toml`
 > 的 `[tool.uv]` 注释。
 
-不引入额外依赖的客户端 / 服务**不设选项**（如 RPent 面只用核心依赖里的 `httpx` / `numpy`）。
+不引入额外依赖的客户端 / 服务**不设选项**（如 RPent 面只用核心依赖里的 `httpx2` / `numpy`）。
 对应的测试文件在依赖缺失时**不收集**（pytest 头部会列出被跳过的文件），因此不带可选面跑
 测试只覆盖核心面。
 

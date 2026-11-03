@@ -19,9 +19,9 @@
 
 - **HTTP 指令下行**：``execute`` / ``rollout`` / ``safe_stop`` / ``reset`` /
   ``set_teleop`` / 采集回合控制；
-- **共享内存观测上行**：读取状态向量（``observations/qpos``，每臂「值 + 夹爪」）/ 目标向量
+- **共享内存观测上行**：读取绝对关节（``observations/qpos``）/ 关节目标
   （``action``，同维同布局）/ 实测位姿 / 目标位姿（``observations/pose`` /
-  ``observations/pose_target``）与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；机器人开启深度时
+  ``observations/pose_action``）与 raw RGB 相机帧，编码为 Edge 契约的 JPEG；机器人开启深度时
   一并读深度图（``observations/depth/<cam>``，uint16、对齐到彩色图）；
 - **相机元数据查询**：``GET /v1/cameras`` 取**彩色内参**与深度比例（静态，惰性一次 + 缓存），
   供 ``GET /v1/depth`` 把像素深度换算成米（反投影输入）；
@@ -34,13 +34,13 @@ Edge 配置（``adapter`` 段）裁剪——``configure()`` 只启用指定臂 /
 ``HOME[space]`` 填充（同空间，不会拿关节值当位姿发）。
 
 **位姿（末端）约定**：下发的位姿目标与读到的位姿（``observations/pose`` /
-``observations/pose_target``）**必须同坐标系**（``POSE_FRAME``，如 ``flange`` / ``tcp``）。位姿永远按
+``observations/pose_action``）**必须同坐标系**（``POSE_FRAME``，如 ``flange`` / ``tcp``）。位姿永远按
 ``xyz(3) + rpy(3)`` 每臂 6 维、单位**米 / 弧度**（与 edge 契约一致；SDK 若有 0.001mm / 0.001° 之类的
 整数标度，由机器人进程换算）。数值明显离谱（量纲写错）时记 ERROR，不把可疑数据喂给策略。
 """
 
 import cv2
-import httpx
+import httpx2
 import numpy as np
 
 from motrix_edge.adapter.base import (
@@ -48,7 +48,7 @@ from motrix_edge.adapter.base import (
     DEPTH_PREFIX,
     KEY_ACTION,
     KEY_POSE,
-    KEY_POSE_TARGET,
+    KEY_POSE_ACTION,
     KEY_QPOS,
     Action,
     ActionSpace,
@@ -165,7 +165,7 @@ class HttpShmAdapter(RobotAdapter):
         self.http_timeout = self.HTTP_TIMEOUT
 
         # 惰性连接资源：首次指令 / 观测时建立（SDK 自维护硬件与连接）
-        self._http: httpx.Client | None = None  # SDK HTTP 客户端（指令下行）
+        self._http: httpx2.Client | None = None  # SDK HTTP 客户端（指令下行）
         self._shm: ObsShmReader | None = None  # 共享内存观测读者（观测上行）
         self._running = False  # 机器人进程最近一次确认是否运行（health 实时刷新）
         self._pose_problem_logged: str | None = None  # 位姿不可用原因（同原因只记一条）
@@ -195,10 +195,10 @@ class HttpShmAdapter(RobotAdapter):
         """机器人进程最近一次确认是否运行（health 实时刷新）。"""
         return self._running
 
-    def _client(self) -> httpx.Client:
+    def _client(self) -> httpx2.Client:
         """惰性建立 SDK HTTP 客户端（首次指令 / 查询时）。"""
         if self._http is None:
-            self._http = httpx.Client(base_url=self.sdk_url, timeout=self.http_timeout)
+            self._http = httpx2.Client(base_url=self.sdk_url, timeout=self.http_timeout)
         return self._http
 
     def release(self):
@@ -219,7 +219,7 @@ class HttpShmAdapter(RobotAdapter):
         if self.effective_pose_dim_per_arm() > 0:
             # 机器人提供位姿才声明（否则观测里确实没有这两个键）
             obs_keys.append(KEY_POSE)
-            obs_keys.append(KEY_POSE_TARGET)
+            obs_keys.append(KEY_POSE_ACTION)
         obs_keys += [f"{CAMERA_PREFIX}{img}" for img in self.images]
         # 深度键只对**具备深度**的启用相机声明（``DEPTH_CAMERAS`` = 类常量能力声明；实际生效相机
         # 以机器人进程上报为准，见 ``depth_camera_names()``——这里是「能不能有深度」）
@@ -403,7 +403,7 @@ class HttpShmAdapter(RobotAdapter):
         持续推理（30Hz）会反复命中 409，故日志**只在状态变化时**各记一条（进入拒绝 / 恢复下发）。
         """
         resp = self._client().post(path, json=body)
-        if resp.status_code == httpx.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
+        if resp.status_code == httpx2.codes.CONFLICT:  # 遥操作中：推理让位（见 /v1/rollout 契约）
             self.rollout_refused_calls += 1
             if not self._rollout_refused_logged:
                 self._rollout_refused_logged = True
@@ -574,10 +574,10 @@ class HttpShmAdapter(RobotAdapter):
         只返回启用臂 / 启用相机的观测（configure 裁剪）；SDK 进程把观测填充到共享内存，
         observe 只读取、不推进 SDK 运行。尚无首帧时返回 ``None``。
 
-        状态**与动作空间无关**：``observations/qpos`` = **状态向量**（每臂「值 + 夹爪」交错）、
-        ``action`` = **同维同布局**的目标向量、``observations/pose`` = **实测**位姿、
-        ``observations/pose_target`` = **目标**位姿（= ``FK(关节段目标)``，随位姿一起提供）；
-        故数采 / 策略拿到的永远是「值 + 夹爪」那一条向量。机器人开启深度时额外给
+        ``observations/qpos`` / ``action`` 固定为每臂 ``[joint..., gripper]`` 的实测 / 目标向量；
+        ``observations/pose`` = **实测**位姿、
+        ``observations/pose_action`` = **目标**位姿（= ``FK(关节段目标)``，随位姿一起提供）；
+        机器人开启深度时额外给
         ``observations/depth/<cam>``（uint16、**已对齐到彩色图**，``0`` = 无效像素）。
         """
         if self._shm is None:
@@ -585,7 +585,7 @@ class HttpShmAdapter(RobotAdapter):
         frame = self._shm.read()
         if frame is None:
             return None  # SDK 尚未产出首帧：瞬态无帧，不是空观测
-        # 状态 / 目标向量：每臂「值 + 夹爪」交错，按**启用臂**裁剪（两键同一口径、同维同布局）
+        # 状态 / 目标按每臂 ``[joint..., gripper]`` 的同一布局裁剪。
         per_arm = self.state_dim_per_arm()
         obs = {
             KEY_QPOS: np.asarray(self._select_arm_segments(frame["qpos"], per_arm), dtype=np.float32),
@@ -607,7 +607,7 @@ class HttpShmAdapter(RobotAdapter):
         if target is not None and per_arm > 0:
             problem = self._pose_problem(target, per_arm)
             if problem is None:
-                obs[KEY_POSE_TARGET] = self._select_arm_segments(target, per_arm)
+                obs[KEY_POSE_ACTION] = self._select_arm_segments(target, per_arm)
             else:
                 self._warn_bad_pose(problem)
         # strict=True：路数由两侧各自声明（SHM header 的 image_count ↔ 类常量 IMAGES），

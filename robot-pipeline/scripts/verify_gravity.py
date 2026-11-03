@@ -51,19 +51,21 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from config import resolve_config_file  # noqa: E402
-from robot.gravity import (  # noqa: E402
-    DEFAULT_PARAMS_RELATIVE,
+from robot.calibration.gravity import (  # noqa: E402
     DEFAULT_SETTLE,
     DEFAULT_WINDOW,
-    T_FF_LIMIT_NM,
-    GravityCompensator,
     SettleDetector,
     friction_from_passes,
-    load_gravity_params,
     plan_waypoints,
     save_samples,
     summarize_samples,
     window_stats,
+)
+from robot.dynamics.gravity import (  # noqa: E402
+    DEFAULT_PARAMS_RELATIVE,
+    T_FF_LIMIT_NM,
+    GravityCompensator,
+    load_gravity_params,
 )
 from robot.kinematics import PiperKinematics  # noqa: E402
 from utils.data_handler import debug_print  # noqa: E402

@@ -89,22 +89,22 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 
 单点定义于 `base.py`：`KEY_QPOS = "observations/qpos"`（**状态向量**：每臂「值 + 夹爪」交错，
 值当前 = 关节角）、`KEY_ACTION = "action"`（**目标向量**：同维同布局，每臂「关节目标 + 夹爪目标」）、
-`KEY_POSE = "observations/pose"`（**实测**末端位姿）、`KEY_POSE_TARGET = "observations/pose_target"`
+`KEY_POSE = "observations/pose"`（**实测**末端位姿）、`KEY_POSE_ACTION = "observations/pose_action"`
 （**目标**位姿 = `FK(关节段目标)`）、`CAMERA_PREFIX = "observations/images/"`（相机名
 `observations/images/<name>`）。**夹爪不单独成键**（是状态向量每臂块的末位）；逐维含义由机器人侧
 `state_layout()` 自描述，写进采集 JSON（`state_space` / `state_dims` / `action_space` / `action_dims`）。
 `capabilities.observation_keys` 与 `observe()` 实际返回**同一套键**（qpos + action +
-启用相机，机器人提供位姿时另有 pose / pose_target），随 `configure()` 实时变化；`image_names`
+启用相机，机器人提供位姿时另有 pose / pose_action），随 `configure()` 实时变化；`image_names`
 由相机键推理（`image_names_of()` 单点）。robot 进程 discover / health 上报的 `observation_keys`
 同口径。
 
 **观测常驻、与动作空间无关**：`qpos` 是**状态向量**（每臂「值（当前 = 关节角）+ 夹爪」交错；逐维
 含义见采集 JSON 的 `state_space` / `state_dims`），`action` 是同维同布局的目标向量，
-`pose` / `pose_target` 是**实测 / 目标**末端位姿（每臂 6 维 xyz + rpy，米 / 弧度，**不交错**；
+`pose` / `pose_action` 是**实测 / 目标**末端位姿（每臂 6 维 xyz + rpy，米 / 弧度，**不交错**；
 机器人提供位姿时才有）——「目标 − 实测」就是底层 MIT 的实时稳态误差。
 其中 `action` 是**进程侧当前目标动作**（SDK 侧正在执行的指令；尚无指令时进程回退为 qpos），
 经共享内存单独传输，**不是 qpos 的副本**——所以 preview 显示的是真实指令。裁剪后
-`qpos` / `action`（以及机器人提供位姿时的 `pose` / `pose_target`）共用同一个
+`qpos` / `action`（以及机器人提供位姿时的 `pose` / `pose_action`）共用同一个
 `_select_arm_segments()` 口径，观测内臂维度始终自洽；预览的 `qpos` / `gripper` 两个字段是
 `adapter.split_state()` 对状态向量的**展示层**拆分（不是两个观测键）；位姿策略靠 `pose` 知道
 自己末端在哪（见
@@ -128,7 +128,7 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 
 ### 动作空间（ActionSpace）
 
-`ActionSpace`（`base.py`）声明 flat 动作向量的**语义**，四个空间**各自只表达一件事**、值都按臂
+`ActionSpace`（`base.py`）声明 flat 动作向量的语义；关节、位姿、夹爪的绝对 / 增量空间各自只表达一件事，值都按臂
 等长展开：`joint`（缺省：每臂 6 关节角，绝对目标）/ `pose`（每臂 xyz + rpy，绝对目标）/
 `pose_delta`（每臂 xyz + rpy，**增量**，由机器人叠加在关节段目标上）/ `gripper`（每臂 1
 夹爪，归一化 `[0, 1]`）。声明链路：调用方声明

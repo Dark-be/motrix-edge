@@ -65,22 +65,19 @@
 - ``/v1/cameras``：相机**静态元数据**（尺寸 / **彩色内参** / 深度比例）——深度图已对齐到彩色图，
   故反投影只需要这一套内参；edge 侧惰性查询一次并缓存，用于 ``GET /v1/depth``。
   相机无深度能力时其 ``depth`` 段为 ``null``。
-- ``/v1/execute`` 与 ``/v1/rollout`` 的 ``layout``（段名取值 ``joint`` / ``pose`` /
-  ``pose_delta`` / ``gripper``，缺省 ``joint``）：声明 ``action`` 的语义——``joint`` 为关节空间绝对
-  目标（每臂 6 关节角），``pose`` 为末端位姿绝对目标（每臂 xyz + rpy），``pose_delta`` 为位姿
-  **增量**（叠加在**关节段目标**的正解位姿上），``gripper`` 为夹爪（每臂 1）。``pose`` /
-  ``pose_delta`` 由机器人侧求解器解算成关节目标（不切运动模式，仍走 MIT 关节通路）后执行。
+- ``/v1/execute`` 与 ``/v1/rollout`` 的 ``layout`` 支持关节、位姿和夹爪的绝对 / 增量段。
+  ``joint_delta`` / ``gripper_delta`` 叠加在各自当前 target，``pose_delta`` 叠加在关节 target 的
+  正解位姿；位姿类由机器人侧解算为关节目标后执行。
   不传该字段的调用方行为不变；解算失败（超限位 / 不收敛）→ 422 且**不改既有目标**；位姿动作见
   [robot-pipeline 位姿动作](../../../wiki/design/robot_pipeline_cartesian.md)。
 - ``/v1/execute`` / ``/v1/rollout`` 的 ``layout``（缺省 ``joint``）：每臂块内的**段序列**，段名用
-  ``+`` 连接、**书写顺序即块内顺序**（``joint`` / ``pose`` / ``pose_delta`` / ``gripper`` /
-  ``joint+gripper`` / ``pose+gripper`` …）；约束是「**至多一个值段**（``joint`` / ``pose`` /
-  ``pose_delta``）+ 可选 ``gripper``」；未知 / 未声明的 layout → 422（附可用清单）。
+  ``+`` 连接、书写顺序即块内顺序；约束是「至多一个运动段 + 至多一个夹爪段」。
+  未知 / 未声明的 layout → 422（附可用清单）。
 - ``arms``（缺省 = 机器人**全部臂**）：**作用域**——给定时只写这些臂，其余臂目标**原样保留**；
   缺省时 ``action`` 的维度按全部臂算（edge adapter 会先把未启用臂用 ``HOME`` 填成全部臂）。
 - **位姿增量叠在目标上**：``pose_delta`` 的基准是机器人自己的**关节段目标**（不是实测位姿）：
   底层 MIT 无重力前馈，实测恒落后目标一个稳态误差，以实测为基准会把误差写进新目标、逐步累积。
-  目标位姿由机器人常驻发布为 ``observations/pose_target``（= ``FK(关节段目标)``），与
+  目标位姿由机器人常驻发布为 ``observations/pose_action``（= ``FK(关节段目标)``），与
   ``observations/pose`` 同系可比。
 """
 
@@ -135,7 +132,7 @@ FIELD_SUPPORTED_ADAPTERS = "supported_adapters"  # robot：声明支持的 adapt
 FIELD_ROBOT_MODEL_ID = "robot_model_id"  # connect / robot：机器人型号
 FIELD_ROBOT_MODEL_VERSION = "robot_model_version"  # robot：机器人型号版本
 FIELD_ACTION_DIM = "action_dim"  # robot：joint 空间维度（兼容字段）
-FIELD_ACTION_DIMS = "action_dims"  # robot：各动作空间维度（{joint: 12, pose: 12, pose_delta: 12, gripper: 2}）
+FIELD_ACTION_DIMS = "action_dims"  # robot：各绝对 / 增量动作空间维度
 FIELD_OBSERVATION_KEYS = "observation_keys"  # robot：观测键布局（含 observations/images/<cam>）
 FIELD_POSE_FRAME = "pose_frame"  # health：位姿（读 + 写）所在坐标系名（flange | tcp）——**运行位**
 FIELD_TCP_OFFSET = "tcp_offset"  # health：TCP 在法兰系下的位置（米，逐臂；非 tcp 时为 null）
@@ -186,21 +183,25 @@ DEFAULT_TELEOP_MODE = VALUE_TELEOP_MODE_ABSOLUTE  # 不传 mode 时保持旧行�
 TELEOP_POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
 # ---- 下发布局（layout）：段名用分隔符连接（书写顺序 = 块内顺序；两侧契约共用）----
-# 段类型（kind）= 动作空间名；约束：**至多一个值段**（joint / pose / pose_delta）+ 可选 gripper。
+# 段类型（kind）= 动作空间名；约束：至多一个运动段 + 至多一个夹爪段。
 VALUE_LAYOUT_SEPARATOR = "+"
 VALUE_LAYOUT_JOINT = "joint"  # 单段：关节（缺省布局）
-VALUE_LAYOUT_JOINT_GRIPPER = "joint+gripper"  # 关节 + 夹爪（与 observations/qpos 的每臂块同构）
+VALUE_LAYOUT_JOINT_GRIPPER = "joint+gripper"  # 关节 + 夹爪原子写入
 
 # ---- 动作空间取值（与 adapter/base.py 的 ActionSpace 一一对应；两端引用不硬编码）----
 VALUE_ACTION_SPACE_JOINT = "joint"  # 关节空间（每臂 6 关节角，绝对目标）
+VALUE_ACTION_SPACE_JOINT_DELTA = "joint_delta"  # 关节空间增量（叠加在当前关节目标）
 VALUE_ACTION_SPACE_POSE = "pose"  # 末端位姿（每臂 xyz + rpy，绝对目标）
 VALUE_ACTION_SPACE_POSE_DELTA = "pose_delta"  # 末端位姿**增量**（每臂 xyz + rpy）
 VALUE_ACTION_SPACE_GRIPPER = "gripper"  # 夹爪（每臂 1，归一化 [0, 1]）
+VALUE_ACTION_SPACE_GRIPPER_DELTA = "gripper_delta"  # 夹爪增量（叠加目标后钳位）
 ACTION_SPACES = (
     VALUE_ACTION_SPACE_JOINT,
+    VALUE_ACTION_SPACE_JOINT_DELTA,
     VALUE_ACTION_SPACE_POSE,
     VALUE_ACTION_SPACE_POSE_DELTA,
     VALUE_ACTION_SPACE_GRIPPER,
+    VALUE_ACTION_SPACE_GRIPPER_DELTA,
 )
 
 __all__ = [
@@ -263,7 +264,9 @@ __all__ = [
     "TELEOP_MODES",
     "TELEOP_POSE_AXES",
     "VALUE_ACTION_SPACE_GRIPPER",
+    "VALUE_ACTION_SPACE_GRIPPER_DELTA",
     "VALUE_ACTION_SPACE_JOINT",
+    "VALUE_ACTION_SPACE_JOINT_DELTA",
     "VALUE_ACTION_SPACE_POSE",
     "VALUE_ACTION_SPACE_POSE_DELTA",
     "VALUE_LAYOUT_JOINT",

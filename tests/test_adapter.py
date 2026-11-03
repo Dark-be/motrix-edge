@@ -38,7 +38,7 @@ from motrix_edge.adapter.base import (
     DEPTH_PREFIX,
     KEY_ACTION,
     KEY_POSE,
-    KEY_POSE_TARGET,
+    KEY_POSE_ACTION,
     KEY_QPOS,
     AdapterCapability,
     DiscoveredRobot,
@@ -89,7 +89,7 @@ def make_discovered(**overrides) -> DiscoveredRobot:
 
 
 def _patch_discover_client(monkeypatch, payload=None, error=None):
-    """把 discover_adapter 里的 ``httpx.Client`` 替换为桩（返回 canned 响应或抛错）。"""
+    """把 discover_adapter 里的 ``httpx2.Client`` 替换为桩（返回 canned 响应或抛错）。"""
 
     class _Resp:
         def __init__(self, payload):
@@ -117,7 +117,7 @@ def _patch_discover_client(monkeypatch, payload=None, error=None):
                 raise self._error
             return _Resp(self._payload)
 
-    monkeypatch.setattr("motrix_edge.adapter.httpx", SimpleNamespace(Client=_Client))
+    monkeypatch.setattr("motrix_edge.adapter.httpx2", SimpleNamespace(Client=_Client))
 
 
 def test_discover_adapter_returns_none_when_no_process(monkeypatch):
@@ -186,8 +186,15 @@ def test_adapter_details_lists_all_registered():
     assert info["available"] is True
     caps = info["capabilities"]
     assert caps["action_dim"] == 12  # 兼容字段 = 关节空间维度（双臂 6 × 2）
-    assert caps["action_dims"] == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
-    assert caps["action_spaces"] == ["joint", "pose", "pose_delta", "gripper"]  # 控制台据此开放四空间直控
+    assert caps["action_dims"] == {
+        "joint": 12,
+        "joint_delta": 12,
+        "pose": 12,
+        "pose_delta": 12,
+        "gripper": 2,
+        "gripper_delta": 2,
+    }
+    assert caps["action_spaces"] == ["joint", "joint_delta", "pose", "pose_delta", "gripper", "gripper_delta"]
     assert caps["image_names"] == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert caps["capabilities"]["capture"] is True
     assert caps["capabilities"]["execute"] is True
@@ -215,7 +222,14 @@ def test_get_adapter_parameterized_by_discovered():
     assert adapter.type == "test_robot"
     # 能力与连接参数来自类级常量（不随 discover 传输）
     assert adapter.action_dim == 12
-    assert adapter.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+    assert adapter.action_dims == {
+        "joint": 12,
+        "joint_delta": 12,
+        "pose": 12,
+        "pose_delta": 12,
+        "gripper": 2,
+        "gripper_delta": 2,
+    }
     assert adapter.images == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert adapter.sdk_url == "http://127.0.0.1:8090"
     assert adapter.shm_name == "test_robot_obs"
@@ -238,13 +252,20 @@ def test_capabilities_declares_action_dim_and_observation_keys():
     adapter = get_adapter(make_discovered())
     caps = adapter.capabilities
     assert caps.action_dim == 12
-    assert caps.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
-    assert caps.action_spaces == ["joint", "pose", "pose_delta", "gripper"]  # 关节 + 位姿（绝对/增量）+ 夹爪
+    assert caps.action_dims == {
+        "joint": 12,
+        "joint_delta": 12,
+        "pose": 12,
+        "pose_delta": 12,
+        "gripper": 2,
+        "gripper_delta": 2,
+    }
+    assert caps.action_spaces == ["joint", "joint_delta", "pose", "pose_delta", "gripper", "gripper_delta"]
     assert caps.observation_keys == [
         KEY_QPOS,
         KEY_ACTION,
         KEY_POSE,
-        KEY_POSE_TARGET,
+        KEY_POSE_ACTION,
         f"{CAMERA_PREFIX}cam_head",
         f"{CAMERA_PREFIX}cam_left_wrist",
         f"{CAMERA_PREFIX}cam_right_wrist",
@@ -557,11 +578,18 @@ def test_capture_commands_raise_when_sdk_rejects():
 
 
 def test_configure_default_enables_all_arms():
-    """缺省（不配置）：启用全部臂，action_dims = {joint:12, pose:12, gripper:2}，动作直发。"""
+    """缺省启用全部臂，各绝对 / 增量动作空间按双臂维度上报。"""
     adapter = test_adapter_mod.TestRobotAdapter()
     assert adapter.enabled_arms == ["left", "right"]
     assert adapter.action_dim == 12
-    assert adapter.action_dims == {"joint": 12, "pose": 12, "pose_delta": 12, "gripper": 2}
+    assert adapter.action_dims == {
+        "joint": 12,
+        "joint_delta": 12,
+        "pose": 12,
+        "pose_delta": 12,
+        "gripper": 2,
+        "gripper_delta": 2,
+    }
     assert adapter.capabilities.action_dim == 12
 
 
@@ -571,7 +599,14 @@ def test_configure_right_arm_changes_dim_and_expands():
     adapter.configure(enabled_arms=["right"])
     assert adapter.enabled_arms == ["right"]
     assert adapter.action_dim == 6
-    assert adapter.action_dims == {"joint": 6, "pose": 6, "pose_delta": 6, "gripper": 1}
+    assert adapter.action_dims == {
+        "joint": 6,
+        "joint_delta": 6,
+        "pose": 6,
+        "pose_delta": 6,
+        "gripper": 1,
+        "gripper_delta": 1,
+    }
     assert adapter.capabilities.action_dim == 6
 
     adapter.execute(np.arange(6, dtype=np.float64))
@@ -780,7 +815,14 @@ def test_adapter_config_current_reports_effective():
     assert data["enabled"]["arms"].get("left") is False
     assert data["enabled"]["cameras"].get("cam_head") is True
     assert data["action_dim"] == 6
-    assert data["action_dims"] == {"joint": 6, "pose": 6, "pose_delta": 6, "gripper": 1}
+    assert data["action_dims"] == {
+        "joint": 6,
+        "joint_delta": 6,
+        "pose": 6,
+        "pose_delta": 6,
+        "gripper": 1,
+        "gripper_delta": 1,
+    }
     assert data["home"] == {"joint": [0.0] * 12, "gripper": [1.0] * 2}  # 类常量 HOME（全臂）
 
 

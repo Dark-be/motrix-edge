@@ -27,7 +27,7 @@ from motrix_edge.adapter.base import (
     CAMERA_PREFIX,
     KEY_ACTION,
     KEY_POSE,
-    KEY_POSE_TARGET,
+    KEY_POSE_ACTION,
     KEY_QPOS,
     ActionSpace,
     HealthStatus,
@@ -137,14 +137,14 @@ class FakeAdapter(RobotAdapter):
         return self._frame_set
 
     def observation_frame(self) -> dict:
-        """当前机器人状态 → 观测帧（含 ``observations/pose_target``，与实测位姿同一拍）。"""
+        """当前机器人状态 → 观测帧（含 ``observations/pose_action``，与实测位姿同一拍）。"""
         if self.track and self.pose_target is not None:
             self._track_target()
         frame = make_obs(qpos=self.qpos, pose=self.pose, gripper=self.gripper)
         # 契约：``action``（目标向量）**常驻**——无指令时回退状态（这里是假机器人，从未收到过指令）
         frame[KEY_ACTION] = rpent_state(self.qpos, self.gripper)
         if self.pose_target is not None:
-            frame[KEY_POSE_TARGET] = np.asarray(self.pose_target, dtype=np.float32).copy()
+            frame[KEY_POSE_ACTION] = np.asarray(self.pose_target, dtype=np.float32).copy()
         return frame
 
     def _track_target(self) -> None:
@@ -162,7 +162,7 @@ class FakeAdapter(RobotAdapter):
         keys = [KEY_QPOS, KEY_ACTION]
         if self.effective_pose_dim_per_arm() > 0:
             keys.append(KEY_POSE)
-            keys.append(KEY_POSE_TARGET)
+            keys.append(KEY_POSE_ACTION)
         return RobotCapabilities(
             action_dim=self.action_dim,
             action_dims=dict(self.action_dims),
@@ -222,7 +222,7 @@ class FakeFrameManager:
     读 ``image_size``）。
 
     ``obs`` 给定 → 固定帧（帧序列由测试自己排）；给 ``adapter`` → 每拍按适配器当前状态出帧
-    （把 ``pose_delta`` 的落点反映到 ``observations/pose_target`` 上，模拟真机器人）。
+    （把 ``pose_delta`` 的落点反映到 ``observations/pose_action`` 上，模拟真机器人）。
     """
 
     image_size = (320, 240)
@@ -302,7 +302,7 @@ def make_obs(*, qpos=None, pose=None, gripper=None, action=None, pose_target=Non
     # ``pose_target`` = **目标位姿**（每臂 ``xyz + rpy`` 6 维，**不含夹爪**——与 ``observations/pose``
     # 同一布局）；不指定则视为「机器人不发布该键」
     if pose_target is not None:
-        obs[KEY_POSE_TARGET] = np.asarray(pose_target, dtype=np.float32)
+        obs[KEY_POSE_ACTION] = np.asarray(pose_target, dtype=np.float32)
     for index, name in enumerate(cameras):
         rgb = np.zeros((4, 5, 3), dtype=np.uint8)
         rgb[..., 0] = 200 + index  # 红：彩色通道若被反转，断言会失败
@@ -371,7 +371,7 @@ def install_lease(leases: LeaseManager, lease_id: str = "ls_rpent_1") -> str:
 def env():
     """(service, node, adapter, leases, commands)：**已签发租约**，可直接调写方法。"""
     adapter = FakeAdapter()
-    node = FakeNode(adapter)  # 观测帧从假机器人状态渲染（含 observations/pose_target）
+    node = FakeNode(adapter)  # 观测帧从假机器人状态渲染（含 observations/pose_action）
     leases = LeaseManager()
     install_lease(leases)
     commands = StubCommands()
@@ -545,7 +545,7 @@ def test_move_delta_sends_delta_and_reports_robot_target(env):
 
     旧实现把「当前**观测**位姿 + 增量」算成绝对目标下发：底层 MIT 有稳态误差，实测恒落后目标，
     于是每一条增量都把当前误差写进新目标（逐条累积）。现在基准只存在于机器人侧（同一拍读 / 叠 /
-    解），回执里的 ``target`` 是**机器人解算出来的**目标位姿（取自 ``observations/pose_target``）。
+    解），回执里的 ``target`` 是**机器人解算出来的**目标位姿（取自 ``observations/pose_action``）。
     """
     service, _node, adapter, _leases, _commands = env
     result = service.call("env.move_delta", kwargs={"delta_xyz": [0.01, 0.0, 0.0]})
@@ -569,7 +569,9 @@ def test_move_delta_sends_delta_and_reports_robot_target(env):
 def test_move_delta_single_arm_keeps_the_other(env):
     """指定 ``arm`` → 只改该臂，另一臂增量恒为 0（``rotate_delta`` 同形）。"""
     service, _node, adapter, _leases, _commands = env
-    result = service.call("env.rotate_delta", kwargs={"arm": "right", "delta_rpy": [0.0, 0.1, 0.0]})
+    result = service.call(
+        "env.rotate_delta", kwargs={"arm": "right", "delta_rpy": [0.0, 0.1, 0.0], "settle": False}
+    )
 
     values, layout = adapter.rollout_calls[-1]
     assert layout == "pose_delta"
@@ -617,13 +619,13 @@ def test_move_delta_never_falls_back_to_observed_pose_base():
 def test_set_gripper_only_changes_gripper(env):
     """``env.set_gripper``：关节段原样重发（保持当前姿态），夹爪同拍落地（``joint+gripper``）。"""
     service, _node, adapter, _leases, _commands = env
-    service.call("env.set_gripper", kwargs={"arm": "right", "open": False})
+    service.call("env.set_gripper", kwargs={"arm": "right", "open": False, "settle": False})
     action, layout = adapter.rollout_calls[-1]
     assert layout == "joint+gripper"  # 一条命令：关节目标 + 夹爪同一拍
     assert joints_of(action) == pytest.approx(list(default_qpos()))  # 关节目标不动
     assert list(grippers_of(action)) == pytest.approx([0.25, 0.0])  # 只改右夹爪（闭合）
 
-    service.call("env.set_gripper", kwargs={"open": True})
+    service.call("env.set_gripper", kwargs={"open": True, "settle": False})
     action, layout = adapter.rollout_calls[-1]
     assert layout == "joint+gripper"
     assert list(grippers_of(action)) == pytest.approx([1.0, 1.0])
@@ -1386,7 +1388,7 @@ def test_move_delta_blocks_until_reached():
     """P0-2：下发后阻塞到到位（RPent 紧接着 dump_state，不能读到未动的那一帧）。
 
     帧从**有状态**假机器人渲染：``pose_delta`` 真的改它的目标，实测位姿按限速跟踪——所以这里同时
-    验证了「下发 → 目标落地 → 等到位」全链路（含 ``observations/pose_target`` 当参考）。
+    验证了「下发 → 目标落地 → 等到位」全链路（含 ``observations/pose_action`` 当参考）。
     """
     service, adapter = delta_service(track=True, track_step=0.005)
 
@@ -1430,7 +1432,7 @@ def test_move_delta_flags_base_changed_when_target_moves_elsewhere():
     install_lease(leases)
     service = RpentService(FakeNode(adapter), StubCommands(), leases=leases, base_cfg=BASE_CFG)
 
-    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.01, 0.0, 0.0]})
+    result = service.call("env.move_delta", kwargs={"delta_xyz": [0.01, 0.0, 0.0], "settle": False})
 
     assert result["base_changed"] is True
     # 回执里的目标仍是**机器人实际的目标**（第三方改动后的），不是我们预测的那个
@@ -1780,7 +1782,9 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     pose = [0.1, 0.2, 0.3, 0.0, np.pi / 2, 0.0, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0]
     adapter.pose_target = np.asarray(pose, dtype=np.float32)
 
-    forward = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0]})
+    forward = service.call(
+        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.05, 0.0, 0.0], "settle": False}
+    )
     assert forward["delta_frame"] == "tool" and forward["delta_axes"] == ["forward", "left", "up"]
     assert np.allclose(forward["converted_delta_base"][0], [0.05, 0.0, 0.0], atol=1e-6), "x = 前"
     pushed, layout = adapter.rollout_calls[-1]
@@ -1788,10 +1792,14 @@ def test_move_delta_uses_semantic_axes(env) -> None:
     assert np.allclose(pushed[0:3], [0.05, 0.0, 0.0], atol=1e-6)
     assert np.allclose(pushed[3:6], [0.0, 0.0, 0.0])  # 平移不碰姿态
 
-    up = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05]})
+    up = service.call(
+        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.0, 0.05], "settle": False}
+    )
     assert np.allclose(up["converted_delta_base"][0], [0.0, 0.0, 0.05], atol=1e-6), "z = 上"
 
-    left = service.call("env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0]})
+    left = service.call(
+        "env.move_delta", kwargs={"arm": "left", "delta_xyz": [0.0, 0.05, 0.0], "settle": False}
+    )
     assert np.allclose(left["converted_delta_base"][0], [0.0, 0.05, 0.0], atol=1e-6), "y = 左"
 
 
@@ -1806,7 +1814,9 @@ def test_rotate_delta_chart_increment_is_exact(env) -> None:
     adapter.pose_target = np.asarray([0.1, 0.2, 0.3, *rpy, 0.4, 0.5, 0.6, 0.0, 0.0, 0.0], dtype=np.float32)
     delta_semantic = [0.0, 0.0, np.radians(20.0)]  # 绕“上”转 20°
 
-    reply = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic})
+    reply = service.call(
+        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": delta_semantic, "settle": False}
+    )
     basis = EgoAxes().basis()  # 语义系 → 法兰系
     exact = rpy_to_matrix(rpy) @ (basis @ rpy_to_matrix(delta_semantic) @ basis.T)
     chart = np.asarray(reply["converted_delta_base"][0], dtype=np.float64)
@@ -1831,10 +1841,14 @@ def test_rotate_delta_identity_target_maps_semantic_axes(env) -> None:
     """
     service, _node, adapter, *_ = env
     adapter.pose_target = rpent_pose_target(default_pose())
-    up = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1]})
+    up = service.call(
+        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.0, 0.1], "settle": False}
+    )
     assert np.allclose(up["converted_delta_base"][0], [-0.1, 0.0, 0.0], atol=1e-6)  # 上 = 法兰 -x
     adapter.pose_target = rpent_pose_target(default_pose())  # 假机器人已把上一条增量叠进目标 → 复位
-    left = service.call("env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0]})
+    left = service.call(
+        "env.rotate_delta", kwargs={"arm": "left", "delta_rpy": [0.0, 0.1, 0.0], "settle": False}
+    )
     assert np.allclose(left["converted_delta_base"][0], [0.0, 0.1, 0.0], atol=1e-6)  # 左 = 法兰 +y
 
 
@@ -1857,7 +1871,7 @@ def test_move_to_sends_absolute_pose_from_world_point(env) -> None:
     adapter.pose = np.asarray(pose, dtype=np.float32)  # 冻结实测（否则假件每拍朝目标挪一步）
     target_world = [0.2, 1.0, 0.35]
 
-    reply = service.call("env.move_to", kwargs={"arm": "right", "target": target_world})
+    reply = service.call("env.move_to", kwargs={"arm": "right", "target": target_world, "settle": False})
 
     pushed, layout = adapter.rollout_calls[-1]
     assert layout == "pose", "move_to 下发绝对位姿（机器人侧 IK）"
@@ -1875,7 +1889,10 @@ def test_move_to_converts_world_rpy_into_the_arm_base(env) -> None:
     adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
     adapter.pose = np.asarray(default_pose(), dtype=np.float32)
     rpy_world = [0.0, 0.0, 0.3]
-    service.call("env.move_to", kwargs={"arm": "right", "target": [0.2, 1.0, 0.35], "rpy": rpy_world})
+    service.call(
+        "env.move_to",
+        kwargs={"arm": "right", "target": [0.2, 1.0, 0.35], "rpy": rpy_world, "settle": False},
+    )
     pushed, _space = adapter.rollout_calls[-1]
     assert np.allclose(pushed[9:12], rpy_world, atol=1e-6)
 
@@ -1886,7 +1903,9 @@ def test_move_to_needs_extrinsics_for_non_world_arm(env) -> None:
     adapter._frame_set = None
     adapter.pose_target = np.asarray(default_pose(), dtype=np.float32)
     adapter.pose = np.asarray(default_pose(), dtype=np.float32)
-    left = service.call("env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35]})
+    left = service.call(
+        "env.move_to", kwargs={"arm": "left", "target": [0.15, 0.25, 0.35], "settle": False}
+    )
     assert np.allclose(np.asarray(left["target"])[0:3], [0.15, 0.25, 0.35], atol=1e-6)  # 恒等：原样
     with pytest.raises(RpentError) as excinfo:
         service.call("env.move_to", kwargs={"arm": "right", "target": [0.15, 0.25, 0.35]})

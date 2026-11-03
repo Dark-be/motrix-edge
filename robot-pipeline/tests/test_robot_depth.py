@@ -37,7 +37,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 _QPOS = [0.0] * 12  # joint 空间：每臂 6 关节角 × 2 臂
 _GRIPPER = [1.0, 1.0]  # gripper 空间：每臂 1 夹爪 × 2 臂（1 = 张开）
@@ -66,7 +66,7 @@ def _robot(module, depth=None):
         config["depth"] = depth
     robot = module.TestRobot(robot_config=config)
     robot.connect()
-    robot.sample_qpos()  # 观测线程的前提：控制线程先出过一拍状态
+    robot.sample_state()  # 观测线程的前提：控制线程先出过一拍状态
     return robot
 
 

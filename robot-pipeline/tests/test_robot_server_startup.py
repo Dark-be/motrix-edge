@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _RPH_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 
 

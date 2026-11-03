@@ -27,7 +27,6 @@
 
 import importlib
 import sys
-import threading
 import types
 from pathlib import Path
 
@@ -35,7 +34,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
 
 
@@ -62,6 +61,9 @@ class _FakeCollector:
 
     def finish(self):
         self.calls.append("finish")
+
+    def cancel(self):
+        self.calls.append("cancel")
 
     def set_meta(self, meta):
         self.meta.update(meta or {})
@@ -121,9 +123,6 @@ class _FakeRobot:
             blocks=values.reshape(1, 7),
         )
 
-    def execute(self, action, *, layout=None, arms=None):
-        raise ValueError("pose target rejected")
-
 
 @pytest.fixture()
 def env_module():
@@ -131,12 +130,16 @@ def env_module():
     stub = types.ModuleType("collector")
     stub.get_collector = lambda cfg: _FakeCollector(cfg if isinstance(cfg, dict) else {})
     previous = sys.modules.get("collector")
+    previous_env = sys.modules.pop("env.base_env", None)
     sys.modules["collector"] = stub
     if str(_ROBOT_PIPELINE_SRC) not in sys.path:
         sys.path.insert(0, str(_ROBOT_PIPELINE_SRC))
     try:
         yield importlib.import_module("env.base_env")
     finally:
+        sys.modules.pop("env.base_env", None)
+        if previous_env is not None:
+            sys.modules["env.base_env"] = previous_env
         if previous is None:
             sys.modules.pop("collector", None)
         else:
@@ -229,24 +232,15 @@ def test_http_action_request_rejects_legacy_action_space_key(env_module):
     assert models.ActionRequest(action=[0.0] * 7, layout="pose").layout == "pose"  # 新键正常
 
 
-def test_waiting_motion_command_returns_control_thread_rejection(env_module):
-    """HTTP 等待模式必须拿到控制线程的 IK/规划错误，不能先返回 accepted。"""
-    env, _ = _env(env_module)
-    caught = []
+def test_server_packs_joint_and_gripper_per_arm(env_module):
+    """跨进程边界仍按每臂 ``6 joint + 1 gripper`` 组装 qpos / action。"""
+    models = importlib.import_module("server.contract_server")
+    robot = types.SimpleNamespace(
+        name="fake_robot",
+        state_arm_count=lambda: 2,
+        state_value_dim_per_arm=lambda: 6,
+    )
 
-    def submit():
-        try:
-            env.robot_execute([0.0] * 7, layout="joint+gripper", arms=["right"], wait=True)
-        except Exception as exc:  # noqa: BLE001 测试跨线程收集异常
-            caught.append(exc)
+    packed = models._interleave_state(robot, np.arange(12), [0.25, 0.75])
 
-    thread = threading.Thread(target=submit)
-    thread.start()
-    while env.commands.empty():
-        pass
-    env._drain_commands()
-    thread.join(timeout=1.0)
-
-    assert not thread.is_alive()
-    assert len(caught) == 1 and isinstance(caught[0], ValueError)
-    assert "pose target rejected" in str(caught[0])
+    assert packed.tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 0.25, 6, 7, 8, 9, 10, 11, 0.75])

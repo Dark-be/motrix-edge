@@ -52,18 +52,16 @@ import numpy as np
 from motrix_edge.adapter.http_contract import FIELD_DEPTH  # 相机元数据的深度段键名（单点定义）
 
 # ---- 观测键契约（standard_obs 字典的键名，与 ACT 采集格式一致）----------------
-# ``observations/qpos`` = **状态向量**：每臂「**值 + 夹爪**」交错（值段当前是关节角；机器人整体切位姿时
-# 只改语义、维度不变——逐维含义见采集 JSON 的 ``state_space`` / ``state_dims``）。
+# 每臂 ``[joint..., gripper]`` 交错；action 与其同维同布局。
 KEY_QPOS = "observations/qpos"
-# ``action`` = **目标向量**：与状态**同维同布局**（每臂「关节目标 + 夹爪目标」；无指令时回退 qpos）。
 KEY_ACTION = "action"
 # 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ``ARM_NAMES``；单位米 / 弧度）——位姿原语的输入；
-# 机器人不提供位姿时该键不出现（``POSE = 0``）。
+# 机器人不提供位姿时该键不出现（``POSE_DIM_PER_ARM = 0``）。
 KEY_POSE = "observations/pose"
 # **目标位姿** = ``FK(关节段目标)``——底层位姿目标（与 ``KEY_POSE`` 同一套 FK、同一拍）。
 # 用途：``pose_delta`` 的解算结果对上位可见（``settle`` 判到位拿它当参考，不必自己攒基准）；
-# 「目标 − 实测」即 MIT 稳态误差。同样随位姿存在（``POSE = 0`` 时无此键）。
-KEY_POSE_TARGET = "observations/pose_target"
+# 「目标 − 实测」即 MIT 稳态误差。同样随位姿存在（``POSE_DIM_PER_ARM = 0`` 时无此键）。
+KEY_POSE_ACTION = "observations/pose_action"
 CAMERA_PREFIX = "observations/images/"
 # **深度图**（``observations/depth/<cam>``）：``uint16[H][W]`` **已对齐到同名彩色图**的深度图
 # （同一像素网格；``0`` = 该像素无有效深度），原始值 × ``depth_scale`` = 米。只有**具备深度的
@@ -77,29 +75,35 @@ Action = Sequence[float] | np.ndarray
 class ActionSpace(str, Enum):
     """动作空间（flat 动作向量的语义）——策略声明、adapter 校验、机器人进程最终解释。
 
-    四个空间**各自只表达一件事**，值都按 ``ARM_NAMES`` 逐臂展开（每臂等长）：
+    各空间只表达一件事，值都按 ``ARM_NAMES`` 逐臂展开（每臂等长）：
 
     - ``JOINT``（缺省）：每臂 6 关节角，**绝对目标**；
+    - ``JOINT_DELTA``：每臂 6 关节角增量，叠加在当前关节目标；
     - ``POSE``：每臂 ``xyz + rpy`` 末端位姿**绝对目标**；由机器人侧求解器转成关节目标后执行
       （运动学归机器人侧，edge 不解释机器人结构）；
     - ``POSE_DELTA``：每臂 ``xyz + rpy`` 位姿**增量**；机器人侧叠加在**当前关节段目标**的正解
       位姿上再解一次（基准取目标而非实测——底层 MIT 有稳态误差，以实测为基准会把误差写进
       新目标、逐步累积）；
     - ``GRIPPER``：每臂 1 夹爪开合（归一化 ``[0, 1]``）。
+    - ``GRIPPER_DELTA``：每臂 1 夹爪开合增量，叠加目标后钳到 ``[0, 1]``。
     """
 
     JOINT = "joint"
+    JOINT_DELTA = "joint_delta"
     POSE = "pose"
     POSE_DELTA = "pose_delta"
     GRIPPER = "gripper"
+    GRIPPER_DELTA = "gripper_delta"
 
 
 # 与机器人侧（``BaseRobot.ACTION_SPACE_*``）同名同值的字符串别名：共享内存 / 机器进程
 # 契约层（不依赖枚举实例的场合）直接用字符串常量。
 ACTION_SPACE_JOINT = ActionSpace.JOINT.value
+ACTION_SPACE_JOINT_DELTA = ActionSpace.JOINT_DELTA.value
 ACTION_SPACE_POSE = ActionSpace.POSE.value
 ACTION_SPACE_POSE_DELTA = ActionSpace.POSE_DELTA.value
 ACTION_SPACE_GRIPPER = ActionSpace.GRIPPER.value
+ACTION_SPACE_GRIPPER_DELTA = ActionSpace.GRIPPER_DELTA.value
 
 
 class AdapterCapability(str, Enum):
@@ -177,12 +181,12 @@ class RobotCapabilities:
     """适配器声明的能力（数据布局声明）。
 
     ``action_spaces`` = **支持的动作空间**列表（缺省仅关节空间）：各个空间的值都按臂展开、
-    维度**各不相同**（joint / pose / pose_delta = 每臂 6，gripper = 每臂 1），故维度以
+    维度按类别不同（运动段每臂 6，夹爪段每臂 1），故维度以
     ``action_dims`` 字典给出（``action_dim`` 保留为关节空间维度的兼容字段）。
 
-    观测**常驻**（与动作空间无关）：``observations/qpos`` = **状态向量**（每臂「值 + 夹爪」交错）、
-    ``action`` = **同维同布局**的目标向量、``observations/pose`` = 实测末端位姿、
-    ``observations/pose_target`` = 目标位姿（机器人不提供位姿时后两个键不出现）。
+    观测**常驻**（与动作空间无关）：``observations/qpos`` / ``action`` = 每臂
+    ``[joint..., gripper]`` 的实测 / 目标向量，``observations/pose`` = 实测末端位姿、
+    ``observations/pose_action`` = 目标位姿（机器人不提供位姿时后两个键不出现）。
     """
 
     robot_model_id: str = "unknown"
@@ -242,8 +246,7 @@ class RobotAdapter(ABC):
     CAPABILITIES: dict[AdapterCapability, bool] = {}
 
     # ---- 动作布局声明（子类覆盖；供 configure 的臂裁剪 / 动作展开）----
-    # **按动作空间**声明每臂维度：``{"joint": 6, "pose": 6, "gripper": 1}``——三个空间
-    # 各自只表达一件事，值都按 ``ARM_NAMES`` 逐臂展开（每臂等长），故臂段切片可由
+    # **按动作空间**声明每臂维度；各空间只表达一件事，值都按 ``ARM_NAMES`` 逐臂展开，故臂段切片可由
     # 「每臂维度」直接算出（无需再单独维护切片表）。只有已声明的空间才可下发。
     ACTION_DIM_PER_ARM: dict[str, int] = {}
     # 各空间的**全臂 home**（长度 = 每臂维度 × 臂数）：未启用臂用**同空间**的 home 填充
@@ -419,14 +422,20 @@ class RobotAdapter(ABC):
         }
 
     def action_layouts(self) -> dict[str, tuple[tuple[str, int], ...]]:
-        """本适配器支持的 layout → 段序列（单段 + 「值段 + gripper」组合；供能力上报 / 前端）。"""
+        """本适配器支持的 layout → 段序列（单段 + 「运动段 + 夹爪段」组合）。"""
         dims = self.segment_dims()
         layouts: dict[str, tuple[tuple[str, int], ...]] = {kind: ((kind, dim),) for kind, dim in dims.items()}
-        gripper = ActionSpace.GRIPPER.value
-        if gripper in dims:
-            for kind, dim in dims.items():
-                if kind != gripper:
-                    layouts[f"{kind}{self.LAYOUT_SEPARATOR}{gripper}"] = ((kind, dim), (gripper, dims[gripper]))
+        motions = (ActionSpace.JOINT, ActionSpace.JOINT_DELTA, ActionSpace.POSE, ActionSpace.POSE_DELTA)
+        grippers = (ActionSpace.GRIPPER, ActionSpace.GRIPPER_DELTA)
+        for motion in motions:
+            if motion.value not in dims:
+                continue
+            for gripper in grippers:
+                if gripper.value in dims:
+                    layouts[f"{motion.value}{self.LAYOUT_SEPARATOR}{gripper.value}"] = (
+                        (motion.value, dims[motion.value]),
+                        (gripper.value, dims[gripper.value]),
+                    )
         return layouts
 
     @classmethod
@@ -439,7 +448,13 @@ class RobotAdapter(ABC):
         name = ActionSpace.JOINT.value if not layout else str(layout).strip()
         parts = [part.strip() for part in name.split(self.LAYOUT_SEPARATOR)]
         dims = self.segment_dims()
-        value_kinds = {kind for kind in dims if kind != ActionSpace.GRIPPER.value}
+        motion_kinds = {
+            ActionSpace.JOINT.value,
+            ActionSpace.JOINT_DELTA.value,
+            ActionSpace.POSE.value,
+            ActionSpace.POSE_DELTA.value,
+        }
+        gripper_kinds = {ActionSpace.GRIPPER.value, ActionSpace.GRIPPER_DELTA.value}
         invalid: str | None = None
         if not parts or any(not part for part in parts):
             invalid = "empty segment"
@@ -447,8 +462,10 @@ class RobotAdapter(ABC):
             invalid = "duplicate segment"
         elif any(part not in dims for part in parts):
             invalid = f"unknown segment (available: {sorted(dims)})"
-        elif len([part for part in parts if part in value_kinds]) > 1:
-            invalid = "at most one value segment (joint / pose / pose_delta)"
+        elif len([part for part in parts if part in motion_kinds]) > 1:
+            invalid = "at most one motion segment"
+        elif len([part for part in parts if part in gripper_kinds]) > 1:
+            invalid = "at most one gripper segment"
         if invalid is not None:
             raise ValueError(
                 f"{self.type}: invalid layout {name!r} ({invalid}; available: {sorted(self.action_layouts())})"
@@ -527,22 +544,13 @@ class RobotAdapter(ABC):
 
     # ---- 状态向量（observations/qpos / action）的布局 ------------------------------
     def state_dim_per_arm(self) -> int:
-        """状态向量的**每臂宽度** = 值维数 + 夹爪维数（joint / pose 每臂 6 + 夹爪 1 = 7）。
-
-        值段与夹爪**同属一条状态向量**（``observations/qpos``；``action`` 同维同布局）、按臂交错
-        展开（双臂 7 + 7 = 14、单臂 7）。逐维含义由机器人侧自描述（采集 JSON 的 ``state_space``
-        / ``state_dims``）；edge 只按臂宽裁剪 / 拆分，不解释每位是什么。
-        """
+        """状态向量的每臂宽度 = 关节维数 + 夹爪维数。"""
         return int(self.ACTION_DIM_PER_ARM.get(ActionSpace.JOINT.value, 0)) + int(
             self.ACTION_DIM_PER_ARM.get(ActionSpace.GRIPPER.value, 0)
         )
 
     def split_state(self, values) -> tuple[np.ndarray, np.ndarray]:
-        """状态向量 → ``(值段扁平, 夹爪段扁平)``（每臂「值 + 夹爪」→ 两段分段）。
-
-        仅供**展示 / 桥接**（``/v1/preview`` 分行、RPent 拆夹爪）——契约里状态就是一条向量，
-        不因展示再拆回两个观测键。形状不符（无臂概念 / 维数对不上）→ ``(原样, 空)``，不猜布局。
-        """
+        """每臂 ``[joint..., gripper]`` 向量拆为关节段与夹爪段。"""
         array = np.asarray(values, dtype=np.float32).reshape(-1)
         per_arm = self.state_dim_per_arm()
         arms = len(self.ARM_NAMES)

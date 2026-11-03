@@ -115,8 +115,17 @@ $$\hat\tau_g(q) = Y(q)\,\hat\pi,\qquad Y(q)\in\mathbb{R}^{6\times n_\pi}$$
 
 ## 运行时接入（已实现）
 
+### 模块归属
+
+-   `robot.dynamics.gravity` 是运行期单点：重力回归器、参数模型与格式、配置归约、前馈补偿器；它只依赖
+    NumPy 和 `robot.kinematics`，不依赖控制器或硬件 SDK。
+-   `robot.calibration.gravity` 是离线/现场标定工具：位形规划、判稳、窗口与摩擦统计、最小二乘拟合、
+    样本读写；它可依赖 `robot.dynamics.gravity`，反向依赖禁止。
+-   `PiperController` 只导入 `robot.dynamics.gravity`；标定脚本按需同时导入两个模块。配置段名仍为
+    `robot.gravity`，不随 Python 模块移动而改变。
+
 -   **注入点**：`PiperController`。`set_joint()` 里若**显式**传了 `torque_ff` 就照传（留给后续导纳 /
-    手动试验的口子）；否则当 `robot.gravity` 装载过模型时，每拍读**实测 `q`**（`get_motor_states()`，
+    手动试验的口子）；否则当控制器装载过重力模型时，每拍读**实测 `q`**（`get_motor_states()`，
     读的是 SDK 后台线程已解析的缓存帧，非请求 / 应答）并下发 `α·τ̂_g(q_meas)`。
     `move_mit` 是直通无平滑模式，所以每拍重发本身就要求读 + 算 + 发同一拍完成。
 -   **配置**（机型 yml 的 `robot.gravity`，已写在 `single_piper.yml` / `dual_piper.yml` /
@@ -214,7 +223,7 @@ $$\hat\tau_g(q) = Y(q)\,\hat\pi,\qquad Y(q)\in\mathbb{R}^{6\times n_\pi}$$
 ## 相关文档
 
 -   [位姿动作（求解器）](./robot_pipeline_cartesian.md)：位姿空间、IK 与「无力矩前馈」的既有口径；
--   [动作空间与观测契约](./robot_pipeline_action_spaces.md)：`joint` / `pose` / `pose_delta` / `gripper`
+-   [动作空间与观测契约](./robot_pipeline_action_spaces.md)：关节、位姿、夹爪的绝对 / 增量空间
     与观测键；
 -   [机器人运行时](./robot_pipeline_runtime.md)：控制 / 观测两条线程与命令队列；
 -   [人工接管与遥操作](./robot_pipeline_teleop.md)：`t_ff` 与接管期间的优先级关系。

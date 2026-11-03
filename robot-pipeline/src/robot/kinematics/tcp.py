@@ -14,7 +14,7 @@
 
 """末端 TCP（工具末端）帧换算 + ``robot.tcp`` 配置解析（纯 numpy，无硬件依赖）。
 
-位姿（``pose`` / ``pose_delta`` 动作与 ``observations/pose`` / ``pose_target`` 观测）的原点可以
+位姿（``pose`` / ``pose_delta`` 动作与 robot 原始观测 ``pose`` / ``pose_action``）的原点可以
 从**法兰**（缺省）切到**工具末端 TCP**：``T_base_tcp = T_base_flange · T_flange_tcp``，其中
 ``T_flange_tcp`` = TCP 在法兰系下的位姿，由配置给出。**本期只允许纯平移**（旋转 = 单位阵）：
 
