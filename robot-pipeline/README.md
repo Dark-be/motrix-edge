@@ -337,21 +337,21 @@ MOTRIX_ROBOT_PIPELINE_CFG=dual_piper.yml uv run uvicorn server.robot_server:app 
 robot server 提供以下端点（前缀 `/v1`，字段/端点单点定义见
 `motrix_edge.adapter.http_contract`）：
 
-| 方法 | 路径                 | 请求 body                         | 说明                                                                            |
-| ---- | -------------------- | --------------------------------- | ------------------------------------------------------------------------------- |
-| POST | `/v1/discover`       | —                                 | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
-| GET  | `/v1/health`         | —                                 | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
-| GET  | `/v1/cameras`        | —                                 | 相机静态元数据（尺寸 / **彩色内参** / 深度比例；Edge 侧缓存后供 `/v1/depth`）   |
-| POST | `/v1/reset`          | —                                 | 复位到 home（非阻塞）                                                           |
-| POST | `/v1/execute`        | `{action: [...], layout?, arms?}` | 直接下发 raw 动作（`layout="pose"` → 机器人侧解算）                             |
-| POST | `/v1/rollout`        | `{action: [...], layout?, arms?}` | 推理动作（**遥操作中 → 409**：推理让位；IK 失败 → 422）                         |
-| POST | `/v1/teleop`         | `{enabled, mode?}`                | 遥操作（`mode` 缺省 `absolute`；`delta` = 人工接管增量）                        |
-| POST | `/v1/safe_stop`      | —                                 | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
-| POST | `/v1/capture/start`  | —                                 | 开始一轮采集（episode 开始）                                                    |
-| POST | `/v1/capture/end`    | —                                 | 结束一轮采集（episode 结束）                                                    |
-| POST | `/v1/capture/cancel` | —                                 | 取消当前采集（停止并删除本轮文件，不生成 JSON）                                 |
-| POST | `/v1/capture/sync`   | `{meta: {...}}`                   | 同步采集元信息（operator / task_name 等）                                       |
-| GET  | `/v1/capture/status` | —                                 | 采集状态（运行位 / 元信息 / 数据目录 / 帧头跳过进度）                           |
+| 方法 | 路径                 | 请求 body                                                             | 说明                                                                            |
+| ---- | -------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| POST | `/v1/discover`       | —                                                                     | 自描述探活：身份 + 连接参数（`endpoint` / `shm_name`），Edge adapter 据此实例化 |
+| GET  | `/v1/health`         | —                                                                     | 健康检查 `{ok, detail, control_hz, measured_hz}`                                |
+| GET  | `/v1/cameras`        | —                                                                     | 相机静态元数据（尺寸 / **彩色内参** / 深度比例；Edge 侧缓存后供 `/v1/depth`）   |
+| POST | `/v1/reset`          | —                                                                     | 复位到 home（非阻塞）                                                           |
+| POST | `/v1/execute`        | `{action: [...], layout?, arms?}`                                     | 直接下发 raw 动作（`layout="pose"` → 机器人侧解算）                             |
+| POST | `/v1/rollout`        | `{action: [...], layout?, arms?}`                                     | 推理动作（**遥操作中 → 409**：推理让位；IK 失败 → 422）                         |
+| POST | `/v1/teleop`         | `{enabled, mode?, follow_space?, follow_axes?, pose_position_scale?}` | 遥操作（`mode` 缺省 `absolute`；`delta` = 人工接管增量）                        |
+| POST | `/v1/safe_stop`      | —                                                                     | 安全停止（软停：停发指令 + 保持位姿，不断电）                                   |
+| POST | `/v1/capture/start`  | —                                                                     | 开始一轮采集（episode 开始）                                                    |
+| POST | `/v1/capture/end`    | —                                                                     | 结束一轮采集（episode 结束）                                                    |
+| POST | `/v1/capture/cancel` | —                                                                     | 取消当前采集（停止并删除本轮文件，不生成 JSON）                                 |
+| POST | `/v1/capture/sync`   | `{meta: {...}}`                                                       | 同步采集元信息（operator / task_name 等）                                       |
+| GET  | `/v1/capture/status` | —                                                                     | 采集状态（运行位 / 元信息 / 数据目录 / 帧头跳过进度）                           |
 
 另有调试端点 `GET /observe`（最新观测 qpos + 末端位姿（提供时）+ 相机 JPEG base64）。
 
@@ -529,10 +529,11 @@ robot:
     `POST /v1/teleop {"enabled": true, "mode": "delta"}`。
 
 主从零位差可用两层常量偏置补偿：`joint_offset` 在主臂 FK 前按关节叠加（rad），`pose_offset`
-在 FK 后按 `xyz`（m）+ `rpy`（rad）叠加。两者在 `absolute` 下直接体现、`delta` 下由锚点抵消；
+在 FK 后按 `xyz`（m）+ `rpy`（rad）叠加。两者在 `absolute` 下直接体现；joint+delta 的关节偏置抵消，但 pose+delta 中关节偏置经非线性 FK 仍影响增量。
+FK 后的固定 xyz 位姿偏置在 delta 中抵消，姿态按 RPY wrap 处理；
 `pose_offset` 只影响 pose 跟随。它们都属现场值，可写一组供全臂共用，也可按臂名分别覆盖。
 
-跟随空间与位姿轴锁定只在 robot-pipeline 配置，不改变 Edge 的 `rollout` / `execute`：
+跟随空间、位姿轴白名单及位置比例可在 robot-pipeline 配置，或在每次启用时覆盖，不改变 Edge 的 `rollout` / `execute`：
 
 ```yaml
 robot:
@@ -541,11 +542,33 @@ robot:
         follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在 teleop 首拍的从臂位姿
         joint_offset: [0, 0.1, 0, 0, 0, 0] # 每臂关节偏置（rad）
         pose_offset: [0, 0, 0.02, 0, 0, 0] # 每臂 xyz（m）+ rpy（rad）偏置
+        pose_position_scale: [1, 1, 1] # 只缩放 pose+delta 的 xyz，旋转固定 1:1
 ```
 
 `pose` 跟随每拍执行「主臂 FK → absolute/delta + 轴白名单 → IK」，得到的关节目标仍经
 `step_rad` 与 `set_joint()` 下发；关闭 teleop 后轴锁定立即失效。只有声明 `pose` 能力且实现同源
 FK / IK 的机器人能启用该配置，配置写错会在启动时失败。
+
+位置比例支持共享三元组或按臂对象，遗漏臂缺省单位比例；有限的零值、负值和大于 1 的值均允许。
+显式比例字段仅允许 pose+delta，非单位 YAML 比例与 pose+absolute 组合会被拒绝；joint 跟随不使用 YAML 比例。
+运行时覆盖只对本次启用有效，下次未指定时回到 YAML。锚点仍来自从臂执行命令参考，不提供手动摆位实测重锚定。
+
+操作顺序为**先关闭，再重新映射设置新的锚点**。确认关闭后可发送：
+
+```json
+{
+    "enabled": true,
+    "mode": "delta",
+    "follow_space": "pose",
+    "follow_axes": ["x", "y", "z"],
+    "pose_position_scale": { "left": [0.5, 0.5, 0.5], "right": [0.7, 0.7, 0.7] }
+}
+```
+
+响应中的 `configuration_status: queued` 与 `configuration` 表示已校验并入队，不能解释为锚点或 IK 就绪；
+`/v1/health` 的 `teleop_pose_position_scale` 反映控制线程当前保存的配置（仅 pose+delta 使用）。
+关闭遥操作不会清空旧运动目标；读取或 IK 失败仍继续追踪旧目标。
+纯遥操作采集不创建 RTC；UI 开启步骤见 [末端遥操作说明](../docs/robot-teleop-mapping.md)。
 
 两种模式的完整语义、锚点采样时机与边界见
 [robot-pipeline 遥操作（绝对映射 / 增量接管）](../wiki/design/robot_pipeline_teleop.md)。

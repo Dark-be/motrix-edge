@@ -159,7 +159,7 @@ def test_teleop_block_shape_and_offsets():
         block = _load(path.name)["robot"].get("teleop")
         if block is None:
             continue
-        assert set(block) <= {"joint_offset", "pose_offset", "follow_space", "follow_axes"}, (
+        assert set(block) <= {"joint_offset", "pose_offset", "follow_space", "follow_axes", "pose_position_scale"}, (
             f"{path.name} 的 robot.teleop 有未知键：{set(block)}"
         )
         follow_space = block.get("follow_space", "joint")
@@ -171,7 +171,7 @@ def test_teleop_block_shape_and_offsets():
             assert set(follow_axes) <= {"x", "y", "z", "roll", "pitch", "yaw"}, (
                 f"{path.name} 的 follow_axes 非法：{follow_axes!r}"
             )
-        for key in ("joint_offset", "pose_offset"):
+        for key in ("joint_offset", "pose_offset", "pose_position_scale"):
             offset = block.get(key)
             if offset is None:
                 continue
@@ -183,8 +183,9 @@ def test_teleop_block_shape_and_offsets():
                 per_arm = [offset]
             assert per_arm, f"{path.name} 的 {key} 为空"
             for values in per_arm:
-                assert isinstance(values, list) and len(values) == 6, (
-                    f"{path.name} 的 {key} 每臂应为 6 个值，实为 {values!r}"
+                dim = 3 if key == "pose_position_scale" else 6
+                assert isinstance(values, list) and len(values) == dim, (
+                    f"{path.name} 的 {key} 每臂应为 {dim} 个值，实为 {values!r}"
                 )
                 assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in values), (
                     f"{path.name} 的 {key} 含非数值项：{values!r}"

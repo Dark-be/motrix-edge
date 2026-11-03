@@ -53,11 +53,12 @@ from .params import (
     parse_offset,
     parse_teleop_follow_axes,
     parse_teleop_follow_space,
+    parse_teleop_position_scale,
     teleop_mode_for,
 )
 
 
-def apply_teleop(adapter, cmd) -> tuple[bool, str | None, str | None, list[str] | None]:
+def apply_teleop(adapter, cmd) -> tuple[bool, str | None, str | None, list[str] | None, object]:
     """``robot teleop`` / ``robot teach`` / ``robot takeover`` 的唯一实现（node 与会话共用）。
 
     模式：``robot teach`` → ``absolute``（示教）、``robot takeover`` → ``delta``（人工接管）
@@ -65,7 +66,8 @@ def apply_teleop(adapter, cmd) -> tuple[bool, str | None, str | None, list[str] 
     见 ``/v1/teleop`` 契约，保持旧调用方行为不变）。``enabled`` 必填（true/false）。
 
     参数非法 → ``ValueError``（调用方回执 ``rejected``）；成功返回
-    ``(enabled, mode, follow_space, follow_axes)`` 供回执回显。
+    ``(enabled, mode, follow_space, follow_axes, scale)`` 供回执回显；机器人返回的
+    configuration 是已校验的入队配置，不代表锚点或 IK 就绪。
     """
     # 别名命令的模式由命令名固定：显式传 mode 说明调用方误解了语义 → 明确拒绝（不静默忽略）
     if cmd.name in TELEOP_COMMAND_MODES and str(cmd.params.get("mode") or "").strip():
@@ -76,8 +78,21 @@ def apply_teleop(adapter, cmd) -> tuple[bool, str | None, str | None, list[str] 
     follow_axes = parse_teleop_follow_axes(cmd.params.get("follow_axes")) if enabled else None
     if follow_space == "joint" and follow_axes is not None:
         raise ValueError("follow_axes is only valid when follow_space='pose'")
-    adapter.set_teleop(enabled, mode, follow_axes, follow_space)
-    return enabled, mode, follow_space, follow_axes
+    scale = parse_teleop_position_scale(cmd.params.get("pose_position_scale")) if enabled else None
+    if scale is not None and (mode != "delta" or follow_space == "joint"):
+        raise ValueError("pose_position_scale is only valid for pose + delta")
+    # Omit the new optional keyword for older adapters when no override is requested.
+    kwargs = {"pose_position_scale": scale} if scale is not None else {}
+    response = adapter.set_teleop(enabled, mode, follow_axes, follow_space, **kwargs)
+    config = response.get("configuration") if isinstance(response, dict) else None
+    if config is not None:
+        mode, follow_space, follow_axes, scale = (
+            config["mode"],
+            config["follow_space"],
+            config["follow_axes"],
+            config["pose_position_scale"],
+        )
+    return enabled, mode, follow_space, follow_axes, scale
 
 
 def apply_switch(adapter, cmd, *, in_session: bool) -> dict:

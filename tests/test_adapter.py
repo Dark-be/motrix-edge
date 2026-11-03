@@ -336,7 +336,11 @@ class _FakeHttp:
             if self.status_code is not None and self.status_code >= 400:
                 raise RuntimeError(f"HTTP {self.status_code}")
 
-        return SimpleNamespace(status_code=self.status_code, raise_for_status=raise_for_status)
+        return SimpleNamespace(
+            status_code=self.status_code,
+            raise_for_status=raise_for_status,
+            json=lambda: {"status": "accepted"},
+        )
 
 
 def _exec_adapter():
@@ -853,3 +857,67 @@ def test_simulation_adapter_declares_only_supported_capabilities():
     assert adapter.effective_pose_dim_per_arm() == 0
     assert adapter.DEPTH_CAMERAS == ()
     assert "simulation_piper" not in {name for name, _, _ in robot_adapters(AdapterCapability.CAPTURE)}
+
+
+def test_scale_command_cli_forwards_and_echoes_resolved_robot_configuration():
+    from motrix_edge.command.config_commands import apply_teleop
+    from motrix_edge.command.registry import build_command_registry
+
+    adapter = _exec_adapter()
+    configuration = {
+        "mode": "delta",
+        "follow_space": "pose",
+        "follow_axes": ["x", "z"],
+        "pose_position_scale": {"left": [0.5] * 3, "right": [0.5] * 3},
+    }
+
+    class Client:
+        def post(self, url, json):
+            assert url == PATH_TELEOP
+            assert json["pose_position_scale"] == [0.5] * 3
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"status": "accepted", "configuration_status": "queued", "configuration": configuration},
+            )
+
+    adapter._http = Client()
+    command_text = "robot takeover true follow_space=pose pose_position_scale=0.5,0.5,0.5"
+    cmd = build_command_registry().parse_argv(command_text.split())
+    enabled, mode, space, axes, scale = apply_teleop(adapter, cmd)
+    assert (enabled, mode, space, axes, scale) == (
+        True,
+        "delta",
+        "pose",
+        ["x", "z"],
+        configuration["pose_position_scale"],
+    )
+
+
+@pytest.mark.parametrize("raw", ["1,2", "1,nan,1", "1,inf,1", [True, 1, 1], {"left": [1, 2]}])
+def test_scale_command_rejects_invalid_shape_before_http(raw):
+    from motrix_edge.command.config_commands import apply_teleop
+    from motrix_edge.command.core import Command
+
+    adapter = _exec_adapter()
+    cmd = Command(name="robot takeover", params={"enabled": True, "follow_space": "pose", "pose_position_scale": raw})
+    with pytest.raises(ValueError, match="pose_position_scale"):
+        apply_teleop(adapter, cmd)
+    assert adapter._http.posts == []
+
+
+def test_scale_health_reaches_capture_and_infer_adapter_snapshot():
+    from motrix_edge.server.state import adapter_state
+
+    adapter = _exec_adapter()
+    scales = {"left": [0.5, 0, -1], "right": [2, 1, 1]}
+    data = {
+        "ok": True,
+        "teleop_follow_space": "pose",
+        "teleop_follow_axes": ["x", "y", "z"],
+        "teleop_pose_position_scale": scales,
+    }
+    adapter._http = SimpleNamespace(get=lambda path: SimpleNamespace(status_code=200, json=lambda: data))
+    health = adapter.health()
+    assert health.teleop_pose_position_scale == scales
+    node = SimpleNamespace(adapter=adapter, adapter_health=health)
+    assert adapter_state(node)["teleop_pose_position_scale"] == scales

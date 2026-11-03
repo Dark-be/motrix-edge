@@ -10,13 +10,22 @@ robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joi
 该能力只属于 robot-pipeline 的 teleop 映射：Edge 的 `rollout` / `execute`、动作 `layout` 与观测
 契约均不改变。配置缺省 `follow_space: joint`，升级不改变既有真机行为。
 
+目标操作顺序：通过关节遥操作建立初始姿态并等待跟踪到位；**先关闭，再重新映射设置新的锚点**。
+关闭并确认状态后选择末端跟随（`follow_space=pose`）、增量模式（`mode=delta`）和轴白名单，
+重新启用，在首个有效读数拍采集新锚点。xyz 位置比例同样在关闭期间配置。主臂与从臂
+分别以启用后首个有效拍的主臂读数和从臂执行命令参考作为锚点，从臂从自己的初始位姿出发。两侧锚点不要求数值相同：
+`delta` 映射的是主臂从其锚点移动了多少，不是把主臂绝对位置复制给从臂。
+
+> **实现状态**：本地后端已接通位置比例、组合校验、状态与入队配置回显；独立控制台源码不在本仓库，
+> 比例输入与逐臂编辑需在控制台仓库配套落地。本次不调整失败保持、RTC 或重复启用行为。
+
 ## 目标与约束
 
--   **接管不突变**：下发接管指令的那一刻，从臂 target 必须等于从臂**当时位姿**——此前残留的
-    （可能已发散的）推理 target 被丢弃。这是接管可用性的底线：突变会同时毁掉安全与数据质量
-    （`action` 是采集的指令列，跳变会污染整条轨迹）。
+-   **接管不突变**：增量接管后的首次有效映射拍，从臂 target 应对应从臂**当前执行命令参考**——此前残留的
+    （可能已发散的）推理 target 应被丢弃。当前实现仅在首次成功采锚点并完成映射后替换 target；
+    首拍读数或映射失败仍继续追踪旧 target，失败拍的行为仍需单独定义；目标跳变会影响动作轨迹和数据质量。
 -   **限速唯一出处**：增量链路只决定 `joint_target`，逐拍逼近幅度仍由 `step_rad` /
-    `_step_toward()` 唯一负责，增量本身**不额外限幅**（主臂抖动放大由 `step_rad` 兜住）。
+    `_step_toward()` 唯一负责，增量本身**不额外限幅**；该限速不提供碰撞、工作空间或失联停止保证。
 -   **控制回路单写者**：主臂读取与 target 计算都在控制线程（`step()` 内），HTTP 线程只入队。
 -   **不新增 edge 侧同义契约**：`mode` 字段与取值单点定义在
     `motrix_edge.adapter.http_contract`，robot server 复用；robot 层（`robot/`）保持契约无关。
@@ -51,18 +60,29 @@ robot-pipeline 的遥操作由三个正交维度组成：**跟随空间**（`joi
     三个命令共用 `command/config_commands.py::apply_teleop`（node 与会话同一实现）；
     命令名集合 `command/naming.py::TELEOP_COMMANDS`。
 
--   **覆盖范围**：关节与夹爪是**同一套语义**——`joint_dim()` 长度的扁平关节向量逐元素增量
-    （夹爪 target = 夹爪锚点 + 夹爪增量）。因此映射函数无需知道 action 布局，子类的
+-   **覆盖范围**：关节与夹爪是**同一套语义**——关节和夹爪分别以各自锚点逐元素计算增量
+    （夹爪 target = 夹爪锚点 + 夹爪增量，钳到 `[0,1]`，不经过关节限速插值）。子类的
     `_read_teleop_joint()` 只返回主臂绝对扁平读数（偏置不含在内）。
--   **1:1 与常量偏置**：增量映射不带缩放（`k = 1`）。基类依次执行
-    `master_joint + joint_offset → FK → master_pose + pose_offset`：`joint_offset` 是逐关节 rad，
-    `pose_offset` 是当前位姿坐标系下逐分量的 `xyz`（m）+ `rpy`（rad），两者都可逐臂配置或由
-    全臂共用一组值，缺省全 0。偏置均在锚点采样前叠加，因此 `absolute` 下可见、`delta` 下由
-    锚点抵消；`pose_offset` 只参与 pose 跟随，不改变 joint 跟随。
+-   **位置增量比例与常量偏置**：`pose` + `delta` 的 xyz 位置比例可按轴配置，缺省 `[1, 1, 1]`，保留既有
+    1:1 行为。旋转 `rpy` 永远按最短角差 1:1 映射，不提供旋转比例参数。基类依次执行
+    `master_joint + joint_offset → FK → master_pose + pose_offset`；`joint_offset` 是逐关节 rad，
+    `pose_offset` 是当前位姿坐标系下逐分量的 `xyz`（m）+ `rpy`（rad），`pose_position_scale` 是
+    三维 xyz 位置比例，三者都可逐臂配置或由全臂共用一组值。比例三项依次对应 `x/y/z`，不包含旋转；
+    `pose_position_scale` 只作用于 `delta`
+    模式的主臂相对锚点位置增量：`slave_xyz_target = slave_xyz_ref + pose_position_scale *
+(master_xyz_now - master_xyz_ref)`；角度增量则为 `wrap(master_rpy_now - master_rpy_ref)` 并
+    1:1 叠加到从臂姿态锚点。位置比例允许有限的正数、零（该轴不跟随）或负数（反向跟随）。
+    `absolute` 仍将主臂绝对位姿直接映射到从臂，不应用位置比例；YAML 配置非单位比例却选择 pose + `absolute` 时明确拒绝；
+    本次显式传入比例仅接受 pose + delta，即使是单位比例也不接受其他组合，避免比例设置被静默忽略。`joint_offset` 在 FK 前、`pose_offset` 在
+    FK 后叠加。joint 跟随的 delta 中，常量关节偏置会抵消；pose 跟随的 delta 中，
+    `FK(q_now + joint_offset) - FK(q_ref + joint_offset)` 仍受关节偏置影响，不能认为其抵消。
+    `joint_offset` 应用于已知的主臂关节零点校准，缺省为零；不能用它消除任意主从初始位姿差。
+    FK 后的常量位置偏置在 delta 差分中抵消，姿态偏置按 RPY wrap 语义计算。`pose_offset` / `pose_position_scale` 只参与 pose
+    跟随，不改变 joint 跟随。
 
 ### 跟随空间与位姿轴锁定
 
-`robot.teleop` 在机器人配置中声明跟随空间与缺省轴白名单：
+`robot.teleop` 在机器人配置中声明跟随空间与缺省轴白名单；下例偏置为示例值，并非必填：
 
 ```yaml
 robot:
@@ -71,53 +91,70 @@ robot:
         follow_axes: [x, y, z, pitch, yaw] # 未列 roll：锁在启用 teleop 时的从臂锚点
         joint_offset: [0, 0.1, 0, 0, 0, 0] # 每臂关节偏置，rad
         pose_offset: [0, 0, 0.02, 0, 0, 0] # 每臂 xyz（m）+ rpy（rad）偏置
+        pose_position_scale: [1, 1, 1] # pose+delta 的 xyz 比例，旋转固定 1:1
 ```
 
-| `follow_space`  | 主臂输入到从臂目标的处理             | `follow_axes`                                        |
-| --------------- | ------------------------------------ | ---------------------------------------------------- |
-| `joint`（缺省） | 主臂关节直接做 absolute / delta 映射 | 不允许配置                                           |
-| `pose`          | 主臂关节 FK → 位姿映射 → IK          | 非空、无重复的 `x/y/z/roll/pitch/yaw` 子集；缺省全部 |
+`pose_position_scale` 可以给一组三轴值供全部臂共用，也可以按物理臂给值；例如双臂配置可写成
+`pose_position_scale: {left: [0.5, 0.5, 0.5], right: [0.7, 0.7, 0.7]}`。运行时覆盖沿用同一形状；遗漏臂使用单位比例，不与 YAML 按臂合并。
+每项必须是有限数值；`0` 表示该方向不跟随，负值表示反向，绝对值大于 `1` 表示放大主臂位移。
+映射不会额外截断目标增量，执行速度仍由现有 `step_rad` 限制；过大的目标仍可能超出工作空间或导致 IK 失败。
 
-Console 可在 teleop 关闭时选择 `joint` / `pose`，并在**每次开启**时通过 `follow_space` 下发；pose
-模式还可通过 `follow_axes` 覆盖轴白名单，未列轴即为界面里勾选的“锁定轴”。运行时覆盖只对本次
-启用有效；旧调用方不传时仍使用 YAML 缺省。空间或锁轴变化必须先关闭 teleop，再重新开启并采集
-新锚点，不允许运行中静默改变约束。joint 跟随收到 `follow_axes` 会明确拒绝；不具备 pose 动作与
-FK/IK 能力的机型收到 `follow_space: pose` 也会明确拒绝。
+| `follow_space`  | 主臂输入到从臂目标的处理                                      | `follow_axes`                                        |
+| --------------- | ------------------------------------------------------------- | ---------------------------------------------------- |
+| `joint`（缺省） | 主臂关节直接做 absolute / delta 映射                          | 不允许配置                                           |
+| `pose`          | 主臂关节 FK → 位姿映射（delta 的 xyz 可缩放、rpy 为 1:1）→ IK | 非空、无重复的 `x/y/z/roll/pitch/yaw` 子集；缺省全部 |
+
+Console / CLI 可在 teleop 关闭时选择 `joint` / `pose`，并在**每次开启**时通过 `follow_space` 下发；pose
+模式还可通过 `follow_axes` 覆盖轴白名单，未跟随轴即锁在本次启用的从臂锚点。`pose_position_scale`
+可由 YAML 持久配置，也可在本次启用时覆盖；运行时覆盖只对本次启用有效，下次开启未显式传值时回到 YAML
+配置。旧调用方不传时仍使用 YAML 缺省，位置比例缺省全 1。空间、锁轴或比例变化遵循“先关闭，再重新映射设置新的锚点”。
+当前后端未强制该顺序：重复启用会覆盖参数并清空锚点，即使参数相同也会重锚定；
+这属于既有行为，不作为客户端重试或配置入口。关闭只停止主臂刷新目标并清锚点，不清除已有运动目标。位置比例只对 `pose` + `delta` 有效；`absolute` 下传入非单位
+比例明确拒绝。joint 跟随收到 `follow_axes` / `pose_position_scale` 会明确拒绝；不具备 pose 动作与 FK/IK
+能力的机型收到 `follow_space: pose` 也会明确拒绝。
 
 位姿跟随的锚点在启用后的首次有效主臂读数拍原子采集：
 `master_pose_ref = FK(master_now + joint_offset) + pose_offset`，
-`slave_pose_ref = FK(slave_current_action)`。未跟随轴始终取 `slave_pose_ref`；跟随轴按模式计算：
+`slave_pose_ref = FK(slave_command_ref)`。从臂参考依次取 `joint_command`、`joint_target`、
+`init_joint`，与关节增量接管共用参考来源。不支持外力手动摆动从臂后按实测位置重新锚定；
+切换前应通过关节遥操作完成初始姿态调整，并让从臂跟踪到位。未跟随轴始终取
+`slave_pose_ref`；跟随轴按模式计算：
 
 -   `absolute`：取 `master_pose_now` 对应分量；
--   `delta`：取 `slave_pose_ref + (master_pose_now - master_pose_ref)`，姿态差与结果均 wrap 到
-    $(-\pi, \pi]$。
+-   `delta`：位置取 `slave_xyz_ref + pose_position_scale * (master_xyz_now - master_xyz_ref)`；姿态取
+    `slave_rpy_ref + wrap(master_rpy_now - master_rpy_ref)`，姿态差与结果均 wrap 到 $(-\pi, \pi]$。
 
-每拍以现有关节目标为 seed 做一次 IK；解算失败或位姿非有限时，本拍保持上一目标、累计失败计数并按
-同一原因限流告警，不影响 health。这里锁定的是既有 `POSE_FRAME`（法兰 / TCP）中的 RPY chart 分量，
+每拍以现有关节目标为 seed 做一次 IK；解算失败或位姿非有限时，本拍保持上一目标（控制器仍向该目标运动，并非停在当前位置）、累计失败计数并按
+同一原因限流告警，不影响 health。初始状态通过关节遥操作建立；随后
+关闭原遥操作并以 `follow_space=pose, mode=delta` 重新开启，首次有效控制拍会分别采集主从末端锚点，
+从该从臂锚点开始按 xyz 位置比例跟随；旋转仍逐拍 1:1 跟随。这里锁定的是既有 `POSE_FRAME`（法兰 / TCP）中的 RPY chart 分量，
 接近 pitch = ±90° 时仍受欧拉角奇异性约束；它是**目标运动学约束**，不是外力下的无限刚度。
 
 ## 增量锚点
 
-**为什么是锚点而不是逐拍积分**：`target += (master_now − master_prev)` 会累积漂移，且主从
-位姿差被永久保留（接管时主从差多少，全程就差多少）。锚点式把接管瞬间的主从差一次性
-**零化**：人工把主臂摆到与从臂相近的位姿后进入 `delta`，主从差无论是 0.05 rad 还是
-0.2 rad，从臂都从**自身位姿**出发；主臂推多少、从臂走多少；主臂回锚点则从臂回锚点。
+**固定锚点的用途**：直接用当前值减固定参考，避免逐拍积分的数值漂移，并明确本次映射的初始条件。
+锚点式将接管瞬间的主从初始值差归入参考：人工把主臂摆到与从臂相近的位姿后进入 `delta`，主从差无论是 0.05 rad 还是
+0.2 rad，从臂都从**自身执行命令参考**出发；主臂推多少、从臂走多少；主臂回锚点则从臂回锚点。
 
 锚点在 `delta` 启用后的**首次成功读数那一拍**一并采样（同一个 `step()` 内，两者同拍）：
 
-| 锚点                | 取值                                                          |
-| ------------------- | ------------------------------------------------------------- |
-| `teleop_master_ref` | 该拍主臂扁平读数                                              |
-| `teleop_slave_ref`  | 该拍从臂位置：`joint_command` → `joint_target` → `init_joint` |
+| 锚点                    | 取值                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| `teleop_master_ref`     | 该拍主臂扁平读数                                                              |
+| `teleop_slave_ref`      | joint + delta 的关节目标参考：`joint_command` → `joint_target` → `init_joint` |
+| `teleop_slave_pose_ref` | pose 跟随的从臂命令参考经 FK 得到的末端参考位姿                               |
 
--   **从臂参考取当前执行位置**（`joint_command`）：接管瞬间增量恒 0 →
-    `joint_target = slave_ref`，不会跳向此前残留目标。
--   **采样推迟到首次成功读数**，而不是在指令处理时同步读主臂：主臂瞬时读不到时不进入半接管
-    状态，target 保持不变（不突变），下一拍继续尝试；一旦读到，增量必然从 0 开始。
+-   **joint + delta 参考取当前执行命令**（`joint_command`）：接管瞬间增量恒 0 →
+    `joint_target = slave_ref`，不会跳向此前残留目标。pose 跟随使用同一命令参考做 FK；不提供手动摆动从臂后的实测重锚定。
+-   **采样推迟到首次成功读数**：处理启用命令后遥操作运行位已经开启，但锚点可能尚不可用。
+    读数或锚点 FK 失败时下一拍重试，旧目标仍被追踪；锚点成功、目标 IK 失败时保留锚点继续重试映射。
+    因此不能把启用回执视为已经采锚点或成功更新目标。
 -   **锚点在接管期间固定**（`disable_teleop()` / 再次 `enable_teleop()` 时清空），
     即整段接管都以接管瞬间为基准，不会随时间重新对齐。
 
 ## 指令链路
+
+### 当前契约
 
 ```
 console / Edge adapter  ──POST /v1/teleop {enabled, mode?, follow_space?, follow_axes?}──▶  contract_server
@@ -128,11 +165,27 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
 
 -   `/v1/teleop` 请求体在 `enabled` 之外增加可选 `mode`（`absolute` / `delta`，缺省
     `absolute`）：**向后兼容**——只发 `{enabled: true}` 的旧调用方行为不变。
--   `follow_space` 是可选的 `joint` / `pose` 本次启用覆盖；`follow_axes` 是可选的非空 pose 轴
-    白名单。两者缺省沿用 YAML。机器人 health 回传
-    `teleop_follow_space` / `teleop_follow_axes`，Edge 状态透传给 Console 决定是否显示锁轴复选框。
+-   `follow_space` 可覆盖本次 joint / pose 空间，`follow_axes` 可覆盖本次 pose 轴白名单，省略时沿用 YAML。
+-   当前可用流程：先 `robot teleop false`，确认关闭后执行
+    `robot takeover true follow_space=pose follow_axes=x,y,z`。
+-   HTTP 返回 `accepted` 表示命令已入队，不表示锚点或 IK 已成功。当前命令回显不应被解释为控制线程执行完成。
+
 -   `mode` 非法 → HTTP 422（server 侧校验，robot 层再兜一层，非法模式保持原模式与 target）。
--   `enabled: false` 时忽略 `mode`。
+-   关闭请求应只传 `enabled: false`。当前 HTTP 入口仍校验 `mode` 的合法性，不应携带非法 mode。
+
+### 位置比例与配置回显
+
+`pose_position_scale` 支持共享三元组或逐臂对象。health / Edge 状态通过
+`teleop_pose_position_scale` 上报比例，命令回执也提供对应配置。响应 `configuration_status: queued` 和 `configuration` 回显经过解析的入队配置；
+控制线程应用后通过 health 上报，入队回执不承诺锚点或 IK 已就绪。
+
+-   本次显式传入比例仅允许 pose + delta，包括单位比例；joint 或 absolute 请求携带比例字段应拒绝。
+-   YAML 比例供 pose + delta 使用；选择 pose + absolute 而配置了非单位比例时拒绝，避免静默忽略设置。
+-   校验三维、有限数值、已知臂与模式组合；非法请求不修改遥操作状态。
+-   运行时覆盖仅对本次启用有效，下次省略则回到 YAML；关闭请求不应用映射配置。
+-   带比例的 CLI 示例：先关闭并确认状态，再执行
+    `robot takeover true follow_space=pose pose_position_scale=0.5,0.5,0.5`。
+-   比例与空间、轴白名单一起在关闭后设置；仍使用现有从臂命令参考，不增加手动摆位重锚定。
 
 ## 遥操作期间的推理下发
 
@@ -158,18 +211,17 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
 
 -   **遥操作 vs 程控优先级**：遥操作期间**仅** `rollout` 被拒（推理让位）；`execute` / `reset` /
     `safe_stop` 仍是程控 / 安全优先，执行即结束遥操作（见「遥操作期间的推理下发」）。
--   **交回模型**：`robot teleop false` 后第一拍 `rollout` 的 target 是模型当前输出，
-    与人工位姿的差由 `step_rad` 逐拍拉过去。其中「模型当前输出」由会话侧保证：**接管开始即
-    `rtc.reset()`**（丢弃未执行的块与在途请求，按世代作废），所以交回后第一块是拿**当时**
-    观测现算的——接管前预取的块（机械臂已被带离原轨迹）不会在交回时被执行；暂停
-    （`infer rollout stop`）同理。是否加「交回时机 / 缓慢过渡」（等待模型动作与当前位姿
-    足够接近再交回）待定，见 `motrix_edge_rtc.md`。
--   **接管期间的数据**：接管与推理共用同一条 `action` 轨迹，采集到的 `action` 因此连续；
+-   **采集与 RTC 的边界**：纯遥操作采集使用 `CaptureSession`，没有 RTC 或推理步进引擎，
+    不存在交回模型或缓存模型动作的问题。本次末端遥操作采集方案不扩展 RTC 行为。
+    `InferSession` 中的录制不改变推理会话性质：持续推理期间接管仍可能有 RTC 动作块。
+    当前接管开始会清空 RTC，但持续循环随后仍推进引擎，因此不能保证交回后的首块使用交回时观测。
+    这一推理接管问题留在推理/RTC 范围处理；`step_rad` 只限制追踪速度，不保证动作新鲜度。
+-   **接管期间的数据**：接管与推理沿用同一套动作记录契约，但这本身不能保证目标或记录数值连续；
     是否在 episode 里标记接管区间（元信息字段）待定。**帧头跳过**已实现
     （`collector.skip_until_motion`，见 [robot-pipeline 运行时](./robot_pipeline_runtime.md)）：
     capture 开始后主臂未出现有效移动前不记录，避免每轮 episode 头部都带一段「还没开始动」的静止帧。
 -   **主臂读不到期间被人工移动**：恢复读数后增量会跳变，但从臂仍受 `step_rad` 限速保护
-    （单拍 ≤ `step_rad`），不会飞车。
+    （每个关节的单拍命令变化受 `step_rad` 约束），但不能据此保证末端运动安全。
 -   **主臂读数不可用（`None` / 读取异常）**：本拍**不刷新 target**（保持原值，不突变），只累计
     `teleop_read_failures` + **同一原因限流告警**；**不置 `last_error`**——接管中读不到主臂是预期
     状态（人还没接上 / 瞬时抖动），不能让 `/v1/health` 变不健康（否则一次 CAN 抖动会被 Edge
@@ -180,3 +232,5 @@ env.commands 队列  ──▶  控制线程 _drain_commands  ──▶  robot.e
 -   **接管前的对齐由人工完成**：主臂**不可被程序驱动**（Piper leader 模式只读），因此不提供
     「推理期主臂跟随从臂」；接管前操作员手动把主臂摆到与从臂相近的位姿，剩下的差值由锚点
     零化（见「增量锚点」）。
+
+使用解释、参数示例和重复启用的数值示例见 [末端遥操作使用说明](../../docs/robot-teleop-mapping.md)。

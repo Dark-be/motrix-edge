@@ -171,6 +171,17 @@ def parse_teleop_follow_axes(raw) -> list[str] | None:
     return axes
 
 
+def parse_teleop_position_scale(raw):
+    from motrix_edge.adapter.teleop import parse_position_scale
+
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip().startswith(("[", "{")) else [float(x) for x in raw.split(",")]
+        except (ValueError, TypeError) as exc:
+            raise ValueError("pose_position_scale must be three finite numbers or an arm object") from exc
+    return parse_position_scale(raw)
+
+
 def parse_teleop_follow_space(raw) -> str | None:
     """解析本次 teleop 的 joint / pose 跟随空间；缺失沿用机器人配置。"""
     if raw is None or raw == "":

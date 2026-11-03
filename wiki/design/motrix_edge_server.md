@@ -291,8 +291,11 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 `capture_status` / `capture_raw`）——**同一份字段定义，两个服务共用**，不再各自逐字段实现。
 
 只读 `EdgeNode` 的**缓存**字段（adapter 身份与心跳 `running` / `control_hz` / `measured_hz`、
-遥操作位 `teleop` / `teleop_mode`、采集 `running` / `meta`；由节点主循环周期刷新），**不**因
+遥操作位 `teleop` / `teleop_mode` / `teleop_follow_space` / `teleop_follow_axes` /
+`teleop_pose_position_scale`、采集 `running` / `meta`；由节点主循环周期刷新），**不**因
 前端轮询触发对机器人进程的实时请求：edge 运行不依赖前端。
+
+`teleop_pose_position_scale` 由控制线程当前配置经 health 心跳透传；仅 pose+delta 使用。
 
 ## 错误语义
 

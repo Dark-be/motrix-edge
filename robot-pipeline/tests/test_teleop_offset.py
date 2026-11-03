@@ -351,3 +351,178 @@ def test_rejects_pose_offset_without_pose_capability(base_robot):
 
     with pytest.raises(ValueError, match="pose_offset needs pose action capability"):
         _JointOnly({"init_joint": [0.0] * 12, "teleop": {"pose_offset": _POSE_OFFSET}})
+
+
+@pytest.mark.parametrize("scale", [[0.5, 0, -2], {"left": [0.5, 0, -2], "right": [2, 3, 4]}])
+def test_pose_delta_position_scale_and_rotation(base_robot, scale):
+    robot = _robot(base_robot)
+    slave = np.array([0.1, 0.2, 0.3, 3.13, 0, 0] * 2)
+    _set_slave_commands(robot, slave)
+    robot.master[3::6] = 3.13
+    robot.enable_teleop("delta", follow_space="pose", pose_position_scale=scale)
+    robot.step()
+    assert np.allclose(robot.joint_target, slave)
+    robot.master += np.array([0.1, 0.2, -0.1, 0.04, 0.05, 0.06] * 2)
+    robot.step()
+    expected = slave.reshape(2, 6).copy()
+    expected[:, :3] += np.array([0.1, 0.2, -0.1]) * robot.teleop_pose_position_scale.reshape(2, 3)
+    expected[:, 3:] += [0.04, 0.05, 0.06]
+    expected[:, 3:] = (expected[:, 3:] + np.pi) % (2 * np.pi) - np.pi
+    assert np.allclose(robot.joint_target, expected.reshape(-1))
+
+
+def test_scale_override_resets_to_yaml_after_close_and_reenable(base_robot):
+    robot = _robot(base_robot, {"teleop": {"follow_space": "pose", "pose_position_scale": [0.5, 0.6, 0.7]}})
+    robot.enable_teleop("delta", pose_position_scale={"left": [2, 0, -1]})
+    assert robot.teleop_scale_status() == {"left": [2, 0, -1], "right": [1, 1, 1]}
+    robot.disable_teleop()
+    robot.enable_teleop("delta")
+    assert robot.teleop_scale_status() == {"left": [0.5, 0.6, 0.7], "right": [0.5, 0.6, 0.7]}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        [1, 2],
+        [1, 2, 3, 4],
+        [[1, 2, 3]],
+        [True, 1, 1],
+        [float("nan"), 1, 1],
+        [float("inf"), 1, 1],
+        {"middle": [1, 1, 1]},
+        {"left": None},
+        ["1", 1, 1],
+    ],
+)
+def test_scale_invalid_override_is_atomic(base_robot, raw):
+    robot = _robot(base_robot)
+    robot.enable_teleop("delta", follow_space="pose", pose_position_scale=[0.5] * 3)
+    robot.step()
+    ref, target = robot.teleop_master_ref.copy(), robot.joint_target.copy()
+    with pytest.raises(ValueError, match="pose_position_scale"):
+        robot.enable_teleop("delta", follow_space="pose", pose_position_scale=raw)
+    assert robot.teleop_enabled
+    assert np.array_equal(robot.teleop_master_ref, ref)
+    assert np.array_equal(robot.joint_target, target)
+    assert np.all(robot.teleop_pose_position_scale == 0.5)
+
+
+@pytest.mark.parametrize("space,mode", [("joint", "delta"), ("joint", "absolute"), ("pose", "absolute")])
+def test_scale_rejects_invalid_mode_even_unit_override(base_robot, space, mode):
+    robot = _robot(base_robot)
+    with pytest.raises(ValueError, match="pose_position_scale"):
+        robot.enable_teleop(mode, follow_space=space, pose_position_scale=[1, 1, 1])
+    assert not robot.teleop_enabled
+
+
+def test_configured_scale_does_not_affect_joint_and_rejects_pose_absolute(base_robot):
+    robot = _robot(base_robot, {"teleop": {"pose_position_scale": [0.5] * 3}})
+    robot.enable_teleop("absolute", follow_space="joint")
+    robot.step()
+    assert np.allclose(robot.joint_target, robot.master)
+    robot.disable_teleop()
+    with pytest.raises(ValueError, match="non-unit"):
+        robot.enable_teleop("absolute", follow_space="pose")
+
+
+def test_scaled_pose_keeps_command_anchor_and_holds_previous_target_on_failure(base_robot):
+    robot = _robot(base_robot)
+    slave = np.array([0.2] * robot.joint_dim())
+    _set_slave_commands(robot, slave)
+    robot.enable_teleop("delta", follow_space="pose", follow_axes=["x"], pose_position_scale=[2, 3, 4])
+    robot.step()
+    # Measured joint getter returns zeros: command reference must still be used.
+    assert np.allclose(robot.joint_target, slave)
+    robot.master += 0.1
+    robot.step()
+    expected = slave.copy()
+    expected[::6] += 0.2
+    assert np.allclose(robot.joint_target, expected)
+    robot.fail_ik = True
+    robot.master += 0.1
+    robot.step()
+    assert np.allclose(robot.joint_target, expected)
+    assert robot.teleop_mapping_failures == 1
+
+
+@pytest.fixture
+def teleop_http(base_robot):
+    from queue import Queue
+
+    from fastapi.testclient import TestClient
+
+    env_type = importlib.import_module("env.base_env").BaseEnv
+    server = importlib.import_module("server.contract_server")
+    robot = _robot(
+        base_robot,
+        {"teleop": {"follow_space": "pose", "follow_axes": ["x", "z"], "pose_position_scale": [0.5, 0.6, 0.7]}},
+    )
+    robot.ready = True
+    env = object.__new__(env_type)
+    env.robot, env.commands = robot, Queue()
+    env._motion_revision = 0
+    # No lifespan/control threads: explicitly drain to test accepted vs applied.
+    return TestClient(server.create_app(env)), env, robot
+
+
+def test_http_scale_queued_then_applied_and_close(teleop_http):
+    client, env, robot = teleop_http
+    response = client.post(
+        "/v1/teleop", json={"enabled": True, "mode": "delta", "pose_position_scale": {"right": [2, 0, -1]}}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["configuration_status"] == "queued"
+    assert body["configuration"] == {
+        "mode": "delta",
+        "follow_space": "pose",
+        "follow_axes": ["x", "z"],
+        "pose_position_scale": {"left": [1, 1, 1], "right": [2, 0, -1]},
+    }
+    assert not robot.teleop_enabled
+    env._drain_commands()
+    assert robot.teleop_enabled
+    assert robot.teleop_master_ref is None
+    assert robot.teleop_scale_status() == body["configuration"]["pose_position_scale"]
+    robot.step()
+    assert robot.teleop_master_ref is not None
+    assert client.post("/v1/teleop", json={"enabled": False, "pose_position_scale": [0, 0]}).status_code == 200
+    env._drain_commands()
+    assert not robot.teleop_enabled
+    assert client.post("/v1/teleop", json={"enabled": True, "mode": "delta"}).status_code == 200
+    env._drain_commands()
+    assert robot.teleop_scale_status() == {"left": [0.5, 0.6, 0.7], "right": [0.5, 0.6, 0.7]}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"pose_position_scale": [1, 2]},
+        {"pose_position_scale": {"middle": [1, 1, 1]}},
+        {"pose_position_scale": [True, 1, 1]},
+        {"pose_position_scale": [1, 1, 1], "mode": "absolute"},
+        {"pose_position_scale": [1, 1, 1], "follow_space": "joint"},
+    ],
+)
+def test_http_invalid_scale_does_not_enqueue(teleop_http, override):
+    client, env, robot = teleop_http
+    response = client.post("/v1/teleop", json={"enabled": True, "mode": "delta", **override})
+    assert response.status_code == 422
+    assert env.commands.empty()
+    assert not robot.teleop_enabled
+
+
+@pytest.mark.parametrize("raw", [[0.5, 1], {"left": [1, float("nan"), 1]}, [10**400, 1, 1]])
+def test_invalid_yaml_scale_is_rejected_at_construction(base_robot, raw):
+    with pytest.raises(ValueError, match="pose_position_scale"):
+        _robot(base_robot, {"teleop": {"pose_position_scale": raw}})
+
+
+def test_scale_rejected_for_robot_without_pose_capability(base_robot):
+    class JointOnly(base_robot.BaseRobot):
+        ARM_NAMES = ("left",)
+        ARM_CONTROLLERS = {"left": "arm_left"}
+        ACTION_SPACES = (base_robot.BaseRobot.ACTION_SPACE_JOINT,)
+
+    with pytest.raises(ValueError, match="pose action capability"):
+        JointOnly({"init_joint": [0] * 6, "teleop": {"pose_position_scale": [1, 1, 1]}})

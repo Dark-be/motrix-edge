@@ -110,6 +110,8 @@ FIELD_ACTION_LAYOUTS = "action_layouts"  # robot：本机器人支持的 layout�
 FIELD_STATE_ARMS = "state_arms"  # robot：物理臂序（arms 缺省时的块序）
 FIELD_TELEOP_ENABLED = "enabled"  # teleop：是否启用遥操作（bool）
 FIELD_TELEOP_MODE = "mode"  # teleop：遥操作映射模式（absolute | delta；缺省 absolute）
+FIELD_TELEOP_POSITION_SCALE = "pose_position_scale"
+FIELD_TELEOP_ACTIVE_SCALE = "teleop_pose_position_scale"
 FIELD_TELEOP_SPACE = "follow_space"  # teleop：本次跟随空间覆盖（joint | pose）
 FIELD_TELEOP_FOLLOW_AXES = "follow_axes"  # teleop：本次 pose 跟随的轴白名单；未列轴锁在启用拍锚点
 FIELD_ENABLED = "enabled"  # tcp / gravity：是否启用（与 teleop 同字面量，刻意保持同名）
@@ -246,6 +248,8 @@ __all__ = [
     "FIELD_TELEOP_ACTIVE_AXES",
     "FIELD_TELEOP_MODE",
     "FIELD_TELEOP_SPACE",
+    "FIELD_TELEOP_POSITION_SCALE",
+    "FIELD_TELEOP_ACTIVE_SCALE",
     "FIELD_TYPE",
     "PATH_CAPTURE_END",
     "PATH_CAPTURE_CANCEL",
