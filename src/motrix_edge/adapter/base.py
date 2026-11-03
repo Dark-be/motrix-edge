@@ -129,7 +129,7 @@ class CaptureStatus:
     附加——**只有 ``meta`` 一个载体**（采集员 / 任务名等是其中的键，分类可拓展），不另设
     同义顶层字段。Edge 周期查询（``capture_status()``）并缓存，供 server 状态上报与前端
     展示；**数据文件列表不在本状态里**——本地数据的扫描 / 选择 / 打包由
-    [UploadSession](./upload_session.py) 直接读目录完成。
+    [UploadService](../upload.py) 直接读目录完成。
     """
 
     running: bool = False  # 进程当前是否正在采集（episode 开→关）

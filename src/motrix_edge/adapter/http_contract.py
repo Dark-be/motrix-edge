@@ -41,7 +41,7 @@
 - ``/v1/capture/status`` 响应字段：``running``（进程是否正在采集）/ ``meta``（``capture sync``
   同步的元信息全集）/ ``data_dir``——**合并**了原 ``/v1/data_status``（已删除，避免两处
   状态不一致）；数据文件列表不在本端点：数据的扫描 / 选择 / 打包见
-  [上传会话（UploadSession）](../../../wiki/design/motrix_edge_upload_session.md)。
+  [上传（UploadService）](../../../wiki/design/motrix_edge_upload.md)。
 - **元信息只有 ``meta`` 一个载体**：采集员 / 任务名等是 ``meta`` 里的键（分类可拓展），
   不再另设同义顶层字段——消费方按需取 ``meta["operator"]`` / ``meta["task_name"]``。
 - ``status`` 取值 ``accepted`` 表示指令已被 SDK 接受。
