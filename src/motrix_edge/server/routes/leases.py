@@ -21,7 +21,8 @@ Console 权威签发 → Edge 只保留**镜像** + 校验（Edge 不生成 leas
 
 from fastapi import APIRouter
 
-from motrix_edge.lease import BEIJING_TZ, Lease
+from motrix_edge.errors import ErrorCode
+from motrix_edge.lease import BEIJING_TZ, Lease, LeaseError
 from motrix_edge.server.deps import Services
 from motrix_edge.server.schemas import LeaseInstallRequest, LeaseRenewRequest
 
@@ -37,6 +38,11 @@ def build_router(services: Services) -> APIRouter:
 
         Edge 不生成 lease_id，只保留 + 校验；已有活跃控制租约 → 409。
         """
+        if req.edge_id != services.identity.edge_id:
+            raise LeaseError(
+                f"lease edge_id {req.edge_id!r} does not match this Edge {services.identity.edge_id!r}",
+                code=ErrorCode.FORBIDDEN,
+            )
         leases.install(
             Lease(
                 lease_id=req.lease_id,
