@@ -16,6 +16,20 @@ robot-pipeline（仓库根 `robot-pipeline/`，独立 uv 子项目）在 robot s
 -   **每个硬件组件单写者**：控制器 SDK、collector 都不是线程安全的，写者必须唯一。
 -   **不新增 edge 侧契约**：观测键、health 字段继续复用 `motrix_edge.adapter` 的单点定义。
 
+## 默认多流录制
+
+episode 录制与观测发布解耦。控制线程产生状态事件，观测线程产生图像事件；两者只做非阻塞入队，
+专用 writer 线程是 MCAP 后端的唯一调用者。state 与 image 使用独立有界队列，队列满时丢弃本流的
+新事件并分类计数，不用阻塞机器人控制或相机预览。
+
+本阶段保持现有数据语义：每条 state 事件仍同时携带 `observations/qpos` 与目标 `action`，图像事件
+沿用逐相机源时间。后续将实际 SDK command 拆为独立 action 流；在那之前不得把目标 action 宣称为
+设备提交命令。
+
+录制会话边界固定为：打开 writer → 开放事件准入 → capture end 关闭准入 → 排空已接收事件 → 写
+footer 与 JSON。capture cancel 关闭准入、丢弃排队事件并删除本轮文件。JSON 记录各流 accepted、
+dropped 与 writer 错误；HTTP capture 契约不变。
+
 ## 拓扑
 
 ```mermaid

@@ -386,9 +386,14 @@ collector:
     机器人整体切位姿时只改 `state_space`，下游不必改代码。各话题按源头采样时间写入 MCAP，
     图片消息头与该图片的话题时间一致，详见 [逐话题采样时间](../wiki/design/robot_pipeline_runtime.md#逐话题采样时间)。
     **流式写入**：`start` → `collect` 直接落盘 → `finish`。
-    **帧头跳过（只对遥操作录制）**：`robot teach` / `robot takeover` 开着时，capture 开始后主臂相对
-    首帧未超过 `skip_until_motion` 阈值前不记录（也不创建 episode 文件），出现一次有效移动才开始；
-    跳过只作用于本轮帧头，下一轮重新武装。进度见日志与 `GET /v1/capture/status` 的 `head_skip`。
+
+默认录制由专用 writer 线程完成：100Hz state 与 30Hz image 分别进入有界队列，控制 / 观测生产方
+不等待磁盘。正常结束会先关闭准入、排空已接收事件再写 footer；取消会丢弃排队事件并删除本轮文件。
+队列 accepted / dropped、writer phase 与错误通过 `/v1/capture/status` 的 `recording` 字段提供，并写入
+episode JSON 的 `recording` 元信息。当前 `action` 仍是随 state 记录的目标值，并非 SDK 实际提交命令。
+**帧头跳过（只对遥操作录制）**：`robot teach` / `robot takeover` 开着时，capture 开始后主臂相对
+首帧未超过 `skip_until_motion` 阈值前不记录（也不创建 episode 文件），出现一次有效移动才开始；
+跳过只作用于本轮帧头，下一轮重新武装。进度见日志与 `GET /v1/capture/status` 的 `head_skip`。
 
 -   采集由 HTTP 控制：`POST /v1/capture/start` 开始，`POST /v1/capture/end` 结束并落盘（在观测线程
     生效，≤ 1/`OBS_HZ`；与运动指令**跨队列顺序不保证**，见

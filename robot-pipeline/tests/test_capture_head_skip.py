@@ -20,6 +20,7 @@
 
 import importlib
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -121,6 +122,13 @@ def _tick(env):
     env._update_capture()
 
 
+def _wait_for_call(collector, name, timeout=1.0):
+    deadline = time.monotonic() + timeout
+    while name not in collector.calls and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert name in collector.calls
+
+
 def test_records_from_first_frame_without_teleop(base_env_module):
     """非遥操作（如 rollout 录制）：不启用帧头跳过，首帧即记录。"""
     env, robot, collector = _build(base_env_module)
@@ -170,6 +178,7 @@ def test_gripper_motion_opens_gate(base_env_module):
     robot.sample = (_Q0, _G0 + np.array([0.2, 0.0]))
     _tick(env)
 
+    _wait_for_call(collector, "collect")
     assert collector.calls == ["start", "collect"]
 
 
@@ -197,7 +206,9 @@ def test_cancel_discards_open_episode(base_env_module):
     env.robot_capture_cancel()
     _tick(env)
 
-    assert collector.calls == ["start", "collect", "cancel"]
+    assert collector.calls[0] == "start"
+    assert collector.calls[-1] == "cancel"
+    assert "finish" not in collector.calls
     assert env.capturing is False
     assert env._episode_open is False
 
@@ -251,6 +262,7 @@ def test_gate_disabled_by_config(base_env_module):
     env.robot_capture_start()
     _tick(env)
 
+    _wait_for_call(collector, "collect")
     assert collector.calls == ["start", "collect"]
 
 
@@ -266,4 +278,5 @@ def test_teleop_off_before_motion_starts_recording(base_env_module):
     robot.teleop_enabled = False  # 人工交回模型（不再有主臂输入）
     _tick(env)
 
+    _wait_for_call(collector, "collect")
     assert collector.calls == ["start", "collect"]
