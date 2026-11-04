@@ -138,6 +138,9 @@ Tailwind CSS）：经同源 `/api` 登录并代理 Edge HTTP API，展示 Edge �
 ## 契约要点（前端实现，单点定义）
 
 -   受控请求封装：统一注入 `X-Lease-Id`；非 2xx 抛出 `{ status, detail }`；**请求带超时**（缺省 15s，上传扫描 / 打包 120s），超时抛明确文案而不是永久 busy。
+-   浏览器凭据只跟随请求目标：同源 Console BFF（`/api/edges/<id>`）携带登录 Cookie；跨域直连
+    Edge（`http://<edge>:8000`）不携带 BFF Cookie。BFF 是否启用认证不能让任意直连 Edge 请求进入
+    `credentials=include`，否则通配 CORS 响应会被浏览器拒绝。
 -   命令回执 `POST /v1/commands`：`status` 即命令结果（`ok` / `rejected` / `error`；`accepted` = push 型无回执），`data` 带结果字段（teleop 当前的 `teleop`/`mode`/`follow_space`/`follow_axes`，以及本地后端已支持的 `pose_position_scale`、episode 的 `episode`/`recording`）；前端据此展示命令处理结果；teleop `data.configuration_status=queued` 的配置回显不代表锚点或 IK 就绪，运行位由状态轮询确认。
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
 -   会话状态 `GET /v1/captures` / `/v1/infers`：`node_state` / `session_type` / `state` / adapter / policy / lease_id；`capture_status` = 机器人进程采集状态缓存（`running` + `meta` 元信息全集，推理状态同构，分类可拓展，前端按 key 逐行展示）；adapter 段带**遥操作位**（`teleop` / `teleop_mode` / `teleop_follow_space` / `teleop_follow_axes`，以及本地后端已支持的 `teleop_pose_position_scale`）。teleop 关闭时可选择空间与模式；pose + delta 时提供 xyz 三轴位置比例输入与锁轴选项，双臂支持共用或分臂，旋转固定 1:1，启用请求发送 `mode` / `follow_space` / `pose_position_scale` / `follow_axes`。位置比例只对 pose + delta 有效。不支持 pose 的机型由机器人进程明确拒绝。推理状态额外返回连接成功后的 `metadata`、`prompt` / `recording` / **`continuous`**（持续推理运行位）。

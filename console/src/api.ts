@@ -86,12 +86,16 @@ export class EdgeApi {
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), timeoutMs);
         const qs = opts.query ? `?${new URLSearchParams(opts.query).toString()}` : "";
+        const requestUrl = `${opts.baseUrl ?? this._baseUrl}${path}${qs}`;
+        const requestOrigin = new URL(requestUrl, window.location.origin).origin;
+        const credentials: RequestCredentials =
+            this._authEnabled && requestOrigin === window.location.origin ? "include" : "omit";
         let res: Response;
         try {
-            res = await fetch(`${opts.baseUrl ?? this._baseUrl}${path}${qs}`, {
+            res = await fetch(requestUrl, {
                 method,
                 headers,
-                credentials: this._authEnabled ? "include" : "omit",
+                credentials,
                 body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
                 signal: controller.signal,
             });
