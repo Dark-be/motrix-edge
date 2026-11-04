@@ -1009,6 +1009,7 @@ def new_test_lease_id() -> str:
 
 def lease_payload(
     lease_id: str | None = None,
+    edge_id: str = "edge-test-001",
     holder_subject_id: str = "operator-1",
     purpose: str = "capture",
     ttl: float = 30,
@@ -1018,7 +1019,7 @@ def lease_payload(
     """构造 Console 签发的租约镜像请求体（POST /v1/leases）。"""
     return {
         "lease_id": lease_id or new_test_lease_id(),
-        "edge_id": "edge-test-001",
+        "edge_id": edge_id,
         "holder_subject_id": holder_subject_id,
         "purpose": purpose,
         "state": state,
@@ -1059,6 +1060,10 @@ def test_leases_install_renew_revoke():
     assert snap["lease_id"] is None
     assert snap["leasable"] is True
     assert snap["renew_interval"] == 60  # 默认建议续租间隔（DEFAULT_RENEW_INTERVAL）
+    # 租约必须绑定本机 identity，不能把其它 Edge 的租约镜像装进来。
+    mismatch = client.post("/v1/leases", json=lease_payload(edge_id="edge-other"))
+    assert mismatch.status_code == 403
+    assert client.get("/v1/leases").json()["lease_id"] is None
     # 签发镜像：POST /v1/leases（Console 生成 lease，Edge 保存镜像）
     lease = install_lease(client, holder_subject_id="operator-1", purpose="capture", ttl=30)
     # 单活跃：已有活跃租约再签发 → 409
