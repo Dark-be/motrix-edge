@@ -31,13 +31,12 @@ class MultiStreamRecorder:
     and discards them on cancel. The wrapped collector remains the schema/metadata single source.
     """
 
-    KINDS = ("state", "image", "meta")
-
-    def __init__(self, collector, capacity: int = 512):
+    def __init__(self, collector, capacity: int = 512, image_names=()):
         if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
             raise ValueError("recording.queue_size must be a positive integer")
         self.collector = collector
         self.capacity = capacity
+        self.image_names = tuple(image_names)
         self._lock = threading.Lock()
         self._queues = self._new_queues()
         self._accepted = collections.Counter()
@@ -65,12 +64,17 @@ class MultiStreamRecorder:
             return self._admitting
 
     def _new_queues(self):
-        return {
+        queues = {
             "state": queue.Queue(self.capacity),
-            "image": queue.Queue(self.capacity),
+            "action": queue.Queue(self.capacity),
             # Capture metadata is control-plane state, not a lossy sensor stream.
             "meta": queue.Queue(),
         }
+        if self.image_names:
+            queues.update({f"image:{name}": queue.Queue(self.capacity) for name in self.image_names})
+        else:
+            queues["image"] = queue.Queue(self.capacity)
+        return queues
 
     def set_meta(self, meta: dict) -> None:
         # Metadata is small and is finalized by the writer. Serializing updates through a queue
@@ -108,8 +112,12 @@ class MultiStreamRecorder:
     def publish_state(self, observation: dict) -> bool:
         return self._publish("state", observation)
 
-    def publish_image(self, observation: dict) -> bool:
-        return self._publish("image", observation)
+    def publish_action(self, observation: dict) -> bool:
+        return self._publish("action", observation)
+
+    def publish_image(self, observation: dict, name: str | None = None) -> bool:
+        kind = f"image:{name}" if name is not None else "image"
+        return self._publish(kind, observation)
 
     def _publish(self, kind: str, observation: dict) -> bool:
         payload = copy.deepcopy(observation)
@@ -208,7 +216,8 @@ class MultiStreamRecorder:
 
     def _drain_once(self) -> bool:
         worked = False
-        for kind in ("state", "image", "meta"):
+        order = ("state", "action", *[f"image:{name}" for name in self.image_names], "image", "meta")
+        for kind in order:
             events = self._queues.get(kind)
             if events is None:
                 continue
@@ -218,11 +227,18 @@ class MultiStreamRecorder:
                 except queue.Empty:
                     break
                 if kind == "state":
-                    collect = getattr(self.collector, "collect_state", None)
+                    collect = getattr(self.collector, "collect_qpos", None)
+                    if collect is None:
+                        collect = getattr(self.collector, "collect_state", None)
                     if collect is None:
                         collect = self.collector.collect
                     collect(payload)
-                elif kind == "image":
+                elif kind == "action":
+                    collect = getattr(self.collector, "collect_action", None)
+                    if collect is None:
+                        collect = self.collector.collect
+                    collect(payload)
+                elif kind.startswith("image"):
                     collect = getattr(self.collector, "collect_images", None)
                     if collect is None:
                         collect = self.collector.collect

@@ -53,8 +53,18 @@ class RealsenseSensor(Sensor):
         self.align = None  # rs.align(rs.stream.color)：enable_depth 且对齐时启用
         self.depth_scale = None  # 深度原始值 → 米（RealSense 硬件标定值，典型 0.001）
         self.color_intrinsics = None  # 彩色内参 dict（fx / fy / cx / cy；对齐后深度与彩图共用）
+        self.color_size = self.COLOR_SIZE
+        self.color_fps = self.COLOR_FPS
 
-    def connect(self, device, pixel_format="raw", enable_depth=False, align_to_color=True):
+    def connect(
+        self,
+        device,
+        pixel_format="raw",
+        enable_depth=False,
+        align_to_color=True,
+        color_size=None,
+        color_fps=None,
+    ):
         """连接 RealSense，选择 color 输出格式（jpg | raw）与是否采集深度。
 
         - ``"jpg"`` / ``"jpeg"`` / ``"mjpeg"`` → ``color`` 返回 JPEG 编码 bytes（1 维 ndarray）；
@@ -75,6 +85,12 @@ class RealsenseSensor(Sensor):
             raise ValueError(f"Unsupported pixel_format: {pixel_format!r} (expected 'jpg' or 'raw')")
         self.enable_depth = bool(enable_depth)
         self.align_to_color = bool(align_to_color)
+        self.color_size = tuple(color_size or self.COLOR_SIZE)
+        self.color_fps = int(color_fps or self.COLOR_FPS)
+        if len(self.color_size) != 2 or any(isinstance(v, bool) or int(v) <= 0 for v in self.color_size):
+            raise ValueError(f"Invalid color_size: {self.color_size!r}")
+        if self.color_fps <= 0:
+            raise ValueError(f"Invalid color_fps: {self.color_fps!r}")
 
         self.context = rs.context()
         self.devices = list(self.context.query_devices())
@@ -97,7 +113,7 @@ class RealsenseSensor(Sensor):
         self.config.enable_device(serial)
         # self.config.disable_all_streams()
         # Enable color stream only
-        self.config.enable_stream(rs.stream.color, *self.COLOR_SIZE, rs.format.bgr8, self.COLOR_FPS)
+        self.config.enable_stream(rs.stream.color, *self.color_size, rs.format.bgr8, self.color_fps)
         if self.enable_depth:
             self.config.enable_stream(rs.stream.depth, *self.DEPTH_SIZE, rs.format.z16, self.DEPTH_FPS)
 
@@ -136,7 +152,7 @@ class RealsenseSensor(Sensor):
         故它就是反投影用的那套内参）；``depth`` 段（无深度时为 None）含
         ``scale``（原始值 → 米）与 ``aligned_to_color``。
         """
-        width, height = self.COLOR_SIZE
+        width, height = self.color_size
         info: dict = {
             "name": self.name,
             "width": int(width),

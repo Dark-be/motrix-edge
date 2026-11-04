@@ -241,31 +241,59 @@ class ActMcapCollector:
         self.collect_images(standard_obs)
 
     def collect_state(self, standard_obs: dict):
-        """写入一条状态采样（目标频率通常为 100Hz）。"""
+        """兼容入口：写入同拍状态与目标 action。新运行时分别调用两个单流入口。"""
+        timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
+        if not isinstance(timestamps, Mapping):
+            raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
+        # 兼容入口保持原子校验：任一显式时间非法时，一条消息都不能先写出去。
+        self._resolve_times(standard_obs, (TOPIC_QPOS, TOPIC_ACTION), timestamps)
+        self.collect_qpos(standard_obs)
+        self.collect_action(standard_obs)
+
+    def collect_qpos(self, standard_obs: dict):
+        """写入一条状态采样。"""
         if self._writer is None:
             raise RuntimeError("ActMcapCollector not started; call start() first")
         timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
         if not isinstance(timestamps, Mapping):
             raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
-        times = self._resolve_times(standard_obs, (TOPIC_QPOS, TOPIC_ACTION), timestamps)
-        earliest, latest = min(times.values()), max(times.values())
-        self._first_ts_ns = earliest if self._first_ts_ns is None else min(self._first_ts_ns, earliest)
-        self._last_ts_ns = latest if self._last_ts_ns is None else max(self._last_ts_ns, latest)
+        ts_ns = self._resolve_times(standard_obs, (TOPIC_QPOS,), timestamps)[TOPIC_QPOS]
+        self._first_ts_ns = ts_ns if self._first_ts_ns is None else min(self._first_ts_ns, ts_ns)
+        self._last_ts_ns = ts_ns if self._last_ts_ns is None else max(self._last_ts_ns, ts_ns)
         qpos = np.asarray(standard_obs[KEY_QPOS], dtype=np.float64).tolist()
+        seq = self._message_seq
+        self._message_seq += 1
+        self._writer.write_message(
+            topic=TOPIC_QPOS,
+            schema=self._schema_qpos,
+            message={"layout": {"dim": [], "data_offset": 0}, "data": qpos},
+            log_time=ts_ns,
+            publish_time=ts_ns,
+            sequence=seq,
+        )
+        self._step_count += 1
+
+    def collect_action(self, standard_obs: dict):
+        """写入一条实际控制提交命令。"""
+        if self._writer is None:
+            raise RuntimeError("ActMcapCollector not started; call start() first")
+        timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
+        if not isinstance(timestamps, Mapping):
+            raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
+        ts_ns = self._resolve_times(standard_obs, (TOPIC_ACTION,), timestamps)[TOPIC_ACTION]
+        self._first_ts_ns = ts_ns if self._first_ts_ns is None else min(self._first_ts_ns, ts_ns)
+        self._last_ts_ns = ts_ns if self._last_ts_ns is None else max(self._last_ts_ns, ts_ns)
         action = np.asarray(standard_obs[KEY_ACTION], dtype=np.float64).tolist()
         seq = self._message_seq
         self._message_seq += 1
-        for topic, data in ((TOPIC_QPOS, qpos), (TOPIC_ACTION, action)):
-            ts_ns = times[topic]
-            self._writer.write_message(
-                topic=topic,
-                schema=self._schema_qpos,
-                message={"layout": {"dim": [], "data_offset": 0}, "data": data},
-                log_time=ts_ns,
-                publish_time=ts_ns,
-                sequence=seq,
-            )
-        self._step_count += 1
+        self._writer.write_message(
+            topic=TOPIC_ACTION,
+            schema=self._schema_qpos,
+            message={"layout": {"dim": [], "data_offset": 0}, "data": action},
+            log_time=ts_ns,
+            publish_time=ts_ns,
+            sequence=seq,
+        )
 
     def collect_images(self, standard_obs: dict):
         """写入一拍图片（目标频率通常为 30Hz）。"""

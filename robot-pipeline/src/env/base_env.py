@@ -12,20 +12,19 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""BaseEnv —— 机器人运行环境（server 进程内，**控制 / 观测双线程**；只控制 robot）。
+"""BaseEnv —— 机器人运行环境（server 进程内的唯一运行时；只控制 robot）。
 
 职责（不碰 HTTP / 共享内存 / 契约——那些归 robot server / contract_server）：
-- **控制线程**：以 ``HZ``（默认 30Hz）执行运动指令和 ``robot.step()``，同时以 ``STATE_HZ``
-  （默认 100Hz）调用 ``robot.sample_state()``，缓存分离的 joint / gripper / pose 状态。
-  相机取帧与采集落盘都**不在**本线程，故相机 / 磁盘卡顿不会拖慢或中断机械臂控制。
-- **观测线程**（``OBS_HZ``，默认 30Hz = **真实取图片的频率**）：取相机帧 + 缓存状态 → 契约观测
-  （``robot.standard_observation()``：融合 qpos / action / qpos_err + 位姿 + 本拍图像）→ 帧钩子 ``on_frame``
-  （server 据此发布共享内存）→ 采集落盘；状态按 100Hz、图片按 30Hz 分别写入 MCAP。
+- **缺省调度**：控制线程以 ``HZ`` 执行运动指令，并以 ``STATE_HZ`` 采样反馈；观测线程以
+  ``OBS_HZ`` 取全部相机。采集始终交给独立 writer 线程。
+- **显式多频调度**（``streams.enabled``）：控制、状态、观测和每台相机分别调度；逐相机 worker
+  独占对应 sensor，观测线程只组合最新缓存，不重复访问硬件。
+- **多流录制**：state、实际 command action 和逐相机 image 各自进入有界队列；生产方不等待磁盘，
+  writer 是 MCAP 后端唯一调用者。
 - **命令队列**：HTTP 线程（server handler）调用 ``robot_reset`` / ``robot_execute`` /
   ``robot_rollout`` / ``robot_safe_stop`` / ``robot_set_teleop`` **只把运动指令入队**，由
   控制线程每拍取出执行；``robot_capture_*`` **只把采集指令入队**，由观测线程取出执行。
-  机器人只有控制线程一个写者、collector 只有观测线程一个写者，HTTP 线程不直接碰它们，
-  避免跨线程竞态。
+  机器人命令只有控制线程一个写者、collector 只有 writer 线程一个写者，HTTP 线程不直接碰它们。
 
   ⚠️ **跨队列顺序不保证**（有意）：FIFO 只在各自队列内成立；采集指令 ≤ 1/``OBS_HZ``（默认
   ≈100ms）在观测拍生效、运动指令 ≤ 1/``HZ``（默认 ≈33ms）在控制拍生效——``capture start``
@@ -49,12 +48,15 @@ import queue
 import threading
 import time
 import uuid
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 
 import numpy as np
 from collector import get_collector
 from streams import MultiStreamRecorder
 from utils.data_handler import debug_print
+from utils.observation_time import KEY_TIMESTAMPS_NS
+
+from motrix_edge.adapter.base import KEY_ACTION
 
 
 class TakeoverActiveError(RuntimeError):
@@ -74,13 +76,50 @@ class BaseEnv:
     # 此后微小位移照常记录，下一轮 episode 重新武装。阈值按现场主臂手感调（rad / 归一化）。
     HEAD_SKIP_DEFAULTS = {"enabled": True, "joint_eps": 0.05, "gripper_eps": 0.05}
 
-    def __init__(self, robot, capture_config: dict | None = None, recording_config: dict | None = None):
+    def __init__(self, robot, capture_config: dict | None = None, stream_config: dict | None = None):
         self.robot = robot
+        self.stream_config = dict(stream_config or {})
+        self.multirate = bool(self.stream_config.get("enabled", False))
+        recording_config = self.stream_config.get("recording") or {}
+        camera_profiles = (self.stream_config.get("cameras") or {}).get("profiles") or {}
+        if self.multirate:
+            self.HZ = self._positive_hz(self.stream_config.get("control_hz", self.HZ), "control_hz")
+            self.STATE_HZ = self._positive_hz(
+                self.stream_config.get("follower_state_hz", self.STATE_HZ), "follower_state_hz"
+            )
+            camera_rates = [
+                self._positive_hz(profile.get("read_hz"), f"{name}.read_hz")
+                for name, profile in camera_profiles.items()
+            ]
+            self.OBS_HZ = self._positive_hz(
+                self.stream_config.get("observation_hz", max(camera_rates, default=self.OBS_HZ)), "observation_hz"
+            )
+            reference_hz = self._positive_hz(
+                self.stream_config.get("reference_control_hz", 30.0), "reference_control_hz"
+            )
+            speed = float(self.stream_config.get("max_joint_speed_rad_s", self.robot.step_rad * reference_hz))
+            if not np.isfinite(speed) or speed <= 0:
+                raise ValueError("streams.max_joint_speed_rad_s must be finite and positive")
+            self.robot.step_rad = speed / self.HZ
         self._running = False
         self._control_thread: threading.Thread | None = None
         self._observe_thread: threading.Thread | None = None
+        self._state_thread: threading.Thread | None = None
+        self._camera_threads: dict[str, threading.Thread] = {}
+        self._camera_profiles = dict(camera_profiles)
+        self._camera_lock = threading.Lock()
+        self._camera_frames: dict[str, dict] = {}
+        self._camera_errors: dict[str, str] = {}
+        self._camera_counts = Counter()
+        if self.multirate and set(self._camera_profiles) != set(self.robot.IMAGE_NAMES):
+            raise ValueError("streams.cameras.profiles must match robot IMAGE_NAMES")
+        configure_cameras = getattr(self.robot, "configure_camera_profiles", None)
+        if callable(configure_cameras):
+            configure_cameras(self._camera_profiles)
         self.loop_alive = False  # 控制线程是否存活（供 health 的 ready 组合）
         self.observe_alive = False  # 观测线程是否存活（供 health 的 ready 组合）
+        self.state_alive = False
+        self.state_error: str | None = None
         self.last_error = None  # 最近一次命令 / 控制拍异常（health 上报；**sticky**，需重启清除）
         self.loop_error = None  # 控制线程持续失败（连续 step 异常超阈值；恢复后自动清除）
         self._step_error_streak = 0  # step 连续失败计数（任一帧成功即清零）
@@ -113,7 +152,10 @@ class BaseEnv:
         self._recorder = MultiStreamRecorder(
             self._collector,
             capacity=(recording_config or {}).get("queue_size", 512),
+            image_names=self.robot.IMAGE_NAMES if self.multirate else (),
         )
+        self.robot.on_command = self._record_command
+        self._collector.set_meta({"action_semantics": "submitted_command"})
         # 注入机器人身份：collector 写 JSON 元信息时附带 robot_name / robot_type
         set_robot_meta = getattr(self._collector, "set_robot_meta", None)
         if set_robot_meta is not None:
@@ -344,9 +386,19 @@ class BaseEnv:
         ``observe_alive`` 是各自的存活位：由两个线程在启动 / 退出时置位，只供 ``ready`` 组合消费，
         不是对外的 health 字段）。
         """
-        err = self.last_error or self.loop_error or self.robot.last_error
+        with self._camera_lock:
+            camera_errors = dict(self._camera_errors)
+            camera_counts = dict(self._camera_counts)
+            cameras_ready = not self.multirate or all(name in self._camera_frames for name in self.robot.IMAGE_NAMES)
+        camera_error = next(iter(camera_errors.values()), None)
+        err = self.last_error or self.loop_error or self.state_error or camera_error or self.robot.last_error
         return {
-            "ready": self.robot.ready and self.loop_alive and self.observe_alive and err is None,
+            "ready": self.robot.ready
+            and self.loop_alive
+            and self.observe_alive
+            and (not self.multirate or self.state_alive)
+            and cameras_ready
+            and err is None,
             "last_error": err,
             "control_hz": self.control_hz,
             "measured_hz": self.measured_hz,
@@ -358,6 +410,13 @@ class BaseEnv:
             "teleop_follow_space": self.robot.teleop_follow_space,
             "teleop_follow_axes": list(self.robot.teleop_follow_axes),
             "teleop_pose_position_scale": self.robot.teleop_scale_status(),
+            "streams": {
+                "enabled": self.multirate,
+                "state_hz": self.STATE_HZ,
+                "observation_hz": self.OBS_HZ,
+                "camera_frames": camera_counts,
+                "camera_errors": camera_errors,
+            },
         }
 
     @property
@@ -381,6 +440,15 @@ class BaseEnv:
         if not periods:
             return float(nominal_hz)
         return 1.0 / (sum(periods) / len(periods))
+
+    @staticmethod
+    def _positive_hz(value, name: str) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"streams.{name} must be finite and positive")
+        result = float(value)
+        if not np.isfinite(result) or result <= 0:
+            raise ValueError(f"streams.{name} must be finite and positive")
+        return result
 
     def capture_status(self) -> dict:
         """采集状态：运行位 + 采集元信息 + 数据目录 + 帧头跳过进度。
@@ -434,7 +502,22 @@ class BaseEnv:
         self._observe_thread = threading.Thread(
             target=self._observe_loop, daemon=True, name=f"{self.robot.name}-observe"
         )
+        if self.multirate:
+            self._state_thread = threading.Thread(target=self._state_loop, daemon=True, name=f"{self.robot.name}-state")
+            self._camera_threads = {
+                name: threading.Thread(
+                    target=self._camera_loop,
+                    args=(name, self._camera_profiles[name]),
+                    daemon=True,
+                    name=f"{self.robot.name}-{name}",
+                )
+                for name in self.robot.IMAGE_NAMES
+            }
         self._control_thread.start()
+        if self._state_thread is not None:
+            self._state_thread.start()
+        for thread in self._camera_threads.values():
+            thread.start()
         self._observe_thread.start()
 
     def stop(self):
@@ -446,10 +529,22 @@ class BaseEnv:
         self._running = False
         if self._control_thread is not None:
             self._control_thread.join(timeout=2.0)
+            if self._control_thread.is_alive():
+                raise TimeoutError("Control thread did not stop; refusing to disconnect hardware")
             self._control_thread = None
+        if self._state_thread is not None:
+            self._state_thread.join(timeout=2.0)
+            if self._state_thread.is_alive():
+                raise TimeoutError("State thread did not stop; refusing to disconnect hardware")
+            self._state_thread = None
         if self._observe_thread is not None:
             self._observe_thread.join(timeout=6.0)
             self._observe_thread = None
+        for name, thread in self._camera_threads.items():
+            thread.join(timeout=6.0)
+            if thread.is_alive():
+                raise TimeoutError(f"Camera worker {name} did not stop")
+        self._camera_threads = {}
         if self._episode_open:
             self._episode_open = False
             self._recorder.finish()
@@ -461,6 +556,9 @@ class BaseEnv:
         本线程是机械臂控制回路的唯一执行者（不碰相机 / 采集）；相机或磁盘卡顿只表现为
         观测线程丢帧（慢帧告警），机械臂仍按 HZ 稳定步进。
         """
+        if self.multirate:
+            self._multirate_control_loop()
+            return
         interval = 1.0 / self.STATE_HZ
         control_interval = 1.0 / self.HZ
         next_control = time.perf_counter()
@@ -492,6 +590,85 @@ class BaseEnv:
 
         finally:
             self.loop_alive = False
+
+    def _multirate_control_loop(self):
+        """独立控制调度：绝对 deadline，超期跳槽但不补发。"""
+        interval = 1.0 / self.HZ
+        deadline = time.monotonic()
+        self.loop_alive = True
+        self._control_prev_t = time.perf_counter()
+        try:
+            while self._running:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+                if not self._running:
+                    break
+                now = time.perf_counter()
+                try:
+                    self._drain_commands()
+                    self.robot.step()
+                    self._control_periods.append(now - self._control_prev_t)
+                    self._control_prev_t = now
+                    self._step_ok()
+                except Exception as exc:  # noqa: BLE001 hardware boundary reports through health
+                    self._step_failed(exc)
+                deadline += interval
+                late = time.monotonic() - deadline
+                if late > 0:
+                    deadline += (int(late / interval) + 1) * interval
+        finally:
+            self.loop_alive = False
+
+    def _state_loop(self):
+        """独立反馈采样调度；不补采错过的 slot。"""
+        interval = 1.0 / self.STATE_HZ
+        deadline = time.monotonic()
+        self.state_alive = True
+        try:
+            while self._running:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+                if not self._running:
+                    break
+                try:
+                    self._sample_state()
+                    self.state_error = None
+                except Exception as exc:  # noqa: BLE001 next sample retries; health exposes latest failure
+                    self.state_error = f"state sample failed: {exc}"
+                deadline += interval
+                late = time.monotonic() - deadline
+                if late > 0:
+                    deadline += (int(late / interval) + 1) * interval
+        finally:
+            self.state_alive = False
+
+    def _camera_loop(self, name: str, profile: dict):
+        """一个 worker 独占一个 sensor，按该相机 read_hz 发布原始帧。"""
+        interval = 1.0 / self._positive_hz(profile.get("read_hz"), f"{name}.read_hz")
+        deadline = time.monotonic()
+        while self._running:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            if not self._running:
+                break
+            try:
+                frame = self.robot.get_observation_frame(name)
+                with self._camera_lock:
+                    self._camera_frames[name] = frame
+                    self._camera_errors.pop(name, None)
+                    self._camera_counts[name] += 1
+                if self._recorder.active:
+                    self._recorder.publish_image(self.robot.frames_observation({name: frame}), name=name)
+            except Exception as exc:  # noqa: BLE001 one camera failure must not stop other producers
+                with self._camera_lock:
+                    self._camera_errors[name] = f"{type(exc).__name__}: {exc}"
+            deadline += interval
+            late = time.monotonic() - deadline
+            if late > 0:
+                deadline += (int(late / interval) + 1) * interval
 
     def _step_ok(self):
         """step 成功：清零连续失败计数；已上报的 loop_error 随之清除（health 复位）。"""
@@ -676,7 +853,13 @@ class BaseEnv:
         观测节奏（``OBS_HZ``），不是控制拍的机械臂采样时刻。
         """
         self._drain_capture_commands()
-        observation = self.robot.build_observation()
+        frames = None
+        if self.multirate:
+            with self._camera_lock:
+                if any(name not in self._camera_frames for name in self.robot.IMAGE_NAMES):
+                    return
+                frames = self.robot.frames_observation(dict(self._camera_frames))
+        observation = self.robot.build_observation() if frames is None else self.robot.build_observation(frames=frames)
         if observation is None:
             return  # 控制线程尚未采到第一拍（启动瞬间）：本拍不出观测，下一拍重试
         self.observation = observation  # 保留最新原始观测副本（其他消费方只读）
@@ -715,7 +898,8 @@ class BaseEnv:
             if not self._episode_open:
                 self._recorder.start()
                 self._episode_open = True
-            self._recorder.publish_image(self.standard_observation)
+            if not self.multirate:
+                self._recorder.publish_image(self.standard_observation)
         elif self._episode_open:
             self._episode_open = False
             self._recorder.finish()
@@ -794,3 +978,15 @@ class BaseEnv:
             return
         self._episode_open = False
         self._recorder.cancel()
+
+    def _record_command(self, joints: np.ndarray, gripper: np.ndarray, timestamp_ns: int) -> None:
+        """机器人成功返回一拍硬件提交后发布实际 command action。"""
+        if not self.capturing or not self._recorder.active:
+            return
+        action = self.robot.interleave_state(joints, gripper)
+        self._recorder.publish_action(
+            {
+                KEY_ACTION: action,
+                KEY_TIMESTAMPS_NS: {KEY_ACTION: int(timestamp_ns)},
+            }
+        )

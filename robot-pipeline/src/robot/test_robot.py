@@ -195,28 +195,23 @@ class TestRobot(BaseRobot):
 
     # ---- 相机（取数的一部分：由 capture_frames() 组装为契约键）-------------------------
 
-    def get_observation_frames(self) -> list:
-        """读取各相机**本拍**帧（顺序对齐 IMAGE_NAMES）——彩色恒有，深度仅在开启时有。
+    def get_observation_frame(self, name: str) -> dict:
+        """读取一个相机本拍帧——彩色恒有，深度仅在开启时有。
 
         从 test 视觉传感器读 color（JPEG），解码为 raw RGB——与真实 piper 接入位一致；
         ``cam_head`` 开启深度时一并带上（同一传感器同一次调用合成，故与彩色同拍）。
         """
-        frames = []
-        for name in self.IMAGE_NAMES:
-            info = self.sensors[name].get_information()
-            color = info.get("color") if info else None
-            if color is None:
-                raise RuntimeError(f"TestRobot.get_observation_frames: 相机 {name} 无帧")
-            decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
-            if decoded is None:
-                raise RuntimeError(f"TestRobot.get_observation_frames: 相机 {name} JPEG 解码失败")
-            frames.append(
-                {
-                    "color": decoded[:, :, ::-1],
-                    "depth": info.get("depth"),
-                    KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
-                    KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
-                    KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
-                }
-            )  # BGR → RGB
-        return frames
+        info = self.sensors[name].get_information()
+        color = info.get("color") if info else None
+        if color is None:
+            raise RuntimeError(f"TestRobot.get_observation_frame: 相机 {name} 无帧")
+        decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
+        if decoded is None:
+            raise RuntimeError(f"TestRobot.get_observation_frame: 相机 {name} JPEG 解码失败")
+        return {
+            "color": decoded[:, :, ::-1],
+            "depth": info.get("depth"),
+            KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
+            KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
+            KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
+        }  # BGR → RGB

@@ -109,6 +109,7 @@ def base_env_module():
 def _build(base_env_module, **collector_cfg):
     robot = _FakeRobot()
     cfg = {"type": "act_mcap", "save_dir": "/tmp/head-skip", **collector_cfg}
+    base_env_module.get_collector = lambda config: _FakeCollector(config if isinstance(config, dict) else {})
     env = base_env_module.BaseEnv(robot, cfg)
     # 观测线程每拍交给采集器的是**契约观测**（融合键；形状由 ``BaseRobot.standard_observation()``
     # 单点产出，见 tests/test_state_layout.py 的 standard_observation 用例）。

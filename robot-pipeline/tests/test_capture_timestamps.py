@@ -202,6 +202,24 @@ def test_legacy_and_partial_timestamp_fallback(monkeypatch):
     assert all(call.kwargs["log_time"] == 9999 for call in collector._writer.write_message.call_args_list)
 
 
+def test_state_and_submitted_action_can_be_written_as_independent_streams():
+    module = _load("collector.mcap_collector")
+    collector = module.ActMcapCollector({})
+    collector._writer = Mock()
+    observation = {
+        "observations/qpos": [0],
+        "action": [1],
+        "timestamps_ns": {"observations/qpos": 100, "action": 200},
+    }
+
+    collector.collect_qpos(observation)
+    collector.collect_action(observation)
+
+    calls = collector._writer.write_message.call_args_list
+    assert [call.kwargs["topic"] for call in calls] == ["observations/qpos", "action"]
+    assert [call.kwargs["log_time"] for call in calls] == [100, 200]
+
+
 @pytest.mark.parametrize("bad", [-1, True, None, 1.5, float("nan"), "123", 2**64])
 def test_invalid_explicit_timestamp_rejected_before_writing(bad):
     module = _load("collector.mcap_collector")

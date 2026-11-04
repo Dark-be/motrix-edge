@@ -275,6 +275,7 @@ class HttpShmAdapter(RobotAdapter):
                 if isinstance(data.get(FIELD_TELEOP_ACTIVE_AXES), list)
                 else None
             ),
+            streams=dict(data.get("streams", {}) or {}),
         )
         if ok or self._health is None:
             self._health = status

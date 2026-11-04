@@ -230,13 +230,20 @@ class DualPiperRobot(BaseRobot):
             self._controller_for_arm(arm).connect(**connect_kwargs)
         debug_print(self.name, "Setup controllers done", "INFO")
         for name in self.IMAGE_NAMES:
-            self.sensors[name].connect(
-                device=self.camera_devices[name],
+            profile = self.camera_profiles.get(name, {})
+            connect_kwargs = {
+                "device": self.camera_devices[name],
                 # RealSense 硬件色彩流本身就是 BGR8：用 raw 直接得到 ndarray，
                 # 避免 sensor 先 JPEG 编码、get_observation_frames 再解码回来（每路每拍白跑一遍编解码）。
-                pixel_format="raw",
-                enable_depth=name in self.depth_cameras,  # 只有生效的深度相机开深度流
-            )
+                "pixel_format": "raw",
+                "enable_depth": name in self.depth_cameras,  # 只有生效的深度相机开深度流
+            }
+            if profile:
+                connect_kwargs.update(
+                    color_size=(profile["width"], profile["height"]),
+                    color_fps=profile["stream_fps"],
+                )
+            self.sensors[name].connect(**connect_kwargs)
         debug_print(self.name, "Setup sensors done", "INFO")
         self.ready = True
 
@@ -263,37 +270,32 @@ class DualPiperRobot(BaseRobot):
             sensor.disconnect()
             debug_print(self.name, f"Disconnect sensor {name} done", "INFO")
 
-    def get_observation_frames(self) -> list:
-        """读取各相机本拍帧（顺序对齐 ``IMAGE_NAMES``）——彩色恒有，深度仅在开启时有。
+    def get_observation_frame(self, name: str) -> dict:
+        """读取一个相机本拍帧——彩色恒有，深度仅在开启时有。
 
-        每相机只调一次 ``get_information()``：彩色与深度同拍同源（深度已对齐彩色图）。
+        只调一次 ``get_information()``：彩色与深度同拍同源（深度已对齐彩色图）。
         按 ``sensor.pixel_format`` 区分：jpg → 解 JPEG；raw → 已是 RGB ndarray。
         """
-        frames = []
-        for name in self.IMAGE_NAMES:
-            sensor = self.sensors[name]
-            info = sensor.get_information()
-            color = info.get("color") if info else None
-            if color is None:
-                raise RuntimeError(f"DualPiperRobot.get_observation_frames: 相机 {name} 无帧")
-            if getattr(sensor, "pixel_format", V4l2Sensor.PIXEL_FORMAT_JPG) != V4l2Sensor.PIXEL_FORMAT_JPG:
-                decoded = color  # raw（V4l2/Realsense）：已解码为 RGB（HxWx3）
-            else:
-                decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
-                if decoded is None:
-                    debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
-                    decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
-                decoded = decoded[:, :, ::-1]  # BGR → RGB
-            frames.append(
-                {
-                    "color": decoded,
-                    "depth": info.get("depth"),
-                    KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
-                    KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
-                    KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
-                }
-            )
-        return frames
+        sensor = self.sensors[name]
+        info = sensor.get_information()
+        color = info.get("color") if info else None
+        if color is None:
+            raise RuntimeError(f"DualPiperRobot.get_observation_frame: 相机 {name} 无帧")
+        if getattr(sensor, "pixel_format", V4l2Sensor.PIXEL_FORMAT_JPG) != V4l2Sensor.PIXEL_FORMAT_JPG:
+            decoded = color  # raw（V4l2/Realsense）：已解码为 RGB（HxWx3）
+        else:
+            decoded = cv2.imdecode(color, cv2.IMREAD_COLOR)
+            if decoded is None:
+                debug_print(self.name, f"相机 {name} JPEG 解码失败，返回空帧", "WARNING")
+                decoded = np.zeros((self.IMAGES[name][1], self.IMAGES[name][0], 3), dtype=np.uint8)
+            decoded = decoded[:, :, ::-1]  # BGR → RGB
+        return {
+            "color": decoded,
+            "depth": info.get("depth"),
+            KEY_TIMESTAMP_NS: info.get(KEY_TIMESTAMP_NS),
+            KEY_TIMESTAMPS_NS: info.get(KEY_TIMESTAMPS_NS, {}),
+            KEY_TIMESTAMP_METADATA: info.get(KEY_TIMESTAMP_METADATA, {}),
+        }
 
     def _read_teleop_joint(self) -> np.ndarray | None:
         """遥操作关节段接入位：主手 → 从手（左→左、右→右），返回扁平 ``joint_dim()`` 维主臂关节角。

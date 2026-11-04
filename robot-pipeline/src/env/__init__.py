@@ -46,5 +46,4 @@ def get_env(base_cfg):
           save_dir: ./data
     """
     robot = get_robot(base_cfg)
-    recording = (base_cfg.get("streams") or {}).get("recording") or {}
-    return BaseEnv(robot=robot, capture_config=base_cfg.get("collector"), recording_config=recording)
+    return BaseEnv(robot=robot, capture_config=base_cfg.get("collector"), stream_config=base_cfg.get("streams"))
