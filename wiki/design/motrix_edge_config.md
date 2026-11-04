@@ -74,7 +74,8 @@
 ## 配置路径与加载
 
 -   **优先级**：先读 `<根>/config/<name>`（`<根> = $MOTRIX_EDGE_DIR` 或
-    `<cwd>/motrix-edge`）；文件不存在时读取包内只读默认值；两者都不存在时返回 `{}`。
+    `<cwd>/motrix-edge`）；文件不存在时读取包内只读默认值。robot-pipeline 的机型配置两处都不存在时
+    直接报错，禁止把空配置带到机器人构造阶段。
 -   **`capture.yml`**（采集元信息选项，`capture meta` 命令族维护）：读取时同样先现场配置、后包内默认；
     只有显式写命令才会在 `<根>/config/capture.yml` 创建或更新文件；见
     [采集元信息选项（capture meta）](./motrix_edge_capture_meta.md)。
@@ -93,6 +94,29 @@
 | `get_log_dir()`              | `<root>/logs`                                           |
 
 -   `CaptureMetaStore` 写 `capture.yml`：在首次显式写操作时创建 `<根>/config/capture.yml`。
+
+### robot-pipeline 机型继承
+
+robot-pipeline 的机型 YAML 可用顶层 `extends` 继承同一配置命名空间中的一个父配置：
+
+```yaml
+extends: dual_piper.yml
+streams:
+    control_hz: 100
+```
+
+加载顺序固定为「父机型 → 子机型 → 机器档案」。父、子配置各自仍遵循「运行根现场文件优先、包内
+示例兜底」；机器档案只在整条继承链合并后叠加一次。字典递归合并，列表和标量由子配置整体替换。
+`extends` 只接受不含目录部分的配置文件名，且循环继承在启动期报错。
+
+相机身份与采集 profile 分属不同层：
+
+-   `robot.cameras.<name>` 是每台机器不同的设备序列号，由机器档案提供；
+-   `streams.cameras.profiles.<name>` 是机型级分辨率、设备出流帧率与应用读取频率；
+-   两边键集合必须与机器人声明的相机名一致，禁止在另一份 recorder 配置中重复序列号。
+
+结构化 profile 保存在 YAML 并随最终配置写入采集元信息；`.env` 只选择运行根、机型配置名和机器档案，
+不承载逐相机结构。
 
 配置段：
 
