@@ -535,6 +535,7 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             FIELD_DETAIL: detail,
             FIELD_CONTROL_HZ: h.get("control_hz"),
             FIELD_MEASURED_HZ: h.get("measured_hz"),
+            "streams": h.get("streams") or {},
             # 运行位（运行期可切，走 health 读回即随时新鲜；见 wiki/design/robot_pipeline_tcp.md）
             FIELD_POSE_FRAME: h.get("pose_frame"),
             FIELD_TCP_OFFSET: h.get("tcp_offset"),

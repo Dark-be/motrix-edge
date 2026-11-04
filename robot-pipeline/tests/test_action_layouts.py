@@ -148,6 +148,7 @@ def env_module():
 
 def _env(env_module):
     robot = _FakeRobot()
+    env_module.get_collector = lambda cfg: _FakeCollector(cfg if isinstance(cfg, dict) else {})
     return env_module.BaseEnv(robot, {"type": "act_mcap", "save_dir": "/tmp/action-layouts"}), robot
 
 

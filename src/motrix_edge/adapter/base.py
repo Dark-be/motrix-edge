@@ -141,6 +141,7 @@ class HealthStatus:
     teleop_follow_space: str | None = None  # joint | pose
     teleop_pose_position_scale: dict[str, list[float]] | None = None
     teleop_follow_axes: list[str] | None = None  # pose 跟随轴白名单；未列轴锁定
+    streams: dict = field(default_factory=dict)  # 多频 state/action/camera 调度与错误诊断
 
 
 @dataclass

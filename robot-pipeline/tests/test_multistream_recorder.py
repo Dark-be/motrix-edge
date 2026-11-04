@@ -43,6 +43,9 @@ class Collector:
             raise OSError("disk failed")
         self.calls.append(("image", payload))
 
+    def collect_action(self, payload):
+        self.calls.append(("action", payload))
+
     def set_meta(self, payload):
         self.meta.update(payload)
         self.calls.append(("meta", payload))
@@ -60,16 +63,18 @@ def test_finish_drains_independent_streams_and_records_summary(tmp_path):
 
     recorder.start()
     assert recorder.publish_state({"seq": 1})
+    assert recorder.publish_action({"command": 2})
     assert recorder.publish_image({"camera": "head"})
     recorder.set_meta({"operator": "tester"})
     summary = recorder.finish()
 
     assert ("state", {"seq": 1}) in collector.calls
+    assert ("action", {"command": 2}) in collector.calls
     assert ("image", {"camera": "head"}) in collector.calls
     assert collector.calls[-1] == "finish"
     assert collector.meta["operator"] == "tester"
-    assert collector.meta["recording"]["accepted"] == {"state": 1, "image": 1, "meta": 1}
-    assert summary["accepted"] == {"state": 1, "image": 1, "meta": 1}
+    assert collector.meta["recording"]["accepted"] == {"state": 1, "action": 1, "image": 1, "meta": 1}
+    assert summary["accepted"] == {"state": 1, "action": 1, "image": 1, "meta": 1}
     assert summary["dropped"] == {}
     assert recorder.status()["phase"] == "completed"
 
@@ -129,3 +134,19 @@ def test_writer_failure_is_contained_and_reported(tmp_path):
     assert summary["data_loss"] is True
     assert recorder.status()["phase"] == "failed"
     assert "cancel" in collector.calls
+
+
+def test_each_camera_has_an_independent_bounded_queue(tmp_path):
+    collector = Collector(tmp_path)
+    recorder = MultiStreamRecorder(collector, capacity=2, image_names=("head", "wrist"))
+    recorder.start()
+
+    assert recorder.publish_image({"seq": 1}, name="head")
+    assert recorder.publish_image({"seq": 2}, name="wrist")
+    summary = recorder.finish()
+
+    assert summary["accepted"] == {"image:head": 1, "image:wrist": 1}
+    assert [call for call in collector.calls if isinstance(call, tuple) and call[0] == "image"] == [
+        ("image", {"seq": 1}),
+        ("image", {"seq": 2}),
+    ]

@@ -379,7 +379,7 @@ collector:
 
 -   `act_mcap`：Foxglove MCAP（**ROS2 官方消息格式**，CDR 编码），每条 episode 保存为
     `{uuid}.mcap`（文件名用 UUID，全局唯一）；每信号一个 topic——`observations/qpos`（**状态向量**
-    = 每臂「值 + 夹爪」交错）/ `action`（**目标向量**，同维同布局）用
+    = 每臂「值 + 夹爪」交错）/ `action`（实际成功返回的控制器提交命令，同维同布局）用
     `std_msgs/msg/Float64MultiArray`，`observations/images/<cam>` 用
     `sensor_msgs/msg/CompressedImage`（JPEG）。**逐维含义写在同名 `{uuid}.json`**
     （`state_space` / `state_dims` / `action_space` / `action_dims`，每项 `{index, arm, kind, name}`）——
@@ -390,7 +390,12 @@ collector:
 默认录制由专用 writer 线程完成：100Hz state 与 30Hz image 分别进入有界队列，控制 / 观测生产方
 不等待磁盘。正常结束会先关闭准入、排空已接收事件再写 footer；取消会丢弃排队事件并删除本轮文件。
 队列 accepted / dropped、writer phase 与错误通过 `/v1/capture/status` 的 `recording` 字段提供，并写入
-episode JSON 的 `recording` 元信息。当前 `action` 仍是随 state 记录的目标值，并非 SDK 实际提交命令。
+episode JSON 的 `recording` 元信息。共享内存实时观测中的 `action` 仍表示目标；MCAP `action` 表示
+限速后实际尝试提交且 SDK 调用成功返回的 command，JSON 用 `action_semantics=submitted_command` 明示。
+
+`dual_piper_multirate.yml` 进一步把控制、状态和每台相机拆成独立调度：逐相机 worker 按各自
+`read_hz` 取帧并写各自队列，观测线程只组合最新缓存，不重复访问 sensor。100Hz 等配置均为调度目标，
+不是设备实际更新频率保证；合入后仍需真机检查周期分位数、CAN 错误与录制丢弃。
 **帧头跳过（只对遥操作录制）**：`robot teach` / `robot takeover` 开着时，capture 开始后主臂相对
 首帧未超过 `skip_until_motion` 阈值前不记录（也不创建 episode 文件），出现一次有效移动才开始；
 跳过只作用于本轮帧头，下一轮重新武装。进度见日志与 `GET /v1/capture/status` 的 `head_skip`。

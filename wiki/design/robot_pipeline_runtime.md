@@ -22,13 +22,18 @@ episode 录制与观测发布解耦。控制线程产生状态事件，观测线
 专用 writer 线程是 MCAP 后端的唯一调用者。state 与 image 使用独立有界队列，队列满时丢弃本流的
 新事件并分类计数，不用阻塞机器人控制或相机预览。
 
-本阶段保持现有数据语义：每条 state 事件仍同时携带 `observations/qpos` 与目标 `action`，图像事件
-沿用逐相机源时间。后续将实际 SDK command 拆为独立 action 流；在那之前不得把目标 action 宣称为
-设备提交命令。
+`observations/qpos` 与 `action` 是独立流：state 记录反馈状态，action 只在控制器调用成功返回后记录
+本拍限速后的实际请求值。目标值继续存在于共享内存实时观测，但不再冒充采集 action。逐相机 worker
+各自独占一个 sensor，按 `streams.cameras.profiles.<name>.read_hz` 取帧并写入对应 image 队列；观测线程
+只组合最新缓存，不再次访问相机。
 
 录制会话边界固定为：打开 writer → 开放事件准入 → capture end 关闭准入 → 排空已接收事件 → 写
 footer 与 JSON。capture cancel 关闭准入、丢弃排队事件并删除本轮文件。JSON 记录各流 accepted、
 dropped 与 writer 错误；HTTP capture 契约不变。
+
+运行时只有 `BaseEnv` 一套实现。未配置 `streams.enabled` 时仍使用同一 recorder 和 action 语义，只是
+沿用控制线程内状态采样与观测线程统一取相机；启用后控制、状态、逐相机和观测各自按配置调度。独立
+状态线程与控制器 SDK 并发访问必须经真机验证，故多频机型在验证完成前保持显式配置而非所有机型默认。
 
 ## 拓扑
 

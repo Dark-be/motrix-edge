@@ -22,5 +22,6 @@
 -   [robot-pipeline 深度观测实施计划](./robot_pipeline_depth_plan.md)
 -   [robot-pipeline 统一坐标系与外参实施计划](./robot_pipeline_frames_plan.md)
 -   [robot-pipeline 末端 TCP 位姿实施计划](./robot_pipeline_tcp_plan.md)
+-   [robot-pipeline 统一多频运行时](./robot_pipeline_unified_multirate_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->

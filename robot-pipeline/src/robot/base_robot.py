@@ -126,6 +126,7 @@ class BaseRobot:
         self.joint_target: np.ndarray | None = None
         self.gripper_command: np.ndarray | None = None
         self.gripper_target: np.ndarray | None = None
+        self.on_command = None  # env 注入：成功提交后发布实际 command 事件
         self.init_joint = self._init_vector("init_joint", self.joint_dim(), required=True)
         self.init_gripper = self._init_vector("init_gripper", self.gripper_dim(), required=False, fill=1.0)
 
@@ -169,6 +170,7 @@ class BaseRobot:
 
         # 生效的深度相机（顺序 = IMAGE_NAMES 子序；空 = 不开深度），由 robot.depth 决定
         self.depth_cameras = self._resolve_depth_cameras()
+        self.camera_profiles: dict[str, dict] = {}
 
         # 末端 TCP（robot.tcp，可选）：位姿读写原点从法兰切到工具末端
         tcp_section = self.robot_config.get(tcp.SECTION)
@@ -1212,7 +1214,10 @@ class BaseRobot:
             self.joint_command = self._step_toward(self.joint_command, self.joint_target, self.step_rad)
         if self.gripper_target is not None:
             self.gripper_command = self.gripper_target.copy()
+        command_started_ns = time.time_ns()
         self._apply_commands(self.joint_command, self.gripper_command)
+        if self.on_command is not None:
+            self.on_command(self.joint_command, self.gripper_command, command_started_ns)
 
     def _apply_commands(self, joints: np.ndarray, gripper: np.ndarray):
         """下发本拍关节与夹爪指令。"""
@@ -1358,6 +1363,13 @@ class BaseRobot:
         width, height = self.IMAGES.get(name, (0, 0))
         return {"name": name, "width": int(width), "height": int(height), "intrinsics": {}, "depth": None}
 
+    def configure_camera_profiles(self, profiles: dict | None) -> None:
+        """绑定逐相机采集 profile；硬件子类在 connect 时消费分辨率与设备帧率。"""
+        values = {str(name): dict(profile or {}) for name, profile in (profiles or {}).items()}
+        if values and set(values) != set(self.IMAGE_NAMES):
+            raise ValueError("streams.cameras.profiles must match robot IMAGE_NAMES")
+        self.camera_profiles = values
+
     def camera_mount(self, name: str) -> tuple[str, str | None]:
         """相机的安装方式 → ``(mount, arm)``（装配事实，取自 ``WRIST_CAMERAS``）：
 
@@ -1385,7 +1397,7 @@ class BaseRobot:
             infos.append(info)
         return infos
 
-    def build_observation(self) -> dict | None:
+    def build_observation(self, frames: dict | None = None) -> dict | None:
         """组装完整观测 = 最新缓存机械臂状态 + 本拍相机帧（彩色 + 深度）——观测线程调用。
 
         ``motion_state`` 为空（启动瞬间 / 机械臂读取失败）时返回 None，本拍不出观测。
@@ -1394,7 +1406,7 @@ class BaseRobot:
         if state is None:
             return None
         timestamp = time.time()  # 观测拍时刻（取帧前打点；取帧 / 落盘耗时不计入）
-        frames = self.capture_frames()
+        frames = self.capture_frames() if frames is None else frames
         return {
             **state,
             **frames,
@@ -1457,13 +1469,17 @@ class BaseRobot:
         """
         raise NotImplementedError
 
+    def get_observation_frame(self, name: str) -> dict:
+        """读取一个相机本拍帧；子类实现，供逐相机 worker 保持单 sensor 写者。"""
+        raise NotImplementedError
+
     def get_observation_frames(self) -> list:
-        """读取各相机本拍帧（list，顺序对齐 ``IMAGE_NAMES``；子类实现）。
+        """读取各相机本拍帧（list，顺序对齐 ``IMAGE_NAMES``）。
 
         每项 ``{"color": <RGB uint8 HxWx3>, "depth": <uint16 HxW> | None}``——彩色恒有，深度仅在
         该相机开启深度时有值。一次取帧同时得到彩色与深度（取帧是阻塞的，不能为深度再读一次）。
         """
-        raise NotImplementedError
+        return [self.get_observation_frame(name) for name in self.IMAGE_NAMES]
 
     def capture_frames(self) -> dict:
         """读取各相机本拍帧并组装契约键（彩色 + 深度）——观测线程调用。
@@ -1471,12 +1487,20 @@ class BaseRobot:
         ``observations/images/<cam>`` 恒有；``observations/depth/<cam>`` 只对生效的深度相机
         （``depth_camera_names()``）且该拍确实拿到深度时写入。
         """
-        depth_names = self.depth_camera_names()
         fallback_timestamp_ns = time.time_ns()  # 旧 sensor 无时间字段时的兼容值
-        frames = self.get_observation_frames()
+        frames = dict(zip(self.IMAGE_NAMES, self.get_observation_frames(), strict=True))
+        return self.frames_observation(frames, fallback_timestamp_ns=fallback_timestamp_ns)
+
+    def frames_observation(self, frames: dict[str, dict], fallback_timestamp_ns: int | None = None) -> dict:
+        """把按相机缓存的原始帧组装为契约键；不会访问 sensor。"""
+        depth_names = self.depth_camera_names()
+        fallback_timestamp_ns = time.time_ns() if fallback_timestamp_ns is None else fallback_timestamp_ns
         timestamps: dict = {}
         out: dict = {KEY_TIMESTAMPS_NS: timestamps, KEY_TIMESTAMP_METADATA: {}}
-        for name, frame in zip(self.IMAGE_NAMES, frames, strict=True):
+        for name in self.IMAGE_NAMES:
+            frame = frames.get(name)
+            if frame is None:
+                continue
             timestamp_ns = frame.get(KEY_TIMESTAMP_NS)
             if timestamp_ns is None:
                 timestamp_ns = fallback_timestamp_ns
