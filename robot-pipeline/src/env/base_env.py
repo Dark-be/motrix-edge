@@ -53,6 +53,7 @@ from collections import OrderedDict, deque
 
 import numpy as np
 from collector import get_collector
+from streams import MultiStreamRecorder
 from utils.data_handler import debug_print
 
 
@@ -73,7 +74,7 @@ class BaseEnv:
     # 此后微小位移照常记录，下一轮 episode 重新武装。阈值按现场主臂手感调（rad / 归一化）。
     HEAD_SKIP_DEFAULTS = {"enabled": True, "joint_eps": 0.05, "gripper_eps": 0.05}
 
-    def __init__(self, robot, capture_config: dict | None = None):
+    def __init__(self, robot, capture_config: dict | None = None, recording_config: dict | None = None):
         self.robot = robot
         self._running = False
         self._control_thread: threading.Thread | None = None
@@ -97,9 +98,6 @@ class BaseEnv:
         self._motion_snapshot = None
         self.commands: queue.Queue = queue.Queue()  # 运动指令（控制线程消费，≤1/HZ 生效）
         self.capture_commands: queue.Queue = queue.Queue()  # 采集指令（观测线程消费，≤1/OBS_HZ 生效）
-        # 控制线程按 STATE_HZ 采样状态；采集仍由观测线程统一写 MCAP，避免 writer 并发写入。
-        self._capture_state_queue: deque[dict] = deque(maxlen=20000)
-
         # 采集：capturing=True 时观测拍记录观测；False 时保存为一条 episode
         # collector 类型由 capture_config 里的 `type` 决定（当前支持 act_mcap，默认 mcap）
         # 帧头跳过（collector.skip_until_motion）：只在「遥操作录制」时武装，阈值按现场调
@@ -111,6 +109,10 @@ class BaseEnv:
         self.capturing = False
         self._collector = get_collector(
             capture_config or {"type": "act_mcap", "save_dir": "./data", "image_format": "jpeg"}
+        )
+        self._recorder = MultiStreamRecorder(
+            self._collector,
+            capacity=(recording_config or {}).get("queue_size", 512),
         )
         # 注入机器人身份：collector 写 JSON 元信息时附带 robot_name / robot_type
         set_robot_meta = getattr(self._collector, "set_robot_meta", None)
@@ -395,6 +397,7 @@ class BaseEnv:
             "meta": getattr(self._collector, "meta", {}) or {},
             "data_dir": str(self._collector.save_dir.resolve()),
             "head_skip": None if self._head_skip is None else {"skipped": self._head_skip["skipped"]},
+            "recording": self._recorder.status(),
         }
 
     def observe(self) -> dict:
@@ -447,6 +450,9 @@ class BaseEnv:
         if self._observe_thread is not None:
             self._observe_thread.join(timeout=6.0)
             self._observe_thread = None
+        if self._episode_open:
+            self._episode_open = False
+            self._recorder.finish()
         self.robot.disconnect()
 
     def _control_loop(self):
@@ -626,7 +632,7 @@ class BaseEnv:
                     self.capturing = False
                     self._cancel_capture()
                 elif cmd == "capture_sync":
-                    self._collector.set_meta(payload)
+                    self._recorder.set_meta(payload)
                 else:
                     debug_print(self.robot.name, f"unknown capture command '{cmd}' ignored", "WARNING")
             except Exception as exc:  # noqa: BLE001 单条命令失败不阻断其余
@@ -656,8 +662,8 @@ class BaseEnv:
                 "teleop": bool(self.robot.teleop_enabled),
                 "observation": self.robot.standard_observation(state),
             }
-            if self.capturing and self._head_skip is None:
-                self._capture_state_queue.append(self._motion_snapshot["observation"])
+            if self.capturing and self._head_skip is None and self._recorder.active:
+                self._recorder.publish_state(self._motion_snapshot["observation"])
 
     def step_observe(self):
         """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 契约观测 → 帧回调 → 采集落盘。
@@ -696,34 +702,23 @@ class BaseEnv:
           capture 开始那一拍未出现有效移动前**不记录、也不开 episode**（文件在首帧真正要记录时
           才创建），解锁后微小位移照常记录；整轮都没动 → 不产出文件（与「同拍 start/end」一致）。
         """
+        if self._episode_open and self._recorder.error is not None:
+            self.capturing = False
+            self._episode_open = False
+            self.last_error = f"recording failed: {self._recorder.error}"
+            self._recorder.finish()
+            return
         if self.capturing:
             if not self._head_skip_release():
                 self._head_skip["skipped"] += 1  # 仍在等主臂有效移动（闸门打开时 _head_skip 必存在）
                 return
             if not self._episode_open:
+                self._recorder.start()
                 self._episode_open = True
-                start = getattr(self._collector, "start", None)
-                if start is not None:
-                    start()
-            self._flush_capture_states()
-            collect_images = getattr(self._collector, "collect_images", None)
-            if collect_images is not None:
-                collect_images(self.standard_observation)
-            else:
-                self._collector.collect(self.standard_observation)
+            self._recorder.publish_image(self.standard_observation)
         elif self._episode_open:
-            self._flush_capture_states()
             self._episode_open = False
-            self._collector.finish()  # 写 footer + 同名 JSON 元信息（文件列表不经契约上报）
-
-    def _flush_capture_states(self) -> None:
-        """在观测线程中按源头时间顺序写出 100Hz 状态队列。"""
-        collect_state = getattr(self._collector, "collect_state", None)
-        if collect_state is None:
-            self._capture_state_queue.clear()
-            return
-        while self._capture_state_queue:
-            collect_state(self._capture_state_queue.popleft())
+            self._recorder.finish()
 
     def _arm_head_skip(self) -> None:
         """``capture_start``：遥操作录制时武装「帧头跳过」（否则不启用，按原行为直接记录）。
@@ -731,7 +726,6 @@ class BaseEnv:
         基准 = **本拍的主臂读数**（``teleop_master_sample()``，与下发 target 同源）；主臂此刻
         读不到（未开启遥操作 / 主臂还没读到）→ 不武装：宁可按原行为记录，也不静默丢帧。
         """
-        self._capture_state_queue.clear()
         self._head_skip = None
         if not self._head_skip_cfg.get("enabled", True):
             return
@@ -795,9 +789,8 @@ class BaseEnv:
 
     def _cancel_capture(self) -> None:
         """丢弃当前 episode（观测线程内调用，保持 collector 单写者）。"""
-        self._capture_state_queue.clear()
         self._head_skip = None
         if not self._episode_open:
             return
         self._episode_open = False
-        self._collector.cancel()
+        self._recorder.cancel()

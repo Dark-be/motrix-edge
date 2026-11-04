@@ -158,6 +158,7 @@ class CaptureStatus:
     running: bool = False  # 进程当前是否正在采集（episode 开→关）
     meta: dict = field(default_factory=dict)  # 采集元信息全集（capture sync 同步；含 operator / task_name 等键）
     data_dir: str | None = None  # 数据目录（进程自维护；edge 只读）
+    recording: dict = field(default_factory=dict)  # writer phase / accepted / dropped / error / last summary
 
 
 def image_names_of(keys) -> list[str]:

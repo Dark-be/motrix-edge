@@ -497,6 +497,7 @@ class HttpShmAdapter(RobotAdapter):
             running=bool(body.get(FIELD_RUNNING, False)),
             meta=dict(body.get(FIELD_META, {}) or {}),
             data_dir=body.get(FIELD_DATA_DIR),
+            recording=dict(body.get("recording", {}) or {}),
         )
 
     def sync_capture_meta(self, meta: dict) -> None:

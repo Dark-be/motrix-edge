@@ -178,6 +178,7 @@ def test_health_and_capture_status():
                 "running": True,
                 "meta": {"operator": "Yu", "task_name": "put bowls", "description": "demo"},
                 "data_dir": "/data/task",
+                "recording": {"phase": "recording", "dropped": {"image": 2}},
             },
         }
     )
@@ -193,6 +194,7 @@ def test_health_and_capture_status():
     assert capture.running is True
     assert capture.meta == {"operator": "Yu", "task_name": "put bowls", "description": "demo"}
     assert capture.data_dir == "/data/task"
+    assert capture.recording == {"phase": "recording", "dropped": {"image": 2}}
 
 
 def test_observe_returns_none_until_first_frame(monkeypatch):
