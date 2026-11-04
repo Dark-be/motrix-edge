@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from config import load_config
 
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "src" / "config"
 _CONFIG_FILES = sorted(_CONFIG_DIR.glob("*.yml"))
@@ -36,20 +37,41 @@ _DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml", "
 _TCP_ARMS = {
     "test_robot.yml": ("left", "right"),
     "dual_piper.yml": ("left", "right"),
+    "dual_piper_multirate.yml": ("left", "right"),
     "dual_alicia_piper.yml": ("left", "right"),
     "single_piper.yml": ("right",),
 }
 # 出厂**开启** robot.tcp 的机型 → 公共偏移（米，法兰系；法兰 +z = 工具伸出方向）。
 # dual piper 的末端实装长度固定，故默认开启；其余机型没有确定的装配长度 → 不带该段。
-_TCP_SHIPPED_ON = {name: (0.0, 0.0, 0.12) for name in ("dual_piper.yml", "dual_alicia_piper.yml", "single_piper.yml")}
+_TCP_SHIPPED_ON = {
+    name: (0.0, 0.0, 0.12)
+    for name in ("dual_piper.yml", "dual_piper_multirate.yml", "dual_alicia_piper.yml", "single_piper.yml")
+}
 
 
 def _load(name: str) -> dict:
+    return load_config(name)
+
+
+def _raw(name: str) -> dict:
     return yaml.safe_load((_CONFIG_DIR / name).read_text())
 
 
 def test_config_dir_is_populated():
     assert sorted(p.name for p in _CONFIG_FILES), f"未找到 robot-pipeline 机型配置：{_CONFIG_DIR}"
+
+
+def test_multirate_camera_profiles_are_inline_and_match_robot_cameras():
+    raw = _raw("dual_piper_multirate.yml")
+    assert raw["extends"] == "dual_piper.yml"
+    assert "camera_config" not in raw["streams"]
+
+    config = _load("dual_piper_multirate.yml")
+    profiles = config["streams"]["cameras"]["profiles"]
+    assert set(profiles) == set(config["robot"]["cameras"])
+    for profile in profiles.values():
+        assert all(isinstance(profile[key], int) and profile[key] > 0 for key in ("width", "height", "stream_fps"))
+        assert 0 < float(profile["read_hz"]) <= profile["stream_fps"]
 
 
 def test_single_piper_reuses_dual_piper_cross_port_keys():

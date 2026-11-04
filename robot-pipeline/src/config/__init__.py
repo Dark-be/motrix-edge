@@ -55,6 +55,7 @@ PROFILE_DIR_NAME = "robot"
 DEFAULT_CONFIG_FILES = (
     "test_robot.yml",
     "dual_piper.yml",
+    "dual_piper_multirate.yml",
     "dual_alicia_piper.yml",
     "single_piper.yml",
 )
@@ -242,15 +243,24 @@ def effective_config_path(name: str) -> Path:
     return resolve_config_file(_yml_name(name))
 
 
-def _base_config(name: str) -> dict:
-    """加载机型配置本体，不包含机器档案，也不写入文件。"""
+def _base_config(name: str, chain: tuple[str, ...] = ()) -> dict:
+    """加载机型配置及其父配置，不包含机器档案，也不写入文件。"""
     name = _yml_name(name)
+    if name in chain:
+        raise ValueError(f"配置继承循环: {' -> '.join((*chain, name))}")
     path = config_path(name)
-    if path.exists():
-        with path.open(encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    text = packaged_config_text(name)
-    return (yaml.safe_load(text) or {}) if text else {}
+    text = path.read_text(encoding="utf-8") if path.exists() else packaged_config_text(name)
+    if text is None:
+        raise FileNotFoundError(f"找不到配置 {name}: {path}，且没有包内示例")
+    config = yaml.safe_load(text) or {}
+    if not isinstance(config, dict):
+        raise ValueError(f"配置 {name} 必须是 YAML 映射")
+    parent = config.pop("extends", None)
+    if parent is None:
+        return config
+    if not isinstance(parent, str) or not parent or Path(parent).name != parent:
+        raise ValueError(f"配置 {name} 的 extends 必须是配置文件名")
+    return deep_merge(_base_config(parent, (*chain, name)), config)
 
 
 def load_config(name: str, machine: str | None = None) -> dict:
