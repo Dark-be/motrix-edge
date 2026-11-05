@@ -101,7 +101,7 @@ streams:
     startup_timeout_seconds: 20
     max_consecutive_timeouts: 5
     profiles:
-      cam_head: { width: 320, height: 240, stream_fps: 60, read_hz: 30 }
+      cam_head: { width: 640, height: 480, stream_fps: 60, read_hz: 30 }
       cam_left_wrist: { width: 640, height: 480, stream_fps: 60, read_hz: 30 }
       cam_right_wrist: { width: 640, height: 480, stream_fps: 60, read_hz: 30 }
 
