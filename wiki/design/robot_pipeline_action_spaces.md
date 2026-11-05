@@ -72,7 +72,7 @@ Edge 边界后，再组装成每臂 7 维 `observations/qpos`、`observations/qp
 -   `gripper_target`：最新请求的最终夹爪目标，长度 `gripper_dim()`。
 
 `command` 表示当前控制拍，`target` 表示最终目标；二者不使用 `action` 命名。控制拍对关节目标做
-`step_rad` 限速，对夹爪目标直接跟随，然后以两个显式参数交给 `_apply_commands()`。
+按 `max_joint_speed_rad_s / control_hz` 限速，对夹爪目标直接跟随，然后以两个显式参数交给 `_apply_commands()`。
 
 具体机型以声明驱动装配和数据展开：`ARM_NAMES` 定义唯一物理臂顺序，`ARM_CONTROLLERS` 将物理臂
 映射到执行控制器；带主手的遥操作机型另用 `MASTER_CONTROLLERS` 声明同一物理臂对应的输入控制器。

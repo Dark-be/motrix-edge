@@ -28,7 +28,7 @@ class Robot:
     name = "multirate-test"
     ADAPTER_TYPE = "test_robot"
     IMAGE_NAMES = ("head", "wrist")
-    step_rad = 0.1
+    max_joint_speed_rad_s = 2.0
     teleop_enabled = False
     last_error = None
     ready = False
@@ -41,6 +41,10 @@ class Robot:
         self.command_count = 0
         self.camera_count = {name: 0 for name in self.IMAGE_NAMES}
         self.disconnected = False
+        self.max_joint_step_rad = None
+
+    def configure_control_hz(self, control_hz):
+        self.max_joint_step_rad = self.max_joint_speed_rad_s / control_hz
 
     def state_layout(self):
         return {"state_space": "joint"}
@@ -165,8 +169,6 @@ def test_unified_env_records_independent_state_action_and_camera_streams(tmp_pat
             "control_hz": 80,
             "follower_state_hz": 60,
             "observation_hz": 20,
-            "reference_control_hz": 30,
-            "max_joint_speed_rad_s": 2.0,
             "recording": {"queue_size": 32},
             "cameras": {
                 "profiles": {
@@ -194,5 +196,5 @@ def test_unified_env_records_independent_state_action_and_camera_streams(tmp_pat
     assert summary["accepted"].get("state", 0) > 0, (summary, env.last_error, robot.state_count, robot.command_count)
     assert summary["accepted"]["action"] > 0
     assert summary["accepted"]["image:head"] > summary["accepted"]["image:wrist"] > 0
-    assert robot.step_rad == 2.0 / 80
+    assert robot.max_joint_step_rad == 2.0 / 80
     assert robot.disconnected

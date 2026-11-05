@@ -147,7 +147,9 @@ def test_deep_merge_recurses_maps_and_replaces_lists(config):
 def test_load_config_applies_machine_profile(config, ext_dir):
     """外部目录的同名机型 yml + ``robot/<machine>.yml`` 深合并：只覆盖写到的键。"""
     (ext_dir / "dual_piper.yml").write_text(
-        yaml.safe_dump({"robot": {"type": "dual_piper_robot", "ports": {"left": "can_left"}, "step_rad": 0.1}}),
+        yaml.safe_dump(
+            {"robot": {"type": "dual_piper_robot", "ports": {"left": "can_left"}, "max_joint_speed_rad_s": 2.0}}
+        ),
         encoding="utf-8",
     )
     (ext_dir / "robot").mkdir()
@@ -159,7 +161,7 @@ def test_load_config_applies_machine_profile(config, ext_dir):
     cfg = config.load_config("dual_piper.yml", "pc16")
 
     assert cfg["robot"]["ports"] == {"left": "m_left", "right": "m_right"}  # 覆盖
-    assert cfg["robot"]["step_rad"] == 0.1  # 机型默认保留
+    assert cfg["robot"]["max_joint_speed_rad_s"] == 2.0  # 机型默认保留
     assert config.list_machines() == ["pc16"]
 
 

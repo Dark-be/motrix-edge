@@ -149,7 +149,7 @@ class FakeAdapter(RobotAdapter):
         return frame
 
     def _track_target(self) -> None:
-        """限速跟踪：实测位姿每拍朝目标移一步（关节段 ``step_rad`` 的位姿等效）。"""
+        """限速跟踪：实测位姿每拍朝目标移一步（关节速度限幅的位姿等效）。"""
         current = np.asarray(self.pose, dtype=np.float64).reshape(-1).copy()
         target = np.asarray(self.pose_target, dtype=np.float64).reshape(-1)
         for index in range(len(self.ARM_NAMES)):

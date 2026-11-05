@@ -55,7 +55,6 @@ PROFILE_DIR_NAME = "robot"
 DEFAULT_CONFIG_FILES = (
     "test_robot.yml",
     "dual_piper.yml",
-    "dual_piper_multirate.yml",
     "dual_alicia_piper.yml",
     "single_piper.yml",
 )

@@ -112,12 +112,19 @@ class BaseRobot:
     TELEOP_FOLLOW_POSE = ACTION_SPACE_POSE
     TELEOP_FOLLOW_SPACES = (TELEOP_FOLLOW_JOINT, TELEOP_FOLLOW_POSE)
     TELEOP_POSE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
+    DEFAULT_CONTROL_HZ = 30.0
+    DEFAULT_MAX_JOINT_SPEED_RAD_S = 1.5  # 旧缺省 0.05 rad/拍 × 30 Hz
 
     def __init__(self, robot_config: dict | None = None):
         self._validate_dimensions()
         self.robot_config = dict(robot_config or {})
         self.name = str(self.robot_config.get("name", self.NAME))
-        self.step_rad = float(self.robot_config.get("step_rad", 0.05))  # 每拍最大关节增量（rad）
+        self.max_joint_speed_rad_s = float(
+            self.robot_config.get("max_joint_speed_rad_s", self.DEFAULT_MAX_JOINT_SPEED_RAD_S)
+        )
+        if not np.isfinite(self.max_joint_speed_rad_s) or self.max_joint_speed_rad_s <= 0:
+            raise ValueError("robot.max_joint_speed_rad_s must be finite and positive")
+        self._max_joint_step_rad = self.max_joint_speed_rad_s / self.DEFAULT_CONTROL_HZ
         self.ready = False
         self.last_error = None
 
@@ -1201,6 +1208,13 @@ class BaseRobot:
         return None
 
     # ---- 每帧推进 --------------------------------------------------------------------
+    def configure_control_hz(self, control_hz: float) -> None:
+        """按实际控制频率换算内部每拍关节增量；配置只暴露频率无关的 rad/s 限速。"""
+        control_hz = float(control_hz)
+        if not np.isfinite(control_hz) or control_hz <= 0:
+            raise ValueError("control_hz must be finite and positive")
+        self._max_joint_step_rad = self.max_joint_speed_rad_s / control_hz
+
     def step(self):
         """刷新目标，关节限速前进，夹爪直接跟随，再下发本拍指令。"""
         self._refresh_teleop_targets()
@@ -1211,7 +1225,7 @@ class BaseRobot:
         if self.gripper_command is None:
             self.gripper_command = self.get_observation_gripper()
         if self.joint_target is not None:
-            self.joint_command = self._step_toward(self.joint_command, self.joint_target, self.step_rad)
+            self.joint_command = self._step_toward(self.joint_command, self.joint_target, self._max_joint_step_rad)
         if self.gripper_target is not None:
             self.gripper_command = self.gripper_target.copy()
         command_started_ns = time.time_ns()

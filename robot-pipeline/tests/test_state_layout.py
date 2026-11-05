@@ -777,7 +777,7 @@ def test_single_piper_connects_only_surviving_hardware(monkeypatch):
 
 def test_single_piper_teleop_capture_and_deadzone():
     single = _load("robot.single_piper_robot")
-    robot = single.SinglePiperRobot({**_DEVICES, "step_rad": 1.0})
+    robot = single.SinglePiperRobot({**_DEVICES, "max_joint_speed_rad_s": 30.0})
     robot.controllers = {"left_master": _FakeArm([0.1] * 6, 0.1), "right_arm": _FakeArm([0.0] * 6, 1.0)}
     robot.enable_teleop()
     robot.step()

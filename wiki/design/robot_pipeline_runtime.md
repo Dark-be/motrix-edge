@@ -9,7 +9,8 @@ robot-pipeline（仓库根 `robot-pipeline/`，独立 uv 子项目）在 robot s
 
 ## 目标与约束
 
--   **控制节拍必须稳定**：`step_rad` 限速步进按固定频率下发，掉拍会让机械臂运动不连续。
+-   **控制节拍必须稳定**：机型只配置 `robot.max_joint_speed_rad_s`；运行时按实际 `control_hz`
+    换算内部每拍最大增量。掉拍会让机械臂运动不连续。
     相机取帧（RealSense `wait_for_frames` 最长 5s、V4L2 `select` 0.2s）与 MCAP 落盘都可能阻塞。
 -   **观测 = 最近一拍机械臂状态 + 本拍相机帧**：采集 / 推理需要「下发命令时的 qpos + action +
     画面」，而两部分分处两线程（见「观测组装」），时刻最多差一个控制周期（`1/HZ` ≈ 33ms）。
@@ -32,8 +33,9 @@ footer 与 JSON。capture cancel 关闭准入、丢弃排队事件并删除本�
 dropped 与 writer 错误；HTTP capture 契约不变。
 
 运行时只有 `BaseEnv` 一套实现。未配置 `streams.enabled` 时仍使用同一 recorder 和 action 语义，只是
-沿用控制线程内状态采样与观测线程统一取相机；启用后控制、状态、逐相机和观测各自按配置调度。独立
-状态线程与控制器 SDK 并发访问必须经真机验证，故多频机型在验证完成前保持显式配置而非所有机型默认。
+沿用控制线程内状态采样与观测线程统一取相机；启用后控制、状态、逐相机和观测各自按配置调度。双臂
+Piper 的唯一机型配置 `dual_piper.yml` 与 `dual_alicia_piper.yml` 默认启用多频调度；深度能力保留但
+默认关闭，现场需要时只需将 `robot.depth.enabled` 改为 `true`。其它机型仍按各自配置决定是否启用。
 
 ## 拓扑
 
