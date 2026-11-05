@@ -63,6 +63,7 @@ class DualPiperAdapter(HttpShmAdapter):
     ROBOT_MODEL_VERSION = "0.0.0"
     # 各动作空间的每臂 / 全臂维度（运动段每臂 6、夹爪段每臂 1）
     ACTION_DIM_PER_ARM = DUAL_ARM_ACTION_DIM_PER_ARM
+    TORQUE_DIM_PER_ARM = 6
     # 支持的动作空间：关节 + 末端位姿（绝对 / 增量）+ 夹爪（每个空间只表达一件事）。
     # ``pose`` / ``pose_delta`` 的每臂 6 维 = xyz + rpy，由**机器人侧**用与位姿观测同一套运动学
     # 解算成关节目标（IK，失败回 422 且不改目标），再走 MIT 关节通路——**不经 move_p**，不引入

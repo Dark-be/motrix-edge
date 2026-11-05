@@ -53,6 +53,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE_ACTION,
     KEY_QPOS,
     KEY_QPOS_ERR,
+    KEY_TORQUE,
     Action,
     ActionSpace,
     CaptureStatus,
@@ -221,6 +222,8 @@ class HttpShmAdapter(RobotAdapter):
     def capabilities(self) -> RobotCapabilities:
         # 状态键在前（qpos → qpos_err → action → 位姿），相机键在后
         obs_keys = [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION]
+        if int(getattr(self, "TORQUE_DIM_PER_ARM", 0)) > 0:
+            obs_keys.append(KEY_TORQUE)
         if self.effective_pose_dim_per_arm() > 0:
             # 机器人提供位姿才声明（否则观测里确实没有这两个键）
             obs_keys.append(KEY_POSE)
@@ -654,6 +657,10 @@ class HttpShmAdapter(RobotAdapter):
             # SHM 布局单独带 action 区（见 shm_contract），preview 显示的是真指令
             KEY_ACTION: np.asarray(self._select_arm_segments(frame["action"], per_arm), dtype=np.float32),
         }
+        torque = frame.get("torque")
+        torque_per_arm = int(getattr(self, "TORQUE_DIM_PER_ARM", 0))
+        if torque is not None and torque_per_arm > 0:
+            obs[KEY_TORQUE] = np.asarray(self._select_arm_segments(torque, torque_per_arm), dtype=np.float32)
         # 末端位姿（机器人提供时）：按启用臂挑选，与 qpos 同一裁剪口径
         per_arm = self.effective_pose_dim_per_arm()
         pose = frame.get("pose")

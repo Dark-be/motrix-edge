@@ -80,6 +80,24 @@ robot:
     pose_offset:
       right: [0, 0, 0, 0, 0, 0]
 
+# 多频运行时：右从臂状态 / 力矩 100Hz，两路相机 30Hz。
+streams:
+  enabled: true
+  control_hz: 100
+  follower_state_hz: 100
+  torque:
+    enabled: true # 右从臂逐关节电机力矩（N·m），与 qpos 同状态拍录制；false = 不读取 / 不发布
+  recording:
+    queue_size: 512
+    jpeg_quality: 90
+  cameras:
+    warmup_seconds: 3
+    startup_timeout_seconds: 20
+    max_consecutive_timeouts: 5
+    profiles:
+      cam_head: { width: 640, height: 480, stream_fps: 60, read_hz: 30 }
+      cam_right_wrist: { width: 640, height: 480, stream_fps: 60, read_hz: 30 }
+
 # 采集配置（env 在 capture start/end 之间把观测写成一条 episode）
 collector:
   type: act_mcap # 采集器类型：act_mcap（act_hdf5 暂不可用）

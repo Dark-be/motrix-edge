@@ -19,11 +19,12 @@
 [`http_contract`](./http_contract.py)（``robot-pipeline`` 契约服务为服务器 /
 ``test_adapter`` 客户端），不经过共享内存。
 
-布局（版本 **8**）：``header | qpos | qpos_err | action | pose | pose_target | images | depths``
+布局（版本 **9**）：``header | qpos | qpos_err | torque | action | pose | pose_target | images | depths``
 
 - ``header``：固定 numpy dtype（magic / 几何 / 动态状态），记录各数据区偏移。
 - ``qpos`` / ``action``：每臂 ``[joint..., gripper]`` 交错的实测 / 目标向量。
 - ``qpos_err``：与 ``qpos`` 同布局的目标误差，由机器人按 ``action - qpos`` 同帧计算。
+- ``torque``：可选执行臂逐关节电机力矩（N·m，不含夹爪）；``torque_dim = 0`` 时不占区。
 - ``pose``：``float64[pose_dim]`` **实测末端位姿**（每臂 ``xyz + rpy``，单位米 / 弧度）——由机器人
   用与位姿目标同一套运动学正解得出（``pose_dim = 0`` = 本机不提供位姿，不占位姿区）。
 - ``pose_target``：``float64[pose_target_dim]`` **目标位姿** = ``FK(关节段目标)``——底层位姿目标，
@@ -66,6 +67,8 @@ OBS_SHM_HEADER = np.dtype(
         ("qpos_offset", "<i8"),
         ("qpos_err_dim", "<i8"),
         ("qpos_err_offset", "<i8"),
+        ("torque_dim", "<i8"),
+        ("torque_offset", "<i8"),
         ("action_dim", "<i8"),
         ("action_offset", "<i8"),
         ("pose_dim", "<i8"),
@@ -85,8 +88,8 @@ OBS_SHM_HEADER = np.dtype(
 )
 
 _OBS_SHM_MAGIC = 0x4D4F544F4E474F  # "MOTONGO"
-# v8：新增机器人侧同帧计算的 qpos_err 区。
-_OBS_SHM_VERSION = 8
+# v9：新增可选执行臂电机力矩区。
+_OBS_SHM_VERSION = 9
 
 
 def _layout(
@@ -94,6 +97,7 @@ def _layout(
     image_size: tuple[int, int],
     qpos_dim: int,
     qpos_err_dim: int,
+    torque_dim: int,
     action_dim: int,
     pose_dim: int = 0,
     pose_target_dim: int = 0,
@@ -102,7 +106,7 @@ def _layout(
 ) -> dict:
     """计算共享内存块布局（各数据区偏移 / 大小 / 总大小）；维数 / 路数为 0 时不占对应区。
 
-    区域顺序固定：``qpos | qpos_err | action | pose | pose_target | images | depths``。
+    区域顺序固定：``qpos | qpos_err | torque | action | pose | pose_target | images | depths``。
     深度图尺寸缺省跟随 ``image_size``（对齐到彩色图后同尺寸）。
     """
     w, h = image_size
@@ -114,7 +118,9 @@ def _layout(
     qpos_bytes = qpos_dim * np.dtype("<f8").itemsize
     qpos_err_offset = qpos_offset + qpos_bytes
     qpos_err_bytes = qpos_err_dim * np.dtype("<f8").itemsize
-    action_offset = qpos_err_offset + qpos_err_bytes
+    torque_offset = qpos_err_offset + qpos_err_bytes
+    torque_bytes = torque_dim * np.dtype("<f8").itemsize
+    action_offset = torque_offset + torque_bytes
     action_bytes = action_dim * np.dtype("<f8").itemsize
     pose_offset = action_offset + action_bytes
     pose_bytes = pose_dim * np.dtype("<f8").itemsize
@@ -128,6 +134,7 @@ def _layout(
         "header_size": header_size,
         "qpos_offset": qpos_offset,
         "qpos_err_offset": qpos_err_offset,
+        "torque_offset": torque_offset,
         "action_offset": action_offset,
         "pose_offset": pose_offset,
         "pose_target_offset": pose_target_offset,
@@ -154,6 +161,7 @@ class ObsShmWriter:
         qpos_dim: int,
         qpos_err_dim: int,
         action_dim: int,
+        torque_dim: int = 0,
         pose_dim: int = 0,
         pose_target_dim: int = 0,
         depth_count: int = 0,
@@ -168,6 +176,7 @@ class ObsShmWriter:
         self.image_size = tuple(image_size)  # (width, height)
         self.qpos_dim = qpos_dim
         self.qpos_err_dim = qpos_err_dim
+        self.torque_dim = int(torque_dim)
         self.action_dim = action_dim
         self.pose_dim = int(pose_dim)
         self.pose_target_dim = int(pose_target_dim)
@@ -178,6 +187,7 @@ class ObsShmWriter:
             self.image_size,
             qpos_dim,
             qpos_err_dim,
+            self.torque_dim,
             action_dim,
             pose_dim=self.pose_dim,
             pose_target_dim=self.pose_target_dim,
@@ -198,6 +208,8 @@ class ObsShmWriter:
         h["qpos_offset"] = self._layout["qpos_offset"]
         h["qpos_err_dim"] = qpos_err_dim
         h["qpos_err_offset"] = self._layout["qpos_err_offset"]
+        h["torque_dim"] = self.torque_dim
+        h["torque_offset"] = self._layout["torque_offset"]
         h["action_dim"] = action_dim
         h["action_offset"] = self._layout["action_offset"]
         h["pose_dim"] = self.pose_dim
@@ -216,6 +228,11 @@ class ObsShmWriter:
         self._qpos = np.ndarray((qpos_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["qpos_offset"])
         self._qpos_err = np.ndarray(
             (qpos_err_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["qpos_err_offset"]
+        )
+        self._torque = (
+            np.ndarray((self.torque_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["torque_offset"])
+            if self.torque_dim > 0
+            else None
         )
         self._action = np.ndarray(
             (action_dim,), dtype="<f8", buffer=self._shm.buf, offset=self._layout["action_offset"]
@@ -255,6 +272,7 @@ class ObsShmWriter:
         qpos_err: np.ndarray,
         action: np.ndarray,
         images: list[np.ndarray],
+        torque: np.ndarray | None = None,
         pose: np.ndarray | None = None,
         pose_target: np.ndarray | None = None,
         depths: list[np.ndarray] | None = None,
@@ -268,6 +286,11 @@ class ObsShmWriter:
         """
         self._qpos[:] = np.asarray(qpos, dtype="<f8")
         self._qpos_err[:] = np.asarray(qpos_err, dtype="<f8")
+        if self._torque is not None and torque is not None:
+            values = np.asarray(torque, dtype="<f8").reshape(-1)
+            if values.shape[0] != self.torque_dim:
+                raise ValueError(f"torque dim {values.shape[0]} != torque_dim {self.torque_dim}")
+            self._torque[:] = values
         self._action[:] = np.asarray(action, dtype="<f8")
         if self._pose is not None and pose is not None:
             values = np.asarray(pose, dtype="<f8")
@@ -364,12 +387,18 @@ class ObsShmReader:
         self.image_size = (int(header["image_width"]), int(header["image_height"]))  # (width, height)
         self.qpos_dim = int(header["qpos_dim"])
         self.qpos_err_dim = int(header["qpos_err_dim"])
+        self.torque_dim = int(header["torque_dim"])
         self.action_dim = int(header["action_dim"])
         self.pose_dim = int(header["pose_dim"])
         self.pose_target_dim = int(header["pose_target_dim"])
         self._qpos = np.ndarray((self.qpos_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["qpos_offset"]))
         self._qpos_err = np.ndarray(
             (self.qpos_err_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["qpos_err_offset"])
+        )
+        self._torque = (
+            np.ndarray((self.torque_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["torque_offset"]))
+            if self.torque_dim > 0
+            else None
         )
         self._action = np.ndarray((self.action_dim,), dtype="<f8", buffer=shm.buf, offset=int(header["action_offset"]))
         self._pose = (
@@ -459,6 +488,7 @@ class ObsShmReader:
             return None
         qpos = self._qpos.copy()
         qpos_err = self._qpos_err.copy()
+        torque = self._torque.copy() if self._torque is not None else None
         action = self._action.copy()
         pose = self._pose.copy() if self._pose is not None else None
         pose_target = self._pose_target.copy() if self._pose_target is not None else None
@@ -467,6 +497,8 @@ class ObsShmReader:
         if int(self._header["frame_seq"]) != seq0:
             return None  # 撕裂帧（写入中途），丢弃
         frame = {"qpos": qpos, "qpos_err": qpos_err, "action": action, "images": images}
+        if torque is not None:
+            frame["torque"] = torque
         if pose is not None:
             frame["pose"] = pose
         if pose_target is not None:

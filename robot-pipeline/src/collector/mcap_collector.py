@@ -24,6 +24,7 @@
     topic                        schema                               内容
     ---------------------------  -----------------------------------  --------------------------
     observations/qpos            std_msgs/msg/Float64MultiArray       状态向量（每臂「值 + 夹爪」）
+    observations/torque          std_msgs/msg/Float64MultiArray       从臂关节力矩（每臂 6 维，N·m）
     action                       std_msgs/msg/Float64MultiArray       同维同布局的目标向量
     observations/images/<cam>    sensor_msgs/msg/CompressedImage      JPEG（format='jpeg'）
 
@@ -68,6 +69,7 @@ from utils.observation_time import KEY_TIMESTAMPS_NS
 
 # standard_obs keys（见 ``BaseRobot.standard_observation()``）
 KEY_QPOS = "observations/qpos"  # 每臂「关节 + 夹爪」交错
+KEY_TORQUE = "observations/torque"  # 执行臂逐关节力矩（N·m，不含夹爪）
 KEY_ACTION = "action"  # 同维同布局的目标向量
 CAMERA_PREFIX = "observations/images/"
 KEY_TIMESTAMP = "timestamp"  # obs 内观测拍时刻（秒，float；观测线程 build_observation() 打点）
@@ -107,6 +109,7 @@ TYPE_COMPRESSED_IMAGE = "sensor_msgs/msg/CompressedImage"
 
 # topic 名（每信号一个）
 TOPIC_QPOS = "observations/qpos"
+TOPIC_TORQUE = "observations/torque"
 TOPIC_ACTION = "action"
 TOPIC_IMAGE_PREFIX = "observations/images/"
 
@@ -246,7 +249,10 @@ class ActMcapCollector:
         if not isinstance(timestamps, Mapping):
             raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
         # 兼容入口保持原子校验：任一显式时间非法时，一条消息都不能先写出去。
-        self._resolve_times(standard_obs, (TOPIC_QPOS, TOPIC_ACTION), timestamps)
+        topics = [TOPIC_QPOS, TOPIC_ACTION]
+        if KEY_TORQUE in standard_obs:
+            topics.append(TOPIC_TORQUE)
+        self._resolve_times(standard_obs, topics, timestamps)
         self.collect_qpos(standard_obs)
         self.collect_action(standard_obs)
 
@@ -272,6 +278,32 @@ class ActMcapCollector:
             sequence=seq,
         )
         self._step_count += 1
+        if KEY_TORQUE in standard_obs:
+            self.collect_torque(standard_obs)
+
+    def collect_torque(self, standard_obs: dict):
+        """写入一条与 qpos 同状态拍的执行臂关节力矩采样。"""
+        if self._writer is None:
+            raise RuntimeError("ActMcapCollector not started; call start() first")
+        timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
+        if not isinstance(timestamps, Mapping):
+            raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
+        ts_ns = self._resolve_times(standard_obs, (TOPIC_TORQUE,), timestamps)[TOPIC_TORQUE]
+        torque = np.asarray(standard_obs[KEY_TORQUE], dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(torque)):
+            raise ValueError("observations/torque contains non-finite values")
+        self._first_ts_ns = ts_ns if self._first_ts_ns is None else min(self._first_ts_ns, ts_ns)
+        self._last_ts_ns = ts_ns if self._last_ts_ns is None else max(self._last_ts_ns, ts_ns)
+        seq = self._message_seq
+        self._message_seq += 1
+        self._writer.write_message(
+            topic=TOPIC_TORQUE,
+            schema=self._schema_qpos,
+            message={"layout": {"dim": [], "data_offset": 0}, "data": torque.tolist()},
+            log_time=ts_ns,
+            publish_time=ts_ns,
+            sequence=seq,
+        )
 
     def collect_action(self, standard_obs: dict):
         """写入一条实际控制提交命令。"""

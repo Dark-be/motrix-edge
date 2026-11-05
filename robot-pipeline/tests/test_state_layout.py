@@ -34,11 +34,12 @@ import json
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_POSE_ACTION, KEY_QPOS, KEY_QPOS_ERR
+from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_POSE_ACTION, KEY_QPOS, KEY_QPOS_ERR, KEY_TORQUE
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
@@ -85,6 +86,9 @@ class _FakeArm:
 
     def get_gripper(self):
         return None if self.gripper is None else self.gripper
+
+    def get_motor_states(self):
+        return SimpleNamespace(tau=self.joint.copy()) if self.joint is not None else None
 
     def set_joint(self, joint, torque_ff=None):
         self.joint = np.asarray(joint, dtype=np.float64).copy()
@@ -213,6 +217,24 @@ def test_standard_observation_packs_fused_contract_vectors(dual_piper):
     assert obs[f"{robot.CAMERA_PREFIX}cam_head"].shape == (2, 2, 3)  # 本拍帧原样带走
     assert obs["timestamp"] == pytest.approx(12.5) and obs["seq"] == robot.seq
     assert robot.KEY_JOINT not in obs and robot.KEY_GRIPPER not in obs  # 原始键不外泄：消费方只认契约键
+
+
+def test_torque_stream_matches_arm_order_and_qpos_timestamp(dual_piper):
+    robot = _robot(dual_piper, left_joint=np.arange(6) + 1, right_joint=np.arange(6) + 11)
+    robot.configure_torque_stream(True)
+    obs = robot.standard_observation(robot.sample_state())
+
+    assert obs[KEY_TORQUE].tolist() == pytest.approx([1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16])
+    assert obs["timestamps_ns"][KEY_TORQUE] == obs["timestamps_ns"][KEY_QPOS]
+    assert [item["arm"] for item in robot.state_layout()["torque_dims"]] == ["left"] * 6 + ["right"] * 6
+
+
+def test_torque_stream_disabled_does_not_read_sdk(dual_piper):
+    robot = _robot(dual_piper)
+    for controller in (robot.controllers["left_arm"], robot.controllers["right_arm"]):
+        controller.get_motor_states = lambda: pytest.fail("disabled torque stream must not read SDK")
+
+    assert KEY_TORQUE not in robot.standard_observation(robot.sample_state())
 
 
 def test_standard_observation_without_first_sample(dual_piper):

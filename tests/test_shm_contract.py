@@ -34,7 +34,7 @@ _QPOS_DIM = 2
 _ACTION_DIM = 2
 _POSE_DIM = 6  # 位姿区（双臂量级）；0 = 本机不提供位姿
 _DEPTH_COUNT = 2  # 深度区（两路深度相机）；0 = 本机无深度
-_EXPECTED_VERSION = 8
+_EXPECTED_VERSION = 9
 _STALE = 0.05  # 测试用陈旧阈值（秒）
 
 
@@ -53,7 +53,7 @@ def _write(writer: ObsShmWriter, value: int, action: int | None = None) -> None:
     )
 
 
-def _make_writer(name: str, pose_dim: int = 0, depth_count: int = 0) -> ObsShmWriter:
+def _make_writer(name: str, pose_dim: int = 0, depth_count: int = 0, torque_dim: int = 0) -> ObsShmWriter:
     return ObsShmWriter(
         name=name,
         image_count=_IMAGE_COUNT,
@@ -61,10 +61,31 @@ def _make_writer(name: str, pose_dim: int = 0, depth_count: int = 0) -> ObsShmWr
         qpos_dim=_QPOS_DIM,
         qpos_err_dim=_QPOS_DIM,
         action_dim=_ACTION_DIM,
+        torque_dim=torque_dim,
         pose_dim=pose_dim,
         pose_target_dim=pose_dim,  # 目标位姿随实测位姿同生共死（机器人侧契约）
         depth_count=depth_count,  # 深度图尺寸缺省跟随 image_size（已对齐到彩色图）
     )
+
+
+def test_optional_torque_region_roundtrip():
+    name = _new_name()
+    writer = _make_writer(name, torque_dim=2)
+    reader = ObsShmReader(name)
+    try:
+        writer.write(
+            qpos=np.zeros(_QPOS_DIM),
+            qpos_err=np.zeros(_QPOS_DIM),
+            action=np.zeros(_ACTION_DIM),
+            torque=np.array([1.25, -2.5]),
+            images=[np.zeros((_IMAGE_SIZE[1], _IMAGE_SIZE[0], 3), dtype="<u1")],
+        )
+        frame = reader.read()
+        assert frame is not None and frame["torque"].tolist() == pytest.approx([1.25, -2.5])
+    finally:
+        reader.close()
+        writer.close()
+        writer.unlink()
 
 
 def test_pose_region_roundtrip():

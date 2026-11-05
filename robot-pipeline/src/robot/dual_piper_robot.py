@@ -88,6 +88,7 @@ class DualPiperRobot(BaseRobot):
         self.controllers.update({name: PiperController(name) for name in self.MASTER_CONTROLLERS.values()})
         self.sensors: dict = {name: RealsenseSensor(name) for name in self.IMAGE_NAMES}
         self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条）
+        self._torque_read_error: str | None = None
 
     # ---- 取数：关节 / 末端位姿（同一拍关节角正解）----
     def get_observation_joint(self) -> np.ndarray:
@@ -96,6 +97,31 @@ class DualPiperRobot(BaseRobot):
         发布为 robot 原始键 ``joint``；夹爪由 ``gripper`` 发布。任一臂读不到时抛 ``RuntimeError``。
         """
         return self._read_joints()
+
+    def supports_torque_stream(self) -> bool:
+        return True
+
+    def get_observation_torque(self) -> np.ndarray | None:
+        """逐执行臂读取 6 维电机力矩缓存，按 ``ARM_NAMES`` 展开（N·m）。"""
+        parts: list[np.ndarray] = []
+        for arm in self.ARM_NAMES:
+            states = self._controller_for_arm(arm).get_motor_states()
+            if states is None:
+                reason = f"arm {arm!r} motor state unavailable"
+                if reason != self._torque_read_error:
+                    self._torque_read_error = reason
+                    debug_print(self.name, f"torque unavailable ({reason}); dropping this sample", "WARNING")
+                return None
+            values = np.asarray(states.tau, dtype=np.float64).reshape(-1)
+            if values.shape[0] != self.JOINT_DIM_PER_ARM or not np.all(np.isfinite(values)):
+                reason = f"arm {arm!r} torque invalid (dim={values.shape[0]})"
+                if reason != self._torque_read_error:
+                    self._torque_read_error = reason
+                    debug_print(self.name, f"torque unavailable ({reason}); dropping this sample", "WARNING")
+                return None
+            parts.append(values)
+        self._torque_read_error = None
+        return np.concatenate(parts)
 
     def get_observation_pose(self, joint: np.ndarray | None = None) -> np.ndarray | None:
         """末端位姿（扁平 ``pose_dim()`` 维：各臂 ``xyz + rpy``）——由同一拍关节角正解。

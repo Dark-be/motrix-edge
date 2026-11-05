@@ -55,6 +55,7 @@ from motrix_edge.adapter.http_contract import FIELD_DEPTH  # 相机元数据的�
 # 每臂 ``[joint..., gripper]`` 交错；action 与其同维同布局。
 KEY_QPOS = "observations/qpos"
 KEY_QPOS_ERR = "observations/qpos_err"
+KEY_TORQUE = "observations/torque"
 KEY_ACTION = "action"
 # 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ``ARM_NAMES``；单位米 / 弧度）——位姿原语的输入；
 # 机器人不提供位姿时该键不出现（``POSE_DIM_PER_ARM = 0``）。
