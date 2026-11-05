@@ -261,6 +261,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 | 键                         | 使用者               | 作用                                                                                        |
 | -------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
 | `host` / `port`            | 客户端传输层         | 推理节点端点（连接目标）；进入会话时固化（改需退出重进）                                    |
+| `endpoint`                 | LerobotRemoteClient  | zenoh 端点；仅 lerobot-remote 展示，填写后优先于 host / port                                |
 | `warmup_required`          | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
 | `action_layout`            | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                       |
 | `observation_layout`       | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                           |
