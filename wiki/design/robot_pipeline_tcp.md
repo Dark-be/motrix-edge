@@ -87,7 +87,7 @@ robot:
 -   **`pose_delta` 语义不变**：仍是**基座系**的 `[Δxyz, wrap(Δrpy)]` chart 相加（不是 TCP 系相加），
     只是基准量从法兰位姿换成 TCP 位姿。上位按工具系给增量时的换算链（见 RPent 对接契约「增量」一节）
     不变——纯平移下工具轴与法兰轴同向，只有原点变了。
--   **完全不受影响**：限位裁切 / IK / `step_rad` 限速 / 动作空间枚举与维度 / 共享内存布局 /
+-   **完全不受影响**：限位裁切 / IK / `max_joint_speed_rad_s` 限速 / 动作空间枚举与维度 / 共享内存布局 /
     `settle` 判到位 / 采集 JSON 的 `state_dims` 维度。
 
 换算只用 `robot/kinematics/transforms.py` 已有的 `rpy_to_matrix` / `matrix_to_rpy` / `make_transform`

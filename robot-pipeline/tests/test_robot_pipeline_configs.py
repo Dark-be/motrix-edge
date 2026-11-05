@@ -37,16 +37,12 @@ _DEPTH_CONFIGS = ("test_robot.yml", "dual_piper.yml", "dual_alicia_piper.yml", "
 _TCP_ARMS = {
     "test_robot.yml": ("left", "right"),
     "dual_piper.yml": ("left", "right"),
-    "dual_piper_multirate.yml": ("left", "right"),
     "dual_alicia_piper.yml": ("left", "right"),
     "single_piper.yml": ("right",),
 }
 # 出厂**开启** robot.tcp 的机型 → 公共偏移（米，法兰系；法兰 +z = 工具伸出方向）。
 # dual piper 的末端实装长度固定，故默认开启；其余机型没有确定的装配长度 → 不带该段。
-_TCP_SHIPPED_ON = {
-    name: (0.0, 0.0, 0.12)
-    for name in ("dual_piper.yml", "dual_piper_multirate.yml", "dual_alicia_piper.yml", "single_piper.yml")
-}
+_TCP_SHIPPED_ON = {name: (0.0, 0.0, 0.12) for name in ("dual_piper.yml", "dual_alicia_piper.yml", "single_piper.yml")}
 
 
 def _load(name: str) -> dict:
@@ -61,12 +57,20 @@ def test_config_dir_is_populated():
     assert sorted(p.name for p in _CONFIG_FILES), f"未找到 robot-pipeline 机型配置：{_CONFIG_DIR}"
 
 
-def test_multirate_camera_profiles_are_inline_and_match_robot_cameras():
-    raw = _raw("dual_piper_multirate.yml")
-    assert raw["extends"] == "dual_piper.yml"
+@pytest.mark.parametrize("name", ("dual_piper.yml", "dual_alicia_piper.yml"))
+def test_multirate_camera_profiles_are_inline_and_match_robot_cameras(name):
+    raw = _raw(name)
+    assert "extends" not in raw
     assert "camera_config" not in raw["streams"]
 
-    config = _load("dual_piper_multirate.yml")
+    config = _load(name)
+    assert config["streams"]["enabled"] is True
+    assert config["robot"]["depth"]["enabled"] is False
+    assert "step_rad" not in config["robot"]
+    assert math.isclose(
+        config["robot"]["max_joint_speed_rad_s"] / config["streams"]["control_hz"],
+        2 * math.pi / 100,
+    )
     profiles = config["streams"]["cameras"]["profiles"]
     assert set(profiles) == set(config["robot"]["cameras"])
     for profile in profiles.values():
@@ -238,8 +242,9 @@ def test_robot_type_is_registered(name):
 def test_dual_piper_variants_share_execution_and_capture_defaults():
     piper = _load("dual_piper.yml")
     alicia = _load("dual_alicia_piper.yml")
-    for key in ("step_rad", "init_joint", "init_gripper", "gravity", "tcp", "teleop", "depth", "cameras"):
+    for key in ("init_joint", "init_gripper", "gravity", "tcp", "teleop", "depth", "cameras"):
         assert alicia["robot"][key] == piper["robot"][key], key
+    assert alicia["streams"] == piper["streams"]
     assert {k: v for k, v in alicia["collector"].items() if k != "save_dir"} == {
         k: v for k, v in piper["collector"].items() if k != "save_dir"
     }
@@ -250,8 +255,9 @@ def test_dual_piper_variants_share_execution_and_capture_defaults():
 def test_single_piper_matches_dual_operational_defaults():
     single = _load("single_piper.yml")
     dual = _load("dual_piper.yml")
-    for key in ("step_rad", "tcp", "depth"):
+    for key in ("tcp",):
         assert single["robot"][key] == dual["robot"][key]
+    assert single["robot"]["depth"]["enabled"] is True
     assert single["robot"]["init_joint"] == dual["robot"]["init_joint"][6:]
     assert single["robot"]["teleop"]["joint_offset"]["right"] == dual["robot"]["teleop"]["joint_offset"]["right"]
     assert {key: value for key, value in single["collector"].items() if key != "save_dir"} == {

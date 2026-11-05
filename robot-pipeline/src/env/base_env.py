@@ -94,13 +94,9 @@ class BaseEnv:
             self.OBS_HZ = self._positive_hz(
                 self.stream_config.get("observation_hz", max(camera_rates, default=self.OBS_HZ)), "observation_hz"
             )
-            reference_hz = self._positive_hz(
-                self.stream_config.get("reference_control_hz", 30.0), "reference_control_hz"
-            )
-            speed = float(self.stream_config.get("max_joint_speed_rad_s", self.robot.step_rad * reference_hz))
-            if not np.isfinite(speed) or speed <= 0:
-                raise ValueError("streams.max_joint_speed_rad_s must be finite and positive")
-            self.robot.step_rad = speed / self.HZ
+        configure_control_hz = getattr(self.robot, "configure_control_hz", None)
+        if callable(configure_control_hz):
+            configure_control_hz(self.HZ)
         self._running = False
         self._control_thread: threading.Thread | None = None
         self._observe_thread: threading.Thread | None = None

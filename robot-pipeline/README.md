@@ -108,12 +108,11 @@ collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 
 每个 robot server 一份配置（`src/config/*.yml`，作为 package data 随包提供），顶层键为
 `INFO_LEVEL`（日志级别 DEBUG / INFO / ERROR，robot server 启动时读）、`server`（监听
-host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `cameras`）、`collector`：
+host/port）、`robot`（name / type / max_joint_speed_rad_s / init_joint / `ports` / `cameras`）、`collector`：
 
 -   `test_robot.yml` —— `robot.type: test_robot`（默认，虚拟机器人无硬件）
--   `dual_piper.yml` —— `robot.type: dual_piper_robot`
--   `dual_piper_multirate.yml` —— 继承 `dual_piper.yml`，内联多频调度与逐相机采集 profile
--   `dual_alicia_piper.yml` —— `robot.type: dual_alicia_piper_robot`
+-   `dual_piper.yml` —— `robot.type: dual_piper_robot`，内联多频调度与逐相机采集 profile
+-   `dual_alicia_piper.yml` —— `robot.type: dual_alicia_piper_robot`，同样启用多频调度与逐相机 profile
 -   `single_piper.yml` —— `robot.type: single_piper_robot`
 
 机型配置可用顶层 `extends` 继承一个同目录配置；加载顺序为父机型 → 子机型 → 机器档案，字典递归
@@ -175,7 +174,9 @@ host/port）、`robot`（name / type / step_rad / init_joint / `ports` / `camera
 3.  在 `src/robot/__init__.py` 的 `ROBOT_REGISTRY` 中注册；在 `src/config/*.yml` 配置
     `robot.type` 即按此自动匹配。
 
-机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `step_rad` / `init_joint` / `cartesian` / `tcp`）。
+机器人控制配置见配置文件的 `robot` 段（`name` / `type` / `max_joint_speed_rad_s` / `init_joint` /
+`cartesian` / `tcp`）。关节限速只使用 `robot.max_joint_speed_rad_s`，运行时结合实际 `control_hz`
+换算内部每拍增量。
 **硬件接线参数**也在此段描述（现场接线不同时只改这里，无需改代码）：
 
 ```yaml
@@ -393,7 +394,7 @@ collector:
 episode JSON 的 `recording` 元信息。共享内存实时观测中的 `action` 仍表示目标；MCAP `action` 表示
 限速后实际尝试提交且 SDK 调用成功返回的 command，JSON 用 `action_semantics=submitted_command` 明示。
 
-`dual_piper_multirate.yml` 进一步把控制、状态和每台相机拆成独立调度：逐相机 worker 按各自
+`dual_piper.yml` 把控制、状态和每台相机拆成独立调度：逐相机 worker 按各自
 `read_hz` 取帧并写各自队列，观测线程只组合最新缓存，不重复访问 sensor。100Hz 等配置均为调度目标，
 不是设备实际更新频率保证；合入后仍需真机检查周期分位数、CAN 错误与录制丢弃。
 **帧头跳过（只对遥操作录制）**：`robot teach` / `robot takeover` 开着时，capture 开始后主臂相对
@@ -535,7 +536,7 @@ robot:
 -   `dual_alicia_piper`：仅主手换为 Alicia 串口示教臂，其余执行臂、三路 RealSense 与采集行为同 `dual_piper`。
 
 `POST /v1/teleop` `{"enabled": true}` 开启后，robot 的 `step()` 每帧从主臂读取目标并限速
-跟随（`robot.step_rad`）；遥操作默认关闭。HTTP 的 `mode` 仍只选择映射模式：
+跟随（`robot.max_joint_speed_rad_s`）；遥操作默认关闭。HTTP 的 `mode` 仍只选择映射模式：
 
 -   `absolute`（缺省）：主臂**绝对**位姿直连从臂 target——主从同构、位姿已对齐的示教采集；
 -   `delta`（**人工接管**）：`target = slave_ref + (master_now − master_ref)`——锚点在接管后
@@ -561,7 +562,7 @@ robot:
 ```
 
 `pose` 跟随每拍执行「主臂 FK → absolute/delta + 轴白名单 → IK」，得到的关节目标仍经
-`step_rad` 与 `set_joint()` 下发；关闭 teleop 后轴锁定立即失效。只有声明 `pose` 能力且实现同源
+`max_joint_speed_rad_s` 限速与 `set_joint()` 下发；关闭 teleop 后轴锁定立即失效。只有声明 `pose` 能力且实现同源
 FK / IK 的机器人能启用该配置，配置写错会在启动时失败。
 
 位置比例支持共享三元组或按臂对象，遗漏臂缺省单位比例；有限的零值、负值和大于 1 的值均允许。
