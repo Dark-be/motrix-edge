@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useEdge } from "../edge";
-import { missingCaptureMeta, REQUIRED_CAPTURE_META } from "../captureMeta";
+import { captureSyncMeta, missingCaptureMeta, REQUIRED_CAPTURE_META } from "../captureMeta";
 import { Button, Card, ErrorText } from "../components/ui";
 import { inputCls } from "../shell/controls";
 import { errMsg, type CaptureMetaResponse } from "../types";
@@ -123,11 +123,8 @@ export function MetaCard() {
     /** 提交选中的元信息到机器人进程（`capture sync`：只在采集会话内被接受）。 */
     const syncMeta = async () => {
         if (!api) return;
-        const meta: Record<string, string> = {};
-        for (const [key, value] of Object.entries(selection)) {
-            if (key === "operator") continue;
-            if (value.trim() !== "") meta[key] = value.trim();
-        }
+        // 请求也必须使用与必填校验相同的 effectiveSelection；服务端仍会用可信身份覆盖 operator。
+        const meta = captureSyncMeta(effectiveSelection);
         setBusy(true);
         setError(null);
         try {
