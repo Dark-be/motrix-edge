@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { useEdge } from "../edge";
+import { LOCAL_EDGE_URL } from "../edgeTargets";
 import { Button } from "../components/ui";
 import { Dropdown } from "./Dropdown";
 import { Chip, FormField, inputCls } from "./controls";
@@ -8,7 +9,7 @@ import { Chip, FormField, inputCls } from "./controls";
 /** 顶栏「连接」下拉：Edge 地址 + 连接 / 断开 + 节点身份与版本。 */
 export function ConnectionMenu() {
     const { baseUrl, connect, disconnect, connected, health, healthError, api } = useEdge();
-    const [draft, setDraft] = useState(baseUrl || `${window.location.origin}/api/edges/edge-local`);
+    const [draft, setDraft] = useState(baseUrl || LOCAL_EDGE_URL);
 
     const host = (() => {
         try {

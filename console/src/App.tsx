@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { EdgeApi } from "./api";
 import { EdgeProvider, useEdge } from "./edge";
+import { isLocalEdgeUrl, LOCAL_EDGE_URL } from "./edgeTargets";
 import { ThemeProvider } from "./theme";
 import { LogPanel } from "./components/LogPanel";
 import { Toasts } from "./components/Toasts";
@@ -61,7 +62,7 @@ function PageBody({ page }: { page: PageId }) {
 /** 未连接时的落地页：填 Edge 地址并连接（地址记在 localStorage，刷新自动重连）。 */
 function ConnectGate() {
     const { baseUrl, connect, healthError } = useEdge();
-    const [draft, setDraft] = useState(baseUrl || `${window.location.origin}/api/edges/edge-local`);
+    const [draft, setDraft] = useState(baseUrl || LOCAL_EDGE_URL);
     const [edges, setEdges] = useState<Array<{ id: string; label: string }>>([]);
     const [authenticated, setAuthenticated] = useState<boolean | null>(null);
     const [consoleError, setConsoleError] = useState<string | null>(null);
@@ -90,6 +91,8 @@ function ConnectGate() {
         return_to: window.location.pathname,
     })}`;
 
+    const canConnect = isLocalEdgeUrl(draft) || (authenticated === true && edges.length > 0);
+
     return (
         <div className="flex flex-1 items-start justify-center overflow-y-auto p-6">
             <Card title="连接 Edge" subtitle="Motrix Edge Console" className="w-full max-w-2xl">
@@ -102,45 +105,45 @@ function ConnectGate() {
                             </Button>
                         </div>
                     )}
-                    {authenticated && edges.length > 0 && (
+                    {(authenticated || isLocalEdgeUrl(draft)) && (
                         <label className="flex flex-col gap-1">
-                            <span className="text-[10px] uppercase tracking-wide text-faint">已注册 Edge</span>
+                            <span className="text-[10px] uppercase tracking-wide text-faint">Edge 目标</span>
                             <select
                                 className="rounded border border-line2 bg-panel2 px-2 py-1 text-[11px] text-ink"
                                 value={draft}
                                 onChange={(event) => setDraft(event.target.value)}
                             >
-                                {edges.map((edge) => {
-                                    const value = `${window.location.origin}/api/edges/${encodeURIComponent(edge.id)}`;
-                                    return (
-                                        <option key={edge.id} value={value}>
-                                            {edge.label} · {edge.id}
-                                        </option>
-                                    );
-                                })}
+                                <option value={LOCAL_EDGE_URL}>本机 Edge · localhost:8000（直连）</option>
+                                {authenticated &&
+                                    edges.map((edge) => {
+                                        const value = `${window.location.origin}/api/edges/${encodeURIComponent(
+                                            edge.id
+                                        )}`;
+                                        return (
+                                            <option key={edge.id} value={value}>
+                                                {edge.label} · {edge.id}
+                                            </option>
+                                        );
+                                    })}
                             </select>
                         </label>
                     )}
                     {authenticated && edges.length === 0 && (
                         <p className="rounded border border-line bg-panel2 p-2 text-amber-400">
-                            Console 尚未配置 Edge；请在 console.config.json 的 edges 段添加设备。
+                            Console 尚未配置远端 Edge；仍可直连本机 localhost:8000。
                         </p>
                     )}
                     <div className="flex flex-wrap items-center gap-2">
                         <input
                             className="min-w-0 flex-1 rounded border border-line2 bg-panel2 px-2 py-1 font-mono text-[11px] text-ink focus:border-accent focus:outline-none"
                             value={draft}
-                            placeholder={`${window.location.origin}/api/edges/<edge-id>`}
+                            placeholder={LOCAL_EDGE_URL}
                             onChange={(e) => setDraft(e.target.value)}
                             onKeyDown={(e) => {
                                 if (e.key === "Enter") connect(draft);
                             }}
                         />
-                        <Button
-                            variant="primary"
-                            disabled={authenticated !== true || edges.length === 0}
-                            onClick={() => connect(draft)}
-                        >
+                        <Button variant="primary" disabled={!canConnect} onClick={() => connect(draft)}>
                             连接
                         </Button>
                     </div>
