@@ -243,6 +243,18 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 
 ## 频率与诊断
 
+### 从臂电机力矩流
+
+Piper 执行臂可选发布 `observations/torque`：每臂 6 个关节力矩，单位 N·m，臂顺序与
+`observations/qpos` 一致但**不含夹爪**。开关位于 `streams.torque.enabled`，缺省为 `true`
+（不支持力矩的机型会忽略）；关闭时不调用 SDK、不进入标准观测、共享内存或 MCAP。力矩不单独设频率，始终跟随
+`follower_state_hz`，并与同拍 qpos 共用源时间戳和 `sample_seq`，避免动力学数据错拍。
+
+SDK 读取的是后台 CAN 读线程维护的电机状态缓存；任一执行臂当拍读取失败时只缺失该拍 torque，
+qpos/action 仍照常产出。采集器把力矩写为独立 ROS2 `Float64MultiArray` topic，不能混入 qpos，
+否则会破坏 qpos/action 同维契约。共享内存为该流保留独立可选区，维度为 0 表示开关关闭或机型
+不支持。
+
 -   **频率**：`HZ`（控制线程，默认 30Hz）与 `OBS_HZ`（观测线程，默认 10Hz）是 `BaseEnv` 类常量；
     `OBS_HZ` 是**真实取观测的频率**（取帧 + 发布 + 落盘），低一档是**有意**的——相机取帧 +
     MCAP 落盘成本远高于机械臂步进，观测 10Hz 足够，机械臂仍按 30Hz 稳定步进。`OBS_SLOW_FRAME_S`（0.5s）为观测慢帧告警阈值。

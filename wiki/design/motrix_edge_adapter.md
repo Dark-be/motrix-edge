@@ -101,6 +101,10 @@ gripper: 2}`、动作直发。单臂任务下策略用通用 `act`（按启用�
 由相机键推理（`image_names_of()` 单点）。robot 进程 discover / health 上报的 `observation_keys`
 同口径。
 
+Piper 真机另可提供 `observations/torque`：按物理臂顺序展开、每臂 6 维、单位 N·m，不含夹爪。
+它是 `streams.torque.enabled` 控制的可选状态流；开启时经共享内存随最新观测透传，关闭时键不存在。
+录制频率和时间戳跟随 qpos 状态拍，但保持独立键 / topic，不改变 qpos/action 的既有布局。
+
 **观测常驻、与动作空间无关**：`qpos` 是**状态向量**（每臂「值（当前 = 关节角）+ 夹爪」交错；逐维
 含义见采集 JSON 的 `state_space` / `state_dims`），`qpos_err` 是 Robot 同拍计算的
 `action - qpos`，`action` 是同维同布局的目标向量，

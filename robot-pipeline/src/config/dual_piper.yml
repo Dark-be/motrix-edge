@@ -93,6 +93,8 @@ streams:
   enabled: true
   control_hz: 100
   follower_state_hz: 100
+  torque:
+    enabled: true # 从臂逐关节电机力矩（N·m），与 qpos 同状态拍录制；false = 不读取 / 不发布
   recording:
     queue_size: 512
     jpeg_quality: 90

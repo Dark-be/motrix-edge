@@ -26,7 +26,7 @@ import numpy as np
 from utils.data_handler import debug_print
 from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
-from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
+from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR, KEY_TORQUE
 
 # 位姿键在 edge 观测契约里带 ``observations/`` 前缀（与 robot 原始的 ``pose`` / ``pose_action`` 不同名，
 # 故取别名避免与类属性同名）：``standard_observation()`` 的输出键就是这一套。
@@ -98,6 +98,7 @@ class BaseRobot:
     KEY_JOINT_ERROR = "joint_error"  # 关节跟踪误差 = 目标 - 实测
     KEY_GRIPPER_ERROR = "gripper_error"  # 夹爪跟踪误差 = 目标 - 实测
     KEY_POSE_ACTION = "pose_action"  # 关节目标的 FK 位姿（pose_dim() > 0）
+    KEY_TORQUE = "torque"  # 执行臂实测电机力矩（每臂 6 维，N·m；可选流）
     KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打点）
     CAMERA_PREFIX = "observations/images/"  # 彩色图像键前缀
     DEPTH_PREFIX = "observations/depth/"  # 深度图键前缀（uint16，已对齐同名彩色图；仅生效的深度相机）
@@ -134,6 +135,7 @@ class BaseRobot:
         self.gripper_command: np.ndarray | None = None
         self.gripper_target: np.ndarray | None = None
         self.on_command = None  # env 注入：成功提交后发布实际 command 事件
+        self.torque_stream_enabled = False
         self.init_joint = self._init_vector("init_joint", self.joint_dim(), required=True)
         self.init_gripper = self._init_vector("init_gripper", self.gripper_dim(), required=False, fill=1.0)
 
@@ -514,12 +516,37 @@ class BaseRobot:
             )
             dims.append({"index": base + per_arm, "arm": arm, "kind": "gripper", "name": "gripper"})
 
-        return {
+        layout = {
             "state_space": self.ACTION_SPACE_JOINT,
             "state_dims": dims,
             "action_space": self.ACTION_SPACE_JOINT,
             "action_dims": list(dims),
         }
+        if self.torque_stream_enabled:
+            layout.update(
+                {
+                    "torque_space": "joint_torque",
+                    "torque_unit": "N.m",
+                    "torque_dims": [
+                        {"index": arm_index * per_arm + offset, "arm": arm, "kind": "torque", "name": name}
+                        for arm_index, arm in enumerate(arms)
+                        for offset, name in enumerate(labels)
+                    ],
+                }
+            )
+        return layout
+
+    def configure_torque_stream(self, enabled: bool) -> None:
+        """启停可选电机力矩状态流；不支持的机型保持关闭。"""
+        self.torque_stream_enabled = bool(enabled and self.supports_torque_stream())
+
+    def supports_torque_stream(self) -> bool:
+        """本机是否实现执行臂电机力矩读取。"""
+        return False
+
+    def get_observation_torque(self) -> np.ndarray | None:
+        """返回逐执行臂关节力矩（N·m）；不支持或当拍不可用返回 ``None``。"""
+        return None
 
     def control_layout(self) -> dict:
         """各执行控制器的控制模式：``{"control_mode": <聚合>, "arms": {<控制器名>: {...}}}``。
@@ -1262,6 +1289,14 @@ class BaseRobot:
             self.KEY_JOINT_ERROR: joint_action - joint,
             self.KEY_GRIPPER_ERROR: gripper_action - gripper,
         }
+        if self.torque_stream_enabled:
+            torque = self.get_observation_torque()
+            if torque is not None:
+                values = np.asarray(torque, dtype=np.float64).reshape(-1)
+                if values.shape[0] != self.joint_dim():
+                    raise ValueError(f"{self.name}: torque dim {values.shape[0]} != joint_dim {self.joint_dim()}")
+                state[self.KEY_TORQUE] = values
+                state[KEY_TIMESTAMPS_NS][KEY_TORQUE] = state_timestamp_ns
         pose = self.get_observation_pose(joint)
         if pose is not None:
             state[self.KEY_POSE] = pose
@@ -1323,6 +1358,8 @@ class BaseRobot:
             fused[OBSERVATION_POSE_KEY] = values[self.KEY_POSE]
         if values.get(self.KEY_POSE_ACTION) is not None:
             fused[OBSERVATION_POSE_ACTION_KEY] = values[self.KEY_POSE_ACTION]
+        if values.get(self.KEY_TORQUE) is not None:
+            fused[KEY_TORQUE] = np.asarray(values[self.KEY_TORQUE], dtype=np.float64)
         for key, value in values.items():
             if key.startswith((self.CAMERA_PREFIX, self.DEPTH_PREFIX)) or key in (
                 self.KEY_TIMESTAMP,

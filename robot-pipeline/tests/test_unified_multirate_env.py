@@ -42,9 +42,13 @@ class Robot:
         self.camera_count = {name: 0 for name in self.IMAGE_NAMES}
         self.disconnected = False
         self.max_joint_step_rad = None
+        self.torque_stream_enabled = False
 
     def configure_control_hz(self, control_hz):
         self.max_joint_step_rad = self.max_joint_speed_rad_s / control_hz
+
+    def configure_torque_stream(self, enabled):
+        self.torque_stream_enabled = bool(enabled)
 
     def state_layout(self):
         return {"state_space": "joint"}
@@ -158,6 +162,15 @@ def wait_until(predicate, timeout=3.0):
     assert predicate()
 
 
+def test_torque_stream_defaults_enabled(tmp_path, monkeypatch):
+    robot = Robot()
+    monkeypatch.setattr(env_module, "get_collector", lambda config: Collector(config))
+
+    env_module.BaseEnv(robot, {"type": "act_mcap", "save_dir": str(tmp_path)}, {})
+
+    assert robot.torque_stream_enabled is True
+
+
 def test_unified_env_records_independent_state_action_and_camera_streams(tmp_path, monkeypatch):
     robot = Robot()
     monkeypatch.setattr(env_module, "get_collector", lambda config: Collector(config))
@@ -168,6 +181,7 @@ def test_unified_env_records_independent_state_action_and_camera_streams(tmp_pat
             "enabled": True,
             "control_hz": 80,
             "follower_state_hz": 60,
+            "torque": {"enabled": True},
             "observation_hz": 20,
             "recording": {"queue_size": 32},
             "cameras": {
@@ -197,4 +211,5 @@ def test_unified_env_records_independent_state_action_and_camera_streams(tmp_pat
     assert summary["accepted"]["action"] > 0
     assert summary["accepted"]["image:head"] > summary["accepted"]["image:wrist"] > 0
     assert robot.max_joint_step_rad == 2.0 / 80
+    assert robot.torque_stream_enabled is True
     assert robot.disconnected

@@ -25,6 +25,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE,
     KEY_QPOS,
     KEY_QPOS_ERR,
+    KEY_TORQUE,
     ActionSpace,
     AdapterCapability,
 )
@@ -122,7 +123,7 @@ def test_identity_and_capabilities():
     assert caps.action_spaces == ["joint", "joint_delta", "pose", "pose_delta", "gripper", "gripper_delta"]
     assert set(adapter.action_layouts()) >= {"joint_delta", "gripper_delta", "joint_delta+gripper_delta"}
     # 观测键 = observe() 实际产出的键（状态向量 qpos + 目标向量 action + 位姿），相机键在后
-    assert caps.observation_keys[:4] == [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION, KEY_POSE]
+    assert caps.observation_keys[:5] == [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION, KEY_TORQUE, KEY_POSE]
     assert caps.image_names == ["cam_head", "cam_left_wrist", "cam_right_wrist"]
     assert all(caps.supports(cap) for cap in AdapterCapability)
 

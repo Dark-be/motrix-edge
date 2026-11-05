@@ -81,6 +81,15 @@ class BaseEnv:
         self.stream_config = dict(stream_config or {})
         self.multirate = bool(self.stream_config.get("enabled", False))
         recording_config = self.stream_config.get("recording") or {}
+        torque_config = self.stream_config.get("torque") or {}
+        if not isinstance(torque_config, dict):
+            raise ValueError("streams.torque must be a mapping")
+        torque_enabled = torque_config.get("enabled", True)
+        if not isinstance(torque_enabled, bool):
+            raise ValueError("streams.torque.enabled must be a bool")
+        configure_torque_stream = getattr(self.robot, "configure_torque_stream", None)
+        if callable(configure_torque_stream):
+            configure_torque_stream(torque_enabled)
         camera_profiles = (self.stream_config.get("cameras") or {}).get("profiles") or {}
         if self.multirate:
             self.HZ = self._positive_hz(self.stream_config.get("control_hz", self.HZ), "control_hz")
@@ -409,6 +418,7 @@ class BaseEnv:
             "streams": {
                 "enabled": self.multirate,
                 "state_hz": self.STATE_HZ,
+                "torque": {"enabled": bool(getattr(self.robot, "torque_stream_enabled", False))},
                 "observation_hz": self.OBS_HZ,
                 "camera_frames": camera_counts,
                 "camera_errors": camera_errors,

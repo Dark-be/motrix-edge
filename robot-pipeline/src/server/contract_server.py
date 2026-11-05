@@ -74,6 +74,7 @@ from motrix_edge.adapter.base import (
     KEY_POSE_ACTION,
     KEY_QPOS,
     KEY_QPOS_ERR,
+    KEY_TORQUE,
 )
 from motrix_edge.adapter.http_contract import (
     DEFAULT_TELEOP_MODE,
@@ -373,6 +374,7 @@ class _ShmPublisher:
             qpos=observation[KEY_QPOS],
             qpos_err=observation[KEY_QPOS_ERR],
             action=observation[KEY_ACTION],
+            torque=observation.get(KEY_TORQUE),
             pose=observation.get(KEY_POSE),
             pose_target=observation.get(KEY_POSE_ACTION),
             images=[observation[f"{CAMERA_PREFIX}{name}"] for name in image_names],
@@ -400,6 +402,7 @@ class _ShmPublisher:
                 qpos_dim=qpos_dim,
                 qpos_err_dim=qpos_dim,
                 action_dim=qpos_dim,
+                torque_dim=self.robot.joint_dim() if getattr(self.robot, "torque_stream_enabled", False) else 0,
                 pose_dim=_robot_pose_dim(self.robot),
                 pose_target_dim=_robot_pose_dim(self.robot),  # 目标位姿随实测位姿同生共死
                 depth_count=len(depth_names),

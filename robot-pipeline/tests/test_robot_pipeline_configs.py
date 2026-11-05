@@ -65,6 +65,7 @@ def test_multirate_camera_profiles_are_inline_and_match_robot_cameras(name):
 
     config = _load(name)
     assert config["streams"]["enabled"] is True
+    assert config["streams"]["torque"] == {"enabled": True}
     assert config["robot"]["depth"]["enabled"] is False
     assert "step_rad" not in config["robot"]
     assert math.isclose(

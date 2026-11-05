@@ -230,6 +230,23 @@ def test_invalid_explicit_timestamp_rejected_before_writing(bad):
     collector._writer.write_message.assert_not_called()
 
 
+def test_torque_uses_the_qpos_source_timestamp():
+    module = _load("collector.mcap_collector")
+    collector = module.ActMcapCollector({})
+    collector._writer = Mock()
+    collector._schema_qpos = object()
+    collector.collect_qpos(
+        {
+            "observations/qpos": [0.0],
+            "observations/torque": [1.5],
+            "timestamps_ns": {"observations/qpos": 123, "observations/torque": 123},
+        }
+    )
+    calls = collector._writer.write_message.call_args_list
+    assert [call.kwargs["topic"] for call in calls] == ["observations/qpos", "observations/torque"]
+    assert [call.kwargs["log_time"] for call in calls] == [123, 123]
+
+
 def test_cv2_timestamps_before_read(monkeypatch):
     module = _load("robot.sensor.cv2_sensor")
     sensor = module.Cv2Sensor("wrist")
