@@ -73,6 +73,7 @@ def test_multirate_camera_profiles_are_inline_and_match_robot_cameras(name):
     )
     profiles = config["streams"]["cameras"]["profiles"]
     assert set(profiles) == set(config["robot"]["cameras"])
+    assert {(profile["width"], profile["height"]) for profile in profiles.values()} == {(640, 480)}
     for profile in profiles.values():
         assert all(isinstance(profile[key], int) and profile[key] > 0 for key in ("width", "height", "stream_fps"))
         assert 0 < float(profile["read_hz"]) <= profile["stream_fps"]
