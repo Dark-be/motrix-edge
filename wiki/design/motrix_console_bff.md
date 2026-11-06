@@ -3,7 +3,7 @@
 ## 摘要
 
 `console/` 是正式子项目：同一个 Node 进程托管 React 构建产物、飞书 OAuth、HttpOnly 登录会话、
-静态 Edge 注册表和浏览器到 Edge 的 HTTP 代理。分布式 Edge 不保存飞书 App Secret，也不接收动态
+静态 Edge / Harness Provider 注册表和浏览器到后端服务的 HTTP 代理。分布式 Edge 不保存飞书 App Secret，也不接收动态
 OAuth 回调；Console 使用每台 Edge 独立的共享密钥签署用户身份，Edge 验证签名后将可信采集员写入
 采集元信息。
 
@@ -18,6 +18,8 @@ OAuth 回调；Console 使用每台 Edge 独立的共享密钥签署用户身份
 -   `http://localhost:8000` 是浏览器内建的本机直连目标，不经过 BFF、无需出现在静态注册表；请求不携带
     Console Cookie，适用于 Console 与 Edge 同机的开发 / 现场调试。
 -   首版代理普通 HTTP API 与 WebRTC offer 信令；WebRTC 媒体仍由浏览器和 Edge 直接协商。
+-   Harness Provider 同样只来自 `harnessProviders` 静态注册表，并限制为任务目录、session、事件、
+    primitive 和媒体读取路由；Provider 不能借代理访问任意路径。
 
 ## 拓扑
 
@@ -28,10 +30,14 @@ Browser
 console/server (Node, fixed host)
   ├─ /api/auth/*
   ├─ /api/edges
-  └─ /api/edges/{edge_id}/v1/*
+  ├─ /api/edges/{edge_id}/v1/*
                  │ HMAC signed identity + X-Lease-Id
                  ▼
-              Edge A/B/C
+  │           Edge A/B/C
+  └─ /api/harness/providers/{provider_id}/*
+                          │ allowlisted session API
+                          ▼
+                    RPent / future Agent Provider
 ```
 
 ## 配置
@@ -46,6 +52,13 @@ Console 从 `console/console.config.json` 读取非敏感配置，Secret 只从�
     "redirectUri": "https://console.example.com/api/auth/feishu/callback",
     "cookieSecure": true,
     "allowedTenants": ["tenant_key_1"],
+    "harnessProviders": {
+        "rpent-local": {
+            "label": "RPent · Motrix Edge",
+            "kind": "rpent",
+            "baseUrl": "http://127.0.0.1:8765"
+        }
+    },
     "edges": {
         "piper-a": {
             "label": "双臂 Piper A",
@@ -108,8 +121,13 @@ Edge 校验时间窗口、常量时间签名比较和 nonce 未使用；同一 n
 ```bash
 cd console
 npm ci
-npm run build
-node --env-file=../.env server/index.mjs
+npm start
 
 uv run --env-file .env motrix-edge run --config /etc/motrix-edge/edge.yml
 ```
+
+`npm start -- --host 127.0.0.1 --port 5183 --public-url http://127.0.0.1:5183` 会先构建，再以命令行值
+覆盖本次进程的监听地址与公开 OAuth 地址；`npm run server -- --port 5183` 跳过构建、直接运行已有
+`dist/`。`frontendUrl` / `redirectUri` 缺省仍来自 `console.config.json`；传 `--public-url` 时二者分别
+变为该根地址和 `<根地址>/api/auth/feishu/callback`。飞书后台必须登记完全一致的 callback；程序不能
+绕过这项平台校验。

@@ -139,7 +139,9 @@ cp .env.example .env
 -   Edge 本机人工安全更新：`bash scripts/update.sh`；只允许干净的 `dev` 工作树快进到
     `origin/dev`，本地修改、领先或分叉时拒绝更新，且不会自动同步依赖或重启服务。
 -   固定网页服务器进入 `console/` 执行 `npm ci && npm run build`，再运行
-    `node --env-file=../.env server/index.mjs`，同一 Node 进程托管网页、飞书登录与 Edge 代理。
+    `npm start`，同一 Node 进程托管网页、飞书登录与 Edge 代理；可用
+    `npm start -- --host 127.0.0.1 --port 5183 --public-url http://127.0.0.1:5183` 覆盖本次监听地址与
+    飞书登录使用的公开 URL（飞书后台须登记对应 callback）。
 
 分布式部署中，浏览器把 Edge Base URL 设为 Console 代理前缀（例如
 `https://console.example.com/api/edges/piper-a`），飞书只登记 Console 的固定回调

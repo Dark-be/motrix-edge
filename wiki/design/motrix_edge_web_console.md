@@ -14,7 +14,8 @@
 
 Edge Web Console 是 MotrixEdge 的**中心操作台**（Vite + React + TypeScript + Node BFF +
 Tailwind CSS）：经同源 `/api` 登录并代理 Edge HTTP API，展示 Edge 状态、管理租约、驱动采集 / 推理会话、
-发送控制信号，并经 WebRTC 播放机器人摄像头实时视频流。定位为**测试项目**——信息展示尽可能完整
+发送控制信号，并经 WebRTC 播放机器人摄像头实时视频流；另提供 RPent Harness 入口，嵌入 RPent
+原生 Dashboard。定位为**测试项目**——信息展示尽可能完整
 （租约到期倒计时、命令名、状态、能力、磁盘等），按钮即信号。
 
 ## 目标与原则
@@ -56,6 +57,31 @@ Tailwind CSS）：经同源 `/api` 登录并代理 Edge HTTP API，展示 Edge �
 -   右侧操作区由 RPent 方法清单驱动，提供环境能力、机器人状态、观测、复位、移动、看向目标和夹爪等
     可选卡片。读操作直接执行；移动、复位、夹爪等写操作明确显示“需要租约”，并由按钮确认执行。
 -   复杂参数使用 JSON 编辑器，所有调用都经现有 `POST /call` RPent 信封返回，错误原样展示在回执中。
+
+### Agent Harness
+
+Harness 与上述 Edge RPent 兼容面是两个控制面：兼容面让外部 Agent 调用 Edge 的 `env.*`；Harness
+由 Console 提供通用任务、对话、运行状态、事件、画面和中断界面，RPent 是首个 Provider。任务目录、
+任务到 memory/recipe/tool profile 的映射、planner 生命周期仍由 RPent 权威维护；Console 只消费
+Provider 自描述，不硬编码 task ID 或记忆内容。
+
+-   Provider 地址只能来自 Console BFF 的 `harnessProviders` 静态注册表。浏览器走同源
+    `/api/harness/providers/<id>/*`，不能提交任意目标，避免 SSRF、CORS 和 mixed-content 分叉。
+-   `HARNESS` 页不依赖 Edge UI 是否已连接：先读取 Provider `/api/commands` 生成任务选择，再经
+    `/api/session/messages` 启动任务或向运行中的 Agent 追加消息；状态、事件、时间线与帧分别来自
+    Provider session API。切换任务必须创建新的 RunConfig、memory preparation、toolkit 与 planner 上下文。
+-   planner / model 在 Provider 进程启动时固定，Console 只展示、不在任务边界修改；“中断当前调用”
+    请求 planner 在安全边界取消当前工具/推理，“终止任务”取消整个 TaskRun 并回到任务选择，两者不混用。
+-   对话区按 RPent transcript 类型展示 user / thinking / text / tool_call / tool_result，保留完整参数、结果、
+    usage 与错误；读取图像的工具结果旁压缩展示当前 Provider 帧，右栏始终列出全部相机/状态帧。缩略图
+    明示为“当前帧”，不冒充已缺失历史映射的调用时原图。Harness 右栏复用其它标签页的 `CameraRail`
+    WebRTC 相机列表，不维护第二套相机 UI；中间消息区固定占据可用高度并独立滚动，长文本、thinking、
+    工具结果和原始事件默认折叠，短内容直接展开。
+-   Motrix Edge 是 attach-only 外部环境；启动 RPent 专用 Provider：
+    `python -m robots.motrix_edge.harness --env-endpoint http://<edge>:8000`。默认只监听
+    `127.0.0.1:8765`；Console BFF 与 RPent 不同机时，网络边界必须只允许 Console 主机访问。
+-   Provider API 可以由 RPent 之外的 Agent 实现；Console 契约只依赖任务目录、run/session 状态、
+    消息、中断、事件和画面，不把某个 planner SDK 或 API key 放进浏览器。
 
 2. **会话区（采集 / 推理二选一）**：同一时刻只可能有一个会话，故两张卡共用一块位置——顶部「会话类型」分段控件切换（会话进行中则锁定为当前会话）；只有被选中的那张面板参与渲染。
 
