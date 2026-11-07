@@ -438,15 +438,15 @@ def test_get_policy_remote():
 
 
 @pytest.mark.optional("lerobot")
-def test_remote_endpoint_falls_back_to_host_port():
-    """没填 endpoint 时由 host/port 拼 zenoh 端点；填了 endpoint 以它为准。"""
-    from motrix_edge.policy.lerobot_remote.client import LerobotRemoteClient
+def test_remote_endpoint_is_independent_from_openpi_host_port():
+    """Lerobot Remote 只读取 endpoint；OpenPI 的 host/port 不参与 Zenoh 地址构造。"""
+    from motrix_edge.policy.lerobot_remote.client import DEFAULT_ENDPOINT, LerobotRemoteClient
 
     policy = get_policy(
         {"policy": {"deployment": "d", "semantics": "s", "host": "10.0.0.9", "port": 7447}},
         policy_type="lerobot-remote",
     )
-    assert policy._config.endpoint == "tcp/10.0.0.9:7447"
+    assert policy._config.endpoint == DEFAULT_ENDPOINT
     explicit = LerobotRemoteClient(
         {"endpoint": "tls/router:7447", "deployment": "d", "semantics": "s", "host": "10.0.0.9", "port": 1}
     )

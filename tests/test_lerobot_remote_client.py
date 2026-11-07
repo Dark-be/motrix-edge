@@ -27,7 +27,7 @@ from motrix_edge.policy.lerobot_remote.client import LerobotRemoteClient
 class _Caps:
     """Minimal stand-in for the server-advertised capabilities."""
 
-    def __init__(self, features, action_shape=(7,)):
+    def __init__(self, features, action_shape=(7,), history_frames=1, history_stride=1):
         from lerobot.policies import FeatureSpec
 
         self.features = tuple(features)
@@ -40,6 +40,8 @@ class _Caps:
         )
         self.action_interval = 0.1
         self.execution_steps = 20
+        self.history_frames = history_frames
+        self.history_stride = history_stride
 
     @staticmethod
     def rgb(name, shape=(480, 640, 3)):
@@ -48,10 +50,17 @@ class _Caps:
         return FeatureSpec(name=name, shape=shape, dtype="uint8", kind="rgb", semantics="rgb")
 
     @staticmethod
+    def rgb_sequence(name, shape=(3, 8, 8, 3)):
+        from lerobot.policies import FeatureSpec
+
+        return FeatureSpec(name=name, shape=shape, dtype="uint8", kind="rgb_sequence", semantics="rgb-history")
+
+    @staticmethod
     def state(name, shape=(7,)):
         from lerobot.policies import FeatureSpec
 
-        return FeatureSpec(name=name, shape=shape, dtype="float32", semantics="joint-abs")
+        names = tuple(f"a{i}" for i in range(shape[0])) if len(shape) == 1 else ()
+        return FeatureSpec(name=name, shape=shape, dtype="float32", names=names, semantics="joint-abs")
 
 
 def _remote_client(policy_config=None):
@@ -157,6 +166,7 @@ class _FakeRemote:
         self.admits = []
         self.requests = []
         self.closed = False
+        self.controls = []
         self._torch = torch
         self._steps = steps
         self._dim = dim
@@ -178,6 +188,9 @@ class _FakeRemote:
 
     def close(self):
         self.closed = True
+
+    def control(self, operation, generation):
+        self.controls.append((operation, generation))
 
 
 def _connected(policy_config=None, caps=None, steps=20):
@@ -247,6 +260,54 @@ def test_disconnect_closes_client():
     client.prepare(_remote_obs())
     client.disconnect()
     assert fake.closed is True and client.connected is False
+
+
+def test_history_deployment_rejects_raw_encoding(monkeypatch):
+    caps = _Caps([_Caps.rgb_sequence("observation.images.head")], history_frames=3, history_stride=2)
+    fake = _FakeRemote(caps)
+    monkeypatch.setattr(
+        "motrix_edge.policy.lerobot_remote.client.RemoteClient.connect", classmethod(lambda cls, cfg: fake)
+    )
+    client = LerobotRemoteClient({"deployment": "d", "semantics": "s", "encoding": "raw"})
+    with pytest.raises(ValueError, match="require policy.encoding=jpeg"):
+        client.connect()
+    assert fake.closed
+
+
+def test_mem_history_is_sampled_at_control_cadence_and_reset_remotely():
+    caps = _Caps(
+        [
+            _Caps.state("observation.state", shape=(3, 7)),
+            _Caps.rgb_sequence("observation.images.piper_0_cam_head"),
+            _Caps.rgb_sequence("observation.images.piper_0_cam_right_wrist"),
+        ],
+        history_frames=3,
+        history_stride=2,
+    )
+    client, fake = _connected(caps=caps, steps=10)
+    client.prepare(_remote_obs())
+    prepared = None
+    for tick in range(5):
+        obs = _remote_obs()
+        obs["observations/qpos"] = np.full(7, tick, dtype=np.float32)
+        obs["observations/images/cam_head"] = np.full((8, 8, 3), tick, dtype=np.uint8)
+        prepared = client.prepare_observation(obs)
+
+    features = client._observation_features(prepared)
+    assert features["observation.state"][:, 0].tolist() == [0, 2, 4]
+    assert features["observation.images.piper_0_cam_head"][:, 0, 0, 0].tolist() == [0, 2, 4]
+    assert features["observation.images.piper_0_cam_head"].shape == (3, 8, 8, 3)
+    assert client.infer_chunk(prepared, index=4) is not None
+    assert len(fake.requests) == 1
+
+    client.reset()
+    prepared = client.prepare_observation(_remote_obs())
+    assert client.infer_chunk(prepared, index=0) is None
+    assert len(fake.requests) == 1
+
+    client.reset()
+    assert fake.controls == [("reset", 1), ("reset", 2)]
+    assert client._history == {}
 
 
 def test_admit_rejects_state_dim_mismatch():

@@ -67,6 +67,7 @@ class _FakePolicy:
         self.reset_calls = 0
         self.disconnect_calls = 0
         self.prepare_calls = 0
+        self.prepare_observation_calls = 0
         self.connect_calls = 0
         self.prompt = None  # 语言条件策略的配置项（会话内 infer config set 预置；推理/录制前必须非空）
         self.bind_calls = 0  # bind_adapter（adapter 布局传入）
@@ -95,6 +96,10 @@ class _FakePolicy:
 
     def prepare(self, obs=None):
         self.prepare_calls += 1
+
+    def prepare_observation(self, observation):
+        self.prepare_observation_calls += 1
+        return observation
 
     def disconnect(self):
         self.disconnect_calls += 1
@@ -519,19 +524,17 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
     assert snapshot["policy_type"] == "openpi"  # 未显式选策略 → 配置缺省类型
     assert snapshot["requires_prompt"] is True
     assert snapshot["missing"] == ["prompt"]  # 未预置 → 缺失必填项
-    # 公共项（推理端点 host / port + 预热门控 warmup_required + 动作布局 action_layout）= 与策略项
-    # 同一张表单（无「连接后锁定」轴）
+    # OpenPI 独立端点 host / port + 公共项 warmup_required / action_layout，与策略项同一张表单。
     assert [item["key"] for item in snapshot["items"]] == [
         "host",
         "port",
-        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]
-    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 3 + [None] * 4
-    assert [item["runtime"] for item in snapshot["items"]] == [False] * 5 + [True, True]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 4
+    assert [item["runtime"] for item in snapshot["items"]] == [False] * 4 + [True, True]
     assert snapshot["values"]["warmup_required"] is True  # 缺省要求先预热
     # 会话内即时生效的键 = runtime=True（端点 / 预热门是会话级配置：进入会话时固化）
     assert snapshot["runtime_keys"] == ["image_size", "prompt"]
@@ -738,6 +741,46 @@ def test_infer_rollout_continuous_replies_started_and_stops(monkeypatch):
     assert replies[0].data["started"] is True
     assert policy.infer_calls >= 1  # 持续推理至少推了一步
     assert adapter.executed  # 有动作下发
+
+
+def test_continuous_rollout_samples_policy_history_every_control_tick(monkeypatch):
+    """MEM 历史按稠密控制拍采样，不受 RTC 动作块请求频率影响。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(
+        adapter,
+        policy,
+        (PROMPT_CMD, "infer rollout continuous", None, None, "session quit"),
+        warmup_required=False,
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.prepare_observation_calls == 2
+    assert len(adapter.executed) == 2
+
+
+def test_continuous_rollout_waits_for_policy_observation_history(monkeypatch):
+    """历史策略未就绪时只采样控制拍，不请求 RTC 或下发动作。"""
+
+    class _HistoryPolicy(_FakePolicy):
+        def observation_ready(self, observation):
+            return self.prepare_observation_calls >= 2
+
+    adapter = _FakeAdapter(ready=True)
+    policy = _HistoryPolicy()
+    _patch(monkeypatch, policy)
+    session = _build_session(
+        adapter,
+        policy,
+        (PROMPT_CMD, "infer rollout continuous", None, None, "session quit"),
+        warmup_required=False,
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.prepare_observation_calls == 2
+    assert policy.infer_calls == 1
+    assert len(adapter.executed) == 1
 
 
 def test_infer_rollout_uses_state_endpoint_for_joint_gripper_layout(monkeypatch):

@@ -53,48 +53,52 @@ POLICY_REGISTRY = {
 #   multiline   长文本项（prompt / system_prompt 等）：前端渲染为多行 textarea（缺省 6 行）
 #   rows        multiline 的行数（可选；缺省用前端缺省值）
 #
-# 端点配置项：openpi / lerobot-remote 都连 TCP 端点（openpi → ws、lerobot-remote → zenoh）→ 排在最前。
+# 端点配置项按策略独立声明（openpi → host/port，lerobot-remote → zenoh endpoint）→ 排在最前。
 # 与策略自身配置项**完全同级**：同一 schema、同一表单、同一 `infer config set` /
 # POST /v1/infers/config 通道、同一校验；也是**会话级**配置（runtime=False：进入会话时构造
 # 传输层，会话内改需退出重进）；**没有专用命令**（旧 `infer ip` / `infer port` 已移除）。
-POLICY_ENDPOINT_CONFIG_ITEMS: list[dict] = [
-    {
-        "key": "host",
-        "label": "推理节点地址 host",
-        "type": "text",
-        "required": False,  # 后端不硬性要求：前端按 group=endpoint 的项是否填齐门控「进入推理」
-        "runtime": False,  # 会话级：进入会话时构造传输层，会话内改需退出重进
-        "group": "endpoint",
-        "default": None,
-        "placeholder": "如 127.0.0.1",
-        "help": "推理节点地址（openpi 也接受完整 `ws://host:port`）；**进入会话时生效，会话内改需退出重进**",
-    },
-    {
-        "key": "port",
-        "label": "推理节点端口 port",
-        "type": "int",
-        "required": False,
-        "runtime": False,
-        "min": 1,
-        "max": 65535,
-        "group": "endpoint",
-        "default": None,
-        "placeholder": "如 8080",
-        "help": "推理节点端口；**进入会话时生效，会话内改需退出重进**",
-    },
-    {
-        "key": "endpoint",
-        "label": "远程推理端点 endpoint",
-        "type": "text",
-        "required": False,
-        "runtime": False,
-        "group": "endpoint",
-        "default": None,
-        "placeholder": "tcp/127.0.0.1:7447",
-        "help": "lerobot-remote（zenoh）的端点：`tcp/host:port`；填了就以它为准（否则由 host/port 拼），"
-        "`tls/...` 需配 zenoh_config_path；**进入会话时生效，会话内改需退出重进**",
-    },
-]
+POLICY_ENDPOINT_CONFIG_ITEMS: dict[str, list[dict]] = {
+    "openpi": [
+        {
+            "key": "host",
+            "label": "推理节点地址 host",
+            "type": "text",
+            "required": False,  # 后端不硬性要求：前端按 group=endpoint 的项是否填齐门控「进入推理」
+            "runtime": False,  # 会话级：进入会话时构造传输层，会话内改需退出重进
+            "group": "endpoint",
+            "default": None,
+            "placeholder": "如 127.0.0.1",
+            "help": "OpenPI 推理节点地址（也接受完整 `ws://host:port`）；**进入会话时生效，会话内改需退出重进**",
+        },
+        {
+            "key": "port",
+            "label": "推理节点端口 port",
+            "type": "int",
+            "required": False,
+            "runtime": False,
+            "min": 1,
+            "max": 65535,
+            "group": "endpoint",
+            "default": None,
+            "placeholder": "如 8080",
+            "help": "OpenPI 推理节点端口；**进入会话时生效，会话内改需退出重进**",
+        },
+    ],
+    "lerobot-remote": [
+        {
+            "key": "endpoint",
+            "label": "远程推理端点 endpoint",
+            "type": "text",
+            "required": False,
+            "runtime": False,
+            "group": "endpoint",
+            "default": None,
+            "placeholder": "tcp/127.0.0.1:7447",
+            "help": "Lerobot Remote 的 Zenoh 端点：`tcp/host:port`；`tls/...` 需配 zenoh_config_path；"
+            "**进入会话时生效，会话内改需退出重进**",
+        },
+    ],
+}
 
 # 公共配置项（**所有策略共有**）：预热门控 warmup_required + 模型动作布局 action_layout —— 与策略自
 # 身配置项**完全同级**：同一 schema、同一表单、同一 `infer config set` / POST /v1/infers/config
@@ -163,6 +167,17 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
         },
     ],
     "lerobot-remote": [
+        {
+            "key": "task",
+            "label": "任务指令 task",
+            "type": "text",
+            "required": False,
+            "runtime": False,
+            "multiline": True,
+            "default": None,
+            "placeholder": "如：依次按下三个按钮",
+            "help": "语言条件 LeRobot 策略的动作指令；进入会话时固化，空值仅适用于非语言策略。",
+        },
         {
             "key": "deployment",
             "label": "服务端部署名 deployment",
@@ -252,13 +267,15 @@ POLICY_CONFIG_ITEMS: dict[str, list[dict]] = {
 
 
 def policy_config_items(policy_type: str) -> list[dict]:
-    """策略配置项清单 = 端点项（host / port）+ 公共项（warmup_required）+ 该策略自身配置项。
+    """策略配置项清单 = 策略端点项 + 公共项 + 该策略自身配置项。
 
-    未知策略类型 → 仅端点项 + 公共项（无策略自身项）。
+    未知策略类型 → 仅公共项（无端点项与策略自身项）。
     """
     return [
         dict(item)
-        for item in POLICY_ENDPOINT_CONFIG_ITEMS + POLICY_COMMON_CONFIG_ITEMS + POLICY_CONFIG_ITEMS.get(policy_type, [])
+        for item in POLICY_ENDPOINT_CONFIG_ITEMS.get(policy_type, [])
+        + POLICY_COMMON_CONFIG_ITEMS
+        + POLICY_CONFIG_ITEMS.get(policy_type, [])
     ]
 
 

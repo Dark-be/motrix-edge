@@ -78,16 +78,16 @@ adapter:
   port: 8090
 
 # 推理策略节点默认端点（见 wiki/design/motrix_edge_policy.md）。策略类型在进入
-# 推理会话时由调用方显式选择；端点项 host / port / endpoint 是**会话级**策略配置项
+# 推理会话时由调用方显式选择；端点项按策略独立（openpi = host/port，lerobot-remote = endpoint），
+# 都是**会话级**策略配置项
 # （进入会话时固化，改需退出重进），与 deployment / semantics 同一 schema、同一通道：
 # infer config set / POST /v1/infers 的 config。
-# **策略要连 TCP 端点**：openpi → ws（host/port）；lerobot-remote → zenoh（endpoint，缺省由
-# host/port 拼成 tcp/host:port，默认端口 7447）。
+# **策略要连 TCP 端点**：openpi → ws（host/port）；lerobot-remote → zenoh（endpoint）。
 # 单臂任务：策略用通用 lerobot-remote；「哪条臂 / 怎么映射回全臂维度」由 adapter 运行时配置承载。
 policy:
   host: 127.0.0.1
   port: 8080 # openpi 的 ws 端口（lerobot-remote 走下面的 endpoint）
-  endpoint: tcp/127.0.0.1:7447 # zenoh 端点（lerobot-remote）；留空则由 host/port 拼
+  endpoint: tcp/127.0.0.1:7447 # lerobot-remote 专用 Zenoh 端点；不读取上面的 openpi host/port
   type: lerobot-remote # 默认策略类型（会话显式选择时覆盖）
   # --- 策略配置项（**每个策略有自己的独立配置项**：prompt / deployment / 块拼接…）---
   # 声明见 policy.POLICY_CONFIG_ITEMS；查询 `infer config`，设置 `infer config set <json>`
@@ -99,6 +99,7 @@ policy:
   mode: chunk # lerobot-remote：执行模式（块缓存/切分/预取由 edge RTC 负责）
   chunk_merge: append # lerobot-remote：块拼接语义（append | aligned，需服务端能力）
   encoding: raw # lerobot-remote：图像编码（raw | jpeg）
+  # π₀.₅ MEM 历史 deployment 必须在进入会话时覆盖为 jpeg；多帧 raw 不适合 Zenoh 单消息。
   observation_layout: qpos+qpos_err # state = concat(qpos, Robot 同帧提供的 qpos_err)
   action_layout: joint_delta # 模型输出叠加到 Robot 当前关节 target
   image_cameras: [cam_head, cam_right_wrist] # 只声明并上传 checkpoint 使用的两路图像

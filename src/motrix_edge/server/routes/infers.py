@@ -80,8 +80,8 @@ def build_router(services: Services) -> APIRouter:
         """进入推理会话（READY → ACTIVE）：连接推理会话并启动任务循环，需先持有有效租约。
 
         请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）、``config`` 指定
-        **该策略的配置项**（如需端点的策略含端点项 ``host`` / ``port``，如 lerobot-act 的模型路径 /
-        openpi 的 prompt）；非法键、类型不符、越界或必填项为空 → 400。
+        **该策略的配置项**（OpenPI 端点为 ``host`` / ``port``，Lerobot Remote 端点为
+        ``endpoint``，另含各自 prompt / deployment 等）；非法键、类型不符、越界或必填项为空 → 400。
         """
         policy_type = req.policy_type if req is not None else None
         config = req.config if req is not None else None
@@ -174,7 +174,7 @@ def build_router(services: Services) -> APIRouter:
         body 为配置项对象（可部分：openpi → prompt；lerobot-remote → deployment / semantics /
         chunk_merge）→ 按当前策略 schema 白名单校验并写入内存态 ``policy`` 段：
         ``runtime: True`` 的键同样应用到运行中的策略客户端（下一请求生效），``runtime: False``
-        的键（host / port / endpoint、deployment…）退出会话重进才生效并在回执 ``deferred`` 列出。
+        的键（策略端点、deployment…）退出会话重进才生效并在回执 ``deferred`` 列出。
         未知键 / 类型不符 / 必填为空 → 400。受控操作：须已在推理会话且持有租约。
         """
         return accepted(_commands().submit(CMD_INFER_CONFIG_SET, {"json": dict(req.config)}, lease_id=x_lease_id))

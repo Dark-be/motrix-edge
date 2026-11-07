@@ -71,7 +71,8 @@ src/lerobot/        # vendored 新版 lerobot 子集（Apache-2.0）：
 
 ## 传输层（motrix_edge.transport）
 
-与策略解耦的通用传输实现，均支持 `connected` / `endpoint`（连接目标由 host / port 在 connect 时现算，端点**随会话固化**：改端点=退出会话改配置再进）：
+与策略解耦的通用传输实现支持 `connected` / `endpoint`；OpenPI 的连接目标由 `host` / `port` 在
+connect 时现算，端点**随会话固化**（改端点 = 退出会话改配置再进）：
 
 -   `WsTransport`（openpi 用）：连接后**先收服务端首条 metadata**；`request()` 发送并阻塞等
     响应，**单次限时**（`request_timeout`，默认 60s）；超时 / 连接异常 / 服务端以**文本帧**
@@ -213,17 +214,35 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 -   **运行时依赖**：`eclipse-zenoh`（传输）+ `msgpack`（wire）+ `torch`（动作载荷是
     `torch.Tensor`，edge 侧固定 CPU 版）+ 可选 `pillow`（jpeg 编码）。
 
+#### 历史观测策略（π₀.₅ MEM）
+
+普通远程策略只在需要新动作块时发送当前观测；这不适用于按控制频率采样历史的策略。对于
+π₀.₅ MEM，Edge 在每个控制拍调用策略的 `prepare_observation()`，由客户端维护密集环形缓冲，
+并在真正请求动作块时携带按 checkpoint 声明抽样后的完整历史窗口。服务端不按请求间隔推断
+时间：历史张量已经按训练时的 `memory_frames` / `memory_stride` 对齐。
+
+-   历史缓冲长度为 `(frames - 1) * stride + 1`；episode 开头用首帧填充。
+-   图像历史 wire 形状为 `[T, H, W, C]`、类型为 `rgb_sequence`；state 为 `[T, D]`。
+-   历史 deployment 强制使用 JPEG；服务端声明 224×224 时，两相机六帧保持在有界单消息内。
+-   合成空相机由策略内部补齐，不占用 wire，也不参与物理相机映射。
+-   `reset()` 同时清空 Edge 历史并向独占远程会话发送 generation reset，防止跨 episode 污染。
+-   历史只在一次动作请求中复制；RTC 队列继续只缓存动作，不拥有策略历史。
+
+服务端 capabilities 是历史窗口的事实来源；客户端不允许用本地配置覆盖服务端声明的时间维。
+不声明历史的 deployment 保持原有单帧路径。
+
 ## 配置项（POLICY_CONFIG_ITEMS）
 
-公共项（与策略自身项**完全同级**、同一张表单、同一通道）：`host` / `port`（`group=endpoint`
-仅用于前端分组）、`warmup_required`（预热门控，缺省 true）、`action_layout`（模型动作布局，
-缺省 `joint`）。它们也是**会话级**配置
+端点项按策略独立声明：`openpi` 使用 `host` / `port`，`lerobot-remote` 使用 Zenoh `endpoint`；
+三者不作为跨策略兼容输入。真正的公共项是 `warmup_required`（预热门控，缺省 true）和
+`action_layout`（模型动作布局，缺省 `joint`）。这些配置都与策略自身项**完全同级**，使用同一张
+表单与同一通道；端点项和公共项也是**会话级**配置
 （`runtime: False`：进入会话时读取，会话内改需退出重进），**没有专用命令**——同一个键只有一套规则。
 
-| 策略             | 专有配置项                                                                                                                                                                                                     |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `openpi`         | `prompt`（必填，语言指令）、`image_size`（默认 224）                                                                                                                                                           |
-| `lerobot-remote` | `deployment`（必填）、`semantics`（必填）、`observation_layout`（`qpos` / `qpos+qpos_err`）、`mode`（chunk）、`chunk_merge`（append / aligned）、`encoding`（raw / jpeg）、`jpeg_quality`、`expected_artifact` |
+| 策略             | 端点与专有配置项                                                                                                                                                                                                           |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openpi`         | `host` / `port`；`prompt`（必填，语言指令）、`image_size`（默认 224）                                                                                                                                                      |
+| `lerobot-remote` | `endpoint`；`deployment`（必填）、`semantics`（必填）、`observation_layout`（`qpos` / `qpos+qpos_err`）、`mode`（chunk）、`chunk_merge`（append / aligned）、`encoding`（raw / jpeg）、`jpeg_quality`、`expected_artifact` |
 
 -   清单由 `policy_config_items(policy_type)` 提供（CLI `infer config`、前端表单、HTTP
     `/v1/infers/config` 同一来源）；`runtime_keys` 由 `runtime` 派生。
@@ -239,7 +258,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
         下发一次（服务端据此加载 checkpoint、定动作块长），会话内改**不重发、不生效** → 标
         `runtime: False`，**退出会话重进才生效**（前端据 `runtime_keys` 在会话内禁用这些输入框，
         避免「status 显示新值、推理仍用旧值」）；
-    -   端点项 `host` / `port`（推理端点，**仅需端点的策略**）：**会话级**——进入会话时用配置构造策略客户端与传输层，
+    -   策略端点项（OpenPI 的 `host` / `port`、Lerobot Remote 的 `endpoint`）：**会话级**——进入会话时用配置构造策略客户端与传输层，
         会话内改只写内存态配置、下一会话生效（回执 `deferred` 列出未即时生效的键）→ 同样标
         `runtime: False`。
     -   公共项 `warmup_required`（预热门控）：同为**会话级**（进入会话时读取，会话内改需退出重进）；
@@ -260,8 +279,8 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 
 | 键                         | 使用者               | 作用                                                                                        |
 | -------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
-| `host` / `port`            | 客户端传输层         | 推理节点端点（连接目标）；进入会话时固化（改需退出重进）                                    |
-| `endpoint`                 | LerobotRemoteClient  | zenoh 端点；仅 lerobot-remote 展示，填写后优先于 host / port                                |
+| `host` / `port`            | OpenPI 客户端传输层  | OpenPI 推理节点端点；进入会话时固化（改需退出重进）                                         |
+| `endpoint`                 | LerobotRemoteClient  | Lerobot Remote Zenoh 端点；不读取 OpenPI 的 `host` / `port`                                 |
 | `warmup_required`          | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
 | `action_layout`            | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                       |
 | `observation_layout`       | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                           |
@@ -289,14 +308,15 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 （回执 `deferred` 列出未即时生效的键），退出会话重进才生效；因此不存在「连接后锁定」这条
 额外的 409 轴。
 
-| 场景                 | 通道                                                                                                                                         |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 查询端点与其它配置项 | `infer config`（HTTP：`GET /v1/infers` 的 `policy_config.items`）                                                                            |
-| 设置端点             | `infer config set '{"host":"10.0.0.9","port":9000}'`（HTTP：`POST /v1/infers/config`，会话内；或 `POST /v1/infers` 的 `config`，进入会话时） |
-| 连接 + 预热          | `infer connect`（HTTP：`POST /v1/infers/connect`，须已在推理会话）                                                                           |
+| 场景                 | 通道                                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| 查询端点与其它配置项 | `infer config`（HTTP：`GET /v1/infers` 的 `policy_config.items`）                                                                     |
+| 设置 OpenPI 端点     | `infer config set '{"host":"10.0.0.9","port":9000}'`（HTTP 同下）                                                                     |
+| 设置 Lerobot 端点    | `infer config set '{"endpoint":"tcp/10.0.0.9:7447"}'`（HTTP：`POST /v1/infers/config`，或进入会话时随 `POST /v1/infers` 的 `config`） |
+| 连接 + 预热          | `infer connect`（HTTP：`POST /v1/infers/connect`，须已在推理会话）                                                                    |
 
-`host` / `port` / `endpoint` **非必填**：`openpi` / `lerobot-remote`
-未配置端点会在连接时报错，前端据「host 已填 + port 合法」门控「进入推理」按钮。
+端点项 **非后端必填**（允许 `edge.yml` 或客户端缺省提供值）；前端按当前策略 schema 的
+`group=endpoint` 门控：OpenPI 要求 host 已填且 port 合法，Lerobot Remote 只要求 endpoint 非空。
 
 ### 预热（推理但不上真机）
 

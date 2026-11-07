@@ -86,15 +86,15 @@ class PolicyConfigFeature:
 
     def _on_policy_config(self, cmd):
         """策略配置命令族：``infer config`` / ``infer config set <json>`` /
-        ``infer model(set)``（**端点项 host / port（仅需端点的策略）+ 每个策略自己的配置项**，
+        ``infer model(set)``（**策略独立端点项 + 每个策略自己的配置项**，
         见 ``policy.POLICY_CONFIG_ITEMS``）。
 
-        **所有配置项一视同仁**——推理端点 host / port（openpi / lerobot-act）与 prompt / 模型路径 /
+        **所有配置项一视同仁**——策略自己的推理端点与 prompt / 模型路径 /
         动作块长度走同一 schema、同一校验、同一通道，**没有「连接后锁定」这一额外轴**：
 
         - 先经 ``handle_policy_config`` 校验并写入内存态 ``base_cfg["policy"]``（下次会话生效）；
         - 设置类命令再按 **``runtime``** 决定是否即时应用：``runtime=True``（prompt / image_size，
-          策略每次请求现读）→ 应用到运行中的客户端，下一请求生效；``runtime=False``（host / port、
+          策略每次请求现读）→ 应用到运行中的客户端，下一请求生效；``runtime=False``（端点项、
           lerobot-act 的模型路径 / device / 动作块长度——**进入会话时固化的握手级配置**）→ 只写
           内存态配置，回执里以 ``deferred`` 告知需退出会话重进。
 
@@ -161,7 +161,7 @@ class PolicyConfigFeature:
 
         只有 ``runtime=True`` 的键即时生效：``prompt`` → 策略 prompt（语言条件策略每次请求携带）；
         其余键 → ``policy.policy_config``（策略自读，如 openpi 的 ``image_size`` 每次请求现读）。
-        ``runtime=False`` 的键（host / port、lerobot-act 的模型路径 / device / 动作块长度）在**进入
+        ``runtime=False`` 的键（策略端点、模型路径 / device / 动作块长度）在**进入
         会话时**已固化到策略客户端与传输层，改内存态配置需退出会话重进才生效。
 
         返回本次写入但**未**即时生效（延后到下次会话）的键，供回执 ``deferred`` 提示。

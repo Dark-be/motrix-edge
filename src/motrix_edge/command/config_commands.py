@@ -152,7 +152,8 @@ def policy_config_status(base_cfg, policy_type=None) -> dict:
         返回 ``{"policy_type", "items": [schema 项 + value], "values": {...}, "missing": [...],
     "requires_prompt", "requires_model_path", "lerobot", "runtime_keys": [...]}``。
 
-    ``items`` = 端点项（``host`` / ``port``，``group="endpoint"``）+ 公共项（``warmup_required``）+
+    ``items`` = 策略独立端点项（OpenPI 为 ``host`` / ``port``，Lerobot Remote 为 ``endpoint``）+
+    公共项（``warmup_required``）+
     策略自身配置项，前端按同一张表单渲染；**会话内可改
     并即时生效的键**由 ``runtime_keys`` 给出（其余键改了要退出会话重进才生效）。
     """
@@ -250,8 +251,8 @@ def handle_policy_config(base_cfg, cmd, policy_type=None) -> CommandResult:
     """策略配置命令族：``infer config`` / ``infer config set <json>`` /
     ``infer model`` / ``infer model set <path>``。
 
-    每个策略有自己的独立配置项（prompt / deployment / 块拼接…）+ **端点项**（推理端点
-    host / port / endpoint，`group="endpoint"`、会话级；openpi / lerobot-remote），见
+    每个策略有自己的独立配置项（prompt / deployment / 块拼接…）+ **策略独立端点项**
+    （`group="endpoint"`、会话级），见
     ``policy.POLICY_CONFIG_ITEMS``：
     ``infer config`` 返回清单 + 当前值 + 缺失必填项；``infer config set <json>`` 按当前策略 schema
     校验并写入（可部分）；``infer model(set)`` 是 **远端部署名** ``deployment``（lerobot-remote）

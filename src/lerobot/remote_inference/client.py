@@ -427,6 +427,9 @@ class RemoteClient:
     def _observation_body(self, observation: ObservationSnapshot) -> dict:
         self._request_sequence += 1
         rgb = {feature.name for feature in self.capabilities.features if feature.kind == "rgb"}
+        rgb_sequences = {
+            feature.name for feature in self.capabilities.features if feature.kind == "rgb_sequence"
+        }
         return {
             "sequence": self._request_sequence,
             "artifact_identity": self.artifact_identity,
@@ -435,9 +438,13 @@ class RemoteClient:
             "task": observation.task,
             "task_version": observation.task_version,
             "features": {
-                name: RGBImage(value, self.config.encoding, self.config.jpeg_quality)
-                if name in rgb
-                else value
+                name: (
+                    RGBImage(value, self.config.encoding, self.config.jpeg_quality)
+                    if name in rgb
+                    else [RGBImage(frame, self.config.encoding, self.config.jpeg_quality) for frame in value]
+                    if name in rgb_sequences
+                    else value
+                )
                 for name, value in observation.features.items()
             },
         }

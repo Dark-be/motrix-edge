@@ -101,16 +101,19 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 
     - **策略配置卡片**：从 `/v1/health` 的已注册策略列表中必选策略 + 按所选策略动态渲染配置项
       （schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers`
-      的 `policy_config`）：**需端点的策略**（openpi / lerobot-act）清单最前是端点项 `host` /
-      `port`（与其它项同层级、同一张表单），随后是策略项——openpi → 文本指令 `prompt`（必填）/
-      `image_size`；lerobot-act → 模型路径 `pretrained_name_or_path`（必填）/ `device` /
-      `actions_per_chunk` / `image_size`。schema 带 `options` 的配置项统一渲染为**下拉选择**并由后端
+      的 `policy_config`）：每个策略的端点形态独立，OpenPI 清单最前是 `host` / `port`，
+      Lerobot Remote 则只有 Zenoh `endpoint`（与其它项同层级、同一张表单）；随后是各自策略项。
+      schema 带 `options` 的配置项统一渲染为**下拉选择**并由后端
       校验候选值；`action_layout` 与 `observation_layout` 因而只能选择声明的固定搭配，不允许自由文本
       拼写。长文本项（`prompt`，schema 标 `multiline`）渲染为**多行 textarea**（占满整行、可拖拽调高）。
       **配置在「进入推理」时随会话下发并锁定**（会话内整张卡片只读，没有「应用配置」按钮）；要改
       先退出推理（写内存态，下一会话生效）。必填项缺失（`missing` 非空）或端点项
       （`group=endpoint`）为空 / 越界时「进入推理」禁用（端点门控按 schema 的端点分组推导，
       不硬编码键名）。
+      为减少逐项填写，配置入口是一个 YAML 文本框：既接受顶层 `policy:` 段，也接受直接的策略对象；
+      点击「解析并同步」后读取 `type` 选择策略，并只把该策略 schema 声明的键同步到进入会话 payload。
+      解析结果在下方按 schema 只读预览；用户需要修改时只能编辑 YAML 并重新解析，避免文本与逐项表单
+      出现两个可写事实来源。未知键、未知策略、类型或候选值不合法都在本地明确报错，不静默丢弃。
     - **进入推理 = 进入会话 + 自动连接预热**：`POST /v1/infers` 成功后**前端自动调用**
       `POST /v1/infers/connect`（`infer connect`：连接策略服务端 → lerobot-act 下发策略指令 /
       服务端加载模型，openpi 预热一帧），**连接成功后其余操作（推理一步 / 持续推理 / 重新连接 /
@@ -129,7 +132,7 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
     - **已同步 meta**（采集 / 推理两处）：只展示**非空值**（`null` / 空串 / 空列表 / 空对象不显示）——
       meta 分类多时不该把面板撑长；全空时提示「尚未同步元信息」。前端用 `metaEntries()` 统一过滤。
 
-10. **RTC 卡片（推理面板内，默认收起）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 步号与剩余 / 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考）；「展开参数」后可输入 H / P / S / E / 聚合函数并「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。
+10. **RTC 卡片（推理面板内，默认收起）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 步号与剩余 / 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考）；「展开参数」后通过独立 YAML 文本框导入 RTC 参数，接受直接对象、顶层 `rtc:` 或 `policy.rtc`，解析后只读预览并「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。RTC 与策略配置分框维护；完整 `policy:` 配置中的 `rtc` 可直接粘到 RTC 框解析，但不会混入策略 payload。
 11. **操作反馈**：每次受控操作弹 **toast**（右下角，约 4.5s 自动消失，只给一行摘要），完整记录进**左下角日志抽屉**（可展开 / 清空）；完整 JSON 回执留在各面板内部，不刷日志。
 12. **数值展示口径（日志 = 网页）**：动作 / qpos 等浮点**统一保留 3 位小数**（`-0.062` 而不是
     `-0.06196591258049011`）。⚠️ **本节的服务端取整随后续控制面 MR 提供**：master 上

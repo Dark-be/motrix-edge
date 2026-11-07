@@ -145,24 +145,21 @@ def test_health_returns_identity_and_version():
     # robots = node 当前绑定（单 adapter 包）；policies = 当前配置选中的策略
     assert body["adapters"]["robots"] == [{"name": "Test Robot", "type": "test_robot"}]
     assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-remote"]
-    # 每个策略携带自己的配置项 schema（公共项 = 推理端点 host/port + 预热门控 warmup_required
-    # + 动作布局 action_layout）
+    # 每个策略携带自己的端点 schema（openpi = host/port；lerobot-remote = endpoint）及公共项。
     by_type = {p["type"]: p for p in body["adapters"]["policies"]}
     assert [item["key"] for item in by_type["openpi"]["config_items"]] == [
         "host",
         "port",
-        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]
     assert [item["key"] for item in by_type["lerobot-remote"]["config_items"]] == [
-        "host",
-        "port",
         "endpoint",
         "warmup_required",
         "action_layout",
+        "task",
         "deployment",
         "semantics",
         "observation_layout",
@@ -1954,14 +1951,12 @@ def test_infers_status_exposes_policy_config():
     assert [item["key"] for item in cfg["items"]] == [
         "host",
         "port",
-        "endpoint",
         "warmup_required",
         "action_layout",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
     assert [item["runtime"] for item in cfg["items"]] == [
-        False,
         False,
         False,
         False,

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from uuid import uuid4
 
 import numpy as np
@@ -65,6 +66,8 @@ OBSERVATION_LAYOUT_QPOS_ERR = "qpos+qpos_err"
 OBSERVATION_LAYOUTS = {OBSERVATION_LAYOUT_QPOS, OBSERVATION_LAYOUT_QPOS_ERR}
 
 DEFAULT_ENDPOINT = "tcp/127.0.0.1:7447"
+_HISTORY_FEATURES_KEY = "__lerobot_remote_history_features__"
+_HISTORY_READY_KEY = "__lerobot_remote_history_ready__"
 
 
 def _normalize_observation_layout(value) -> str:
@@ -97,6 +100,9 @@ class LerobotRemoteClient(BasePolicyClient):
         self._adapter_cameras: list[str] | None = None
         self._camera_map: dict[str, str] = {}
         self._lock = threading.Lock()
+        self._request_lock = threading.RLock()
+        self._history: dict[str, deque[np.ndarray]] = {}
+        self._history_steps = 0
         self._task = str(self.policy_config.get("task") or self.policy_config.get("prompt") or "")
         # 显式相机映射（yaml 的 policy.camera_map：端上相机名 → 服务端特征名）
         raw_map = self.policy_config.get("camera_map") or {}
@@ -108,11 +114,7 @@ class LerobotRemoteClient(BasePolicyClient):
     # -- 配置 ---------------------------------------------------------------
     def _build_config(self) -> RemoteInferenceConfig:
         """从 edge.yml 的 ``policy`` 段构造远程推理配置（会话级，构造即固化）。"""
-        endpoint = self.policy_config.get("endpoint")
-        if not endpoint:
-            host = self.policy_config.get("host") or "127.0.0.1"
-            port = self.policy_config.get("port") or 7447
-            endpoint = f"tcp/{host}:{port}"
+        endpoint = self.policy_config.get("endpoint") or DEFAULT_ENDPOINT
         return RemoteInferenceConfig(
             endpoint=str(endpoint),
             deployment=str(self.policy_config.get("deployment") or ""),
@@ -139,7 +141,14 @@ class LerobotRemoteClient(BasePolicyClient):
         """连接并发现唯一就绪的 deployment（``DESCRIBE`` 查询 = 新协议的握手）。"""
         self.disconnect()
         client = RemoteClient.connect(self._config)
+        if int(getattr(client.capabilities, "history_frames", 1)) > 1 and self._config.encoding != "jpeg":
+            client.close()
+            raise ValueError(
+                "lerobot-remote: history deployments require policy.encoding=jpeg; "
+                "raw multi-frame observations exceed practical Zenoh message bounds"
+            )
         self._client = client
+        self._generation = 0
         self._admitted = False
         self.chunk_seen = False
         self.observed_chunk_len = None
@@ -151,11 +160,15 @@ class LerobotRemoteClient(BasePolicyClient):
         }
 
     def disconnect(self):
-        client, self._client = self._client, None
-        self._admitted = False
-        self.server_metadata = {}
-        if client is not None:
-            client.close()
+        with self._request_lock:
+            client, self._client = self._client, None
+            self._admitted = False
+            self._history.clear()
+            self._history_steps = 0
+            self._generation = 0
+            self.server_metadata = {}
+            if client is not None:
+                client.close()
 
     def bind_adapter(self, action_dim=None, camera_names=None):
         """绑定 adapter 启用的相机名（相机名单一事实来源 = adapter 配置）。"""
@@ -170,6 +183,63 @@ class LerobotRemoteClient(BasePolicyClient):
         if observation is None or not self.connected:
             return
         self._ensure_admitted(observation)
+        if int(getattr(self._client.capabilities, "history_frames", 1)) > 1:
+            # The remote server is already model-warmed. Suppress the generic warmup
+            # chunk request: MEM must first collect a dense, contiguous rollout history.
+            self.chunk_seen = True
+
+    def prepare_observation(self, observation: dict) -> dict:
+        """Capture one dense control tick and attach an aligned MEM history window."""
+        if self._client is None:
+            return observation
+        self._ensure_admitted(observation)
+        caps = self._client.capabilities
+        frames = int(getattr(caps, "history_frames", 1))
+        stride = int(getattr(caps, "history_stride", 1))
+        if frames <= 1:
+            return observation
+        maxlen = (frames - 1) * stride + 1
+        features: dict[str, np.ndarray] = {}
+        self._history_steps += 1
+        state = self._state_values(observation)
+        for spec in caps.features:
+            if spec.kind == "rgb_sequence":
+                _, height, width, _ = spec.shape
+                edge_name = self._camera_map[spec.name]
+                current = resize_with_pad(
+                    to_rgb_uint8(observation[f"{KEY_OBS_IMAGE_PREFIX}{edge_name}"]), height, width
+                )
+            elif spec.kind == "rgb":
+                height, width = spec.shape[:2]
+                edge_name = self._camera_map[spec.name]
+                features[spec.name] = resize_with_pad(
+                    to_rgb_uint8(observation[f"{KEY_OBS_IMAGE_PREFIX}{edge_name}"]), height, width
+                )
+                continue
+            elif len(spec.shape) == 2:
+                current = state.astype(np.float32, copy=False)
+            else:
+                features[spec.name] = state.astype(np.float32, copy=False)
+                continue
+            queue = self._history.get(spec.name)
+            if queue is None or queue.maxlen != maxlen:
+                queue = deque(maxlen=maxlen)
+                self._history[spec.name] = queue
+            snapshot = np.array(current, copy=True, order="C")
+            if not queue:
+                queue.extend([snapshot] * maxlen)
+            else:
+                queue.append(snapshot)
+            ages = range((frames - 1) * stride, -1, -stride)
+            features[spec.name] = np.stack([queue[-1 - age] for age in ages], axis=0)
+        prepared = dict(observation)
+        prepared[_HISTORY_FEATURES_KEY] = features
+        prepared[_HISTORY_READY_KEY] = self._history_steps >= maxlen
+        return prepared
+
+    def observation_ready(self, observation: dict) -> bool:
+        """Hold MEM inference until every sampled history slot is a real control tick."""
+        return bool(observation.get(_HISTORY_READY_KEY, True))
 
     # -- 推理 ---------------------------------------------------------------
     def infer_chunk(self, observation, index: int | None = None) -> ActionChunk | None:
@@ -177,6 +247,11 @@ class LerobotRemoteClient(BasePolicyClient):
         if self._client is None:
             raise RuntimeError("lerobot-remote: not connected (connect() first)")
         self._ensure_admitted(observation)
+        history_required = int(getattr(self._client.capabilities, "history_frames", 1)) > 1
+        if history_required and _HISTORY_FEATURES_KEY not in observation:
+            observation = self.prepare_observation(observation)
+        if history_required and not observation.get(_HISTORY_READY_KEY, False):
+            return None
         step = int(index) if index is not None else 0
 
         snapshot = ObservationSnapshot(
@@ -201,7 +276,8 @@ class LerobotRemoteClient(BasePolicyClient):
             delay=0,
             submitted_at=time.monotonic(),
         )
-        result = self._client.infer(request)
+        with self._request_lock:
+            result = self._client.infer(request)
         actions = result.canonical_actions.detach().cpu().numpy().astype(np.float32, copy=False)
         chunk = ActionChunk(actions=actions, start_index=step)
         self._note_chunk_len(chunk)
@@ -209,6 +285,16 @@ class LerobotRemoteClient(BasePolicyClient):
 
     # -- 内部 ---------------------------------------------------------------
     _generation = 0
+
+    def reset(self):
+        """Clear local MEM history and reset the admitted server policy generation."""
+        self._history.clear()
+        self._history_steps = 0
+        with self._request_lock:
+            if self._client is None or not self._admitted:
+                return
+            self._generation += 1
+            self._client.control("reset", self._generation)
 
     def _ensure_admitted(self, observation) -> None:
         """首次推理 / 布局变化时完成 admission（校验并占用独占会话）。"""
@@ -237,7 +323,7 @@ class LerobotRemoteClient(BasePolicyClient):
             ]
         mapping: dict[str, str] = {}
         for spec in caps.features:
-            if spec.kind != "rgb":
+            if spec.kind not in {"rgb", "rgb_sequence"}:
                 continue
             explicit = next(
                 (edge for edge, feature_name in self._explicit_camera_map.items() if feature_name == spec.name),
@@ -278,6 +364,15 @@ class LerobotRemoteClient(BasePolicyClient):
     def _observation_features(self, observation) -> dict[str, np.ndarray]:
         """按服务端声明的特征名组装观测（state 向量 + 端侧 letterbox 到声明尺寸的 RGB）。"""
         caps = self._client.capabilities
+        history = observation.get(_HISTORY_FEATURES_KEY)
+        if history is not None:
+            expected = {spec.name for spec in caps.features}
+            if set(history) != expected:
+                raise ValueError(
+                    f"lerobot-remote: history feature names differ from server contract: "
+                    f"{sorted(history)} != {sorted(expected)}"
+                )
+            return {name: np.asarray(value) for name, value in history.items()}
         state = self._state_values(observation)
         features: dict[str, np.ndarray] = {}
         for spec in caps.features:
@@ -285,6 +380,8 @@ class LerobotRemoteClient(BasePolicyClient):
                 height, width = int(spec.shape[0]), int(spec.shape[1])
                 image = observation[f"{KEY_OBS_IMAGE_PREFIX}{self._camera_map[spec.name]}"]
                 features[spec.name] = resize_with_pad(to_rgb_uint8(image), height, width)
+            elif spec.kind == "rgb_sequence":
+                raise ValueError("lerobot-remote: MEM deployment requires prepare_observation() history")
             else:
                 expected = int(np.prod(spec.shape)) if spec.shape else state.size
                 if state.size != expected:

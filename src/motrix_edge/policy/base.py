@@ -81,6 +81,19 @@ class BasePolicyClient:
         """
         pass
 
+    def prepare_observation(self, observation: dict) -> dict:
+        """Capture per-control-tick policy state and return an inference snapshot.
+
+        Stateless policies return the observation unchanged. History-aware clients
+        override this hook so RTC requests carry a snapshot aligned with the tick that
+        scheduled them, rather than sampling mutable history later in a worker thread.
+        """
+        return observation
+
+    def observation_ready(self, observation: dict) -> bool:
+        """Whether a prepared observation may be submitted to the inference engine."""
+        return True
+
     def bind_adapter(self, action_dim=None, camera_names=None):
         """绑定推理时机器人适配器启用的布局（启用臂 qpos 维数 + 启用相机名）。
 

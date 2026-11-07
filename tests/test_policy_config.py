@@ -38,6 +38,11 @@ _ITEMS = [
 def schema_policy(monkeypatch):
     """注入一个临时策略（清单 + 注册表都要有，才能过类型校验）。"""
     monkeypatch.setitem(policy_pkg.POLICY_CONFIG_ITEMS, _TYPE, [dict(item) for item in _ITEMS])
+    monkeypatch.setitem(
+        policy_pkg.POLICY_ENDPOINT_CONFIG_ITEMS,
+        _TYPE,
+        [dict(item) for item in policy_pkg.POLICY_ENDPOINT_CONFIG_ITEMS["openpi"]],
+    )
     monkeypatch.setitem(policy_pkg.POLICY_REGISTRY, _TYPE, ("motrix_edge.policy.openpi.client", "OpenPIClient"))
     return _TYPE
 
@@ -47,19 +52,17 @@ def _cfg(**policy):
 
 
 def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
-    """清单顺序 = 端点项（host / port / endpoint）+ 公共项（warmup_required / action_layout）+ 策略自身项。"""
+    """清单顺序 = 本策略端点项 + 公共项（warmup_required / action_layout）+ 策略自身项。"""
     keys = [item["key"] for item in policy_config_items(schema_policy)]
-    assert keys == ["host", "port", "endpoint", "warmup_required", "action_layout", "model", "device"]
+    assert keys == ["host", "port", "warmup_required", "action_layout", "model", "device"]
 
 
-def test_endpoint_items_lead_every_policy_schema():
-    """端点项（host / port / endpoint）排在**每个**注册策略清单的最前几项（策略都连 TCP 端点）。"""
-    for policy_type in policy_pkg.POLICY_REGISTRY:
-        assert [item["key"] for item in policy_config_items(policy_type)][:3] == [
-            "host",
-            "port",
-            "endpoint",
-        ]
+def test_each_policy_exposes_only_its_own_endpoint_shape():
+    """OpenPI 使用 host/port；Lerobot Remote 使用单个 Zenoh endpoint，互不暴露兼容字段。"""
+    openpi = [item["key"] for item in policy_config_items("openpi") if item.get("group") == "endpoint"]
+    remote = [item["key"] for item in policy_config_items("lerobot-remote") if item.get("group") == "endpoint"]
+    assert openpi == ["host", "port"]
+    assert remote == ["endpoint"]
 
 
 def test_runtime_keys_only_include_hot_reloadable(schema_policy):

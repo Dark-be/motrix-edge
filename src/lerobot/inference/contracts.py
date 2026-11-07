@@ -67,6 +67,8 @@ class PolicyCapabilities:
     retains_session_state: bool = True
     action_representation: str = "canonical"
     model_action_dim: int | None = None
+    history_frames: int = 1
+    history_stride: int = 1
 
     def __post_init__(self) -> None:
         """Validate lengths, interval, and feature identity."""
@@ -80,6 +82,8 @@ class PolicyCapabilities:
             type(self.model_action_dim) is not int or self.model_action_dim <= 0
         ):
             raise ValueError("Model action dimension must be a positive integer.")
+        if self.history_frames < 1 or self.history_stride < 1:
+            raise ValueError("History frames and stride must be positive integers.")
 
 
 @dataclass(frozen=True)

@@ -493,6 +493,7 @@ class InferSession(PolicyConfigFeature, BaseSession):
         enabled, mode = super()._set_teleop(cmd, state=state)
         if enabled:
             self.rtc.reset()
+            self.policy.reset()
         return enabled, mode
 
     def _dispatch_session_cmd(self, name, cmd) -> bool:
@@ -532,7 +533,12 @@ class InferSession(PolicyConfigFeature, BaseSession):
                 cmd, CommandResult(status="rejected", error="observation not ready", code=ErrorCode.UNAVAILABLE)
             )
             return
-        action = self.engine.step(obs)  # 引擎（RtcEngine）：必要时登记预取（后台线程）→ 取本步动作
+        prepare_observation = getattr(self.policy, "prepare_observation", None)
+        if callable(prepare_observation):
+            obs = prepare_observation(obs)
+        observation_ready = getattr(self.policy, "observation_ready", None)
+        ready = not callable(observation_ready) or observation_ready(obs)
+        action = self.engine.step(obs) if ready else None
         if action is not None and deadline_exceeded(cmd):  # 调用方已放弃等回执 → 不下发动作
             self._dropped_actions += 1
             debug_print(
@@ -644,6 +650,7 @@ class InferSession(PolicyConfigFeature, BaseSession):
                 # 暂停即丢弃未执行的动作块：恢复时块可能已经过时（尤其中间插了人工接管——
                 # 机械臂已被带离原轨迹，旧块会把动作往回拉）；下一块用**当时**观测现算。
                 self.rtc.reset()
+                self.policy.reset()
                 self._reply(cmd, ok_result(state="ready", continuous=False))
                 debug_print(self.name, "Continuous rollout stopped by request (session kept).", "INFO")
                 return None
@@ -670,6 +677,15 @@ class InferSession(PolicyConfigFeature, BaseSession):
             self.reject_not_applicable(cmd, "during continuous rollout")
             obs = self.adapter.observe()
             if obs is None:  # 观测未就绪：按步进间隔轮询
+                time.sleep(self.step_interval)
+                continue
+            # MEM 历史必须在每个稠密控制拍采样，而不是只在 RTC 需要新动作块时采样。
+            # 否则 memory_stride 计数的会是动作块请求，会把本应约 1s 的观测间隔放大到数十秒。
+            prepare_observation = getattr(self.policy, "prepare_observation", None)
+            if callable(prepare_observation):
+                obs = prepare_observation(obs)
+            observation_ready = getattr(self.policy, "observation_ready", None)
+            if callable(observation_ready) and not observation_ready(obs):
                 time.sleep(self.step_interval)
                 continue
             action = self.engine.step(obs)  # 引擎（RtcEngine）：必要时登记预取（后台线程）→ 取本步动作
