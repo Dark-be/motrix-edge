@@ -102,7 +102,7 @@ class SinglePiperRobot(BaseRobot):
         """把目标 action 下发到 Follower 从臂（限速已在 step() 内完成）。
 
         布局：6 关节 + 夹爪（对齐 QPOS=7）。
-        set_joint 内部会 clip 关节角度（原地修改），故传 copy 避免改动 self.action。
+        set_joint 内部会复制为 float64 后 clip，不会原地修改 self.action；此处保留独立切片以明确边界。
         """
         self.controllers["follower"].set_joint(np.asarray(action[:6], dtype=np.float64).copy())
         self.controllers["follower"].set_gripper(float(action[6]))

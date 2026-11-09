@@ -1,0 +1,6 @@
+Source: https://github.com/agilexrobotics/agx_arm_urdf.git
+Version: 680fa925cd00db7e2628563d2edc5540963045de
+Scope: piper/urdf/piper_description.urdf and piper/meshes/*.stl.
+Local changes: URDF joint frames, limits and complete inertial tensors converted to MJCF; relative
+mesh paths and position actuators added. Joint2/joint3 frames were cross-checked against the official
+piper_sdk firmware >= 1.6-6 MDH defaults.

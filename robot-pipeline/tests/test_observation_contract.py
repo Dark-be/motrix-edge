@@ -109,3 +109,21 @@ def test_step_supports_single_arm_layout():
     robot.step()
 
     np.testing.assert_allclose(robot.applied, [0.1] * 6 + [0.5])
+
+
+def test_target_action_rejects_non_finite_values_without_poisoning_control_state():
+    robot = _SingleArmRobot()
+    valid = np.array([0.2] * 6 + [0.5])
+    robot.set_target_action(valid)
+
+    for invalid in (np.full(robot.QPOS, np.nan), np.full(robot.QPOS, np.inf)):
+        try:
+            robot.set_target_action(invalid)
+        except ValueError as exc:
+            assert "finite" in str(exc)
+        else:
+            raise AssertionError("non-finite target_action must be rejected")
+
+    np.testing.assert_array_equal(robot.target_action, valid)
+    robot.step()
+    assert np.all(np.isfinite(robot.applied))

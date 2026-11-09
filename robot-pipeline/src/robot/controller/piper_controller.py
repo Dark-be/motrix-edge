@@ -19,8 +19,18 @@ import numpy as np
 from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 from utils.data_handler import debug_print, set_log_level
 
+from robot.kinematics import IkResult, PiperKinematics, pose6_to_pose7, pose7_to_pose6, solve_ik
+
 from .arm_controller import ArmController
 
+# 单个共享 MotrixSim MJCF 模型：位姿→关节解算、关节→位姿正解和下发前裁切共用它。
+# SceneData 按线程隔离，因此双臂的观察线程与控制线程不会共享可变仿真状态。
+_KINEMATICS = PiperKinematics()
+
+# MIT 位置环缺省参数：**只有 P/D**（``kp`` / ``kd``），``t_ref = 0`` = **无力矩前馈**、
+# ``vel_ref = 0`` ——即不补重力 / 科氏 / 摩擦，也不做力控；所以关节会停在
+# ``τ_gravity / kp`` 附近的平衡点（“设定什么关节就是什么关节”并不成立）。上位任何
+# 「到位」判定（edge 的 ``settle`` / RPent 的 ``reached``）都得按**实测稳态误差**设容差。
 MIT_CTRL_CFG = [
     {"vel_ref": 0.0, "kp": 6.0, "kd": 0.8, "t_ref": 0.0},
     {"vel_ref": 0.0, "kp": 4.0, "kd": 1.0, "t_ref": 0.0},
@@ -47,13 +57,37 @@ def _require_robot(method):
 
 
 class PiperController(ArmController):
+    """Piper 单臂控制器：**关节 / 夹爪读写 + 限位把关**；运动学是**无状态静态函数**。
+
+    对外只有三类：
+
+    - ``get_joint`` / ``set_joint``：唯一的一条关节通路（``set_joint`` 只给 MIT 的 ``p_des``，
+      ``kp`` / ``kd`` / ``t_ff`` 用 ``MIT_CTRL_CFG`` 缺省值）；
+    - ``get_gripper`` / ``set_gripper``：夹爪；
+    - ``joint_to_pose(q)`` / ``pose_to_joint(pose, seed)``：**静态**运动学转换——robot 层把
+      ``pose`` 目标解成关节角后，与 ``joint`` 目标走同一条控制通路（解算不进控制拍）。
+
+    **限位只有一份**：上述静态转换与 ``set_joint`` 的裁切共用 ``_KINEMATICS.joint_limits``
+    （= ``PIPER_JOINT_LIMITS``），无需任何注入；SDK 侧 ``set_joint_limits_enabled(True)``
+    对越界值会报错并打印，先裁掉就不给它报错的机会。
+
+    **保留 SDK 位姿兼容接口**：``get_position()`` 继续返回 ``get_flange_pose()``；``set_pose()`` /
+    ``set_position()`` 继续把米 / 弧度位姿交给 ``move_p()``。它们供既有调用方与现场标定使用；
+    新运行时位姿观测 / 目标则用上述同源 FK / IK，不通过 ``move_p`` 下发。
+
+    **无力矩前馈**：``MIT_CTRL_CFG`` 只有 P/D（``t_ref = 0``、``vel_ref = 0``），不补重力 /
+    科氏 / 摩擦，也不做力控——位姿 / 关节目标都会停在 ``τ_gravity / kp`` 附近的平衡点，
+    上位「到位」判定（edge 的 ``settle`` / RPent 的 ``reached``）必须按实测稳态误差设容差。
+    """
+
     def __init__(self, name="piper_controller"):
         super().__init__(name)
         self.robot = None
         self.gripper = None
         self.port: str = "can0"
-        self.ctrl_mode: str = "mit"  # 控制模式，支持 "joint" "mit" 或 "pose"
+        self.ctrl_mode: str = "mit"  # 下发通路：``mit``（缺省，力矩环）或 ``joint``（SDK 位置速度模式）
         self.role: str = "follower"  # 角色，支持 "leader" 或 "follower"
+        self._limit_warned: tuple[int, ...] | None = None  # 限位告警去重（同一组超限关节只打一条）
 
     def connect(self, port: str = "can0", ctrl_mode: str = "mit", role: str = "follower", firmware: str = PiperFW.V188):
         self.port = port
@@ -142,11 +176,63 @@ class PiperController(ArmController):
 
     @_require_robot
     def get_position(self):
+        """读取 SDK 法兰位姿（米 / 弧度；兼容 / 标定接口；运行时应使用同源 FK）。"""
         flange_pose = self.robot.get_flange_pose()
         if flange_pose is None:
             debug_print(self.name, "Failed to get flange pose")
             return None
         return np.array(flange_pose.msg)
+
+    # ---- 运动学转换（**静态纯函数**，无实例状态；robot 层调用）------------------------
+    @staticmethod
+    def joint_to_pose(q: np.ndarray) -> np.ndarray:
+        """正解：关节角 → 末端位姿 ``[x, y, z, roll, pitch, yaw]``（米 / 弧度）。
+
+        与 ``pose_to_joint()`` 共用同一个运动学模型，所以「读到的位姿」与「下发的目标」同系可闭合。
+        """
+        values = np.asarray(q, dtype=np.float64).reshape(-1)
+        if values.shape != (_KINEMATICS.DOF,) or not np.all(np.isfinite(values)):
+            raise ValueError("joint vector must contain exactly six finite values")
+        return pose7_to_pose6(_KINEMATICS.pose(values))
+
+    @staticmethod
+    def pose_to_joint(
+        pose: np.ndarray,
+        seed: np.ndarray | None = None,
+        fallback_seeds: tuple[np.ndarray, ...] = (),
+        **ik_config,
+    ) -> IkResult:
+        """位姿 → 关节目标（**只解算、不下发**）：调用方拿 ``IkResult.q`` 去写控制目标，
+        之后逐拍 ``set_joint()``——位姿目标与关节目标因此在控制链路上走**同一条**通路，
+        且解算只发生在这个调用里（不进控制拍）。
+
+        解算失败不抛错（返回 ``ok=False`` + 原因，由调用方决定拒绝还是保持原目标）；
+        ``seed`` 缺省零位形（离当前位形越近，解越“就近”），``ik_config`` 可覆盖
+        ``solve_ik`` 的缺省参数（``pos_tol`` / ``rot_tol`` / ``max_iters`` / ``step_size`` / ``damping``）。
+        """
+        start = np.zeros(_KINEMATICS.DOF) if seed is None else seed
+        try:
+            target = pose6_to_pose7(pose)
+        except (TypeError, ValueError, OverflowError):
+            return IkResult(False, None, float("inf"), float("inf"), 0, "bad_input")
+        return solve_ik(_KINEMATICS, target, start, fallback_seeds=fallback_seeds, **ik_config)
+
+    @_require_robot
+    def set_pose(self, pose: np.ndarray) -> None:
+        """兼容旧接口：用 SDK ``move_p`` 下发法兰位姿（米 / 弧度）。
+
+        新运行时应先用 ``pose_to_joint()`` 解算，再走 ``set_joint()``；该包装仅为不破坏既有
+        控制器调用方。SDK 自己负责位姿范围校验与运动模式切换。
+        """
+        values = np.asarray(pose, dtype=np.float64).reshape(-1)
+        if values.size != 6 or not np.all(np.isfinite(values)):
+            raise ValueError(f"{self.name}: pose must contain six finite values in metres/radians")
+        self.robot.move_p(values.tolist())
+        debug_print(self.name, f"set pose to {values}", "DEBUG")
+
+    def set_position(self, position: np.ndarray) -> None:
+        """实现 ``ArmController`` 统一接口；行为与历史 ``set_pose()`` 相同。"""
+        self.set_pose(position)
 
     @_require_robot
     def get_gripper(self):
@@ -162,35 +248,78 @@ class PiperController(ArmController):
         return np.clip(gripper_state.msg.value * 10, 0, 1)
 
     @_require_robot
-    def set_joint(self, joint: np.ndarray):
+    def set_joint(self, joint: np.ndarray, torque_ff: np.ndarray | None = None):
+        """下发关节命令（MIT：``p_des`` + 固定 ``kp`` / ``kd``）。
+
+        ``torque_ff`` = 可选的**前馈力矩**（6 维，Nm）：不传则用 MIT 配置的 ``t_ref``（当前为 0）——
+        本控制器不自己算力矩（位置环的 ``kp`` / ``kd`` 抵抗外部作用）。
+        新运行时关节链路与 ``move_p`` 无关（``move_mit`` 与 ``move_j`` / ``move_p`` 是 SDK 的互斥
+        运动模式，不应与仅供旧调用方使用的 ``set_pose()`` 兼容入口交替下发）。
+
+        **下发前逐关节裁到软限位**（``_KINEMATICS.joint_limits``，与解算/正解同一份表）：SDK 的
+        ``set_joint_limits_enabled(True)`` 对越界值会报错并打印，先裁切就不给它报错的机会；
+        确实裁到时打一条 WARNING（同一组超限关节只打一条，30Hz 调用不会刷屏）。
+        关节与前馈力矩任一值为 NaN / Inf 时整条拒绝，绝不把非有限数交给硬件 SDK；
+        ``torque_ff`` 仅在 MIT 模式有效，其他控制模式传入时显式拒绝。
+        输入会先规范化为 float64 副本，避免整型动作在软限位裁切时截断浮点边界。
+        """
+        joint = np.asarray(joint, dtype=np.float64).reshape(-1)
         if joint.shape[0] != 6:
             debug_print(self.name, "set_joint() input size should be 6", "ERROR")
+            return
+        if not np.all(np.isfinite(joint)):
+            raise ValueError(f"{self.name}: refusing non-finite joint target")
+        if torque_ff is not None:
+            torque_ff = np.asarray(torque_ff, dtype=np.float64).reshape(-1)
+            if torque_ff.shape[0] != 6:
+                debug_print(self.name, "set_joint() torque_ff size should be 6", "ERROR")
+                return
+            if not np.all(np.isfinite(torque_ff)):
+                raise ValueError(f"{self.name}: refusing non-finite torque feed-forward")
+            if self.ctrl_mode != "mit":
+                raise ValueError(f"{self.name}: torque feed-forward is only supported in mit mode")
+        # 显式限位判断（越界值一帧都不下发给 SDK）
+        limits = _KINEMATICS.joint_limits
+        clipped = np.clip(joint, limits[:, 0], limits[:, 1])
+        if not np.array_equal(clipped, joint):
+            self._warn_joint_limits(joint, clipped)
+            joint = clipped
         else:
-            # 限制关节角度范围，防止机械臂损坏
-            joint[2] = np.clip(joint[2], -2.96706, 0.0)
+            self._limit_warned = None  # 回到限位内：下次超限重新告警一条
 
-            if self.ctrl_mode == "mit":
-                for i in range(6):
-                    self.robot.move_mit(
-                        joint_index=i + 1,
-                        p_des=joint[i],
-                        v_des=MIT_CTRL_CFG[i]["vel_ref"],
-                        kp=MIT_CTRL_CFG[i]["kp"],
-                        kd=MIT_CTRL_CFG[i]["kd"],
-                        t_ff=MIT_CTRL_CFG[i]["t_ref"],
-                    )
+        if self.ctrl_mode == "mit":
+            for i in range(6):
+                self.robot.move_mit(
+                    joint_index=i + 1,
+                    p_des=joint[i],
+                    v_des=MIT_CTRL_CFG[i]["vel_ref"],
+                    kp=MIT_CTRL_CFG[i]["kp"],
+                    kd=MIT_CTRL_CFG[i]["kd"],
+                    t_ff=MIT_CTRL_CFG[i]["t_ref"] if torque_ff is None else float(torque_ff[i]),
+                )
 
-            elif self.ctrl_mode == "joint":
-                # pose = self.robot.fk(joint.tolist())
-                # self.robot.move_p(pose)
-                self.robot.move_j(joint.tolist())
+        elif self.ctrl_mode == "joint":
+            self.robot.move_j(joint.tolist())
 
-            debug_print(self.name, f"set joint to {joint}", "DEBUG")
+        debug_print(self.name, f"set joint to {joint}", "DEBUG")
 
-    @_require_robot
-    def set_pose(self, pose: np.ndarray):
-        self.robot.move_p(pose.tolist())
-        debug_print(self.name, f"set pose to {pose}", "DEBUG")
+    def _warn_joint_limits(self, requested: np.ndarray, clipped: np.ndarray) -> None:
+        """关节目标超出软限位：告警一条（**同一组超限关节只打一条**，避免 30Hz 刷屏）。
+
+        日志里同时给原始值与裁剪后的值——现场一眼能看出是「模型给的目标越界」而不是「机械臂没动」。
+        """
+        over = tuple(index for index in range(6) if requested[index] != clipped[index])
+        if over == self._limit_warned:
+            return
+        self._limit_warned = over
+        names = [f"j{index + 1}" for index in over]
+        debug_print(
+            self.name,
+            f"joint target clipped to limits on {names}: "
+            f"{np.round(np.asarray(requested, dtype=np.float64), 4).tolist()} -> "
+            f"{np.round(np.asarray(clipped, dtype=np.float64), 4).tolist()}",
+            "WARNING",
+        )
 
     @_require_robot
     def set_gripper(self, gripper: float):

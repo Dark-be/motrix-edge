@@ -16,6 +16,7 @@
 -   [Edge Web Console（前端）实施计划](./motrix_edge_web_console_plan.md)
 -   [ACT 走 Lerobot gRPC AsyncInference + transport 通用化实施计划](./motrix_edge_policy_act_grpc_plan.md)
 -   [robot-pipeline 控制 / 观测双线程实施计划](./robot_pipeline_control_thread_plan.md)
+-   [robot-pipeline 笛卡尔动作栈实施计划](./robot_pipeline_cartesian_stack_plan.md)
 -   [RTC 过渡策略（权重过渡 / 连续过渡）实施计划](./motrix_edge_rtc_transition_plan.md)
 
 <!-- 新增计划文档后在此登记标题链接。 -->

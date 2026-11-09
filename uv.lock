@@ -8,6 +8,15 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "absl-py"
+version = "2.1.0"
+source = { registry = "http://pypi.mp/simple" }
+sdist = { url = "http://pypi.mp/packages/absl-py/2.1.0/absl-py-2.1.0.tar.gz", hash = "sha256:7820790efbb316739cde8b4e19357243fc3608a152024288513dd968d7d959ff" }
+wheels = [
+    { url = "http://pypi.mp/packages/absl-py/2.1.0/absl_py-2.1.0-py3-none-any.whl", hash = "sha256:526a04eadab8b4ee719ce68f204172ead1027549089702d99b9059f129ff1308" },
+]
+
+[[package]]
 name = "aioice"
 version = "0.10.2"
 source = { registry = "http://pypi.mp/simple" }
@@ -422,7 +431,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "http://pypi.mp/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "http://pypi.mp/packages/exceptiongroup/1.3.1/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219" }
 wheels = [
@@ -809,6 +818,7 @@ dependencies = [
 dev = [
     { name = "grpcio-tools" },
     { name = "httpx" },
+    { name = "motrixsim" },
     { name = "protobuf" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -835,10 +845,51 @@ requires-dist = [
 dev = [
     { name = "grpcio-tools", specifier = ">=1.62.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "motrixsim", specifier = "==0.10.1" },
     { name = "protobuf", specifier = ">=4.25" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+]
+
+[[package]]
+name = "motrixsim"
+version = "0.10.1"
+source = { registry = "http://pypi.mp/simple" }
+dependencies = [
+    { name = "motrixsim-core" },
+]
+wheels = [
+    { url = "http://pypi.mp/packages/motrixsim/0.10.1/motrixsim-0.10.1-py3-none-any.whl", hash = "sha256:9c27362c40b9a72c3e7ac80f556cc0effd4c30ab3afb93764c81e1f3745402b0" },
+]
+
+[[package]]
+name = "motrixsim-core"
+version = "0.10.1+pro"
+source = { registry = "http://pypi.mp/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "numpy", version = "2.2.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "http://pypi.mp/simple" }, marker = "python_full_version >= '3.12'" },
+]
+wheels = [
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:acf21beebb740a7fa2fe54f39043da36bd97a8a41665dd5b79cfb2c534e41d7d" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:647297cd33419f5cdb0e11a77b99ec3bbe53aa4772d694a9e24af76e8a1d9d40" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6bc2e0201e5c58c19fdd90f0b1c18d40eca7ecd701bcc3cafd27dad0a51bc78b" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp310-cp310-win_amd64.whl", hash = "sha256:ddf08d7182783150b15ad9fa9d965db97b425585eddee74e35d070cd5113ac30" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:8dde4334ce167104bf4cbb95d51d2920b691c32b5663934ca19e8e3c8780033d" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:396f9416749ad4db54b679e180b147f494904d8a9fab1e0aeeed342091e6c6b7" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f4df882d6ed91f63ef13c4ce40991f6f9320847289af2f7a4f57d91a36d54869" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp311-cp311-win_amd64.whl", hash = "sha256:a0e9eda950996deb4d7eaa08424bd874430c500122036907ac5e095d66649ad3" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:55d7966e863f05b5e727eba8760ceeea5ce57506dda9ee336bed61022985b7ef" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:83e6d1e1f52b0a3317b0c3492ebca97ae61af65ab202a30aab1a9f14e360d43d" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:072394f936e9e8b4d74ea193114344edaf9716eabc1e83aad97098bdd652a234" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp312-cp312-win_amd64.whl", hash = "sha256:80e60e106a01d1b923b3260cfed27a8f67457406c6a1dc93df63f9df890a3f83" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e0de0c0108cefa639fa0b4aa3a9906f6d805e6ec89d102b60e8fffd829c23611" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7405c1d09189bba97cb18f1003757255a814f4b0097af8536467acc68f3386e0" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ab9a0218ec762b402a5be2b85ae0db7c849f62325f3ce8d8fc7ab81f8c6b290a" },
+    { url = "http://pypi.mp/packages/motrixsim-core/0.10.1+pro/motrixsim_core-0.10.1+pro-cp313-cp313-win_amd64.whl", hash = "sha256:b1858db3638e3bc9bd899f997fed6d71d076da7f47332b039c817d6a728a33a2" },
 ]
 
 [[package]]

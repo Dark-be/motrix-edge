@@ -184,8 +184,15 @@ class BaseRobot:
         """设置目标动作（绝对值）：step() 每帧把 action 朝 target_action 限速移动。
 
         增量（人工接管）写入 target 请用 ``set_target_action_delta()``（锚点 + 增量）。
+        NaN / Inf 会整条拒绝并抛出 ``ValueError``，既有目标保持不变，避免污染控制状态。
         """
-        self.target_action = None if target_action is None else np.asarray(target_action, dtype=np.float64)
+        if target_action is None:
+            self.target_action = None
+            return
+        values = np.asarray(target_action, dtype=np.float64)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("target_action must contain only finite values")
+        self.target_action = values
 
     # ---- 遥操作（模式 / 锚点；adapter 通讯控制中暂时均为 False）-------------------------
     def enable_teleop(self, mode: str = TELEOP_MODE_ABSOLUTE) -> bool:
@@ -379,9 +386,9 @@ class BaseRobot:
         """读取当前帧**末端位姿**（扁平 ``POSE`` 维：各臂 ``xyz + rpy``，顺序同 qpos 的臂布局）。
 
         缺省返回 ``None`` = **本机器人不提供位姿观测**：共享内存布局保持 v2（``pose_dim = 0``），
-        下游（adapter / 预览 / 笛卡尔策略）因此拿不到位姿。子类按硬件能力实现——真机读法兰位姿，
-        模拟机器人用「手搓 FK」从关节派生。``qpos`` 为**同一拍**已采样的关节状态（None → 自行采样），
-        供「位姿由关节派生」的实现保持两者严格一致。
+        下游（adapter / 预览 / 笛卡尔策略）因此拿不到位姿。后续子类接入时应从 ``qpos`` 经各自运动学
+        后端派生；Piper 必须使用与 IK 同源的 MotrixSim FK，SDK 法兰位姿只供兼容读取和现场标定。
+        ``qpos`` 为**同一拍**已采样的关节状态（None → 自行采样），保证关节与位姿观测严格一致。
         """
         return None
 

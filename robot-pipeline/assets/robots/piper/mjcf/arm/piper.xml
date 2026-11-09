@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AgileX PiPER model derived from the latest official agx_arm_urdf model. Its joint
+    frames match the firmware >= 1.6-6 defaults in the official piper_sdk kinematics.
+    Resource paths are relative to this model entry. See ../../README.md for provenance.
+-->
+<mujoco model="piper">
+    <compiler angle="radian" />
+    <size njmax="500" nconmax="100" />
+    <asset>
+        <mesh name="base_link" file="resources/src/piper_description/meshes/base_link.STL" />
+        <mesh name="link1" file="resources/src/piper_description/meshes/link1.STL" />
+        <mesh name="link2" file="resources/src/piper_description/meshes/link2.STL" />
+        <mesh name="link3" file="resources/src/piper_description/meshes/link3.STL" />
+        <mesh name="link4" file="resources/src/piper_description/meshes/link4.STL" />
+        <mesh name="link5" file="resources/src/piper_description/meshes/link5.STL" />
+        <mesh name="link6" file="resources/src/piper_description/meshes/link6.STL" />
+    </asset>
+    <worldbody>
+        <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="base_link" />
+        <body name="link1" pos="0 0 0.123">
+            <inertial pos="0.00032 -0.00041 -0.00348" mass="0.71" fullinertia="0.00050027 0.00040879 0.00045802 0.00000078 0.00000626 0.00000462" />
+            <joint name="joint1" pos="0 0 0" axis="0 0 1" limited="true" range="-2.6179938 2.6179938" damping="500"/>
+            <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="link1" />
+            <body name="link2" pos="0 0 0" quat="0.047970944898 -0.047970944898 -0.705477702302 -0.705477702302">
+                <inertial pos="0.21852 -0.00861 0.00126" mass="1.16" fullinertia="0.00111915 0.06763251 0.067559 0.00182916 0.00019233 0.00000767" />
+                <joint name="joint2" pos="0 0 0" axis="0 0 1" limited="true" range="0 3.1415926" damping="5"/>
+                <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="link2" />
+                <body name="link3" pos="0.28503 0 0" quat="0.624015988261 0 0 -0.781411572985">
+                    <inertial pos="-0.01999 -0.14808 -0.00053" mass="0.5" fullinertia="0.01347608 0.00046377 0.01363321 0.00161034 0.00000066 0.00000162" />
+                    <joint name="joint3" pos="0 0 0" axis="0 0 1" limited="true" range="-2.9670597 0" damping="20"/>
+                    <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="link3" />
+                    <body name="link4" pos="-0.02198 -0.25075 0" quat="0.707106781187 0.707106781187 0 0">
+                        <inertial pos="0.00013 -0.00076 -0.00394" mass="0.38" fullinertia="0.00017844 0.00018914 0.00014613 0.00000062 0.00000067 0.00000408" />
+                        <joint name="joint4" pos="0 0 0" axis="0 0 1" limited="true" range="-1.7453292 1.7453292" damping="5"/>
+                        <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="link4" />
+                        <body name="link5" pos="0 0 0" quat="0.707106781187 -0.707106781187 0 0">
+                            <inertial pos="0.00018 -0.06104 -0.00227" mass="0.383" fullinertia="0.00172318 0.00017936 0.00171172 0.00000259 0.00000010 0.00000990" />
+                            <joint name="joint5" pos="0 0 0" axis="0 0 1" limited="true" range="-1.2217304 1.2217304" damping="5"/>
+                            <geom type="mesh" rgba="0.792157 0.819608 0.933333 1" mesh="link5" />
+                            <body name="link6" pos="8.8259e-05 -0.091 0" quat="0.707106781187 0.707106781187 0 0">
+                                <inertial pos="0.00134940815 0 -0.00344975303" mass="0.01655408133" fullinertia="0.00000152476803967 0.00000151721319881 0.00000284541364481 0 0.00000010017156778 0" />
+                                <joint name="joint6" pos="0 0 0" axis="0 0 1" limited="true" range="-2.9670597 2.9670597" damping="5"/>
+                                <geom type="mesh" rgba="0.898039 0.917647 0.929412 1" mesh="link6" />
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    <actuator>
+        <position name="joint1" ctrllimited="true" ctrlrange="-2.6179938 2.6179938" joint="joint1" kp="10000" user="1" forcelimited="false"/>
+        <position name="joint2" ctrllimited="true" ctrlrange="0 3.1415926" joint="joint2" kp="2000" user="1" forcelimited="false"/>
+        <position name="joint3" ctrllimited="true" ctrlrange="-2.9670597 0" joint="joint3" kp="2000" user="1" forcelimited="false"/>
+        <position name="joint4" ctrllimited="true" ctrlrange="-1.7453292 1.7453292" joint="joint4" kp="500" user="1" forcelimited="false"/>
+        <position name="joint5" ctrllimited="true" ctrlrange="-1.2217304 1.2217304" joint="joint5" kp="200" user="1" forcelimited="false"/>
+        <position name="joint6" ctrllimited="true" ctrlrange="-2.9670597 2.9670597" joint="joint6" kp="200" user="1" forcelimited="false"/>
+    </actuator>
+</mujoco>

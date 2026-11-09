@@ -152,7 +152,7 @@ class DualAliciaPiperRobot(BaseRobot):
         """把目标 action 拆分到 slave 从臂下发（限速已在 step() 内完成）。
 
         布局：左 6 关节 + 左夹爪 + 右 6 关节 + 右夹爪（对齐 QPOS=14）。
-        set_joint 内部会 clip 关节角度（原地修改），故传 copy 避免改动 self.action。
+        set_joint 内部会复制为 float64 后 clip，不会原地修改 self.action；此处保留独立切片以明确边界。
         """
         left = self.controllers["left_arm"]
         right = self.controllers["right_arm"]

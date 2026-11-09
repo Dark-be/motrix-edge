@@ -33,6 +33,8 @@ dev = [
     "ruff",
     "grpcio-tools>=1.62.0",  # 重生成 vendored lerobot/transport 的 services_pb2{,_grpc}.py
     "protobuf>=4.25",
+    # 根环境仅用于运行 robot-pipeline 运动学测试；生产运行时依赖由 robot-pipeline 自身声明。
+    "motrixsim==0.10.1",
 ]
 
 # 单一 src-layout 包 motrix_edge：随 uv sync 以 editable 方式安装，

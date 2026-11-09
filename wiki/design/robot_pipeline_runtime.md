@@ -120,9 +120,10 @@ flowchart LR
     `POSE_DIM_PER_ARM = 6`）；
 -   **test_robot**（虚拟）无真实运动学：用固定可逆映射从**同一拍 qpos** 派生——「关节动 → EEF
     跟着动」，预览与笛卡尔闭环都可解释；
--   **真机**（piper 系列）应读法兰位姿（`PiperController.get_position()` / `get_flange_pose()`）
-    并在 `get_observation_pose()` 返回；若还需接受笛卡尔目标，则要补机器人侧 IK（见
-    [边缘原语接口](./motrix_edge_primitives.md) 的未决项）。
+-   **真机**（piper 系列）从同一拍关节反馈经共享 FK 生成位姿，使观测与笛卡尔目标的 IK 使用
+    同一模型和坐标系；SDK 法兰位姿只用于兼容读取与现场标定。运动学契约见
+    [Piper 笛卡尔运动学](./robot_pipeline_cartesian.md)。当前分阶段交付中，运动学基础已具备，
+    `POSE` 发布与笛卡尔动作编排由后续 robot 栈接入；接入前仍保持 `pose_dim = 0`。
 -   采集（`ActMcapCollector`）只落 qpos / action / images，**位姿不入 mcap**（数据集格式未定，
     暂不扩 schema）。
 

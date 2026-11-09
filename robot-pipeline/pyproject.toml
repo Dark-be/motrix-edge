@@ -23,6 +23,7 @@ dependencies = [
   # 契约单点：robot server 复用 motrix_edge.adapter.{base,http_contract,shm_contract}
   # （同仓 path 依赖；uv sync 自动以 editable 方式装入本子项目环境）
   "motrix-edge",
+  "motrixsim==0.10.1",
 ]
 
 [dependency-groups]
@@ -55,6 +56,18 @@ package-dir = { "" = "src" }
 # 仅在 src/ 下发现包
 where = ["src"]
 exclude = ["tests*", "third_party*", "docs*", "assets*", "packages*", "build*"]
+
+# MJCF 位于源码树的 assets 下；构建 wheel 时复制到标准 share 目录，运行时同时支持源码与安装布局。
+[tool.setuptools.data-files]
+"share/robot-pipeline/assets/robots/piper" = ["assets/robots/piper/README.md"]
+"share/robot-pipeline/assets/robots/piper/mjcf/arm" = [
+  "assets/robots/piper/mjcf/arm/LICENSE",
+  "assets/robots/piper/mjcf/arm/NOTICES",
+  "assets/robots/piper/mjcf/arm/piper.xml",
+]
+"share/robot-pipeline/assets/robots/piper/mjcf/arm/resources/src/piper_description/meshes" = [
+  "assets/robots/piper/mjcf/arm/resources/src/piper_description/meshes/*.STL",
+]
 
 [tool.pytest.ini_options]
 markers = ["manual: should be run manually."]
