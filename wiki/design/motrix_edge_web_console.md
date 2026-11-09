@@ -112,8 +112,9 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
       不硬编码键名）。
       为减少逐项填写，配置入口是一个 YAML 文本框：既接受顶层 `policy:` 段，也接受直接的策略对象；
       点击「解析并同步」后读取 `type` 选择策略，并只把该策略 schema 声明的键同步到进入会话 payload。
-      解析结果在下方按 schema 只读预览；用户需要修改时只能编辑 YAML 并重新解析，避免文本与逐项表单
-      出现两个可写事实来源。未知键、未知策略、类型或候选值不合法都在本地明确报错，不静默丢弃。
+      解析结果在下方按 schema 以纯文本字段只读预览（不使用禁用输入框）；用户需要修改时只能编辑 YAML
+      并重新解析，避免文本与逐项表单出现两个可写事实来源。未知键、未知策略、类型或候选值不合法都在
+      本地明确报错，不静默丢弃。
     - **进入推理 = 进入会话 + 自动连接预热**：`POST /v1/infers` 成功后**前端自动调用**
       `POST /v1/infers/connect`（`infer connect`：连接策略服务端 → lerobot-act 下发策略指令 /
       服务端加载模型，openpi 预热一帧），**连接成功后其余操作（推理一步 / 持续推理 / 重新连接 /
@@ -132,7 +133,7 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
     - **已同步 meta**（采集 / 推理两处）：只展示**非空值**（`null` / 空串 / 空列表 / 空对象不显示）——
       meta 分类多时不该把面板撑长；全空时提示「尚未同步元信息」。前端用 `metaEntries()` 统一过滤。
 
-10. **RTC 卡片（推理面板内，默认收起）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 步号与剩余 / 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考）；「展开参数」后通过独立 YAML 文本框导入 RTC 参数，接受直接对象、顶层 `rtc:` 或 `policy.rtc`，解析后只读预览并「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。RTC 与策略配置分框维护；完整 `policy:` 配置中的 `rtc` 可直接粘到 RTC 框解析，但不会混入策略 payload。
+10. **RTC 卡片（推理面板内，默认收起）**：展示 `enabled` / 块长上限 H / 执行段 E / 后缀段 S / 前置段 P（跳过）/ 步号与剩余 / 最近切分 `P/E/S` / 实测推理耗时（`rtc.last_delay` 及其折算步数，供定 P 参考）；「展开参数」后通过独立 YAML 文本框导入 RTC 参数，接受直接对象、顶层 `rtc:` 或 `policy.rtc`，解析后以纯文本字段只读预览（不使用禁用输入框）并「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。RTC 与策略配置分框维护；完整 `policy:` 配置中的 `rtc` 可直接粘到 RTC 框解析，但不会混入策略 payload。
 11. **操作反馈**：每次受控操作弹 **toast**（右下角，约 4.5s 自动消失，只给一行摘要），完整记录进**左下角日志抽屉**（可展开 / 清空）；完整 JSON 回执留在各面板内部，不刷日志。
 12. **数值展示口径（日志 = 网页）**：动作 / qpos 等浮点**统一保留 3 位小数**（`-0.062` 而不是
     `-0.06196591258049011`）。⚠️ **本节的服务端取整随后续控制面 MR 提供**：master 上
@@ -182,7 +183,8 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
     步号与剩余 / 最近一块的 prefix·execution·suffix 切分），并可经 `POST /v1/infers/rtc` 运行期改参数。
 -   WebRTC：`RTCPeerConnection` recvonly 视频轨 → `createOffer` → `setLocalDescription` →
     `POST /v1/webrtc/offer`（body `{sdp: pc.localDescription.sdp, type}`）→ `setRemoteDescription(answer)`；
-    **必须发送含 ICE 候选的 `localDescription.sdp`**。
+    **必须发送含 ICE 候选的 `localDescription.sdp`**。PeerConnection 由 Console 外壳常驻持有，页面标签只
+    消费媒体流；切换 MANUAL / COLLECT / INFER / DEBUG 不重新协商，仅在租约、Edge 目标或相机集合变化时重连。
 -   错误语义：`409`（无租约 / 已在环境 / 非法状态转移 / 节点未就绪）、`403`（异租约）、`410`（租约过期）、
     `501`（服务未注入）。UI 一律展示。
 
