@@ -89,6 +89,7 @@ class AuthConfig:
     authorize_url: str = AUTHORIZE_URL
     token_url: str = TOKEN_URL
     user_info_url: str = USER_INFO_URL
+    capture_requires_login: bool = True
 
 
 @dataclass
@@ -309,6 +310,7 @@ def build_auth_service(base_cfg: dict, leases: LeaseManager) -> AuthService | No
         authorize_url=str(raw.get("authorize_url") or AUTHORIZE_URL),
         token_url=str(raw.get("token_url") or TOKEN_URL),
         user_info_url=str(raw.get("user_info_url") or USER_INFO_URL),
+        capture_requires_login=bool(raw.get("capture_requires_login", True)),
     )
     if config.session_ttl <= 0 or config.state_ttl <= 0:
         raise ValueError("auth.feishu session_ttl and state_ttl must be positive")

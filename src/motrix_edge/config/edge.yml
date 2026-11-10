@@ -45,7 +45,8 @@ server:
 # 分布式部署：飞书登录由固定 Node Console 持有；Edge 只验证 Console 的 HMAC 身份签名。
 auth:
   feishu:
-    enabled: false # 仅单机调试时开启；分布式 Edge 不保存飞书 App Secret
+    enabled: false # 开启后仅采集同步要求登录；普通 Edge 控制与租约不要求飞书
+    capture_requires_login: true # 采集数据入库时校验飞书会话；离线模式可设 false 并重启
     app_id_env: MOTRIX_EDGE_FEISHU_APP_ID
     app_secret_env: MOTRIX_EDGE_FEISHU_APP_SECRET # App Secret 只放服务端环境变量
     redirect_uri: http://localhost:8000/v1/auth/feishu/callback # 须在飞书后台登记；生产改 HTTPS 域名

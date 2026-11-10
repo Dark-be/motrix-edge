@@ -132,7 +132,7 @@ def build_router(services: Services) -> APIRouter:
                 lease_id=x_lease_id,
                 identity=request.state.proxy_identity,
             )
-        elif auth is not None:
+        elif auth is not None and auth.config.capture_requires_login:
             capture_meta = auth.bind_capture_meta(
                 capture_meta,
                 lease_id=x_lease_id,
