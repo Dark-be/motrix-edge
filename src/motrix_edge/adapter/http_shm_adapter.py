@@ -195,6 +195,8 @@ class HttpShmAdapter(RobotAdapter):
         self.teleop_mode: str | None = None  # 最近一次 set_teleop 的模式（None = 未指定，进程侧缺省）
         self.rollout_refused_calls = 0  # 遥操作（人工接管）中 rollout 被 SDK 拒绝（409）次数
         self._rollout_refused_logged = False  # 拒绝日志限流位（仅状态变化时各记一条）
+        self.rollout_invalid_calls = 0  # 进程侧拒绝的单拍动作（422），持续推理跳过该拍
+        self._rollout_invalid_logged: str | None = None  # 422 detail 限流位
 
     @property
     def running(self) -> bool:
@@ -470,7 +472,20 @@ class HttpShmAdapter(RobotAdapter):
                 self._rollout_refused_logged = True
                 debug_print(self.name, "rollout refused: robot in teleop (human takeover)", "WARNING")
             return False
+        if resp.status_code == httpx2.codes.UNPROCESSABLE_CONTENT:
+            # 持续推理是逐拍下发：单个模型动作越界/语义不匹配不应终止整个会话。
+            # 保留严格的 HTTP 校验语义，但把该拍视为与遥操作拒绝相同的“未下发”。
+            self.rollout_invalid_calls += 1
+            try:
+                detail = str(resp.json().get("detail") or resp.text)
+            except Exception:  # noqa: BLE001 - 错误响应也不能打断持续循环
+                detail = resp.text
+            if detail != self._rollout_invalid_logged:
+                self._rollout_invalid_logged = detail
+                debug_print(self.name, f"rollout rejected (422), skip action: {detail}", "WARNING")
+            return False
         resp.raise_for_status()
+        self._rollout_invalid_logged = None
         if self._rollout_refused_logged:  # 遥操作结束：恢复下发（状态变化才记日志）
             self._rollout_refused_logged = False
             debug_print(self.name, "rollout resumed (teleop off)", "INFO")

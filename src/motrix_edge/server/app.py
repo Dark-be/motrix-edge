@@ -146,12 +146,22 @@ def create_app(
 
     app = FastAPI(title="MotrixEdge", version=get_package_version())
 
-    # 匿名兼容模式允许任意前端 origin；启用 Cookie 登录后必须使用显式 origin。
-    allowed_origins = list(auth.config.allowed_origins) if auth is not None else ["*"]
+    # Cookie credentials 不能与 ``Access-Control-Allow-Origin: *`` 同时使用。
+    # 匿名 Edge 也可能被带认证能力的 Console 直接访问，因此允许部署配置显式声明
+    # 前端来源；未配置时保留旧的匿名通配符行为（前端应使用 credentials=omit）。
+    if auth is not None:
+        allowed_origins = list(auth.config.allowed_origins)
+        allow_credentials = True
+    else:
+        cors_cfg = (base_cfg.get("server") or {}).get("cors_origins") or []
+        allowed_origins = [str(origin).rstrip("/") for origin in cors_cfg if str(origin).strip()]
+        allow_credentials = bool(allowed_origins)
+        if not allowed_origins:
+            allowed_origins = ["*"]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_credentials=auth is not None,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
