@@ -15,6 +15,7 @@
 """Policy declarations for direct, current-observation chunk prediction."""
 
 from dataclasses import dataclass
+
 from lerobot.utils.compat import StrEnum  # vendored: py3.10 shim (upstream: enum.StrEnum)
 
 
@@ -56,9 +57,7 @@ class FeatureSpec:
             raise ValueError(f"Unsupported feature dtype: {self.dtype!r}")
         if self.kind == "rgb" and (len(self.shape) != 3 or self.shape[-1] != 3 or self.dtype != "uint8"):
             raise ValueError("RGB features require HWC uint8 with three channels.")
-        if self.kind == "rgb_sequence" and (
-            len(self.shape) != 4 or self.shape[-1] != 3 or self.dtype != "uint8"
-        ):
+        if self.kind == "rgb_sequence" and (len(self.shape) != 4 or self.shape[-1] != 3 or self.dtype != "uint8"):
             raise ValueError("RGB sequence features require THWC uint8 with three channels.")
         if self.names and (len(self.shape) != 1 or len(self.names) != self.shape[0]):
             raise ValueError("Ordered component names must match a one-dimensional feature.")
@@ -85,6 +84,7 @@ class ChunkPolicySpec:
     training_max_delay: int = 0
     history_frames: int = 1
     history_stride: int = 1
+    history_padding: bool = False
 
     def __post_init__(self) -> None:
         """Validate the policy's declared prediction and execution lengths."""
@@ -94,3 +94,5 @@ class ChunkPolicySpec:
             raise ValueError("History frames and stride must be positive integers.")
         if self.current_observation_only and (self.history_frames, self.history_stride) != (1, 1):
             raise ValueError("Current-observation policies cannot declare a temporal history window.")
+        if self.history_padding and self.history_frames <= 1:
+            raise ValueError("History padding requires a temporal history window.")

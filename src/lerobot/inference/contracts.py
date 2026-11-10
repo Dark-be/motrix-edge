@@ -32,7 +32,11 @@ import torch
 
 from lerobot.policies import (
     ChunkPolicySpec as ChunkPolicySpec,
+)
+from lerobot.policies import (
     ExecutionMode as ExecutionMode,
+)
+from lerobot.policies import (
     FeatureSpec as FeatureSpec,
 )
 
@@ -69,6 +73,7 @@ class PolicyCapabilities:
     model_action_dim: int | None = None
     history_frames: int = 1
     history_stride: int = 1
+    history_padding: bool = False
 
     def __post_init__(self) -> None:
         """Validate lengths, interval, and feature identity."""
@@ -78,12 +83,12 @@ class PolicyCapabilities:
             raise ValueError("A valid mode and execution length are required.")
         if len({feature.name for feature in self.features}) != len(self.features):
             raise ValueError("Duplicate observation feature names.")
-        if self.model_action_dim is not None and (
-            type(self.model_action_dim) is not int or self.model_action_dim <= 0
-        ):
+        if self.model_action_dim is not None and (type(self.model_action_dim) is not int or self.model_action_dim <= 0):
             raise ValueError("Model action dimension must be a positive integer.")
         if self.history_frames < 1 or self.history_stride < 1:
             raise ValueError("History frames and stride must be positive integers.")
+        if type(self.history_padding) is not bool or (self.history_padding and self.history_frames <= 1):
+            raise ValueError("History padding requires a temporal history window.")
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,7 @@ class ObservationSnapshot:
     observation_id: str = ""
     action_cursor: int | None = None
     execution_generation: int | None = None
+    padding: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Copy camera buffers so asynchronous encoding sees a stable frame."""
@@ -113,6 +119,12 @@ class ObservationSnapshot:
             array.setflags(write=False)
             owned[name] = array
         object.__setattr__(self, "features", MappingProxyType(owned))
+        owned_padding: dict[str, np.ndarray] = {}
+        for name, value in self.padding.items():
+            array = np.array(value, dtype=np.bool_, copy=True, order="C")
+            array.setflags(write=False)
+            owned_padding[name] = array
+        object.__setattr__(self, "padding", MappingProxyType(owned_padding))
 
 
 @dataclass(frozen=True)

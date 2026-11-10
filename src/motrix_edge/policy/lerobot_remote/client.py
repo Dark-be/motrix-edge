@@ -67,6 +67,7 @@ OBSERVATION_LAYOUTS = {OBSERVATION_LAYOUT_QPOS, OBSERVATION_LAYOUT_QPOS_ERR}
 
 DEFAULT_ENDPOINT = "tcp/127.0.0.1:7447"
 _HISTORY_FEATURES_KEY = "__lerobot_remote_history_features__"
+_HISTORY_PADDING_KEY = "__lerobot_remote_history_padding__"
 _HISTORY_READY_KEY = "__lerobot_remote_history_ready__"
 
 
@@ -200,6 +201,7 @@ class LerobotRemoteClient(BasePolicyClient):
             return observation
         maxlen = (frames - 1) * stride + 1
         features: dict[str, np.ndarray] = {}
+        padding: dict[str, np.ndarray] = {}
         self._history_steps += 1
         state = self._state_values(observation)
         for spec in caps.features:
@@ -230,15 +232,19 @@ class LerobotRemoteClient(BasePolicyClient):
                 queue.extend([snapshot] * maxlen)
             else:
                 queue.append(snapshot)
-            ages = range((frames - 1) * stride, -1, -stride)
+            ages = tuple(range((frames - 1) * stride, -1, -stride))
             features[spec.name] = np.stack([queue[-1 - age] for age in ages], axis=0)
+            padding[spec.name] = np.asarray([self._history_steps <= age for age in ages], dtype=np.bool_)
         prepared = dict(observation)
         prepared[_HISTORY_FEATURES_KEY] = features
+        prepared[_HISTORY_PADDING_KEY] = padding
         prepared[_HISTORY_READY_KEY] = self._history_steps >= maxlen
         return prepared
 
     def observation_ready(self, observation: dict) -> bool:
-        """Hold MEM inference until every sampled history slot is a real control tick."""
+        """Use negotiated masks immediately, or wait for a full history on legacy servers."""
+        if self._client is not None and bool(getattr(self._client.capabilities, "history_padding", False)):
+            return True
         return bool(observation.get(_HISTORY_READY_KEY, True))
 
     # -- 推理 ---------------------------------------------------------------
@@ -250,7 +256,8 @@ class LerobotRemoteClient(BasePolicyClient):
         history_required = int(getattr(self._client.capabilities, "history_frames", 1)) > 1
         if history_required and _HISTORY_FEATURES_KEY not in observation:
             observation = self.prepare_observation(observation)
-        if history_required and not observation.get(_HISTORY_READY_KEY, False):
+        padding_supported = bool(getattr(self._client.capabilities, "history_padding", False))
+        if history_required and not padding_supported and not observation.get(_HISTORY_READY_KEY, False):
             return None
         step = int(index) if index is not None else 0
 
@@ -259,6 +266,7 @@ class LerobotRemoteClient(BasePolicyClient):
             capture_time=time.monotonic(),
             task=self._task,
             observation_id=uuid4().hex,
+            padding=self._observation_padding(observation) if padding_supported else {},
         )
         request = ChunkRequest(
             observation=snapshot,
@@ -392,6 +400,24 @@ class LerobotRemoteClient(BasePolicyClient):
                     )
                 features[spec.name] = state.astype(np.float32, copy=False)
         return features
+
+    def _observation_padding(self, observation) -> dict[str, np.ndarray]:
+        """Return per-feature MEM masks aligned with the sampled histories."""
+        padding = observation.get(_HISTORY_PADDING_KEY)
+        if padding is None:
+            return {}
+        expected = {
+            spec.name
+            for spec in self._client.capabilities.features
+            if spec.kind == "rgb_sequence"
+            or (int(getattr(self._client.capabilities, "history_frames", 1)) > 1 and len(spec.shape) == 2)
+        }
+        if set(padding) != expected:
+            raise ValueError(
+                f"lerobot-remote: history padding names differ from server contract: "
+                f"{sorted(padding)} != {sorted(expected)}"
+            )
+        return {name: np.asarray(value, dtype=np.bool_) for name, value in padding.items()}
 
 
 __all__ = ["LerobotRemoteClient", "OBSERVATION_LAYOUT_QPOS", "OBSERVATION_LAYOUT_QPOS_ERR"]

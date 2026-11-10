@@ -160,10 +160,7 @@ class RemoteClient:
             descriptors: dict[str, dict] = {}
             for payload in replies:
                 response = decode_message(payload)
-                if (
-                    response.message_type is not MessageType.DESCRIPTOR
-                    or response.request_id != request.request_id
-                ):
+                if response.message_type is not MessageType.DESCRIPTOR or response.request_id != request.request_id:
                     raise ProtocolError(ErrorCode.MALFORMED, "Invalid deployment descriptor response")
                 descriptor = response.body
                 if (
@@ -195,9 +192,7 @@ class RemoteClient:
                 PROTOCOL_VERSION,
             )
             if config.expected_artifact and config.expected_artifact != descriptor.get("artifact_identity"):
-                raise ProtocolError(
-                    ErrorCode.INCOMPATIBLE, "Expected artifact differs from deployed checkpoint"
-                )
+                raise ProtocolError(ErrorCode.INCOMPATIBLE, "Expected artifact differs from deployed checkpoint")
             return cls(transport, config, descriptor)
         except Exception:
             transport.close()
@@ -290,8 +285,7 @@ class RemoteClient:
         if mode not in caps.modes:
             raise ProtocolError(
                 ErrorCode.INCOMPATIBLE,
-                f"Execution mode {mode!r} is not supported; "
-                f"server modes={tuple(str(mode) for mode in caps.modes)!r}",
+                f"Execution mode {mode!r} is not supported; server modes={tuple(str(mode) for mode in caps.modes)!r}",
             )
         try:
             self.blend_indices = validate_blend_settings(self.chunk_settings, caps)
@@ -311,9 +305,7 @@ class RemoteClient:
                 )
         if mode != ExecutionMode.CHUNK and caps.model_action_dim not in (None, caps.action_feature.shape[0]):
             if RTC_MODEL_SPACE not in self.descriptor.get("execution_contracts", []):
-                raise ProtocolError(
-                    ErrorCode.UNSUPPORTED, "Server lacks the distinct RTC model-space contract"
-                )
+                raise ProtocolError(ErrorCode.UNSUPPORTED, "Server lacks the distinct RTC model-space contract")
             required.append(RTC_MODEL_SPACE)
         request = Envelope(
             MessageType.OPEN,
@@ -392,9 +384,7 @@ class RemoteClient:
             self._present = False
         return self._present
 
-    def control(
-        self, operation: str, generation: int, *, cancelled: Callable[[], bool] | None = None
-    ) -> None:
+    def control(self, operation: str, generation: int, *, cancelled: Callable[[], bool] | None = None) -> None:
         """Wait for a worker-applied control acknowledgement on the network thread."""
         request = Envelope(
             MessageType.CONTROL,
@@ -417,19 +407,14 @@ class RemoteClient:
             MessageType.ACK,
             cancelled=lambda: (cancelled is not None and cancelled()) or not self.present,
         )
-        if (
-            response.body.get("operation") != operation
-            or response.body.get("applied_generation") != generation
-        ):
+        if response.body.get("operation") != operation or response.body.get("applied_generation") != generation:
             raise ProtocolError(ErrorCode.STALE, "Control was not applied at the requested generation")
         self.generation = generation
 
     def _observation_body(self, observation: ObservationSnapshot) -> dict:
         self._request_sequence += 1
         rgb = {feature.name for feature in self.capabilities.features if feature.kind == "rgb"}
-        rgb_sequences = {
-            feature.name for feature in self.capabilities.features if feature.kind == "rgb_sequence"
-        }
+        rgb_sequences = {feature.name for feature in self.capabilities.features if feature.kind == "rgb_sequence"}
         return {
             "sequence": self._request_sequence,
             "artifact_identity": self.artifact_identity,
@@ -437,6 +422,7 @@ class RemoteClient:
             "capture_time": observation.capture_time,
             "task": observation.task,
             "task_version": observation.task_version,
+            "padding": dict(observation.padding),
             "features": {
                 name: (
                     RGBImage(value, self.config.encoding, self.config.jpeg_quality)
@@ -470,9 +456,7 @@ class RemoteClient:
             if request.message_type is MessageType.LANGUAGE_REQUEST and not self.present:
                 raise ConnectionError("Server presence lost during language query; session cannot recover")
             if channel.oversized or channel.dropped:
-                raise ProtocolError(
-                    ErrorCode.MALFORMED, "Inference reply channel overflow or oversized message"
-                )
+                raise ProtocolError(ErrorCode.MALFORMED, "Inference reply channel overflow or oversized message")
             try:
                 payload = channel.get(timeout=min(0.02, timeout))
             except Empty:
@@ -558,12 +542,8 @@ class RemoteClient:
         if expected is MessageType.ACTION and self.chunk_settings["chunk_merge"] == "aligned":
             context_keys.extend(["observation_cursor", "cursor"])
             if any(type(response.body.get(key)) is not int for key in ("observation_cursor", "cursor")):
-                raise ProtocolError(
-                    ErrorCode.MALFORMED, "Result action cursor context differs from its request"
-                )
-        if response.message_type is not expected or any(
-            response.body.get(key) != body[key] for key in context_keys
-        ):
+                raise ProtocolError(ErrorCode.MALFORMED, "Result action cursor context differs from its request")
+        if response.message_type is not expected or any(response.body.get(key) != body[key] for key in context_keys):
             raise ProtocolError(ErrorCode.MALFORMED, "Result execution context differs from its request")
 
     def query_language(
@@ -584,9 +564,7 @@ class RemoteClient:
         request = Envelope(
             MessageType.LANGUAGE_REQUEST, self.instance_id, self.session_id, generation, uuid4().hex, body
         )
-        result = self._exchange(
-            request, "/language/request", self._language, self.config.language_timeout_s, cancelled
-        )
+        result = self._exchange(request, "/language/request", self._language, self.config.language_timeout_s, cancelled)
         self._validate_context(result, body, MessageType.LANGUAGE_RESULT)
         answer = result.body.get("answer")
         if (

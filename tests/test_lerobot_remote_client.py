@@ -27,7 +27,7 @@ from motrix_edge.policy.lerobot_remote.client import LerobotRemoteClient
 class _Caps:
     """Minimal stand-in for the server-advertised capabilities."""
 
-    def __init__(self, features, action_shape=(7,), history_frames=1, history_stride=1):
+    def __init__(self, features, action_shape=(7,), history_frames=1, history_stride=1, history_padding=False):
         from lerobot.policies import FeatureSpec
 
         self.features = tuple(features)
@@ -42,6 +42,7 @@ class _Caps:
         self.execution_steps = 20
         self.history_frames = history_frames
         self.history_stride = history_stride
+        self.history_padding = history_padding
 
     @staticmethod
     def rgb(name, shape=(480, 640, 3)):
@@ -308,6 +309,27 @@ def test_mem_history_is_sampled_at_control_cadence_and_reset_remotely():
     client.reset()
     assert fake.controls == [("reset", 1), ("reset", 2)]
     assert client._history == {}
+
+
+def test_mem_padding_contract_infers_immediately_and_marks_missing_history():
+    caps = _Caps(
+        [
+            _Caps.state("observation.state", shape=(3, 7)),
+            _Caps.rgb_sequence("observation.images.piper_0_cam_head"),
+            _Caps.rgb_sequence("observation.images.piper_0_cam_right_wrist"),
+        ],
+        history_frames=3,
+        history_stride=2,
+        history_padding=True,
+    )
+    client, fake = _connected(caps=caps, steps=10)
+    prepared = client.prepare_observation(_remote_obs())
+
+    assert client.observation_ready(prepared)
+    assert client.infer_chunk(prepared, index=0) is not None
+    padding = fake.requests[0].observation.padding
+    assert set(padding) == {spec.name for spec in caps.features}
+    assert all(mask.tolist() == [True, True, False] for mask in padding.values())
 
 
 def test_admit_rejects_state_dim_mismatch():
