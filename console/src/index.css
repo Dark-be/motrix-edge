@@ -1,0 +1,247 @@
+@import "tailwindcss";
+
+/* 深色切换用 class 策略：`<html class="dark">`（默认浅色，见 theme.ts） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ===== 主题令牌 =====
+ *
+ * 两套变量：`--t-*` 是**语义令牌**（页 / 面板 / 描边 / 正文 / 高亮），新代码直接用
+ * `bg-panel` / `text-ink` / `text-accent` 这类类名。旧组件用的是 Tailwind 内置调色板
+ * （slate / sky / rose / emerald / amber），这里把**同一批变量名重定义**成主题相关值
+ * ——两套命名都随主题切换，无需逐文件改类名。
+ *
+ * 语义映射：`slate-950/900` = 页面 / 面板底色；`slate-800/700` = 描边 / 悬浮面；
+ * `slate-600…100` = 由浅到深的文字；`sky-*` = 强调色（浅色下取橙色，与界面同风格）。
+ */
+:root {
+    /* 语义令牌 —— 浅色（默认） */
+    --t-page: #eef1f5;
+    --t-panel: #ffffff;
+    --t-panel-2: #f7f8fa;
+    --t-elev: #eceff4;
+    --t-line: #d9dee6;
+    --t-line-2: #c3cad6;
+    --t-ink: #10161e;
+    --t-muted: #5c6673;
+    --t-faint: #8b95a3;
+    --t-accent: #c2410c;
+    --t-accent-soft: #fff1e6;
+    --t-accent-ink: #ffffff;
+    --t-ok: #15803d;
+    --t-warn: #b45309;
+    --t-danger: #c02626;
+    --t-scroll: #c3cad6;
+
+    /* 旧组件复用的内置调色板 —— 浅色取值 */
+    --t-slate-950: #f7f8fa;
+    --t-slate-900: #ffffff;
+    --t-slate-800: #e2e6ec;
+    --t-slate-700: #d3d9e2;
+    --t-slate-600: #99a2af;
+    --t-slate-500: #6b7684;
+    --t-slate-400: #55606e;
+    --t-slate-300: #3c4653;
+    --t-slate-200: #232c37;
+    --t-slate-100: #101720;
+
+    --t-sky-950: #fff4e8;
+    --t-sky-900: #ffe6cc;
+    --t-sky-700: #f0b479;
+    --t-sky-600: #c2410c;
+    --t-sky-500: #ea580c;
+    --t-sky-400: #b45309;
+    --t-sky-300: #92400e;
+    --t-sky-200: #7c2d12;
+
+    --t-rose-950: #fff1f1;
+    --t-rose-900: #fee2e2;
+    --t-rose-800: #fecaca;
+    --t-rose-700: #fca5a5;
+    --t-rose-600: #c02626;
+    --t-rose-500: #dc2626;
+    --t-rose-400: #b91c1c;
+    --t-rose-300: #b91c1c;
+    --t-rose-200: #991b1b;
+
+    --t-emerald-950: #ecfdf3;
+    --t-emerald-900: #d1fae5;
+    --t-emerald-700: #6ee7b7;
+    --t-emerald-600: #047857;
+    --t-emerald-500: #059669;
+    --t-emerald-300: #15803d;
+    --t-emerald-200: #166534;
+
+    --t-amber-950: #fffbeb;
+    --t-amber-900: #fef3c7;
+    --t-amber-800: #fde68a;
+    --t-amber-700: #fcd34d;
+    --t-amber-600: #b45309;
+    --t-amber-500: #d97706;
+    --t-amber-400: #b45309;
+    --t-amber-300: #92400e;
+}
+
+.dark {
+    --t-page: #020617;
+    --t-panel: #0f172a;
+    --t-panel-2: #0b1220;
+    --t-elev: #1e293b;
+    --t-line: #1e293b;
+    --t-line-2: #334155;
+    --t-ink: #e2e8f0;
+    --t-muted: #94a3b8;
+    --t-faint: #64748b;
+    --t-accent: #38bdf8;
+    --t-accent-soft: #0c4a6e;
+    --t-accent-ink: #04121f;
+    --t-ok: #34d399;
+    --t-warn: #fbbf24;
+    --t-danger: #fb7185;
+    --t-scroll: #334155;
+
+    --t-slate-950: #020617;
+    --t-slate-900: #0f172a;
+    --t-slate-800: #1e293b;
+    --t-slate-700: #334155;
+    --t-slate-600: #475569;
+    --t-slate-500: #64748b;
+    --t-slate-400: #94a3b8;
+    --t-slate-300: #cbd5e1;
+    --t-slate-200: #e2e8f0;
+    --t-slate-100: #f1f5f9;
+
+    --t-sky-950: #082f49;
+    --t-sky-900: #0c4a6e;
+    --t-sky-700: #0369a1;
+    --t-sky-600: #0284c7;
+    --t-sky-500: #0ea5e9;
+    --t-sky-400: #38bdf8;
+    --t-sky-300: #7dd3fc;
+    --t-sky-200: #bae6fd;
+
+    --t-rose-950: #4c0519;
+    --t-rose-900: #881337;
+    --t-rose-800: #9f1239;
+    --t-rose-700: #be123c;
+    --t-rose-600: #e11d48;
+    --t-rose-500: #f43f5e;
+    --t-rose-400: #fb7185;
+    --t-rose-300: #fda4af;
+    --t-rose-200: #fecdd3;
+
+    --t-emerald-950: #022c22;
+    --t-emerald-900: #064e3b;
+    --t-emerald-700: #047857;
+    --t-emerald-600: #059669;
+    --t-emerald-500: #10b981;
+    --t-emerald-300: #6ee7b7;
+    --t-emerald-200: #a7f3d0;
+
+    --t-amber-950: #451a03;
+    --t-amber-900: #78350f;
+    --t-amber-800: #92400e;
+    --t-amber-700: #b45309;
+    --t-amber-600: #d97706;
+    --t-amber-500: #f59e0b;
+    --t-amber-400: #fbbf24;
+    --t-amber-300: #fcd34d;
+}
+
+@theme inline {
+    --color-page: var(--t-page);
+    --color-panel: var(--t-panel);
+    --color-panel2: var(--t-panel-2);
+    --color-elev: var(--t-elev);
+    --color-line: var(--t-line);
+    --color-line2: var(--t-line-2);
+    --color-ink: var(--t-ink);
+    --color-muted: var(--t-muted);
+    --color-faint: var(--t-faint);
+    --color-accent: var(--t-accent);
+    --color-accent-soft: var(--t-accent-soft);
+    --color-accent-ink: var(--t-accent-ink);
+    --color-ok: var(--t-ok);
+    --color-warn: var(--t-warn);
+    --color-danger: var(--t-danger);
+
+    /* 旧组件调色板别名（见文件头说明） */
+    --color-slate-950: var(--t-slate-950);
+    --color-slate-900: var(--t-slate-900);
+    --color-slate-800: var(--t-slate-800);
+    --color-slate-700: var(--t-slate-700);
+    --color-slate-600: var(--t-slate-600);
+    --color-slate-500: var(--t-slate-500);
+    --color-slate-400: var(--t-slate-400);
+    --color-slate-300: var(--t-slate-300);
+    --color-slate-200: var(--t-slate-200);
+    --color-slate-100: var(--t-slate-100);
+
+    --color-sky-950: var(--t-sky-950);
+    --color-sky-900: var(--t-sky-900);
+    --color-sky-700: var(--t-sky-700);
+    --color-sky-600: var(--t-sky-600);
+    --color-sky-500: var(--t-sky-500);
+    --color-sky-400: var(--t-sky-400);
+    --color-sky-300: var(--t-sky-300);
+    --color-sky-200: var(--t-sky-200);
+
+    --color-rose-950: var(--t-rose-950);
+    --color-rose-900: var(--t-rose-900);
+    --color-rose-800: var(--t-rose-800);
+    --color-rose-700: var(--t-rose-700);
+    --color-rose-600: var(--t-rose-600);
+    --color-rose-500: var(--t-rose-500);
+    --color-rose-400: var(--t-rose-400);
+    --color-rose-300: var(--t-rose-300);
+    --color-rose-200: var(--t-rose-200);
+
+    --color-emerald-950: var(--t-emerald-950);
+    --color-emerald-900: var(--t-emerald-900);
+    --color-emerald-700: var(--t-emerald-700);
+    --color-emerald-600: var(--t-emerald-600);
+    --color-emerald-500: var(--t-emerald-500);
+    --color-emerald-300: var(--t-emerald-300);
+    --color-emerald-200: var(--t-emerald-200);
+
+    --color-amber-950: var(--t-amber-950);
+    --color-amber-900: var(--t-amber-900);
+    --color-amber-800: var(--t-amber-800);
+    --color-amber-700: var(--t-amber-700);
+    --color-amber-600: var(--t-amber-600);
+    --color-amber-500: var(--t-amber-500);
+    --color-amber-400: var(--t-amber-400);
+    --color-amber-300: var(--t-amber-300);
+}
+
+html {
+    color-scheme: light;
+}
+
+html.dark {
+    color-scheme: dark;
+}
+
+body {
+    margin: 0;
+    background-color: var(--t-page);
+    color: var(--t-ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+/* 细滚动条（monospace 面板） */
+*::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+    background: var(--t-scroll);
+    border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* 数值一律等宽 + 定宽数字，避免轮询刷新时左右跳动 */
+.tnum {
+    font-variant-numeric: tabular-nums;
+}
