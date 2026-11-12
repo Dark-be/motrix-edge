@@ -7,6 +7,8 @@ export type InferPreset = {
     source: string;
 };
 
+export const DEFAULT_INFER_PRESET_ID = "lerobot-remote-default";
+
 const isMap = (value: unknown): value is YamlMap =>
     typeof value === "object" && value !== null && !Array.isArray(value);
 

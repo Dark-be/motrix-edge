@@ -96,30 +96,38 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 
 8. **状态面板（右栏）**：节点状态（`node_state`）、会话状态（`state`）、**匹配到的适配器**（name / type / running / control_hz / measured_hz）、磁盘。
 
-9. **推理面板（配置在前）**：会话区选中「推理」后按「选策略 / 填完整配置 → 进入推理」组织。
+9. **推理面板（操作在前，配置可折叠）**：会话区选中「推理」后，常用会话操作保持在前；
+   「推理配置」作为默认收起的次级区域，会话外紧跟「进入推理会话」按钮，会话内紧跟连接 / 预热、
+   「推理一步」与「持续推理」操作区。
 
-    - **策略配置卡片**：从 `/v1/health` 的已注册策略列表中必选策略 + 按所选策略动态渲染配置项
-      （schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers`
-      的 `policy_config`）：每个策略的端点形态独立，OpenPI 清单最前是 `host` / `port`，
-      Lerobot Remote 则只有 Zenoh `endpoint`（与其它项同层级、同一张表单）；随后是各自策略项。
-      schema 带 `options` 的配置项统一渲染为**下拉选择**并由后端
-      校验候选值；`action_layout` 与 `observation_layout` 因而只能选择声明的固定搭配，不允许自由文本
-      拼写。长文本项（`prompt`，schema 标 `multiline`）渲染为**多行 textarea**（占满整行、可拖拽调高）。
+    - **策略配置卡片**：从 `/v1/health` 的已注册策略列表确定可用策略，并用所选策略的 schema 解析、
+      校验一份完整 YAML（schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用
+      `GET /v1/infers` 的 `policy_config`）。每个策略的端点形态独立：OpenPI 使用 `host` / `port`，
+      Lerobot Remote 使用 Zenoh `endpoint`；schema 的 `options` 约束仍由前端解析器和后端共同校验，
+      `action_layout` 与 `observation_layout` 不允许填写声明范围外的值。界面不再为这些键生成第二套
+      逐字段编辑器，避免 YAML 与表单双写。
       **配置在「进入推理」时随会话下发并锁定**（会话内整张卡片只读，没有「应用配置」按钮）；要改
       先退出推理（写内存态，下一会话生效）。必填项缺失（`missing` 非空）或端点项
       （`group=endpoint`）为空 / 越界时「进入推理」禁用（端点门控按 schema 的端点分组推导，
       不硬编码键名）。
-      为减少逐项填写，页面把包内 `console/src/config/infer-presets/*.yml` 自动发现为「策略配置」预设；
-      每份文件用顶层 `preset.id` / `preset.label` 描述选项，并在同一个 `policy` 对象内携带策略参数与
-      `rtc`。
-      内置 OpenPI、Lerobot Remote 两份默认预设，后续叠碗等任务通过新增 YAML 文件直接成为选项，
-      无需修改组件。选择预设后立即解析完整策略草稿；`rtc` 与其它策略配置一起写入进入会话 payload，
-      不存在第二条 RTC 写接口。策略卡首行只展示预设选择、策略类型与校验状态；
-      YAML 唯一编辑入口、重新解析操作及同步摘要统一放入默认收起的「配置详情」。用户需要修改时只能
-      编辑 YAML 并重新解析，避免出现两个可写事实来源；「恢复预设」可丢弃本地编辑并重新载入包内文本。
+      为减少逐项填写，Console BFF 的 `GET /api/policy-presets` 在每次请求时读取「策略配置」预设：
+      运行目录 `$MOTRIX_EDGE_DIR/policy/` **存在时只读取该目录**；目录不存在时才读取包内
+      `src/motrix_edge/config/policy/*.yml` 作为随 Edge 包发布的只读兜底和格式示例，两者不合并。前端本身
+      不内置预设。每份文件用顶层
+      `preset.id` / `preset.label` 描述选项，并在同一个 `policy` 对象内携带策略参数与 `rtc`。接口不要求
+      飞书登录，断网模式仍可读取本机任务；非法 YAML、重复 ID 或缺字段必须明确报错，不能部分静默加载。
+      BFF 不缓存目录，现场新增、修改或删除 YAML 后刷新页面即可生效，无需 Git 提交或重新构建 Console。
+      内置 OpenPI、Lerobot Remote 两份默认预设；其它任务只进入运行目录。选择预设后立即解析完整策略草稿；
+      `rtc` 与其它策略配置一起写入进入会话 payload，
+      不存在第二条 RTC 写接口。「推理配置」收起时只展示当前预设、策略类型与校验状态，不展示字段计数
+      或 RTC 的 H/P/E/S 数字串；展开后提供预设选择、YAML 唯一编辑入口及重新解析操作，不再重复渲染
+      所有解析字段的只读网格。用户需要修改时只能编辑 YAML 并重新解析，避免出现两个事实展示源；
+      「恢复预设」可丢弃本地编辑并重新载入目录文本。
       未知键、未知策略、类型或候选值不合法都在本地明确报错，不静默丢弃。
       完整 YAML 按 Edge 地址写入浏览器本地缓存；节点离线、会话异常结束、页面刷新或重新连接时优先恢复
-      缓存，不用远端状态或包内默认值覆盖用户最近一次已解析配置。包内预设仅在该 Edge 尚无缓存时载入。
+      缓存，不用远端状态或目录预设覆盖用户最近一次已解析配置。目录预设仅在该 Edge 尚无缓存时载入。
+      缓存键包含配置契约版本；当旧缓存与新版包内 schema / 预设不再安全兼容时提升版本，使用新命名空间
+      重新载入预设，避免历史映射继续污染新策略连接。
     - **进入推理 = 进入会话 + 自动连接预热**：`POST /v1/infers` 成功后**前端自动调用**
       `POST /v1/infers/connect`（`infer connect`：连接策略服务端 → lerobot-act 下发策略指令 /
       服务端加载模型，openpi 预热一帧），**连接成功后其余操作（推理一步 / 持续推理 / 重新连接 /
@@ -132,14 +140,14 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
       （`POST /v1/infers/episode/start·end·cancel` → `capture episode start/end/cancel`，robot 不关心模式；
       开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带
       `task_name=prompt`）、**退出推理**。推理只提供「单步」与「持续」两种模式。
-    - 卡片下部：策略配置内嵌 RTC → **策略服务器 metadata**（只展示 `metadata` 与「已连接 / 未连接」徽标，
+    - 卡片下部：按钮区下方的可折叠策略配置（内嵌 RTC）→ **策略服务器 metadata**（只展示 `metadata` 与「已连接 / 未连接」徽标，
       连接 / 重连按钮统一在按钮区）→ 推理参数（Prompt / 录制 operator / task_name
       / 已同步 meta）。
     - **已同步 meta**（采集 / 推理两处）：只展示**非空值**（`null` / 空串 / 空列表 / 空对象不显示）——
       meta 分类多时不该把面板撑长；全空时提示「尚未同步元信息」。前端用 `metaEntries()` 统一过滤。
 
-10. **RTC 配置（内嵌在策略配置内）**：策略栏紧凑展示启用状态与 `H/P/E/S` 摘要，完整参数只存在于
-    同一份 YAML 的 `policy.rtc`；解析后与策略端点、观测映射一起进入同一个 payload。运行中的步号、
+10. **RTC 配置（内嵌在策略配置内）**：完整参数只存在于同一份 YAML 的 `policy.rtc`，折叠摘要不再
+    额外展示 `H/P/E/S`；解析后与策略端点、观测映射一起进入同一个 payload。运行中的步号、
     剩余、最近切分与实测推理耗时继续由推理状态区只读展示。
 11. **操作反馈**：每次受控操作弹 **toast**（右下角，约 4.5s 自动消失，只给一行摘要），完整记录进**左下角日志抽屉**（可展开 / 清空）；完整 JSON 回执留在各面板内部，不刷日志。
 12. **数值展示口径（日志 = 网页）**：动作 / qpos 等浮点**统一保留 3 位小数**（`-0.062` 而不是

@@ -15,8 +15,8 @@
 """config 包 —— 运行目录解析与配置加载。
 
 ``MOTRIX_EDGE_DIR`` 指定运行根目录，未设置时使用 ``<cwd>/motrix-edge``。配置固定在
-``<root>/config``，日志固定在 ``<root>/logs``。现场配置不存在时读取包内只读默认值；普通读取
-不创建目录或文件。
+``<root>/config``，策略预设固定在 ``<root>/policy``，日志固定在 ``<root>/logs``。现场配置不存在时
+读取包内只读默认值；普通读取不创建目录或文件。
 
 路径在每次调用时解析，不保留 import 时快照。
 """
@@ -31,6 +31,7 @@ ROOT_DIR_ENV = "MOTRIX_EDGE_DIR"
 DEFAULT_ROOT_DIR_NAME = "motrix-edge"
 CONFIG_DIR_NAME = "config"
 LOG_DIR_NAME = "logs"
+POLICY_DIR_NAME = "policy"
 
 # 包内默认配置文件（作为 package data 打包；现场目录存在同名文件时优先）。
 DEFAULT_CONFIG_FILES = ("edge.yml", "capture.yml")
@@ -50,6 +51,11 @@ def get_config_dir() -> Path:
 def get_log_dir() -> Path:
     """返回日志目录 ``<root>/logs``。"""
     return get_root_dir() / LOG_DIR_NAME
+
+
+def get_policy_dir() -> Path:
+    """返回现场策略预设目录 ``<root>/policy``。"""
+    return get_root_dir() / POLICY_DIR_NAME
 
 
 def config_path(name: str) -> Path:
@@ -79,10 +85,12 @@ __all__ = [
     "DEFAULT_ROOT_DIR_NAME",
     "CONFIG_DIR_NAME",
     "LOG_DIR_NAME",
+    "POLICY_DIR_NAME",
     "DEFAULT_CONFIG_FILES",
     "get_root_dir",
     "get_config_dir",
     "get_log_dir",
+    "get_policy_dir",
     "config_path",
     "writable_config_path",
     "load_config",

@@ -173,15 +173,8 @@ def test_remote_unmappable_camera_raises():
         client._resolve_cameras(caps, {"observations/qpos": np.zeros(7)})
 
 
-def test_remote_infer_freq_must_match_server_action_interval():
-    client = _remote_client({"infer_freq": 4})
-    client._client.admit = lambda **kwargs: None
-    with pytest.raises(ValueError, match="does not match server action_interval"):
-        client._ensure_admitted(_remote_obs())
-
-
-def test_remote_infer_freq_matching_server_action_interval_admits():
-    client = _remote_client({"infer_freq": 10})
+def test_remote_dispatch_frequency_is_independent_from_server_action_interval():
+    client = _remote_client({"infer_freq": 0.4})
     admitted = []
     client._client.admit = lambda **kwargs: admitted.append(kwargs)
     client._ensure_admitted(_remote_obs())

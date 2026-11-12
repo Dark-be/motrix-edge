@@ -4,28 +4,28 @@ preset:
 
 policy:
   type: lerobot-remote
-  endpoint: tcp/172.29.17.45:7447
-  deployment: pi05-press-three-buttons-v2-mem5s-15k
-  semantics: piper-joint-radians-gripper-0to1-abs-v1
-  infer_freq: 4
+  infer_freq: 0.4
+  endpoint: tcp/172.29.17.45:7448
+  deployment: akt-press-three-buttons-v4-first-frame-openloop10-30k
+  semantics: piper-world-xyzrpy-radians-gripper-0to1-abs-v1
+  warmup_required: true
   task: press the three buttons in order
   observation_layout: qpos
-  action_layout: joint+gripper
+  action_layout: pose+gripper
   arm_map:
     right: observation.state
   camera_map:
-    cam_head: observation.images.piper_0_cam_head
-    cam_right_wrist: observation.images.piper_0_cam_right_wrist
+    cam_head: observation.images.cam_head
   mode: chunk
   chunk_merge: append
+  joint_offsets:
+    right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   encoding: jpeg
   jpeg_quality: 95
-  warmup_required: true
-
   rtc:
     enabled: true
-    action_horizon: 50
+    action_horizon: 10
     prefix_len: 0
-    execution_horizon: 30
-    suffix_len: 20
+    execution_horizon: 10
+    suffix_len: 0
     aggregate_fn: weighted_average

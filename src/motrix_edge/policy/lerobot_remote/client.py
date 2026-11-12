@@ -28,7 +28,7 @@
   - 没有 ``actions_per_chunk`` / ``image_size`` / ``pretrained_name_or_path``：模型与块长在
     **服务端**的 deployment YAML 里，端上只按 ``capabilities`` 对齐；图像尺寸取服务端声明的
     特征形状（端侧 letterbox 到该尺寸，与训练分辨率一致）；
-  - 频率必须与服务端 ``action_interval`` 一致（端上直接采用服务端声明值完成 admission）；
+  - admission 直接采用服务端 ``action_interval``；Edge 本地 ``infer_freq`` 只控制实际下发节奏；
   - 相机名必须**逐字**等于服务端特征名（如 ``observation.images.piper_0_cam_head``）：
     默认按相机短名自动匹配（``cam_head`` → ``..._cam_head``），可用 yaml 的
     ``camera_map``（端上相机名 → 服务端特征名）显式覆盖。
@@ -106,10 +106,6 @@ class LerobotRemoteClient(BasePolicyClient):
         self._history_steps = 0
         self._task = str(self.policy_config.get("task") or self.policy_config.get("prompt") or "")
         self._observation_layout = _normalize_observation_layout(self.policy_config.get("observation_layout"))
-        raw_infer_freq = self.policy_config.get("infer_freq")
-        self._infer_freq = None if raw_infer_freq in (None, "") else float(raw_infer_freq)
-        if self._infer_freq is not None and (not math.isfinite(self._infer_freq) or self._infer_freq <= 0):
-            raise ValueError("policy.infer_freq must be a positive finite number")
 
     # -- 配置 ---------------------------------------------------------------
     def _build_config(self) -> RemoteInferenceConfig:
@@ -314,23 +310,14 @@ class LerobotRemoteClient(BasePolicyClient):
                 return
             caps = self._client.capabilities
             self._camera_map = self._resolve_cameras(caps, observation)
-            if self._infer_freq is not None:
-                requested_interval = 1.0 / self._infer_freq
-                server_interval = float(caps.action_interval)
-                if not math.isfinite(server_interval) or server_interval <= 0:
-                    raise ValueError(f"lerobot-remote: server declares invalid action_interval={server_interval!r}")
-                if not math.isclose(requested_interval, server_interval, rel_tol=1e-3, abs_tol=1e-6):
-                    raise ValueError(
-                        "lerobot-remote: policy.infer_freq does not match server action_interval: "
-                        f"{self._infer_freq:g} Hz -> {requested_interval:g}s, "
-                        f"server declares {server_interval:g}s; set infer_freq to "
-                        f"{1.0 / server_interval:g} Hz"
-                    )
+            server_interval = float(caps.action_interval)
+            if not math.isfinite(server_interval) or server_interval <= 0:
+                raise ValueError(f"lerobot-remote: server declares invalid action_interval={server_interval!r}")
             self._client.admit(
                 features=caps.features,
                 action_feature=caps.action_feature,
                 semantics=self._config.semantics,
-                # 直接采用服务端声明的动作周期：端上频率必须与之一致，否则 admission 会被拒
+                # 这是模型动作块的采样周期；Edge 实际消费 / 下发节奏由 policy.infer_freq 独立控制。
                 action_interval=caps.action_interval,
                 mode=self._config.mode,
             )

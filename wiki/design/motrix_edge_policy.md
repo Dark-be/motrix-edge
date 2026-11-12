@@ -190,7 +190,8 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 
 -   **契约来自服务端**：`capabilities` 声明了 features（名称/形状/语义）、`action_feature`、
     `action_interval`、执行模式与块长（`execution_steps` = 一次返回的步数）。端上**直接采用**
-    `caps.action_interval` 完成 admission（频率必须与之一致，否则被拒）；图像尺寸也取自
+    `caps.action_interval` 完成 admission；该值是模型动作块的采样时间基准，不限制 Edge 的实际下发
+    节奏。图像尺寸也取自
     `caps.features[i].shape`，端侧 letterbox 到该尺寸（与训练分辨率一致，不拉伸）。
 -   **策略观测作用域由 policy 显式声明**：`camera_map` / `arm_map` 都是
     `Edge 观测名称 → 推理端特征键名`。map 的键同时选择本策略消费的相机 / 机械臂，值直接使用
@@ -206,7 +207,10 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 -   **块与调度**：服务端只返回**一块**整块（`mode=chunk`，`chunk_merge=append`）；块缓存 / 三元
     切分 / 过渡 / 预取仍由 `motrix_edge.rtc` 负责。`start_index` = 请求的绝对步号，rtc 据此跳过
     过期步。`observed_chunk_len` 直接取 `caps.execution_steps`（服务端声明，非猜测）。
--   **错误可见**：admission 失败（相机/state/频率/语义不符）在 `prepare`（`infer connect`）阶段
+-   **下发频率独立**：`policy.infer_freq` 仅控制 Edge 的观测采样、RTC 步进和逐步动作下发频率；它
+    可以不同于服务端 `caps.action_interval` 对应的模型采样频率。降低它会按更长的现实时间间隔消费
+    相邻模型动作，即对轨迹做时间拉伸，不对动作值插值或重采样。
+-   **错误可见**：admission 失败（相机/state/动作契约/语义不符）在 `prepare`（`infer connect`）阶段
     直接抛出清晰错误；推理失败抛协议错误，不会静默返回空块。
 -   **vendored lerobot**：`src/lerobot/`（Apache-2.0）只保留 wire 所需子集——
     `remote_inference/{protocol,codec,client,chunk_contract}`、`transport/zenoh.py`、

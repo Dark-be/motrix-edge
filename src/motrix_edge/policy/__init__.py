@@ -114,7 +114,7 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "min": 0.001,
         "help": "动作块内每步动作的下发频率（Hz）；例如 4 = 每 250ms 下发一个动作。"
         "它同时决定观测采样、RTC 步进和动作块消耗节奏；进入会话后固化。"
-        "lerobot-remote 会在 admission 时校验它与服务端声明的 action_interval 一致。",
+        "它独立于 lerobot-remote 服务端声明的模型动作采样周期。",
     },
     {
         "key": "warmup_required",

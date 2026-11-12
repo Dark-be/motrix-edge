@@ -1,14 +1,59 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
     bindTrustedCaptureBody,
     loadConfig,
+    loadPolicyPresets,
     parseServerArgs,
     requireAllowedTenant,
     safeReturnTo,
     signIdentityHeaders,
 } from "./index.mjs";
+
+test("runtime policy directory replaces built-in presets", (t) => {
+    const directory = mkdtempSync(join(tmpdir(), "motrix-policy-presets-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    writeFileSync(
+        join(directory, "light-switch.yml"),
+        `preset:
+  id: lerobot-remote-light-switch
+  label: turn on light switch
+policy:
+  type: lerobot-remote
+  deployment: akt-turn-on-light-switch-v3-first-frame-openloop4-30k
+  task: turn on the light switch
+  rtc:
+    action_horizon: 4
+    execution_horizon: 4
+`
+    );
+    writeFileSync(
+        join(directory, "openpi.yml"),
+        `preset:
+  id: openpi-default
+  label: site openpi
+policy:
+  type: openpi
+`
+    );
+
+    const presets = loadPolicyPresets(directory);
+    assert.equal(presets.length, 2);
+    assert.equal(presets.find((preset) => preset.id === "openpi-default").label, "site openpi");
+    const lightSwitch = presets.find((preset) => preset.id === "lerobot-remote-light-switch");
+    assert.equal(lightSwitch.policyType, "lerobot-remote");
+    assert.match(lightSwitch.source, /action_horizon: 4/);
+});
+
+test("built-in policy presets are used only when the runtime directory is absent", () => {
+    const missing = join(tmpdir(), `missing-motrix-policy-${process.pid}-${Date.now()}`);
+    const presets = loadPolicyPresets(missing);
+    assert.deepEqual(presets.map((preset) => preset.id).sort(), ["lerobot-remote-default", "openpi-default"]);
+});
 
 test("server CLI separates listen overrides from the public OAuth URL", () => {
     assert.deepEqual(

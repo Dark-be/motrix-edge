@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import type { EdgeApi } from "../api";
 import type { InferRolloutResponse, InferStatus } from "../types";
 import { SignalGrid, type Signal } from "./SignalGrid";
@@ -17,6 +19,7 @@ export function InferOps({
     run,
     infers,
     onRollout,
+    policyConfig,
 }: {
     api: EdgeApi | null;
     hasLease: boolean;
@@ -26,6 +29,8 @@ export function InferOps({
     infers: InferStatus | null;
     /** 推理回执回调（推理页把动作块喂给 3D 视口画期望轨迹） */
     onRollout?: (resp: InferRolloutResponse) => void;
+    /** 低频策略配置紧跟推理操作区显示，并由其自身控制展开 / 收起。 */
+    policyConfig?: ReactNode;
 }) {
     const connected = api !== null;
     const inferConnected = infers?.connected ?? false;
@@ -96,6 +101,8 @@ export function InferOps({
                 </div>
                 {warmupError && <p className="mt-1 text-[11px] text-amber-300">上次预热未完成：{warmupError}</p>}
             </div>
+
+            {policyConfig}
 
             <Disclosure label="Info">
                 <KvGrid>

@@ -16,7 +16,7 @@ type SessionKind = "capture" | "infer";
  *
  * 结构按「进 / 用 / 退」三段拆开，避免把两套流程铺成两排按钮：
  *
- * 1. **未进入** —— 选会话类型 → （推理额外要策略配置）→ 一个主按钮「进入」；
+ * 1. **未进入** —— 选会话类型 → 一个主按钮「进入」→ 默认收起的推理配置；
  *    采集的「预检」是只读辅助，放同一行。
  * 2. **已进入** —— **统一录制控件**（采集 / 推理同一对命令，见 `RecordingControl`）
  *    + 该会话特有的操作（采集：元信息；推理：预热 / 单步 / 持续）+ 退出。
@@ -151,18 +151,6 @@ export function SessionDeck({
                         />
                     )}
 
-                    {isInfer && (
-                        <PolicyConfigForm
-                            policies={policies}
-                            connected={connected}
-                            busy={busy}
-                            locked={false}
-                            framed={false}
-                            cfg={cfg}
-                            cacheScope={api?.baseUrl ?? "disconnected"}
-                        />
-                    )}
-
                     <div className="flex flex-wrap items-center gap-2">
                         <Button
                             variant="primary"
@@ -191,20 +179,19 @@ export function SessionDeck({
                         )}
                         {enterBlocked && <span className="text-[10px] text-amber-300">{enterBlocked}</span>}
                     </div>
-                </div>
-            ) : (
-                <div className="space-y-2">
                     {isInfer && (
                         <PolicyConfigForm
                             policies={policies}
                             connected={connected}
                             busy={busy}
-                            locked
-                            framed={false}
+                            locked={false}
                             cfg={cfg}
                             cacheScope={api?.baseUrl ?? "disconnected"}
                         />
                     )}
+                </div>
+            ) : (
+                <div className="space-y-2">
                     <RecordingControl
                         api={api}
                         hasLease={hasLease}
@@ -229,6 +216,16 @@ export function SessionDeck({
                             run={run}
                             infers={infers}
                             onRollout={onRollout}
+                            policyConfig={
+                                <PolicyConfigForm
+                                    policies={policies}
+                                    connected={connected}
+                                    busy={busy}
+                                    locked
+                                    cfg={cfg}
+                                    cacheScope={api?.baseUrl ?? "disconnected"}
+                                />
+                            }
                         />
                     ) : null}
 

@@ -202,6 +202,7 @@ H 远大于模型块长时，若策略端**声明了**块长则 `calibrate` 会�
 `aggregate_fn` 必须是 `rtc.base.TRANSITION_FUNCTIONS` 已注册的策略名（见上文策略表）。
 预取提前量 = `P + S`（执行段还剩 P 步时发起；在工作线程完成）。
 `control_hz` 由会话按 `1 / step_interval`（`policy.infer_freq`）自动传入，仅用于实测耗时折算上报，不需配置。
+该频率是 Edge 实际消费和下发动作的节奏；远端策略的模型采样周期由服务端契约独立声明，两者无需一致。
 
 ## 策略配置入口
 

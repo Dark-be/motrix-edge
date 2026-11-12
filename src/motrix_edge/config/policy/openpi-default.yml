@@ -1,6 +1,6 @@
 preset:
   id: openpi-default
-  label: OpenPI 默认配置
+  label: openpi default
 
 policy:
   type: openpi

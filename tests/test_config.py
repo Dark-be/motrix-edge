@@ -19,6 +19,7 @@ from motrix_edge.config import (
     config_path,
     get_config_dir,
     get_log_dir,
+    get_policy_dir,
     get_root_dir,
     load_config,
     writable_config_path,
@@ -34,6 +35,7 @@ def test_root_dir_prefers_env(monkeypatch, tmp_path):
     assert get_root_dir() == tmp_path
     assert get_config_dir() == tmp_path / "config"
     assert get_log_dir() == tmp_path / "logs"
+    assert get_policy_dir() == tmp_path / "policy"
     assert config_path("edge.yml") == tmp_path / "config" / "edge.yml"
 
 
@@ -43,6 +45,7 @@ def test_root_dir_defaults_under_cwd(monkeypatch, tmp_path):
     assert get_root_dir() == tmp_path / "motrix-edge"
     assert get_config_dir() == tmp_path / "motrix-edge" / "config"
     assert get_log_dir() == tmp_path / "motrix-edge" / "logs"
+    assert get_policy_dir() == tmp_path / "motrix-edge" / "policy"
 
 
 def test_load_config_falls_back_without_writing(monkeypatch, tmp_path):

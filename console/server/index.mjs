@@ -8,6 +8,7 @@ import { parse } from "yaml";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(HERE, "..");
 const BUILTIN_POLICY_PRESET_DIR = resolve(ROOT, "..", "src", "motrix_edge", "config", "policy");
+const DEFAULT_RUNTIME_ROOT = resolve(ROOT, "..", "motrix-edge");
 const MAX_POLICY_PRESET_BYTES = 256 * 1024;
 const SIGNATURE_VERSION = "motrix-console-v1";
 const MIME = {
@@ -60,6 +61,7 @@ export function loadConfig(path = process.env.MOTRIX_CONSOLE_CONFIG || join(ROOT
         appId: process.env.MOTRIX_CONSOLE_FEISHU_APP_ID,
         appSecret: process.env.MOTRIX_CONSOLE_FEISHU_APP_SECRET,
         authEnabled,
+        policyDir: join(resolve(process.env.MOTRIX_EDGE_DIR || DEFAULT_RUNTIME_ROOT), "policy"),
         allowedTenants: new Set(tenantSource.map((value) => String(value).trim()).filter(Boolean)),
         edges,
         harnessProviders,
@@ -225,7 +227,7 @@ export function createConsoleServer(config = loadConfig()) {
                 });
             }
             if (url.pathname === "/api/policy-presets") {
-                return json(res, 200, { presets: loadPolicyPresets() });
+                return json(res, 200, { presets: loadPolicyPresets(config.policyDir) });
             }
             if (url.pathname === "/api/harness/providers") {
                 requireSession(req, sessions);

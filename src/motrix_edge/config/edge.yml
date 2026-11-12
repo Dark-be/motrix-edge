@@ -102,7 +102,7 @@ policy:
   # 与文本指令（openpi 的 prompt，`infer config set`）由调用方 / 前端按所选策略动态填写。
   deployment: null # lerobot-remote：服务端 deployment 名（== server.yaml 的 deployment）
   semantics: null # lerobot-remote：动作单位/顺序标识，必须与服务端逐字一致
-  infer_freq: 10 # 动作块内每步下发频率（Hz）；必须与 lerobot 服务端 action_interval 相匹配
+  infer_freq: 10 # Edge 动作下发频率（Hz）；独立于远端模型 action_interval
   mode: chunk # lerobot-remote：执行模式（块缓存/切分/预取由 edge RTC 负责）
   chunk_merge: append # lerobot-remote：块拼接语义（append | aligned，需服务端能力）
   encoding: raw # lerobot-remote：图像编码（raw | jpeg）

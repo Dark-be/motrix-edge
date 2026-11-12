@@ -39,6 +39,13 @@ Tailwind 的浏览器控制台，Node BFF 负责飞书登录、设备白名单�
 
 ## 后续重构（对齐 edge 接口 + 可用性）
 
+-   [x] 推理配置布局瘦身：整体默认收起，会话外放在「进入推理会话」下方，会话内紧跟推理操作按钮；
+        折叠摘要只保留预设、策略类型与校验状态，展开后不再重复展示逐字段只读网格。
+
+-   [x] 运行时策略预设目录：`$MOTRIX_EDGE_DIR/policy/` 存在时 Console BFF 只动态读取现场目录，
+        不存在时才使用包内兜底；前端从 `/api/policy-presets` 加载并在接口失败时回退包内预设；以开灯任务
+        作为首份无需 Git 提交的现场配置，补齐服务端扫描、前端加载和构建测试。
+
 -   [x] API/类型对齐：`infer connect`（`POST /v1/infers/connect`，`InferStatus.connected`）、
         `capture sync`（`POST /v1/captures/sync`，`CapturesStatus.capture_status`）
 -   [x] 会话卡片折叠（采集 / 推理可收起；当前会话切换时自动收起另一张）

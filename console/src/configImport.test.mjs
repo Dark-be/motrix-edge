@@ -101,10 +101,42 @@ test("every checked-in preset has metadata and is accepted as one policy config"
         const parsed = parsePolicyImport(source, policyRefs);
         assert.equal(parsed.policyType, document.policy.type);
         assert.equal(typeof parsed.draft.action_layout, "string");
-        assert.deepEqual(JSON.parse(parsed.draft.arm_map), document.policy.arm_map);
-        assert.deepEqual(JSON.parse(parsed.draft.camera_map), document.policy.camera_map);
+        if (document.policy.arm_map !== undefined) {
+            assert.deepEqual(JSON.parse(parsed.draft.arm_map), document.policy.arm_map);
+        }
+        if (document.policy.camera_map !== undefined) {
+            assert.deepEqual(JSON.parse(parsed.draft.camera_map), document.policy.camera_map);
+        }
         const rtc = JSON.parse(parsed.draft.rtc);
         assert.equal(rtc.enabled, true);
         assert.equal(rtc.prefix_len + rtc.execution_horizon + rtc.suffix_len, rtc.action_horizon);
     }
+});
+
+test("default three-button preset uses slow local pose dispatch", () => {
+    const preset = parse(
+        readFileSync(new URL("../../src/motrix_edge/config/policy/lerobot-remote-default.yml", import.meta.url), "utf8")
+    ).policy;
+    assert.equal(preset.infer_freq, 0.4);
+    assert.equal(preset.endpoint, "tcp/172.29.17.45:7448");
+    assert.equal(preset.deployment, "akt-press-three-buttons-v4-first-frame-openloop10-30k");
+    assert.equal(preset.action_layout, "pose+gripper");
+    assert.deepEqual(preset.arm_map, { right: "observation.state" });
+    assert.deepEqual(preset.camera_map, { cam_head: "observation.images.cam_head" });
+    assert.deepEqual(preset.joint_offsets.right, [0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(preset.rtc, {
+        enabled: true,
+        action_horizon: 10,
+        prefix_len: 0,
+        execution_horizon: 10,
+        suffix_len: 0,
+        aggregate_fn: "weighted_average",
+    });
+});
+
+test("OpenPI preset has the concise display name", () => {
+    const root = parse(
+        readFileSync(new URL("../../src/motrix_edge/config/policy/openpi-default.yml", import.meta.url), "utf8")
+    );
+    assert.equal(root.preset.label, "openpi default");
 });
