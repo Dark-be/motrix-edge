@@ -81,9 +81,9 @@ export function TopBar() {
                     </label>
                 )}
                 <ConnectionMenu />
-                <AuthMenu />
-                <LeaseMenu />
                 <NodeMenu />
+                <LeaseMenu />
+                <AuthMenu />
                 <Button
                     size="xs"
                     variant={threeEnabled ? "primary" : "ghost"}

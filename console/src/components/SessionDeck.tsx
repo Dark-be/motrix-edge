@@ -5,7 +5,6 @@ import { useOps } from "../hooks/useOps";
 import { usePolicyConfig } from "../hooks/usePolicyConfig";
 import { errMsg, type CapturesStatus, type InferRolloutResponse, type InferStatus, type PolicyRef } from "../types";
 import { InferOps } from "./InferOps";
-import { RtcCard } from "./RtcCard";
 import { PolicyConfigForm } from "./PolicyConfigForm";
 import { RecordingControl } from "./RecordingControl";
 import { Badge, Button, Card, ErrorText, Segmented } from "./ui";
@@ -160,6 +159,7 @@ export function SessionDeck({
                             locked={false}
                             framed={false}
                             cfg={cfg}
+                            cacheScope={api?.baseUrl ?? "disconnected"}
                         />
                     )}
 
@@ -202,9 +202,9 @@ export function SessionDeck({
                             locked
                             framed={false}
                             cfg={cfg}
+                            cacheScope={api?.baseUrl ?? "disconnected"}
                         />
                     )}
-
                     <RecordingControl
                         api={api}
                         hasLease={hasLease}
@@ -262,20 +262,5 @@ export function SessionDeck({
         </Card>
     );
 
-    if (!isInfer || fixedKind === undefined || (!inShownSession && cfg.selectedPolicy === "")) return sessionCard;
-
-    return (
-        <>
-            {sessionCard}
-            <RtcCard
-                api={api}
-                hasLease={hasLease}
-                inInfer={inShownSession}
-                busy={busy}
-                rtc={infers?.rtc ?? null}
-                run={run}
-                standalone
-            />
-        </>
-    );
+    return sessionCard;
 }

@@ -1,0 +1,31 @@
+preset:
+  id: lerobot-remote-default
+  label: press three button
+
+policy:
+  type: lerobot-remote
+  endpoint: tcp/172.29.17.45:7447
+  deployment: pi05-press-three-buttons-v2-mem5s-15k
+  semantics: piper-joint-radians-gripper-0to1-abs-v1
+  infer_freq: 4
+  task: press the three buttons in order
+  observation_layout: qpos
+  action_layout: joint+gripper
+  arm_map:
+    right: observation.state
+  camera_map:
+    cam_head: observation.images.piper_0_cam_head
+    cam_right_wrist: observation.images.piper_0_cam_right_wrist
+  mode: chunk
+  chunk_merge: append
+  encoding: jpeg
+  jpeg_quality: 95
+  warmup_required: true
+
+  rtc:
+    enabled: true
+    action_horizon: 50
+    prefix_len: 0
+    execution_horizon: 30
+    suffix_len: 20
+    aggregate_fn: weighted_average

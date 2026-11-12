@@ -50,13 +50,13 @@ const iconBtn =
  * + 「同步」推给机器人进程（同步只在采集会话内被接受）；下方只读展示**已同步到机器人进程的摘要**
  * （录制时长 / 动作帧数 / 采集人 / 任务，5 Hz 轮询 `GET /v1/captures` 刷新）。
  *
- * 采集员只来自飞书登录；`capture.yml` 仅提供任务等业务分类。业务选项写操作是**配置级**动作
- * （改设备上的配置文件），须持租约。
+ * 在线 Console 使用飞书身份；离线 Console 则允许现场填写不可信的采集员姓名。
  */
 export function MetaCard() {
     const { api, hasLease, nodeState, sessionType, captureStatus, onLog, authStatus, auth } = useEdge();
     const [options, setOptions] = useState<Record<string, string[]>>({});
     const [selection, setSelection] = useState<Record<string, string>>({});
+    const [operator, setOperator] = useState("");
     /** 正在新增 / 重命名的分类（`old` 非空 = 重命名） */
     const [editing, setEditing] = useState<{ key: string; old: string | null } | null>(null);
     const [draft, setDraft] = useState("");
@@ -69,8 +69,8 @@ export function MetaCard() {
     const keys = useMemo(() => orderedKeys(options), [options]);
     const syncedMeta = useMemo(() => captureStatus?.meta ?? {}, [captureStatus?.meta]);
     const effectiveSelection = useMemo(
-        () => (auth ? { ...selection, operator: auth.user.display_name } : selection),
-        [auth, selection]
+        () => ({ ...selection, operator: auth?.user.display_name ?? operator.trim() }),
+        [auth, operator, selection]
     );
     const missingSelection = useMemo(() => missingCaptureMeta(effectiveSelection), [effectiveSelection]);
 
@@ -190,9 +190,12 @@ export function MetaCard() {
                             使用飞书登录
                         </Button>
                     ) : (
-                        <span className="min-w-0 flex-1 rounded border border-amber-700 bg-amber-950/30 px-2 py-1 text-[11px] text-amber-400">
-                            Edge 未启用飞书认证
-                        </span>
+                        <input
+                            className={`${inputCls} min-w-0 flex-1`}
+                            value={operator}
+                            placeholder="请输入采集员姓名（不可信）"
+                            onChange={(e) => setOperator(e.target.value)}
+                        />
                     )}
                 </div>
                 {rows.map((key) => {

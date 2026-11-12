@@ -17,8 +17,8 @@ export interface PolicyConfigItem {
     key: string;
     /** 展示名（表单标签） */
     label: string;
-    /** 控件 / 校验类型：text | int | float | bool */
-    type: "text" | "int" | "float" | "bool";
+    /** 控件 / 校验类型；string_map 在 YAML 中表示字符串到字符串的映射。 */
+    type: "text" | "int" | "float" | "bool" | "string_map" | "rtc";
     /** 是否必填（缺失时 `missing` 会列出该项；推理 / 录制按钮据此门控） */
     required?: boolean;
     /** 会话内改动是否**立即生效**：true = 策略每次请求现读；false = 会话级 / 握手级（退出重进才生效） */
@@ -36,7 +36,7 @@ export interface PolicyConfigItem {
     /** 敏感项（密钥）：后端不回显值（`value` 恒空 + `configured` 标记），前端渲染密码框 */
     secret?: boolean;
     /** 代码缺省值（可选） */
-    default?: string | number | boolean | null;
+    default?: string | number | boolean | Record<string, string> | null;
     /** 固定候选值；存在时渲染下拉框，提交值仍按 `type` 转换。 */
     options?: Array<string | number | boolean>;
     placeholder?: string;
@@ -45,7 +45,7 @@ export interface PolicyConfigItem {
 
 /** schema 项 + 当前值（GET /v1/infers 的 policy_config.items）。 */
 export interface PolicyConfigItemValue extends PolicyConfigItem {
-    value: string | number | boolean | null;
+    value: string | number | boolean | Record<string, string> | null;
     /** 敏感项专用：后端内存态是否已设置（值不回显） */
     configured?: boolean;
 }
@@ -57,7 +57,7 @@ export interface PolicyConfigStatus {
     /** 配置项清单（schema + 当前值） */
     items: PolicyConfigItemValue[];
     /** 当前值字典（key → value） */
-    values: Record<string, string | number | boolean | null>;
+    values: Record<string, string | number | boolean | Record<string, string> | null>;
     /** 缺失的必填项键（非空 → 不能开始推理 / 录制） */
     missing: string[];
     /** 会话内可运行时修改的键 */
@@ -452,7 +452,7 @@ export interface InferSyncResponse {
     meta: Record<string, unknown> | null;
 }
 
-/** RTC（实时动作块）参数（`policy.rtc` 段；POST /v1/infers/rtc 可部分更新）。 */
+/** RTC（实时动作块）参数（完整策略配置的 `policy.rtc` 段）。 */
 export interface RtcParams {
     enabled: boolean;
     /** 块长上限 H（一次推理只取策略块的前 H 步）；模型块更短时 P/E/S 与提前量按「实际块长 / H」等比缩放 */
@@ -491,12 +491,6 @@ export interface RtcStatus {
     last_delay?: number;
     /** 实测推理耗时折算的控制步数（P 建议值） */
     last_delay_steps?: number;
-}
-
-/** POST /v1/infers/rtc：设置 RTC 参数，回执生效后的运行状态。 */
-export interface InferRTCResponse {
-    status: string;
-    rtc: RtcStatus | null;
 }
 
 /** POST /v1/infers/config：设置策略配置项（按当前策略 schema 校验），回执生效后的状态。 */

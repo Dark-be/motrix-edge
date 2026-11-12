@@ -18,7 +18,6 @@ import {
     type InferEpisodeResponse,
     type InferRolloutResponse,
     type InferRolloutStopResponse,
-    type InferRTCResponse,
     type InferStatus,
     type InferSyncResponse,
     type LeaseInstallRequest,
@@ -88,8 +87,14 @@ export class EdgeApi {
         const qs = opts.query ? `?${new URLSearchParams(opts.query).toString()}` : "";
         const requestUrl = `${opts.baseUrl ?? this._baseUrl}${path}${qs}`;
         const requestOrigin = new URL(requestUrl, window.location.origin).origin;
+        // 只有同源 Console 请求需要 Cookie（登录 / BFF）；直连 Edge 是跨源控制面，
+        // 不发送浏览器凭据，避免匿名 Edge 的通配 CORS 与 credentials 冲突。
         const credentials: RequestCredentials =
-            this._authEnabled && requestOrigin === window.location.origin ? "include" : "omit";
+            this._authEnabled &&
+            requestOrigin === window.location.origin &&
+            requestUrl.startsWith(window.location.origin)
+                ? "include"
+                : "omit";
         let res: Response;
         try {
             res = await fetch(requestUrl, {
@@ -141,7 +146,7 @@ export class EdgeApi {
         return this.request("POST", "/api/auth/logout", { baseUrl: window.location.origin });
     }
 
-    consoleEdges(): Promise<{ edges: Array<{ id: string; label: string }> }> {
+    consoleEdges(): Promise<{ edges: Array<{ id: string; label: string; baseUrl: string }> }> {
         return this.request("GET", "/api/edges", { baseUrl: window.location.origin });
     }
 
@@ -343,11 +348,6 @@ export class EdgeApi {
     inferConnect(): Promise<InferConnectResponse> {
         // 单次尝试连接推理节点：infer connect（成功回执含服务端 metadata）
         return this.request("POST", "/v1/infers/connect", { lease: true });
-    }
-
-    setInferRtc(params: Record<string, unknown>): Promise<InferRTCResponse> {
-        // 运行期设置 RTC（实时动作块）参数（可部分）：写内存态 policy.rtc + 应用到运行中 manager
-        return this.request("POST", "/v1/infers/rtc", { lease: true, body: params });
     }
 
     setInferConfig(config: Record<string, unknown>): Promise<InferConfigResponse> {

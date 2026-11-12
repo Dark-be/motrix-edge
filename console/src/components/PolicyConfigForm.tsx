@@ -1,6 +1,10 @@
+import { useEffect, useRef, useState } from "react";
+
+import { parsePolicyImport } from "../configImport";
 import type { usePolicyConfig } from "../hooks/usePolicyConfig";
+import { loadInferPresets, type InferPreset } from "../inferPresets";
 import type { PolicyConfigItemValue, PolicyRef } from "../types";
-import { Badge, BlockTitle, plain } from "./ui";
+import { Badge, Button } from "./ui";
 
 /**
  * 策略配置表单（**按所选策略的 schema 动态生成**，前端不硬编码任何键名）。
@@ -16,6 +20,7 @@ export function PolicyConfigForm({
     locked,
     framed = true,
     cfg,
+    cacheScope,
 }: {
     policies: PolicyRef[];
     connected: boolean;
@@ -25,158 +30,198 @@ export function PolicyConfigForm({
     /** false 时作为顶层 Card 的正文使用，避免出现卡片套卡片。 */
     framed?: boolean;
     cfg: ReturnType<typeof usePolicyConfig>;
+    /** 按 Edge 地址隔离最近一次已解析的完整策略 YAML。 */
+    cacheScope: string;
 }) {
-    const { activePolicyType, configItems, configValue, setField, configMissing, configReady, endpointMissing } = cfg;
+    const { activePolicyType, configItems, configValue, configMissing, configReady, endpointMissing } = cfg;
+    const [yamlText, setYamlText] = useState("");
+    const [selectedPresetId, setSelectedPresetId] = useState("");
+    const [parseError, setParseError] = useState<string | null>(null);
+    const [presetCatalog, setPresetCatalog] = useState<InferPreset[] | null>(null);
+    const [presetLoadError, setPresetLoadError] = useState<string | null>(null);
+    const edited = useRef(false);
+    const initialized = useRef(false);
+    const availablePresets = (presetCatalog ?? []).filter((preset) =>
+        policies.some((policy) => policy.type === preset.policyType)
+    );
+    const selectedPreset = availablePresets.find((preset) => preset.id === selectedPresetId) ?? null;
+    const cacheKey = `edge-console:policy-config:${cacheScope}`;
     // 选策略 / 填配置只改本地草稿（不发请求）→ 不要求租约，只在「进入并预热」时校验；
     // 会话内整张表单只读（`locked`）。
     const disabled = !connected || busy || locked;
+    const syncConfig = (source: string, persist = false) => {
+        try {
+            const parsed = parsePolicyImport(source, policies);
+            cfg.replaceDraft(parsed.policyType, parsed.draft);
+            if (persist) localStorage.setItem(cacheKey, source);
+            setParseError(null);
+            return true;
+        } catch (error) {
+            setParseError(error instanceof Error ? error.message : String(error));
+            return false;
+        }
+    };
+    const parseConfig = () => {
+        syncConfig(yamlText, true);
+    };
+    const applyPreset = (preset: InferPreset) => {
+        edited.current = false;
+        setSelectedPresetId(preset.id);
+        setYamlText(preset.source);
+        syncConfig(preset.source, true);
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+        loadInferPresets()
+            .then((presets) => {
+                if (!cancelled) setPresetCatalog(presets);
+            })
+            .catch((error) => {
+                if (cancelled) return;
+                setPresetLoadError(error instanceof Error ? error.message : String(error));
+                setPresetCatalog([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (initialized.current || edited.current || availablePresets.length === 0 || locked) return;
+        initialized.current = true;
+        const cached = localStorage.getItem(cacheKey);
+        if (cached && syncConfig(cached)) {
+            setYamlText(cached);
+            setSelectedPresetId(availablePresets.find((preset) => preset.source === cached)?.id ?? "");
+            return;
+        }
+        const initial =
+            availablePresets.find((preset) => preset.policyType === activePolicyType) ?? availablePresets[0];
+        applyPreset(initial);
+        // cfg is intentionally represented by stable setters plus the current policy list.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [policies, locked, activePolicyType, cacheKey, presetCatalog]);
+
+    const configuredCount = configItems.filter((item) => configValue(item).trim() !== "").length;
+    const rtc = (() => {
+        const item = configItems.find((candidate) => candidate.key === "rtc");
+        if (!item) return null;
+        try {
+            return JSON.parse(configValue(item)) as {
+                enabled?: boolean;
+                action_horizon?: number;
+                prefix_len?: number;
+                execution_horizon?: number | null;
+                suffix_len?: number;
+            };
+        } catch {
+            return null;
+        }
+    })();
 
     return (
         <div className={framed ? "rounded border border-slate-800 bg-slate-950/40 p-2" : ""}>
-            <div className="mb-2 flex flex-wrap items-end gap-2">
-                <label className="flex min-w-0 flex-1 flex-col gap-0.5" htmlFor="infer-policy">
-                    <span className="text-[10px] uppercase tracking-wide text-slate-500">
-                        推理策略（进入会话前必选）
-                    </span>
+            <div className="flex flex-wrap items-center gap-2">
+                <label className="flex min-w-[15rem] flex-1 items-center gap-2">
+                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-slate-500">策略配置</span>
                     <select
-                        id="infer-policy"
-                        value={activePolicyType}
-                        onChange={(e) => cfg.setSelectedPolicy(e.target.value)}
-                        disabled={disabled}
-                        className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[11px] text-slate-100 disabled:opacity-50"
+                        value={selectedPresetId}
+                        disabled={disabled || availablePresets.length === 0}
+                        onChange={(event) => {
+                            const preset = availablePresets.find((candidate) => candidate.id === event.target.value);
+                            if (preset) applyPreset(preset);
+                        }}
+                        className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-100 disabled:opacity-50"
                     >
-                        <option value="">请选择策略</option>
-                        {policies.map((policy) => (
-                            <option key={policy.type} value={policy.type}>
-                                {policy.type} — {policy.class}
+                        {availablePresets.length === 0 && <option value="">无可用预设</option>}
+                        {availablePresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                                {preset.label}
                             </option>
                         ))}
                     </select>
                 </label>
-                {policies.length === 0 && (
-                    <span className="text-[11px] text-amber-300">未发现可用策略，无法进入推理会话。</span>
-                )}
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <Badge tone={configReady && cfg.endpointSet ? "green" : "amber"}>
+                        {activePolicyType || "未解析"}
+                    </Badge>
+                    <span className="text-[10px] text-slate-500">
+                        {configuredCount}/{configItems.length} 项
+                    </span>
+                    {rtc && (
+                        <span className="font-mono text-[10px] text-slate-500">
+                            RTC {rtc.enabled ? "on" : "off"} · {rtc.action_horizon ?? "—"}/{rtc.prefix_len ?? "—"}/
+                            {rtc.execution_horizon ?? "auto"}/{rtc.suffix_len ?? "—"}
+                        </span>
+                    )}
+                </div>
             </div>
 
-            <BlockTitle
-                actions={
-                    <Badge tone={configReady ? "green" : "amber"}>
-                        {configItems.length === 0
-                            ? "无额外配置项"
-                            : configReady
-                            ? "已配置"
-                            : `缺 ${configMissing.join("、")}`}
-                    </Badge>
-                }
-            >
-                策略配置
-            </BlockTitle>
+            {parseError && <p className="mt-1 text-[11px] text-rose-300">{parseError}</p>}
+            {presetLoadError && <p className="mt-1 text-[11px] text-amber-300">{presetLoadError}</p>}
+            {policies.length === 0 && <p className="mt-1 text-[11px] text-amber-300">未发现可用策略。</p>}
+            {!cfg.endpointSet && <p className="mt-1 text-[11px] text-rose-300">缺端点：{endpointMissing.join("、")}</p>}
+            {!configReady && <p className="mt-1 text-[11px] text-rose-300">缺必填：{configMissing.join("、")}</p>}
 
-            {configItems.length === 0 ? (
-                <p className="text-[11px] text-slate-500">{activePolicyType === "" ? "选择策略" : "无额外配置项"}</p>
-            ) : (
-                <div className="grid grid-cols-2 gap-2">
-                    {configItems.map((item) => (
-                        <ConfigField
-                            key={item.key}
-                            item={item}
-                            value={configValue(item)}
-                            disabled={disabled}
-                            onChange={(value) => setField(item.key, value)}
-                        />
-                    ))}
+            <details className="mt-1.5 border-t border-slate-800 pt-1.5 text-[11px]">
+                <summary className="cursor-pointer select-none text-slate-500">配置详情 · YAML 与同步摘要</summary>
+                <label className="mt-1.5 flex min-w-0 flex-col gap-1">
+                    <textarea
+                        value={yamlText}
+                        onChange={(event) => {
+                            edited.current = true;
+                            setYamlText(event.target.value);
+                        }}
+                        rows={10}
+                        spellCheck={false}
+                        disabled={disabled}
+                        className="w-full resize-y rounded border border-slate-700 bg-slate-950 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-slate-100 disabled:opacity-50"
+                    />
+                </label>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={disabled || selectedPreset === null}
+                        onClick={() => selectedPreset && applyPreset(selectedPreset)}
+                    >
+                        恢复预设
+                    </Button>
+                    <Button size="xs" disabled={disabled || yamlText.trim() === ""} onClick={parseConfig}>
+                        解析并同步
+                    </Button>
+                    <span className="text-[10px] text-slate-500">修改 YAML 后需重新解析。</span>
                 </div>
-            )}
-
-            {!cfg.endpointSet && (
-                <p className="mt-1 text-[11px] text-rose-300">推理端点未配置（{endpointMissing.join("、")}）</p>
-            )}
-            {!configReady && <p className="mt-1 text-[11px] text-rose-300">缺少必填（{configMissing.join("、")}）</p>}
+                {configItems.length > 0 && (
+                    <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-slate-800 pt-1.5">
+                        {configItems.map((item) => (
+                            <ConfigValue key={item.key} item={item} value={configValue(item)} />
+                        ))}
+                    </div>
+                )}
+            </details>
         </div>
     );
 }
 
-/** 单个配置项：`options` → 固定下拉；否则按 `type` / `multiline` 渲染。 */
-function ConfigField({
-    item,
-    value,
-    disabled,
-    onChange,
-}: {
-    item: PolicyConfigItemValue;
-    value: string;
-    disabled: boolean;
-    onChange: (value: string) => void;
-}) {
-    const cls =
-        "rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[11px] text-slate-100 disabled:opacity-50";
+/** YAML 解析结果只读展示；避免禁用输入框让人误以为存在第二个编辑入口。 */
+function ConfigValue({ item, value }: { item: PolicyConfigItemValue; value: string }) {
+    const shown = item.secret ? (item.configured || value !== "" ? "已设置（不回显）" : "未配置") : value || "未配置";
     return (
-        <label className={`flex min-w-0 flex-col gap-0.5${item.multiline ? " col-span-2" : ""}`}>
-            <span className="truncate text-[10px] uppercase tracking-wide text-slate-500" title={item.label}>
+        <div className={`flex min-w-0 items-baseline gap-1.5${item.multiline ? " col-span-2" : ""}`}>
+            <span className="shrink-0 text-[10px] text-slate-500" title={item.label}>
                 {item.label}
                 {item.required && <span className="text-rose-300"> *</span>}
             </span>
-            {item.options && item.options.length > 0 ? (
-                <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} className={cls}>
-                    {item.options.map((option) => (
-                        <option key={String(option)} value={String(option)}>
-                            {String(option)}
-                        </option>
-                    ))}
-                </select>
-            ) : item.type === "bool" ? (
-                <select
-                    value={value || "false"}
-                    onChange={(e) => onChange(e.target.value)}
-                    disabled={disabled}
-                    className={cls}
-                >
-                    {["true", "false"].map((option) => (
-                        <option key={option} value={option}>
-                            {option}
-                        </option>
-                    ))}
-                </select>
-            ) : item.multiline ? (
-                /* 长文本项（schema 标 multiline，如 prompt / system_prompt）：占满一行且可拖拽调整高度 */
-                <textarea
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                    placeholder={item.placeholder ?? item.key}
-                    rows={item.rows ?? 4}
-                    spellCheck
-                    disabled={disabled}
-                    className={`w-full resize-y leading-relaxed ${cls}`}
-                />
-            ) : (
-                <input
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                    placeholder={
-                        item.secret && item.configured && value === ""
-                            ? "已设置（输入新值可覆盖）"
-                            : item.placeholder ?? item.key
-                    }
-                    type={item.secret ? "password" : item.type === "int" || item.type === "float" ? "number" : "text"}
-                    step={item.type === "float" ? "any" : undefined}
-                    autoComplete={item.secret ? "off" : undefined}
-                    spellCheck={item.secret ? false : undefined}
-                    disabled={disabled}
-                    title={
-                        item.secret
-                            ? "仅存 edge 内存态：不落盘、不回显，刷新页面后需重填"
-                            : plain(item.help) || undefined
-                    }
-                    className={cls}
-                />
-            )}
-            {item.secret && (
-                <span className="text-[10px] text-amber-300/80">
-                    {item.configured && value === ""
-                        ? "内存态已设置（刷新后此框会清空）"
-                        : "仅本次运行有效：不落盘、不回显"}
-                </span>
-            )}
-        </label>
+            <span
+                className={`min-w-0 truncate font-mono text-[10px] ${
+                    shown === "未配置" ? "text-slate-600" : "text-slate-200"
+                }`}
+                title={shown}
+            >
+                {shown}
+            </span>
+        </div>
     );
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { useEdge } from "../edge";
-import { useWebRTC } from "../hooks/useWebRTC";
+import { useConsoleWebRTC } from "../webrtc";
 import { Button, Card } from "../components/ui";
 
 /**
@@ -11,14 +11,8 @@ import { Button, Card } from "../components/ui";
  * 有相机时**自动连接**，相机集合变化自动重连。
  */
 export function CameraRail() {
-    const { api, cameraNames, hasLease } = useEdge();
-    const cameraKey = cameraNames.join(",");
-    const { state, error, streams, connect, disconnect } = useWebRTC(api, cameraNames);
-
-    useEffect(() => {
-        if (hasLease && cameraNames.length > 0) void connect();
-        else disconnect();
-    }, [hasLease, cameraKey, cameraNames.length, connect, disconnect]);
+    const { cameraNames, hasLease } = useEdge();
+    const { state, error, streams, connect, disconnect } = useConsoleWebRTC();
 
     // @types/react 的 video 无 srcObject prop：用 ref 回调挂流（只在流真正变化时设置）
     const videoEls = useRef<(HTMLVideoElement | null)[]>([]);

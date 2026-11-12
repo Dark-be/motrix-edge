@@ -1,11 +1,14 @@
 import { createHmac, createHash, randomBytes } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parse } from "yaml";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(HERE, "..");
+const BUILTIN_POLICY_PRESET_DIR = resolve(ROOT, "..", "src", "motrix_edge", "config", "policy");
+const MAX_POLICY_PRESET_BYTES = 256 * 1024;
 const SIGNATURE_VERSION = "motrix-console-v1";
 const MIME = {
     ".css": "text/css; charset=utf-8",
@@ -44,6 +47,8 @@ export function loadConfig(path = process.env.MOTRIX_CONSOLE_CONFIG || join(ROOT
             baseUrl: validatedBaseUrl(raw.baseUrl, `Harness provider ${id}`),
         });
     }
+    const authConfig = config.auth || {};
+    const authEnabled = Boolean(authConfig.enabled);
     return {
         host: config.host || "0.0.0.0",
         port: Number(config.port || 5174),
@@ -54,6 +59,7 @@ export function loadConfig(path = process.env.MOTRIX_CONSOLE_CONFIG || join(ROOT
         stateTtl: Number(config.stateTtl || 600),
         appId: process.env.MOTRIX_CONSOLE_FEISHU_APP_ID,
         appSecret: process.env.MOTRIX_CONSOLE_FEISHU_APP_SECRET,
+        authEnabled,
         allowedTenants: new Set(tenantSource.map((value) => String(value).trim()).filter(Boolean)),
         edges,
         harnessProviders,
@@ -171,8 +177,13 @@ export function createConsoleServer(config = loadConfig()) {
             const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
             prune(states);
             prune(sessions);
-            if (url.pathname === "/api/auth") return json(res, 200, { enabled: true, provider: "feishu" });
+            if (url.pathname === "/api/auth")
+                return json(res, 200, {
+                    enabled: config.authEnabled,
+                    provider: config.authEnabled ? "feishu" : null,
+                });
             if (url.pathname === "/api/auth/feishu/login") {
+                if (!config.authEnabled) return json(res, 404, { detail: "Feishu login is disabled" });
                 const state = base64url(randomBytes(32));
                 states.set(state, {
                     expiresAt: now() + config.stateTtl,
@@ -186,6 +197,7 @@ export function createConsoleServer(config = loadConfig()) {
                 return redirect(res, 307, target.toString());
             }
             if (url.pathname === "/api/auth/feishu/callback") {
+                if (!config.authEnabled) return json(res, 404, { detail: "Feishu login is disabled" });
                 const state = url.searchParams.get("state");
                 const transaction = states.get(state);
                 states.delete(state);
@@ -202,12 +214,18 @@ export function createConsoleServer(config = loadConfig()) {
                 return json(res, 200, { authenticated: false });
             }
             if (url.pathname === "/api/auth/me") {
+                if (!config.authEnabled) return json(res, 200, { authenticated: false });
                 const session = requireSession(req, sessions);
                 return json(res, 200, { authenticated: true, user: session.identity });
             }
             if (url.pathname === "/api/edges") {
-                requireSession(req, sessions);
-                return json(res, 200, { edges: [...config.edges.values()].map(({ id, label }) => ({ id, label })) });
+                if (config.authEnabled) requireSession(req, sessions);
+                return json(res, 200, {
+                    edges: [...config.edges.values()].map(({ id, label, baseUrl }) => ({ id, label, baseUrl })),
+                });
+            }
+            if (url.pathname === "/api/policy-presets") {
+                return json(res, 200, { presets: loadPolicyPresets() });
             }
             if (url.pathname === "/api/harness/providers") {
                 requireSession(req, sessions);
@@ -239,38 +257,61 @@ export function createConsoleServer(config = loadConfig()) {
             }
             const match = url.pathname.match(/^\/api\/edges\/([^/]+)(\/v1(?:\/.*)?)$/);
             if (match) {
-                const session = requireSession(req, sessions);
-                const edge = config.edges.get(decodeURIComponent(match[1]));
-                if (!edge) return json(res, 404, { detail: "edge not found" });
-                let body = await readBody(req);
-                const target = `${match[2]}${url.search}`;
-                const headers = forwardHeaders(req.headers);
-                if (edge.trustedNetwork && req.method === "POST" && match[2] === "/v1/captures/sync") {
-                    body = bindTrustedCaptureBody(body, session.identity, headers["x-lease-id"]);
-                }
-                if (edge.secret)
-                    Object.assign(
-                        headers,
-                        signIdentityHeaders(edge.secret, {
-                            method: req.method,
-                            target,
-                            body,
-                            identity: session.identity,
-                        })
-                    );
-                const upstream = await fetch(`${edge.baseUrl}${target}`, {
-                    method: req.method,
-                    headers,
-                    body: body.length ? body : undefined,
-                });
-                res.writeHead(upstream.status, responseHeaders(upstream.headers));
-                return res.end(Buffer.from(await upstream.arrayBuffer()));
+                return json(res, 501, { detail: "Console is discovery-only; connect to the Edge baseUrl directly" });
             }
             return serveStatic(url.pathname, res);
         } catch (error) {
             return json(res, error.status || 500, { detail: error.message || "internal error" });
         }
     });
+}
+
+export function loadPolicyPresets(policyDir, builtinDir = BUILTIN_POLICY_PRESET_DIR) {
+    const presets = new Map();
+    loadPresetDirectory(policyDir && existsSync(policyDir) ? policyDir : builtinDir, presets);
+    return [...presets.values()].sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
+}
+
+function loadPresetDirectory(directory, presets) {
+    if (!directory || !existsSync(directory)) return;
+    const directoryIds = new Set();
+    for (const name of readdirSync(directory).sort()) {
+        if (!/\.ya?ml$/i.test(name)) continue;
+        const path = join(directory, name);
+        const info = statSync(path);
+        if (!info.isFile()) continue;
+        if (info.size > MAX_POLICY_PRESET_BYTES) {
+            throw new Error(`policy preset ${path} exceeds ${MAX_POLICY_PRESET_BYTES} bytes`);
+        }
+        const source = readFileSync(path, "utf8");
+        let root;
+        try {
+            root = parse(source);
+        } catch (error) {
+            throw new Error(`invalid policy preset ${path}: ${error.message}`);
+        }
+        if (!isObject(root) || !isObject(root.preset) || !isObject(root.policy)) {
+            throw new Error(`policy preset ${path} must contain preset and policy objects`);
+        }
+        const id = stringField(root.preset.id);
+        const label = stringField(root.preset.label);
+        const policyType = stringField(root.policy.type);
+        if (!id || !label || !policyType) {
+            throw new Error(`policy preset ${path} requires preset.id, preset.label and policy.type`);
+        }
+        if (directoryIds.has(id)) throw new Error(`duplicate policy preset id ${id} in ${directory}`);
+        if (presets.has(id)) throw new Error(`duplicate policy preset id ${id} in ${directory}`);
+        directoryIds.add(id);
+        presets.set(id, { id, label, policyType, source });
+    }
+}
+
+function isObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringField(value) {
+    return typeof value === "string" ? value.trim() : "";
 }
 
 function allowedHarnessTarget(method, target) {
@@ -349,7 +390,7 @@ function requireSession(req, sessions) {
 }
 
 function requireConfig(config) {
-    if (!config.appId || !config.appSecret || !config.redirectUri || !config.frontendUrl)
+    if (config.authEnabled && (!config.appId || !config.appSecret || !config.redirectUri || !config.frontendUrl))
         throw new Error("Console Feishu configuration is incomplete");
 }
 
@@ -456,7 +497,9 @@ function redirect(res, status, location) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-    const config = { ...loadConfig(), ...parseServerArgs() };
+    const args = parseServerArgs();
+    if (!args.frontendUrl) throw new Error("Console requires --public-url for the OAuth/public origin");
+    const config = { ...loadConfig(), ...args };
     createConsoleServer(config).listen(config.port, config.host, () => {
         console.log(`Motrix Console listening on http://${config.host}:${config.port}`);
     });

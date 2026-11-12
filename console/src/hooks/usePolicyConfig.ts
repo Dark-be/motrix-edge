@@ -35,7 +35,9 @@ export function usePolicyConfig({
         setDraft((prev) => {
             const next = { ...prev };
             for (const [key, value] of Object.entries(values)) {
-                if (next[key] === undefined && value !== null && value !== undefined) next[key] = String(value);
+                if (next[key] === undefined && value !== null && value !== undefined) {
+                    next[key] = typeof value === "object" ? JSON.stringify(value) : String(value);
+                }
             }
             return next;
         });
@@ -62,10 +64,14 @@ export function usePolicyConfig({
         const editable = draft[item.key];
         if (editable !== undefined) return editable;
         const serverValue = useSessionConfig ? sessionConfig.values[item.key] : item.value;
-        return serverValue === null || serverValue === undefined ? "" : String(serverValue);
+        if (serverValue === null || serverValue === undefined) return "";
+        return typeof serverValue === "object" ? JSON.stringify(serverValue) : String(serverValue);
     };
 
-    const setField = (key: string, value: string) => setDraft((prev) => ({ ...prev, [key]: value }));
+    const replaceDraft = (policyType: string, values: Record<string, string>) => {
+        setSelectedPolicy(policyType);
+        setDraft(values);
+    };
 
     /** 缺失的必填项：会话内用后端结论，未进入会话前端自查。 */
     const configMissing = useSessionConfig
@@ -108,6 +114,8 @@ export function usePolicyConfig({
                     ? Number(raw)
                     : item.type === "bool"
                     ? raw === "true"
+                    : item.type === "string_map" || item.type === "rtc"
+                    ? JSON.parse(raw)
                     : raw;
         }
         return body;
@@ -116,11 +124,10 @@ export function usePolicyConfig({
     return {
         inInfer,
         selectedPolicy,
-        setSelectedPolicy,
         activePolicyType,
         configItems,
         configValue,
-        setField,
+        replaceDraft,
         configMissing,
         configReady,
         endpointMissing,

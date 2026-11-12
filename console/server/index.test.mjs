@@ -20,7 +20,12 @@ test("server CLI separates listen overrides from the public OAuth URL", () => {
             redirectUri: "http://127.0.0.1:5183/api/auth/feishu/callback",
         }
     );
-    assert.deepEqual(parseServerArgs(["--port=6000"]), { port: 6000 });
+    assert.deepEqual(parseServerArgs(["--port=6000", "--public-url", "http://127.0.0.1:6000"]), {
+        port: 6000,
+        frontendUrl: "http://127.0.0.1:6000",
+        redirectUri: "http://127.0.0.1:6000/api/auth/feishu/callback",
+    });
+    assert.deepEqual(parseServerArgs([]), {});
     assert.throws(() => parseServerArgs(["--port", "0"]), /invalid Console port/);
     assert.throws(() => parseServerArgs(["--unknown"]), /unknown Console option/);
     assert.throws(() => parseServerArgs(["--public-url", "http://127.0.0.1:5183/path"]), /invalid baseUrl/);

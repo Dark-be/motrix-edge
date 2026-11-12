@@ -19,7 +19,7 @@ function newLeaseId(): string {
  * 无租约 → 签发表单（Edge id 自动绑定当前连接；用户只选操作员 / 用途 / 有效期）。
  */
 export function LeaseMenu() {
-    const { lease, health, authStatus, auth } = useEdge();
+    const { lease, health } = useEdge();
     const {
         status,
         countdown,
@@ -46,8 +46,7 @@ export function LeaseMenu() {
 
     const isMine = myLeaseId !== null && myLeaseId === status?.lease_id;
     const defaultEdgeId = health?.identity?.["X-Edge-Id"] ?? "";
-    const authenticatedHolder = auth?.user.subject ?? "";
-    const effectiveHolder = authStatus?.enabled ? authenticatedHolder : holder;
+    const effectiveHolder = holder.trim() || "console";
     const effectiveTtl = ttl ?? status?.default_ttl ?? 120;
     const expectedExpiry = useMemo(() => new Date(Date.now() + effectiveTtl * 1000), [effectiveTtl]);
 
@@ -150,8 +149,7 @@ export function LeaseMenu() {
                             <FormField label="操作员">
                                 <input
                                     className={inputCls}
-                                    value={authStatus?.enabled ? auth?.user.display_name ?? "请先飞书登录" : holder}
-                                    disabled={authStatus?.enabled}
+                                    value={holder}
                                     onChange={(e) => setHolder(e.target.value)}
                                 />
                             </FormField>
@@ -188,7 +186,7 @@ export function LeaseMenu() {
                         <Button
                             variant="primary"
                             type="submit"
-                            disabled={busy || !defaultEdgeId || (authStatus?.enabled === true && !auth)}
+                            disabled={busy || !defaultEdgeId || !effectiveHolder}
                             className="w-full"
                         >
                             签发租约

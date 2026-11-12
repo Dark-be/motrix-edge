@@ -1,0 +1,25 @@
+preset:
+  id: openpi-default
+  label: OpenPI 默认配置
+
+policy:
+  type: openpi
+  host: 127.0.0.1
+  port: 8080
+  prompt: complete the task
+  image_size: 224
+  action_layout: joint+gripper
+  arm_map:
+    right: state
+  camera_map:
+    cam_head: cam_head
+    cam_right_wrist: cam_right_wrist
+  warmup_required: true
+
+  rtc:
+    enabled: true
+    action_horizon: 16
+    prefix_len: 0
+    execution_horizon: 10
+    suffix_len: 6
+    aggregate_fn: weighted_average

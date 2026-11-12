@@ -4,9 +4,19 @@
   "frontendUrl": "http://10.30.20.64:5174",
   "redirectUri": "http://10.30.20.64:5174/api/auth/feishu/callback",
   "cookieSecure": false,
+  "auth": {
+    "enabled": true
+  },
   "allowedTenants": [],
   "sessionTtl": 28800,
   "stateTtl": 600,
+  "harnessProviders": {
+    "rpent-local": {
+      "label": "RPent · Motrix Edge",
+      "kind": "rpent",
+      "baseUrl": "http://127.0.0.1:8765"
+    }
+  },
   "edges": {
     "piper01": {
       "label": "家居区 piper01",
@@ -40,7 +50,7 @@
     },
     "piper07": {
       "label": "电梯口 piper07",
-      "baseUrl": "http://10.30.30.16:8000",
+      "baseUrl": "http://10.30.40.192:8000",
       "trustedNetwork": true
     }
   }
