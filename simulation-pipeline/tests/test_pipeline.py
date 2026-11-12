@@ -25,6 +25,7 @@ from pathlib import Path
 import httpx2
 import numpy as np
 import pytest
+from motrix_simulation_pipeline.piper_kinematics import PIPER_LIMITS, PiperKinematics
 
 from motrix_edge.adapter import discover_adapter
 from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS
@@ -84,6 +85,8 @@ def test_scene_control_and_video(tmp_path, task):
                 discovery = client.post("/v1/discover").json()["robot"]
                 assert discovery["capabilities"]["capture"] is False
                 assert discovery["type"] == "simulation_piper"
+                assert discovery["action_dims"]["pose"] == 6
+                assert "pose+gripper" in {layout["name"] for layout in discovery["action_layouts"]}
                 adapter = discover_adapter(host="127.0.0.1", port=port)
                 assert isinstance(adapter, SimulationPiperAdapter)
                 assert adapter.health().ok
@@ -125,6 +128,26 @@ def test_scene_control_and_video(tmp_path, task):
                     pytest.fail(f"actual state did not reach target: {obs}")
                 assert adapter.motion_command("move-1")["execution_status"] == "applied"
                 assert adapter.motion_snapshot()["sample_age_s"] < 2
+                kinematics = PiperKinematics(PIPER_LIMITS)
+                pose_joint_target = np.asarray(obs[KEY_QPOS])[:6].copy()
+                pose_joint_target[0] = np.clip(
+                    pose_joint_target[0] + 0.03,
+                    PIPER_LIMITS[0, 0] + 0.01,
+                    PIPER_LIMITS[0, 1] - 0.01,
+                )
+                pose_target = kinematics.pose(pose_joint_target)
+                pose_result = adapter.submit_motion(
+                    [*pose_target, 0.4], command_id="pose-1", layout="pose+gripper", arms=["right"]
+                )
+                resolved_pose_joints = np.asarray(pose_result["resolved_action"][:6])
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    obs = adapter.observe()
+                    if obs is not None and np.max(np.abs(np.asarray(obs[KEY_QPOS])[:6] - resolved_pose_joints)) < 0.03:
+                        break
+                    time.sleep(0.1)
+                else:
+                    pytest.fail(f"pose target did not reach resolved joints: {obs}")
                 same = client.post(
                     "/v1/execute", json={"action": target.tolist(), "layout": "joint+gripper", "command_id": "move-1"}
                 )
@@ -135,7 +158,7 @@ def test_scene_control_and_video(tmp_path, task):
                     ).status_code
                     == 422
                 )
-                for action, layout in (([2], "gripper"), ([99] * 6, "joint"), ([0] * 5, "joint"), ([0] * 6, "pose")):
+                for action, layout in (([2], "gripper"), ([99] * 6, "joint"), ([0] * 5, "joint")):
                     assert client.post("/v1/rollout", json={"action": action, "layout": layout}).status_code == 422
                 assert client.post("/v1/capture/start").status_code == 404
                 stop = client.post("/v1/safe_stop").json()

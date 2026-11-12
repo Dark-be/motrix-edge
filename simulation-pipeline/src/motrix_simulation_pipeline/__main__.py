@@ -32,6 +32,14 @@ def main():
     parser.add_argument("--shm-name", default="simulation_piper_obs")
     parser.add_argument("--cameras", nargs=2, default=["cam_head", "cam_right_wrist"])
     parser.add_argument("--no-render", action="store_true", help="Physics test only; no Edge video")
+    parser.add_argument(
+        "--tcp-offset",
+        nargs=3,
+        type=float,
+        default=(0.0, 0.0, 0.12),
+        metavar=("X", "Y", "Z"),
+        help="TCP position in flange frame, metres (default: 0 0 0.12)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)
     args = parser.parse_args()
@@ -44,6 +52,7 @@ def main():
         args.shm_name,
         tuple(args.cameras),
         not args.no_render,
+        tcp_offset=tuple(args.tcp_offset),
     )
     settings.output.mkdir(parents=True, exist_ok=False)
     uvicorn.run(create_app(Simulation(settings)), host=args.host, port=args.port)

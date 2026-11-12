@@ -25,9 +25,9 @@ class SimulationPiperAdapter(HttpShmAdapter):
     ROBOT_MODEL_VERSION = "0.1.0"
     ARM_NAMES = ("right",)
     DEFAULT_ENABLED_ARMS = ARM_NAMES
-    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.GRIPPER)
-    ACTION_DIM_PER_ARM = {"joint": 6, "gripper": 1}
-    POSE_DIM_PER_ARM = 0
+    ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.POSE, ActionSpace.GRIPPER)
+    ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}
+    POSE_DIM_PER_ARM = 6
     HOME = {"joint": [0.0, 0.1, 0.0, 0.0, 0.0, 0.0], "gripper": [1.0]}
     IMAGES = {"cam_head": (640, 480), "cam_right_wrist": (640, 480)}
     DEPTH_CAMERAS = ()

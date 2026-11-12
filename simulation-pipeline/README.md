@@ -1,6 +1,7 @@
 # Simulation pipeline
 
-独立的 Python 3.11 仿真机器人进程，通过 Edge 的 HTTP 与共享内存契约提供六关节单臂、夹爪和双相机 RGB 控制/预览。**不实现 capture、录制、深度、末端位姿动作或训练奖励**。
+独立的 Python 3.11 仿真机器人进程，通过 Edge 的 HTTP 与共享内存契约提供六关节单臂、Piper
+基座系 TCP 位姿、夹爪和双相机 RGB 控制/预览。**不实现 capture、录制、深度或训练奖励**。
 
 ## 启动
 
@@ -23,6 +24,8 @@ bash scripts/start.sh \
 `--output` 必须是新目录，保存 SDK 任务诊断；脚本未指定输出时自动分配 `/tmp` 新路径。不录制数据集。
 默认 HTTP 为 `127.0.0.1:8090`、共享内存为 `simulation_piper_obs`，可通过 `--host`、`--port`、
 `--shm-name` 修改。Edge 与服务必须共享 IPC；启动冲突不会删除其他进程的共享内存。
+策略位姿按 TCP 解释，缺省 TCP 是法兰 `+z` 方向 0.12 m（与 Piper 出厂配置一致）；末端工具长度不同
+时用 `--tcp-offset X Y Z` 覆盖，单位为米。
 
 MotrixGen 内部任务最多运行 9000 个控制拍；到达上限、控制任务提前结束或出现运行错误时，pipeline
 会清理 renderer 与共享内存并直接退出整个进程。`/v1/discover` 只在仿真线程健康时返回机器人，避免
@@ -62,7 +65,12 @@ curl -X POST http://127.0.0.1:8090/v1/reset
 curl -X POST http://127.0.0.1:8090/v1/safe_stop
 ```
 
-动作布局支持 `joint`、`gripper`、`joint+gripper`。`applied` 表示目标已由控制线程采用，实际到位需要读取运动采样。reset 回到启动后的机械臂姿态，不重置物体；重新布置场景需重启进程。停止清空排队动作并保持当前实际姿态，物理继续运行。
+动作布局支持 `joint`、`gripper`、`joint+gripper`、`pose`、`pose+gripper`。`pose` 是 Piper
+基座系 TCP 的绝对 `[x,y,z,roll,pitch,yaw]`（米、弧度），在入队前还原法兰并经 Piper FK/IK
+转为关节目标；不可达
+目标返回 422 且不改变当前目标。`applied` 表示目标已由控制线程采用，实际到位需要读取运动采样。
+reset 回到启动后的机械臂姿态，不重置物体；重新布置场景需重启进程。停止清空排队动作并保持当前
+实际姿态，物理继续运行。
 
 实现与边界见 [设计](../wiki/design/simulation_pipeline.md)。
 

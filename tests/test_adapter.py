@@ -848,13 +848,13 @@ def test_adapter_config_current_without_adapter_is_rejected():
     assert "not bound" in replies[0].error
 
 
-def test_simulation_adapter_declares_only_supported_capabilities():
+def test_simulation_adapter_declares_piper_pose_capability():
     adapter = get_adapter(DiscoveredRobot(name="simulation", type="simulation_piper"))
     assert adapter.sdk_url == "http://127.0.0.1:8090"
-    assert adapter.action_dims == {"joint": 6, "gripper": 1}
+    assert adapter.action_dims == {"joint": 6, "pose": 6, "gripper": 1}
     assert adapter.images == ["cam_head", "cam_right_wrist"]
     assert not adapter.capabilities.capabilities[AdapterCapability.CAPTURE]
-    assert adapter.effective_pose_dim_per_arm() == 0
+    assert adapter.effective_pose_dim_per_arm() == 6
     assert adapter.DEPTH_CAMERAS == ()
     assert "simulation_piper" not in {name for name, _, _ in robot_adapters(AdapterCapability.CAPTURE)}
 

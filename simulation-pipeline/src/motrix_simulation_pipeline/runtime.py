@@ -36,6 +36,8 @@ from msgspec.structs import replace
 from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
 from motrix_edge.adapter.shm_contract import ObsShmWriter
 
+from .piper_kinematics import PiperKinematics, effective_limits
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -48,6 +50,7 @@ class Settings:
     render: bool = True
     observation_hz: float = 10.0
     joint_speed: float = 0.7
+    tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.12)
 
     def __post_init__(self):
         if not self.workspace.is_dir() or not self.session.is_file() or not self.scene.is_file():
@@ -56,6 +59,8 @@ class Settings:
             raise ValueError("two distinct scene camera names required")
         if not 0 < self.observation_hz <= 30 or not np.isfinite(self.joint_speed) or self.joint_speed <= 0:
             raise ValueError("observation_hz must be in (0,30]; joint_speed must be positive and finite")
+        if len(self.tcp_offset) != 3 or not np.all(np.isfinite(self.tcp_offset)):
+            raise ValueError("tcp_offset must contain three finite values")
 
 
 class Simulation:
@@ -72,6 +77,7 @@ class Simulation:
         self.target = np.zeros(7)
         self.home = np.zeros(7)
         self.limits = np.zeros((6, 2))
+        self.kinematics: PiperKinematics | None = None
         self.snapshot: dict = {}
         self.revision = 0
         self.seq = 0
@@ -105,17 +111,12 @@ class Simulation:
     def submit(self, action=None, layout="joint", arms=None, command_id=None, operation="move") -> dict:
         if arms is not None and arms != ["right"]:
             raise ValueError("arms must be ['right']")
-        layouts = {"joint": 6, "gripper": 1, "joint+gripper": 7}
+        layouts = {"joint": 6, "gripper": 1, "joint+gripper": 7, "pose": 6, "pose+gripper": 7}
         if layout not in layouts:
-            raise ValueError("supported layouts: joint, gripper, joint+gripper")
+            raise ValueError(f"supported layouts: {', '.join(layouts)}")
         values = np.asarray(action if action is not None else [], dtype=float)
         if operation == "move" and (values.shape != (layouts[layout],) or not np.all(np.isfinite(values))):
             raise ValueError("invalid action dimensions or nonfinite values")
-        if operation == "move":
-            if layout != "gripper" and np.any((values[:6] < self.limits[:, 0]) | (values[:6] > self.limits[:, 1])):
-                raise ValueError("joint target outside model limits")
-            if "gripper" in layout and not 0 <= values[-1] <= 1:
-                raise ValueError("gripper must be in [0,1]")
         if command_id is not None and (not isinstance(command_id, str) or not 0 < len(command_id) <= 128):
             raise ValueError("command_id must be a nonempty string of at most 128 characters")
         key = command_id or uuid4().hex
@@ -128,6 +129,22 @@ class Simulation:
                 if prior["request"] != request:
                     raise ValueError("command_id reused with a different request")
                 return dict(prior)
+            resolved_layout, resolved_action = layout, values.copy()
+            if operation == "move":
+                if "gripper" in layout and not 0 <= values[-1] <= 1:
+                    raise ValueError("gripper must be in [0,1]")
+                if layout.startswith("pose"):
+                    if self.kinematics is None:
+                        raise RuntimeError("Piper kinematics not initialized")
+                    result = self.kinematics.solve(values[:6], self.target[:6], self.home[:6])
+                    if not result.ok:
+                        raise ValueError(f"pose target rejected ({result.describe()})")
+                    resolved_action = result.q if layout == "pose" else np.r_[result.q, values[-1]]
+                    resolved_layout = "joint" if layout == "pose" else "joint+gripper"
+                elif layout != "gripper" and np.any(
+                    (values[:6] < self.limits[:, 0]) | (values[:6] > self.limits[:, 1])
+                ):
+                    raise ValueError("joint target outside model limits")
             if operation == "stop":
                 for pending in self.pending:
                     self.commands[pending].update(execution_status="rejected", error="superseded by safe stop")
@@ -144,6 +161,8 @@ class Simulation:
                 "execution_status": "queued",
                 "motion_revision": self.revision,
                 "request": request,
+                "resolved_layout": resolved_layout,
+                "resolved_action": resolved_action.tolist(),
             }
             self.commands[key] = receipt
             self.pending.append(key)
@@ -236,6 +255,7 @@ class ExternalControl(PrimitiveSkill):
             actuator = runtime.sim.model.actuators[idx]
             joint = runtime.sim.model.get_joint(actuator.target_name)
             sim.limits[i] = joint.range
+        sim.kinematics = PiperKinematics(effective_limits(sim.limits), sim.settings.tcp_offset)
         sim.home = self.read_state(runtime)
         sim.home[:6] = np.clip(
             runtime.sim.data.actuator_ctrls[list(robot.arm_actuator_indices)], sim.limits[:, 0], sim.limits[:, 1]
@@ -295,12 +315,12 @@ class ExternalControl(PrimitiveSkill):
                 elif request["operation"] == "stop":
                     sim.target = actual.copy()
                     self.command = actual.copy()
-                elif request["layout"] == "joint":
-                    sim.target[:6] = request["action"]
-                elif request["layout"] == "gripper":
-                    sim.target[6] = request["action"][0]
+                elif receipt["resolved_layout"] == "joint":
+                    sim.target[:6] = receipt["resolved_action"]
+                elif receipt["resolved_layout"] == "gripper":
+                    sim.target[6] = receipt["resolved_action"][0]
                 else:
-                    sim.target[:] = request["action"]
+                    sim.target[:] = receipt["resolved_action"]
                 sim.revision += 1
                 receipt.update(execution_status="applied", motion_revision=sim.revision)
             sim.pending.clear()

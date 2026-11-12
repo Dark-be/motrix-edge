@@ -77,7 +77,7 @@ def create_app(sim: Simulation) -> FastAPI:
                 "robot_model_id": "simulated-piper",
                 "robot_model_version": "0.1.0",
                 "action_dim": 6,
-                "action_dims": {"joint": 6, "gripper": 1},
+                "action_dims": {"joint": 6, "pose": 6, "gripper": 1},
                 "state_arms": ["right"],
                 "action_layouts": [
                     {
@@ -87,8 +87,10 @@ def create_app(sim: Simulation) -> FastAPI:
                     }
                     for name, parts in {
                         "joint": [("joint", 6)],
+                        "pose": [("pose", 6)],
                         "gripper": [("gripper", 1)],
                         "joint+gripper": [("joint", 6), ("gripper", 1)],
+                        "pose+gripper": [("pose", 6), ("gripper", 1)],
                     }.items()
                 ],
                 "observation_keys": [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION] + [CAMERA_PREFIX + n for n in cameras],
