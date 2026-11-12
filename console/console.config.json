@@ -7,5 +7,41 @@
   "allowedTenants": [],
   "sessionTtl": 28800,
   "stateTtl": 600,
-  "edges": {}
+  "edges": {
+    "piper01": {
+      "label": "家居区 piper01",
+      "baseUrl": "http://10.30.40.110:8000",
+      "trustedNetwork": true
+    },
+    "piper02": {
+      "label": "厨卫区 piper02",
+      "baseUrl": "http://10.30.40.92:8000",
+      "trustedNetwork": true
+    },
+    "piper03": {
+      "label": "物流区 piper03",
+      "baseUrl": "http://10.30.40.194:8000",
+      "trustedNetwork": true
+    },
+    "piper04": {
+      "label": "商超区 piper04",
+      "baseUrl": "http://10.30.40.193:8000",
+      "trustedNetwork": true
+    },
+    "piper05": {
+      "label": "示教区 piper05",
+      "baseUrl": "http://10.30.40.58:8000",
+      "trustedNetwork": true
+    },
+    "piper06": {
+      "label": "休息区 piper06",
+      "baseUrl": "http://10.30.40.38:8000",
+      "trustedNetwork": true
+    },
+    "piper07": {
+      "label": "电梯口 piper07",
+      "baseUrl": "http://10.30.30.16:8000",
+      "trustedNetwork": true
+    }
+  }
 }

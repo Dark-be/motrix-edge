@@ -28,9 +28,11 @@ export function loadConfig(path = process.env.MOTRIX_CONSOLE_CONFIG || join(ROOT
     for (const [id, raw] of Object.entries(config.edges || {})) {
         if (!id || id.includes("/")) throw new Error(`invalid Edge id: ${id}`);
         const baseUrl = validatedBaseUrl(raw.baseUrl, id);
-        const secret = raw.sharedSecret || process.env[raw.sharedSecretEnv || ""];
-        if (!secret) throw new Error(`Edge ${id} shared secret is not configured`);
-        edges.set(id, { id, label: raw.label || id, baseUrl, secret });
+        const secret = raw.sharedSecret || (raw.sharedSecretEnv ? process.env[raw.sharedSecretEnv] : undefined);
+        const trustedNetwork = raw.trustedNetwork === true;
+        if (!secret && !trustedNetwork) throw new Error(`Edge ${id} requires sharedSecretEnv or trustedNetwork`);
+        if (secret && trustedNetwork) throw new Error(`Edge ${id} cannot combine sharedSecretEnv and trustedNetwork`);
+        edges.set(id, { id, label: raw.label || id, baseUrl, secret, trustedNetwork });
     }
     return {
         host: config.host || "0.0.0.0",
@@ -82,6 +84,39 @@ export function signIdentityHeaders(secret, { method, target, body, identity, ti
         "X-Motrix-Signature": signature,
         "X-Motrix-Identity": encodedIdentity,
     };
+}
+
+export function bindTrustedCaptureBody(body, identity, leaseId, syncedAt = new Date().toISOString()) {
+    let payload;
+    try {
+        payload = JSON.parse(body.toString("utf8"));
+    } catch {
+        throw httpError(400, "invalid capture sync body");
+    }
+    if (
+        !payload ||
+        typeof payload !== "object" ||
+        Array.isArray(payload) ||
+        !payload.meta ||
+        typeof payload.meta !== "object" ||
+        Array.isArray(payload.meta)
+    )
+        throw httpError(400, "capture sync body requires meta object");
+    const subject = String(identity.subject || "");
+    const displayName = String(identity.display_name || "");
+    validateHeaderText(subject, "subject");
+    validateHeaderText(displayName, "display_name");
+    const meta = { ...payload.meta };
+    for (const key of ["operator", "operator_identity", "capture_context", "meta_schema_version"]) delete meta[key];
+    meta.meta_schema_version = 2;
+    meta.operator = displayName;
+    meta.operator_identity = { ...identity, provider: "feishu", subject, display_name: displayName };
+    meta.capture_context = {
+        source: "motrix_console_trusted_network",
+        ...(leaseId ? { lease_id: leaseId } : {}),
+        synced_at: syncedAt,
+    };
+    return Buffer.from(JSON.stringify({ ...payload, meta }));
 }
 
 export function safeReturnTo(value) {
@@ -141,13 +176,22 @@ export function createConsoleServer(config = loadConfig()) {
                 const session = requireSession(req, sessions);
                 const edge = config.edges.get(decodeURIComponent(match[1]));
                 if (!edge) return json(res, 404, { detail: "edge not found" });
-                const body = await readBody(req);
+                let body = await readBody(req);
                 const target = `${match[2]}${url.search}`;
                 const headers = forwardHeaders(req.headers);
-                Object.assign(
-                    headers,
-                    signIdentityHeaders(edge.secret, { method: req.method, target, body, identity: session.identity })
-                );
+                if (edge.trustedNetwork && req.method === "POST" && match[2] === "/v1/captures/sync") {
+                    body = bindTrustedCaptureBody(body, session.identity, headers["x-lease-id"]);
+                }
+                if (edge.secret)
+                    Object.assign(
+                        headers,
+                        signIdentityHeaders(edge.secret, {
+                            method: req.method,
+                            target,
+                            body,
+                            identity: session.identity,
+                        })
+                    );
                 const upstream = await fetch(`${edge.baseUrl}${target}`, {
                     method: req.method,
                     headers,
