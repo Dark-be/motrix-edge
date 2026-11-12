@@ -38,20 +38,20 @@ flowchart TD
     CMD --> B["CommandBus"] --> N["node / session（命令消费方，唯一副作用路径）"]
 ```
 
-| 文件                       | 职责                                                                                                                       |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `app.py`                   | 应用装配：identity / 租约 / 上传服务的缺省构造、CORS 与 correlation / no-store 中间件、统一错误处理器、挂载各域 router     |
-| `schemas.py`               | 请求 / 响应 Pydantic 模型（线上形状单点）                                                                                  |
-| `deps.py`                  | `Services` 容器（router 工厂的唯一入参）                                                                                   |
-| `routes/*`                 | 按域的 HTTP 映射（health / leases / commands / uploads / captures / infers / webrtc / rpent）；不含业务逻辑、不 try/except |
-| `state.py`                 | node 只读视图（adapter 身份 / 心跳 / 采集状态）                                                                            |
-| `status.py`                | 只读快照组装（`/v1/captures` · `/v1/infers` · `precheck`）                                                                 |
-| `command.py`               | **HTTP 命令写通道** `CommandService`：`CommandDispatcher`（与 CLI 共用）+ 租约门 + capability / 回执映射                   |
-| `meta.py`                  | 采集元信息选项（`CaptureMetaService`，直连 `CaptureMetaStore`；配置级、有意不经总线）                                      |
-| `auth.py`                  | 可选飞书 OAuth、登录会话和可信采集员身份绑定                                                                               |
-| `proxy_auth.py`            | 中心 Console HMAC 身份签名验证、时间窗 / nonce 防重放与租约主体绑定                                                        |
-| `preview.py` / `webrtc.py` | 观测预览 / WebRTC 推流（各自协议面，不依赖 FastAPI）                                                                       |
-| `rpent.py`                 | RPent 兼容 RPC facade（外部协议适配）                                                                                      |
+| 文件                       | 职责                                                                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `app.py`                   | 应用装配：identity / 租约 / 上传服务的缺省构造、CORS 与 correlation / no-store 中间件、统一错误处理器、挂载各域 router             |
+| `schemas.py`               | 请求 / 响应 Pydantic 模型（线上形状单点）                                                                                          |
+| `deps.py`                  | `Services` 容器（router 工厂的唯一入参）                                                                                           |
+| `routes/*`                 | 按域的 HTTP 映射（health / tasks / leases / commands / uploads / captures / infers / webrtc / rpent）；不含业务逻辑、不 try/except |
+| `state.py`                 | node 只读视图（adapter 身份 / 心跳 / 采集状态）                                                                                    |
+| `status.py`                | 只读快照组装（`/v1/captures` · `/v1/infers` · `precheck`）                                                                         |
+| `command.py`               | **HTTP 命令写通道** `CommandService`：`CommandDispatcher`（与 CLI 共用）+ 租约门 + capability / 回执映射                           |
+| `meta.py`                  | 采集元信息选项（`CaptureMetaService`，直连 `CaptureMetaStore`；配置级、有意不经总线）                                              |
+| `auth.py`                  | 可选飞书 OAuth、登录会话和可信采集员身份绑定                                                                                       |
+| `proxy_auth.py`            | 中心 Console HMAC 身份签名验证、时间窗 / nonce 防重放与租约主体绑定                                                                |
+| `preview.py` / `webrtc.py` | 观测预览 / WebRTC 推流（各自协议面，不依赖 FastAPI）                                                                               |
+| `rpent.py`                 | RPent 兼容 RPC facade（外部协议适配）                                                                                              |
 
 -   **错误处理**：各层只抛 `ServiceError` 子类（基类在顶层 `motrix_edge/errors.py`：命令层
     `CommandError`、租约层 `LeaseError`、上传服务 `UploadError`、服务层各 `*Error` —— 放顶层
@@ -70,6 +70,7 @@ flowchart TD
 | GET/POST        | `/v1/auth/feishu/login·callback`、`/v1/auth/logout`                                                                | 飞书 OAuth 重定向、回调与 Edge 登录会话                                                                                            | AuthService        |
 | GET             | `/v1/adapters`                                                                                                     | 静态列出全部注册适配器（不 discover / 不探活）                                                                                     | —（内建）          |
 | GET/POST        | `/v1/adapters/config`、`/v1/adapters/current`                                                                      | 运行时 adapter 能力配置（启用臂 / 相机；POST 须租约）                                                                              | EdgeNode           |
+| GET             | `/v1/task/status`                                                                                                  | 当前 adapter 的可选任务状态；统一 `status` / `success` / `progress[]`，并保留提供器自定义详情                                      | RobotAdapter       |
 | POST            | `/v1/commands`                                                                                                     | 受控命令（capability 映射，须租约）                                                                                                | CommandService     |
 | POST/GET        | `/v1/leases`、`/v1/leases/{id}:renew·revoke`、`/v1/leases/{id}`                                                    | Edge 级租约（Console 签发镜像）                                                                                                    | LeaseManager       |
 | GET/POST/DELETE | `/v1/captures` + `/v1/captures/precheck`                                                                           | 采集会话控制（写 → `session run/quit` 命令；读 → `status.py`）                                                                     | —（命令 + 快照）   |

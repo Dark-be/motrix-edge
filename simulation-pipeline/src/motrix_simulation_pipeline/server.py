@@ -95,7 +95,12 @@ def create_app(sim: Simulation) -> FastAPI:
                     }.items()
                 ],
                 "observation_keys": [KEY_QPOS, KEY_QPOS_ERR, KEY_ACTION] + [CAMERA_PREFIX + n for n in cameras],
-                "capabilities": {"capture": False, "execute": True, "streaming": sim.settings.render},
+                "capabilities": {
+                    "capture": False,
+                    "execute": True,
+                    "streaming": sim.settings.render,
+                    "task_status": sim.task_status_provider is not None,
+                },
                 "endpoint": str(request.base_url).rstrip("/"),
                 "shm_name": sim.settings.shm_name,
             },
@@ -135,6 +140,13 @@ def create_app(sim: Simulation) -> FastAPI:
     def state():
         try:
             return sim.motion_snapshot()
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.get("/v1/task/status")
+    def task_status():
+        try:
+            return sim.task_status_snapshot()
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
 

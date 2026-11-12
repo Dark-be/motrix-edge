@@ -14,6 +14,7 @@ import type {
     PreviewResponse,
     AuthMe,
     AuthStatus,
+    TaskStatus,
 } from "./types";
 
 const STORAGE_KEY = "edge-console:baseUrl";
@@ -71,6 +72,8 @@ export interface EdgeState {
     capturesError: string | null;
     infers: InferStatus | null;
     infersError: string | null;
+    taskStatus: TaskStatus | null;
+    taskStatusError: string | null;
     preview: PreviewResponse | null;
     previewError: string | null;
 
@@ -176,6 +179,7 @@ export function EdgeProvider({ children }: { children: ReactNode }) {
     const health = usePolling<HealthResponse>(() => api!.health(), POLL_MS, connected);
     const captures = usePolling<CapturesStatus>(() => api!.capturesStatus(), SESSION_POLL_MS, connected);
     const infers = usePolling<InferStatus>(() => api!.inferStatus(), SESSION_POLL_MS, connected);
+    const taskStatus = usePolling<TaskStatus>(() => api!.taskStatus(), SESSION_POLL_MS, connected);
     // 观测预览属受控操作（须持租约）：无租约不轮询，避免刷 409
     const preview = usePolling<PreviewResponse>(
         () =>
@@ -268,6 +272,8 @@ export function EdgeProvider({ children }: { children: ReactNode }) {
         capturesError: captures.error,
         infers: infers.data,
         infersError: infers.error,
+        taskStatus: taskStatus.data,
+        taskStatusError: taskStatus.error,
         preview: preview.data,
         previewError: preview.error,
         lease,

@@ -33,6 +33,7 @@ import {
     type WebRTCAnswerResponse,
     type AuthMe,
     type AuthStatus,
+    type TaskStatus,
 } from "./types";
 
 let _cmdCounter = 0;
@@ -153,6 +154,10 @@ export class EdgeApi {
     // ---- /v1/health / /v1/adapters -------------------------------------
     health(): Promise<HealthResponse> {
         return this.request("GET", "/v1/health");
+    }
+
+    taskStatus(): Promise<TaskStatus> {
+        return this.request("GET", "/v1/task/status");
     }
 
     adapters(): Promise<AdaptersResponse> {

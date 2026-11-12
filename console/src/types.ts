@@ -95,6 +95,28 @@ export interface HealthResponse {
     time: string;
 }
 
+// ==== /v1/task/status ====
+export interface TaskProgressItem {
+    key: string;
+    label: string;
+    state: string;
+    complete: boolean;
+    metrics?: Record<string, unknown>;
+}
+
+/** Adapter-provided task status. Providers may append task-specific fields. */
+export interface TaskStatus {
+    available: boolean;
+    task: string | null;
+    provider: string | null;
+    status: string;
+    success: boolean;
+    progress: TaskProgressItem[];
+    reason?: string;
+    sample_age_s?: number;
+    [key: string]: unknown;
+}
+
 // ==== /v1/adapters ====
 /** 动作空间（值语义的区分）：joint = 关节角 / pose = 末端位姿（绝对）/
  * pose_delta = 末端位姿**增量**（机器人侧叠加在关节段目标上）/ gripper = 夹爪 */

@@ -84,12 +84,23 @@ def test_scene_control_and_video(tmp_path, task):
                     pytest.fail((tmp_path / "server.log").read_text())
                 discovery = client.post("/v1/discover").json()["robot"]
                 assert discovery["capabilities"]["capture"] is False
+                assert discovery["capabilities"]["task_status"] is (task == "press_three_buttons")
                 assert discovery["type"] == "simulation_piper"
                 assert discovery["action_dims"]["pose"] == 6
                 assert "pose+gripper" in {layout["name"] for layout in discovery["action_layouts"]}
                 adapter = discover_adapter(host="127.0.0.1", port=port)
                 assert isinstance(adapter, SimulationPiperAdapter)
                 assert adapter.health().ok
+                adapter_task_status = adapter.task_status()
+                assert adapter_task_status is not None
+                assert adapter_task_status["available"] is (task == "press_three_buttons")
+                task_status = client.get("/v1/task/status").json()
+                assert task_status["available"] is (task == "press_three_buttons")
+                assert task_status["task"] == task
+                assert task_status["success"] is False
+                if task == "press_three_buttons":
+                    assert task_status["expected_order"] == ["pink", "green", "blue"]
+                    assert set(task_status["buttons"]) == {"pink", "green", "blue"}
                 obs = None
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:

@@ -19,6 +19,7 @@ import os
 import signal
 import time
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -37,6 +38,7 @@ from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
 from motrix_edge.adapter.shm_contract import ObsShmWriter
 
 from .piper_kinematics import PiperKinematics, effective_limits
+from .task_status import TaskStatusContext, TaskStatusProvider, create_task_status_provider
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ class Settings:
     observation_hz: float = 10.0
     joint_speed: float = 0.7
     tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.12)
+    task_name: str | None = None
 
     def __post_init__(self):
         if not self.workspace.is_dir() or not self.session.is_file() or not self.scene.is_file():
@@ -61,6 +64,8 @@ class Settings:
             raise ValueError("observation_hz must be in (0,30]; joint_speed must be positive and finite")
         if len(self.tcp_offset) != 3 or not np.all(np.isfinite(self.tcp_offset)):
             raise ValueError("tcp_offset must contain three finite values")
+        if self.task_name is not None and (not self.task_name or any(part in self.task_name for part in ("/", "\\"))):
+            raise ValueError("task_name must be a nonempty path-free name")
 
 
 class Simulation:
@@ -85,6 +90,9 @@ class Simulation:
         self.camera_meta: list[dict] = []
         self.renderer: mx.render.RenderApp | None = None
         self.writer: ObsShmWriter | None = None
+        self.task_name = settings.task_name or settings.session.parent.name
+        self.task_status_provider: TaskStatusProvider | None = None
+        self.task_status: dict[str, object] = {}
 
     def start(self):
         if ExternalControl.simulation is not None:
@@ -194,6 +202,14 @@ class Simulation:
                 raise RuntimeError("no motion sample yet")
             return {**self.snapshot, "sample_age_s": max(0, time.monotonic() - self.snapshot["sample_monotonic"])}
 
+    def task_status_snapshot(self) -> dict[str, object]:
+        with self.lock:
+            if not self.task_status:
+                raise RuntimeError("no task status sample yet")
+            status = deepcopy(self.task_status)
+            status["sample_age_s"] = max(0, time.monotonic() - float(status["sample_monotonic"]))
+            return status
+
     def run(self):
         fatal = False
         try:
@@ -281,6 +297,11 @@ class ExternalControl(PrimitiveSkill):
             runtime.sim.data.actuator_ctrls[list(robot.arm_actuator_indices)], sim.limits[:, 0], sim.limits[:, 1]
         )
         sim.target = sim.home.copy()
+        sim.task_status_provider = create_task_status_provider(
+            TaskStatusContext(workspace=sim.settings.workspace, task_name=sim.task_name)
+        )
+        if sim.task_status_provider is not None:
+            sim.task_status_provider.start(runtime)
         self.command = sim.home.copy()
         sim.period = self.ctrl_dt
         self.deadline = time.monotonic()
@@ -311,7 +332,38 @@ class ExternalControl(PrimitiveSkill):
             sim.renderer = mx.render.RenderApp(headless=True)
             sim.renderer.launch(runtime.sim.model)
         sim.writer.set_flags(running=True, capturing=False)
+        self.update_task_status(runtime, 0.0)
         sim.initialized.set()
+
+    def update_task_status(self, runtime: RuntimeData, dt: float, *, reset: bool = False) -> None:
+        sim = self.simulation
+        provider = sim.task_status_provider
+        if reset and provider is not None:
+            provider.reset()
+        payload = (
+            {
+                "available": False,
+                "task": sim.task_name,
+                "provider": None,
+                "reason": "no task status provider registered",
+                "status": "unavailable",
+                "progress": [],
+                "success": False,
+            }
+            if provider is None
+            else {
+                "available": True,
+                "task": provider.task_name,
+                "provider": provider.provider_name,
+                **provider.snapshot(runtime, dt),
+            }
+        )
+        sim.task_status = {
+            "instance_id": sim.instance_id,
+            "sample_seq": sim.seq,
+            "sample_monotonic": time.monotonic(),
+            **payload,
+        }
 
     def read_state(self, runtime: RuntimeData) -> np.ndarray:
         robot = self.robot
@@ -327,11 +379,13 @@ class ExternalControl(PrimitiveSkill):
             self.deadline = time.monotonic()
         actual = self.read_state(runtime)
         with sim.lock:
+            reset_task_status = False
             for key in sim.pending:
                 receipt = sim.commands[key]
                 request = receipt["request"]
                 if request["operation"] == "reset":
                     sim.target = sim.home.copy()
+                    reset_task_status = True
                 elif request["operation"] == "stop":
                     sim.target = actual.copy()
                     self.command = actual.copy()
@@ -345,6 +399,7 @@ class ExternalControl(PrimitiveSkill):
                 receipt.update(execution_status="applied", motion_revision=sim.revision)
             sim.pending.clear()
             sim.seq += 1
+            self.update_task_status(runtime, self.ctrl_dt, reset=reset_task_status)
             target = sim.target.copy()
             sim.snapshot = {
                 "instance_id": sim.instance_id,

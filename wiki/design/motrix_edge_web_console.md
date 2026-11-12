@@ -145,6 +145,10 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
       / 已同步 meta）。
     - **已同步 meta**（采集 / 推理两处）：只展示**非空值**（`null` / 空串 / 空列表 / 空对象不显示）——
       meta 分类多时不该把面板撑长；全空时提示「尚未同步元信息」。前端用 `metaEntries()` 统一过滤。
+    - **任务成功状态**：推理页以 5 Hz 轮询 `GET /v1/task/status`。仅当 adapter 返回
+      `available=true` 时，在推理状态区展示通用 `task` / `status` / `success` 与 `progress[]`；
+      每个进度项只依赖 `key` / `label` / `state` / `complete`，指标放在悬浮详情中。Console 不按任务名
+      分支，新增任务状态提供器无需修改页面。
 
 10. **RTC 配置（内嵌在策略配置内）**：完整参数只存在于同一份 YAML 的 `policy.rtc`，折叠摘要不再
     额外展示 `H/P/E/S`；解析后与策略端点、观测映射一起进入同一个 payload。运行中的步号、

@@ -14,7 +14,10 @@
 
 """Single-arm simulation capabilities over the existing HTTP/SHM transport."""
 
+import httpx2
+
 from motrix_edge.adapter.base import ActionSpace, AdapterCapability, CaptureStatus
+from motrix_edge.adapter.http_contract import PATH_TASK_STATUS
 from motrix_edge.adapter.http_shm_adapter import HttpShmAdapter
 
 
@@ -42,3 +45,16 @@ class SimulationPiperAdapter(HttpShmAdapter):
 
     def capture_status(self) -> CaptureStatus:
         return CaptureStatus(running=False)
+
+    def task_status(self) -> dict | None:
+        try:
+            response = self._client().get(PATH_TASK_STATUS)
+        except httpx2.TransportError:
+            # Task status is an optional diagnostic surface.  The simulation process may exit
+            # before Edge or Console stops polling, which must degrade to "unavailable" rather
+            # than turn every poll into an application traceback.
+            return None
+        if response.status_code in (404, 503):
+            return None
+        response.raise_for_status()
+        return response.json()

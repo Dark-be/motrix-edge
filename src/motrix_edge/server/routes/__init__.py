@@ -31,6 +31,7 @@ from motrix_edge.server.routes.health import build_router as build_health_router
 from motrix_edge.server.routes.infers import build_router as build_infers_router
 from motrix_edge.server.routes.leases import build_router as build_leases_router
 from motrix_edge.server.routes.rpent import build_router as build_rpent_router
+from motrix_edge.server.routes.tasks import build_router as build_tasks_router
 from motrix_edge.server.routes.uploads import build_router as build_uploads_router
 from motrix_edge.server.routes.webrtc import build_router as build_webrtc_router
 
@@ -40,6 +41,7 @@ def build_routers(services: Services) -> list[APIRouter]:
     return [
         build_auth_router(services),  # /v1/auth/*
         build_health_router(services),  # /v1/health + /v1/adapters/*
+        build_tasks_router(services),  # /v1/task/status
         build_leases_router(services),  # /v1/leases/*
         build_commands_router(services),  # /v1/commands
         build_uploads_router(services),  # /v1/uploads/*

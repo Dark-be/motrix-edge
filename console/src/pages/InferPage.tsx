@@ -25,6 +25,7 @@ export function InferPage() {
         sessionType,
         captures,
         infers,
+        taskStatus,
         health,
         arms,
         onLog,
@@ -83,7 +84,7 @@ export function InferPage() {
                             onLog={onLog}
                             fixedKind="infer"
                             onRollout={onRollout}
-                            extra={<InferStatus infers={infers} />}
+                            extra={<InferStatus infers={infers} taskStatus={taskStatus} />}
                         />
                         <SessionHooks />
                     </>
@@ -103,7 +104,13 @@ export function InferPage() {
 }
 
 /** 推理状态（并进推理卡片）：连接 / 预热 / 运行位 + RTC 摘要与耗时。 */
-function InferStatus({ infers }: { infers: ReturnType<typeof useEdge>["infers"] }) {
+function InferStatus({
+    infers,
+    taskStatus,
+}: {
+    infers: ReturnType<typeof useEdge>["infers"];
+    taskStatus: ReturnType<typeof useEdge>["taskStatus"];
+}) {
     const rtc = infers?.rtc ?? null;
     return (
         <div className="space-y-1 border-t border-slate-800 pt-2">
@@ -158,6 +165,43 @@ function InferStatus({ infers }: { infers: ReturnType<typeof useEdge>["infers"] 
                     drop <span className="font-mono text-slate-200">{infers?.dropped_actions ?? 0}</span>
                 </span>
             </div>
+            {taskStatus?.available && (
+                <div className="space-y-1 border-t border-slate-800 pt-1.5">
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                        <span>
+                            task <span className="font-mono text-slate-200">{taskStatus.task ?? "—"}</span>
+                        </span>
+                        <span
+                            className={
+                                taskStatus.success
+                                    ? "font-mono text-emerald-300"
+                                    : taskStatus.status === "failed"
+                                    ? "font-mono text-red-300"
+                                    : "font-mono text-amber-300"
+                            }
+                        >
+                            {taskStatus.status}
+                        </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                        {taskStatus.progress.map((item) => (
+                            <span
+                                key={item.key}
+                                title={item.metrics ? JSON.stringify(item.metrics) : undefined}
+                                className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                                    item.complete
+                                        ? "border-emerald-700/60 bg-emerald-950/30 text-emerald-300"
+                                        : item.state === "pressed" || item.state === "pressing"
+                                        ? "border-amber-700/60 bg-amber-950/30 text-amber-300"
+                                        : "border-slate-700 bg-slate-900 text-slate-400"
+                                }`}
+                            >
+                                {item.label}: {item.state}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

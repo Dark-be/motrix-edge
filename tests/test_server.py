@@ -188,6 +188,41 @@ def test_health_without_node_returns_empty_robot():
     assert [p["type"] for p in body["adapters"]["policies"]] == ["openpi", "lerobot-remote"]
 
 
+def test_task_status_reports_unavailable_for_adapter_without_provider():
+    client = TestClient(create_app(BASE_CFG, node=FakeNode()))
+
+    response = client.get("/v1/task/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "available": False,
+        "task": None,
+        "provider": None,
+        "status": "unavailable",
+        "progress": [],
+        "success": False,
+        "reason": "bound adapter does not expose task status",
+    }
+
+
+def test_task_status_forwards_generic_adapter_snapshot():
+    node = FakeNode()
+    node.adapter.task_status = lambda: {
+        "available": True,
+        "task": "press_three_buttons",
+        "provider": "press_three_buttons_v1",
+        "status": "running",
+        "progress": [{"key": "pink", "label": "pink", "state": "pressed", "complete": False}],
+        "success": False,
+    }
+    client = TestClient(create_app(BASE_CFG, node=node))
+
+    response = client.get("/v1/task/status")
+
+    assert response.status_code == 200
+    assert response.json()["progress"][0]["state"] == "pressed"
+
+
 def test_adapters_info_returns_capabilities():
     """GET /v1/adapters：静态列出已注册且已实现的 adapter，与 discover 无关。
 

@@ -61,6 +61,7 @@ curl -X POST http://127.0.0.1:8090/v1/execute \
   -H 'Content-Type: application/json' \
   -d '{"action":[0.5],"layout":"gripper","arms":["right"],"command_id":"half-open"}'
 curl http://127.0.0.1:8090/v1/motion/commands/half-open
+curl http://127.0.0.1:8090/v1/task/status
 curl -X POST http://127.0.0.1:8090/v1/reset
 curl -X POST http://127.0.0.1:8090/v1/safe_stop
 ```
@@ -71,6 +72,12 @@ curl -X POST http://127.0.0.1:8090/v1/safe_stop
 目标返回 422 且不改变当前目标。`applied` 表示目标已由控制线程采用，实际到位需要读取运动采样。
 reset 回到启动后的机械臂姿态，不重置物体；重新布置场景需重启进程。停止清空排队动作并保持当前
 实际姿态，物理继续运行。
+
+任务状态由 session 所在目录名自动选择，也可用 `--task <任务名>` 显式指定。已注册的
+`press_three_buttons` 会在 `GET /v1/task/status` 返回三枚按钮的实际弹簧行程、稳定按压、回弹、首次
+按压顺序和总体成功状态；判据读取任务自身 `success.json`。机器人 reset 会清空累计判定。没有注册状态
+提供器的任务返回 `available=false`，但控制与观测不受影响。新增任务状态时实现并注册独立提供器，
+通用控制循环和 HTTP 路由无需按任务增加分支。
 
 实现与边界见 [设计](../wiki/design/simulation_pipeline.md)。
 

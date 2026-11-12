@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--session", type=Path, required=True, help="Session TOML, relative to workspace")
     parser.add_argument("--scene", type=Path, required=True, help="Scene JSON, relative to workspace")
+    parser.add_argument("--task", help="Task status provider name; defaults to the session directory name")
     parser.add_argument("--output", type=Path, required=True, help="New directory for SDK diagnostics")
     parser.add_argument("--shm-name", default="simulation_piper_obs")
     parser.add_argument("--cameras", nargs=2, default=["cam_head", "cam_right_wrist"])
@@ -53,6 +54,7 @@ def main():
         tuple(args.cameras),
         not args.no_render,
         tcp_offset=tuple(args.tcp_offset),
+        task_name=args.task,
     )
     settings.output.mkdir(parents=True, exist_ok=False)
     uvicorn.run(create_app(Simulation(settings)), host=args.host, port=args.port)
