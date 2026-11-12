@@ -16,7 +16,7 @@ function newLeaseId(): string {
  * 顶栏「租约」下拉：**收起态只显示租约状态**（无租约 → 提示下拉签发）。
  *
  * 展开后：本页持有 → 倒计时 / 续租 / 撤销 / 自动续租；他人占用 → 显式「撤销占用并接管」；
- * 无租约 → 签发表单（Edge id / 操作员 / 用途 / 有效期）。
+ * 无租约 → 签发表单（Edge id 自动绑定当前连接；用户只选操作员 / 用途 / 有效期）。
  */
 export function LeaseMenu() {
     const { lease, health, authStatus, auth } = useEdge();
@@ -39,8 +39,6 @@ export function LeaseMenu() {
         takeover,
     } = lease;
 
-    const [leaseId] = useState(() => newLeaseId());
-    const [edgeId, setEdgeId] = useState("");
     const [holder, setHolder] = useState("console");
     const [purpose, setPurpose] = useState("capture");
     const [ttl, setTtl] = useState<number | null>(null);
@@ -70,9 +68,10 @@ export function LeaseMenu() {
 
     const onSubmit = (e: FormEvent) => {
         e.preventDefault();
+        if (!defaultEdgeId) return;
         const values: LeaseFormValues = {
-            lease_id: leaseId,
-            edge_id: edgeId || defaultEdgeId,
+            lease_id: newLeaseId(),
+            edge_id: defaultEdgeId,
             holder_subject_id: effectiveHolder,
             purpose,
             state: "active",
@@ -144,14 +143,9 @@ export function LeaseMenu() {
 
                 {canIssue && !isMine && !expiredMine && (
                     <form className="space-y-1.5 border-t border-line pt-2" onSubmit={onSubmit}>
-                        <FormField label="Edge id">
-                            <input
-                                className={inputCls}
-                                value={edgeId}
-                                placeholder={defaultEdgeId || "edge-…"}
-                                onChange={(e) => setEdgeId(e.target.value)}
-                            />
-                        </FormField>
+                        <div className="rounded border border-line bg-panel2 px-2 py-1 text-[11px]">
+                            <Row k="Edge" v={defaultEdgeId || "等待 Edge health"} />
+                        </div>
                         <div className="grid grid-cols-2 gap-1.5">
                             <FormField label="操作员">
                                 <input
@@ -194,7 +188,7 @@ export function LeaseMenu() {
                         <Button
                             variant="primary"
                             type="submit"
-                            disabled={busy || (authStatus?.enabled === true && !auth)}
+                            disabled={busy || !defaultEdgeId || (authStatus?.enabled === true && !auth)}
                             className="w-full"
                         >
                             签发租约
