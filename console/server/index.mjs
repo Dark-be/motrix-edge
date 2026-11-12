@@ -34,6 +34,16 @@ export function loadConfig(path = process.env.MOTRIX_CONSOLE_CONFIG || join(ROOT
         if (secret && trustedNetwork) throw new Error(`Edge ${id} cannot combine sharedSecretEnv and trustedNetwork`);
         edges.set(id, { id, label: raw.label || id, baseUrl, secret, trustedNetwork });
     }
+    const harnessProviders = new Map();
+    for (const [id, raw] of Object.entries(config.harnessProviders || {})) {
+        if (!id || id.includes("/")) throw new Error(`invalid Harness provider id: ${id}`);
+        harnessProviders.set(id, {
+            id,
+            label: raw.label || id,
+            kind: raw.kind || "rpent",
+            baseUrl: validatedBaseUrl(raw.baseUrl, `Harness provider ${id}`),
+        });
+    }
     return {
         host: config.host || "0.0.0.0",
         port: Number(config.port || 5174),
@@ -46,7 +56,35 @@ export function loadConfig(path = process.env.MOTRIX_CONSOLE_CONFIG || join(ROOT
         appSecret: process.env.MOTRIX_CONSOLE_FEISHU_APP_SECRET,
         allowedTenants: new Set(tenantSource.map((value) => String(value).trim()).filter(Boolean)),
         edges,
+        harnessProviders,
     };
+}
+
+/** Parse process-only listen overrides; OAuth/public URLs remain configuration-owned. */
+export function parseServerArgs(argv = process.argv.slice(2)) {
+    const result = {};
+    for (let index = 0; index < argv.length; index += 1) {
+        const arg = argv[index];
+        const [name, inline] = arg.split("=", 2);
+        if (name !== "--host" && name !== "--port" && name !== "--public-url")
+            throw new Error(`unknown Console option: ${arg}`);
+        const value = inline ?? argv[++index];
+        if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+        if (name === "--host") {
+            result.host = value;
+            continue;
+        }
+        if (name === "--public-url") {
+            const publicUrl = validatedBaseUrl(value, "Console public URL");
+            result.frontendUrl = publicUrl;
+            result.redirectUri = `${publicUrl}/api/auth/feishu/callback`;
+            continue;
+        }
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid Console port: ${value}`);
+        result.port = port;
+    }
+    return result;
 }
 
 export function requireAllowedTenant(allowedTenants, tenantKey) {
@@ -171,6 +209,34 @@ export function createConsoleServer(config = loadConfig()) {
                 requireSession(req, sessions);
                 return json(res, 200, { edges: [...config.edges.values()].map(({ id, label }) => ({ id, label })) });
             }
+            if (url.pathname === "/api/harness/providers") {
+                requireSession(req, sessions);
+                return json(res, 200, {
+                    providers: [...config.harnessProviders.values()].map(({ id, label, kind }) => ({
+                        id,
+                        label,
+                        kind,
+                    })),
+                });
+            }
+            const harnessMatch = url.pathname.match(/^\/api\/harness\/providers\/([^/]+)(\/.*)$/);
+            if (harnessMatch) {
+                requireSession(req, sessions);
+                const provider = config.harnessProviders.get(decodeURIComponent(harnessMatch[1]));
+                if (!provider) return json(res, 404, { detail: "Harness provider not found" });
+                const target = harnessMatch[2];
+                if (!allowedHarnessTarget(req.method, target)) {
+                    return json(res, 404, { detail: "Harness provider route not allowed" });
+                }
+                const body = await readBody(req);
+                const upstream = await fetch(`${provider.baseUrl}${target}${url.search}`, {
+                    method: req.method,
+                    headers: forwardHeaders(req.headers),
+                    body: body.length ? body : undefined,
+                });
+                res.writeHead(upstream.status, responseHeaders(upstream.headers));
+                return res.end(Buffer.from(await upstream.arrayBuffer()));
+            }
             const match = url.pathname.match(/^\/api\/edges\/([^/]+)(\/v1(?:\/.*)?)$/);
             if (match) {
                 const session = requireSession(req, sessions);
@@ -205,6 +271,25 @@ export function createConsoleServer(config = loadConfig()) {
             return json(res, error.status || 500, { detail: error.message || "internal error" });
         }
     });
+}
+
+function allowedHarnessTarget(method, target) {
+    const routes = new Set([
+        "GET /healthz",
+        "GET /api/commands",
+        "GET /api/session/config",
+        "POST /api/session/messages",
+        "POST /api/session/interrupt",
+        "POST /api/session/stop",
+        "GET /api/session/state",
+        "GET /api/session/transcript",
+        "GET /api/session/primitives",
+        "POST /api/session/primitive",
+        "GET /api/session/frame",
+        "GET /api/session/video",
+        "GET /api/session/action-video",
+    ]);
+    return routes.has(`${method} ${target}`);
 }
 
 async function exchangeFeishuUser(config, code) {
@@ -371,7 +456,7 @@ function redirect(res, status, location) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-    const config = loadConfig();
+    const config = { ...loadConfig(), ...parseServerArgs() };
     createConsoleServer(config).listen(config.port, config.host, () => {
         console.log(`Motrix Console listening on http://${config.host}:${config.port}`);
     });

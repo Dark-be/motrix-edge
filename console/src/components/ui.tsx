@@ -151,6 +151,7 @@ export function Card({
     actions,
     children,
     className = "",
+    contentClassName = "",
     collapsible = false,
     collapsed = false,
     onToggle,
@@ -161,6 +162,8 @@ export function Card({
     actions?: ReactNode;
     children: ReactNode;
     className?: string;
+    /** 内容容器附加样式；用于需要独立滚动的满高卡片。 */
+    contentClassName?: string;
     /** 可在头部折叠 / 展开（收起暂时不用的卡片） */
     collapsible?: boolean;
     collapsed?: boolean;
@@ -197,7 +200,7 @@ export function Card({
                 </div>
                 {actions && <div className="flex flex-wrap items-center gap-1.5">{actions}</div>}
             </header>
-            {!collapsed && <div className="p-2.5">{children}</div>}
+            {!collapsed && <div className={`p-2.5 ${contentClassName}`}>{children}</div>}
         </section>
     );
 }

@@ -4,10 +4,27 @@ import test from "node:test";
 import {
     bindTrustedCaptureBody,
     loadConfig,
+    parseServerArgs,
     requireAllowedTenant,
     safeReturnTo,
     signIdentityHeaders,
 } from "./index.mjs";
+
+test("server CLI separates listen overrides from the public OAuth URL", () => {
+    assert.deepEqual(
+        parseServerArgs(["--host", "127.0.0.1", "--port", "5183", "--public-url", "http://127.0.0.1:5183"]),
+        {
+            host: "127.0.0.1",
+            port: 5183,
+            frontendUrl: "http://127.0.0.1:5183",
+            redirectUri: "http://127.0.0.1:5183/api/auth/feishu/callback",
+        }
+    );
+    assert.deepEqual(parseServerArgs(["--port=6000"]), { port: 6000 });
+    assert.throws(() => parseServerArgs(["--port", "0"]), /invalid Console port/);
+    assert.throws(() => parseServerArgs(["--unknown"]), /unknown Console option/);
+    assert.throws(() => parseServerArgs(["--public-url", "http://127.0.0.1:5183/path"]), /invalid baseUrl/);
+});
 
 test("return path rejects open redirects", () => {
     assert.equal(safeReturnTo("/collect"), "/collect");
@@ -60,6 +77,17 @@ test("checked-in Console registry contains only trusted static Edge targets", ()
         assert.equal(edge.secret, undefined);
         assert.match(edge.baseUrl, /^http:\/\/10\.30\.(30|40)\./);
     }
+    assert.deepEqual(
+        [...config.harnessProviders.values()],
+        [
+            {
+                id: "rpent-local",
+                label: "RPent · Motrix Edge",
+                kind: "rpent",
+                baseUrl: "http://127.0.0.1:8765",
+            },
+        ]
+    );
 });
 
 test("signed identity headers are deterministic for fixed timestamp and nonce", () => {
