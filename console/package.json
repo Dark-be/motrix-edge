@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "server": "node server/index.mjs",
+    "test:client": "node --experimental-strip-types --test src/captureMeta.test.mjs",
     "test:server": "node --test server/index.test.mjs"
   },
   "dependencies": {

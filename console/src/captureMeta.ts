@@ -11,3 +11,13 @@ export function missingCaptureMeta(meta: Record<string, unknown>): string[] {
         return typeof value !== "string" || value.trim() === "";
     }).map(({ label }) => label);
 }
+
+/** 组装同步请求的 meta：包含登录态注入的 operator，并统一裁剪空白值。 */
+export function captureSyncMeta(selection: Record<string, string>): Record<string, string> {
+    const meta: Record<string, string> = {};
+    for (const [key, value] of Object.entries(selection)) {
+        const trimmed = value.trim();
+        if (trimmed !== "") meta[key] = trimmed;
+    }
+    return meta;
+}
