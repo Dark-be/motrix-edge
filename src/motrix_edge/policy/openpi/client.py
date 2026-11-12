@@ -48,12 +48,11 @@ class OpenPIClient(BasePolicyClient):
         super().__init__(policy_config=policy_config)
         # 下发相机集（过滤）：服务端 metadata 声明了相机清单就以它为准，否则用 adapter 启用集
         # （见 ``_image_cameras``）；两者都无 → 透传观测内全部相机。
-        self._adapter_cameras: list[str] | None = None  # adapter 实际启用的相机（bind_adapter）
         self._server_cameras: list[str] | None = None  # 服务端 metadata 声明的相机清单
         # edge 相机名 → 下发相机名重命名（默认同名）：本仓对接的 openpi 分支里，服务端
         # ``PiperInputs`` 收的是**源**相机名（cam_head / cam_left_wrist / cam_right_wrist，
         # 再由它映射到模型键 base_left_0_rgb 等），与 edge 侧名一致 → 一般留空。
-        self._rename_cameras = dict(self.policy_config.get("rename_cameras") or {})
+        self._rename_cameras = self.camera_map or dict(self.policy_config.get("rename_cameras") or {})
         # 文本指令（prompt）：openpi 官方「运行时动态传入」，每次 infer 请求可换。
         # 配置值作缺省；推理会话可运行时更新（infer config set / POST /v1/infers/config）。
         # None = 不发（服务端用 default_prompt 兜底）。
@@ -68,19 +67,14 @@ class OpenPIClient(BasePolicyClient):
             request_timeout=float(self.policy_config.get("request_timeout", 60.0)),
         )
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
-        """绑定机器人适配器运行时启用的布局（adapter config set 的 enabled_cameras）。
-
-        相机名单一事实来源 = adapter 配置：推理会话（InferSession）进入时把 adapter 启用的
-        相机名传入本方法，openpi 据此过滤要下发的相机（只下发列表内），**无需另读 edge.yml
-        的相机名**。``camera_names=None``（未绑定）→ 透传观测内全部相机（adapter.observe
-        本就只含启用相机，等效）。``action_dim``（启用臂 qpos 维数）仅信息性：state 维度由
-        观测 qpos 实际长度决定，随 adapter 启用臂自动子集。
-
-        服务端 metadata **声明了**相机清单时以服务端为准（见 ``_image_cameras``）：声明的是
-        服务端要的相机，比 adapter 启用集更准（多送的相机白白占带宽）。
-        """
-        self._adapter_cameras = [str(c).strip() for c in camera_names] if camera_names else None
+    def bind_adapter(self, action_dim=None, camera_names=None, arm_names=None, state_dim_per_arm=None):
+        """绑定 Adapter 全局观测能力，并校验 Policy 显式选择的相机 / 机械臂子集。"""
+        super().bind_adapter(
+            action_dim=action_dim,
+            camera_names=camera_names,
+            arm_names=arm_names,
+            state_dim_per_arm=state_dim_per_arm,
+        )
         self._warn_missing_server_cameras()
 
     @property
@@ -103,13 +97,16 @@ class OpenPIClient(BasePolicyClient):
         用属性而不在 bind_adapter / connect 里写字段：两件事（会话绑定 adapter、连接拿 metadata）
         的先后顺序不属于契约，取谁都必须得同一个结果。
         """
-        return list(self._server_cameras) if self._server_cameras else self._adapter_cameras
+        if self.camera_map:
+            return list(self.camera_map)
+        return list(self._server_cameras) if self._server_cameras else (list(self._adapter_cameras) or None)
 
     def _warn_missing_server_cameras(self) -> None:
         """告警「服务端要的相机 adapter 没启用」：不告警的话，服务端只会报缺键 / 一直拿不到动作。"""
-        if not self._server_cameras or self._adapter_cameras is None:
+        if not self._server_cameras:
             return
-        missing = [c for c in self._server_cameras if c not in self._adapter_cameras]
+        provided = set(self.camera_map.values()) if self.camera_map else set(self._adapter_cameras)
+        missing = [name for name in self._server_cameras if name not in provided]
         if missing:
             debug_print(
                 "policy",
@@ -171,12 +168,12 @@ class OpenPIClient(BasePolicyClient):
 
         按 **openpi 官方 flat 契约** 组装观测：qpos → ``state``（原样上传，服务端归一化）；
         图像解码 → 等比补零缩放 ``image_size``（与官方服务端 / 训练管线同样的 letterbox，
-        服务端再缩时为 no-op）→ **uint8 数组**（不再 jpeg），经 ``image_cameras`` 过滤 +
-        ``rename_cameras`` 改名到服务端期望的**源**相机名；``prompt`` 每次请求动态携带
+        服务端再缩时为 no-op）→ **uint8 数组**（不再 jpeg），经 ``camera_map`` 选择并改名
+        到服务端期望的**源**相机名；``prompt`` 每次请求动态携带
         （服务端每帧重新 tokenize，可换）。
         块缓存 / 切分 / 平滑由 RTCManager 负责，本方法不做任何缓存。
         """
-        qpos = observation[KEY_OBS_QPOS]
+        qpos = self.state_for_arms(observation[KEY_OBS_QPOS])
         cameras = self._image_cameras  # 现读（bind_adapter / metadata 都可能改它）
         image_size = self.image_size  # 现读：会话内 infer config set image_size 立即生效
         prepared = {}
@@ -185,7 +182,7 @@ class OpenPIClient(BasePolicyClient):
                 continue
             edge_name = key[len(KEY_OBS_IMAGE_PREFIX) :]
             if cameras is not None and edge_name not in cameras:
-                continue  # 只下发 image_cameras 子集（双相机），其余过滤
+                continue  # 只下发 policy 选择的相机子集，其余过滤
             model_key = self._rename_cameras.get(edge_name, edge_name)
             prepared[model_key] = prepare_openpi_image(value, image_size)
         payload = build_openpi_observation(qpos, prepared, prompt=self.prompt)

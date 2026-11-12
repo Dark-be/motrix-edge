@@ -108,6 +108,21 @@ def test_remote_qpos_error_layout_concatenates_state():
     assert state.tolist() == [*range(7), *range(10, 17)]
 
 
+def test_remote_arm_map_builds_each_server_feature_from_selected_arms():
+    client = LerobotRemoteClient(
+        {
+            "deployment": "d",
+            "semantics": "s",
+            "arm_map": {"right": "observation.right_state", "left": "observation.left_state"},
+        }
+    )
+    client.bind_adapter(arm_names=["left", "right"], state_dim_per_arm=2)
+    observation = {"observations/qpos": np.array([1, 2, 3, 4], dtype=np.float32)}
+
+    assert client._state_values(observation, "observation.right_state").tolist() == [3, 4]
+    assert client._state_values(observation, "observation.left_state").tolist() == [1, 2]
+
+
 def test_remote_qpos_error_layout_requires_matching_robot_observation():
     client = LerobotRemoteClient({"deployment": "d", "semantics": "s", "observation_layout": "qpos+qpos_err"})
     with pytest.raises(KeyError, match="observations/qpos_err"):
@@ -130,7 +145,10 @@ def test_remote_camera_map_override():
         {
             "deployment": "d",
             "semantics": "s",
-            "camera_map": {"head": "observation.images.piper_0_cam_head"},
+            "camera_map": {
+                "head": "observation.images.piper_0_cam_head",
+                "cam_right_wrist": "observation.images.piper_0_cam_right_wrist",
+            },
         }
     )
     caps = _Caps(
@@ -153,6 +171,21 @@ def test_remote_unmappable_camera_raises():
     caps = _Caps([_Caps.rgb("observation.images.front")])
     with pytest.raises(ValueError, match="cannot map server camera"):
         client._resolve_cameras(caps, {"observations/qpos": np.zeros(7)})
+
+
+def test_remote_infer_freq_must_match_server_action_interval():
+    client = _remote_client({"infer_freq": 4})
+    client._client.admit = lambda **kwargs: None
+    with pytest.raises(ValueError, match="does not match server action_interval"):
+        client._ensure_admitted(_remote_obs())
+
+
+def test_remote_infer_freq_matching_server_action_interval_admits():
+    client = _remote_client({"infer_freq": 10})
+    admitted = []
+    client._client.admit = lambda **kwargs: admitted.append(kwargs)
+    client._ensure_admitted(_remote_obs())
+    assert admitted[0]["action_interval"] == pytest.approx(0.1)
 
 
 class _FakeRemote:

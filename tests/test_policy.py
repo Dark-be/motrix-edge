@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from motrix_edge.policy import POLICY_REGISTRY, get_policy
+from motrix_edge.policy.base import BasePolicyClient
 from motrix_edge.policy.contract import (
     resize_with_pad,
     to_rgb_uint8,
@@ -28,6 +29,41 @@ from motrix_edge.policy.contract import (
 @pytest.fixture
 def qpos():
     return np.zeros(14, dtype=np.float32)
+
+
+def test_policy_maps_select_available_adapter_observations_in_declared_order():
+    client = BasePolicyClient(
+        {
+            "arm_map": {"right": "observation.state", "left": "observation.state"},
+            "camera_map": {"wrist": "observation.images.wrist"},
+        }
+    )
+    client.bind_adapter(
+        camera_names=["head", "wrist"],
+        arm_names=["left", "right"],
+        state_dim_per_arm=2,
+    )
+
+    assert client.rollout_arms == ["right", "left"]
+    assert client.state_for_arms([1, 2, 3, 4]).tolist() == [3, 4, 1, 2]
+
+
+@pytest.mark.parametrize(
+    ("config", "error"),
+    [
+        ({"arm_map": {"missing": "observation.state"}}, "unavailable Edge arm"),
+        ({"camera_map": {"missing": "observation.images.missing"}}, "unavailable Edge camera"),
+    ],
+)
+def test_policy_maps_reject_observations_unavailable_from_adapter(config, error):
+    client = BasePolicyClient(config)
+    with pytest.raises(ValueError, match=error):
+        client.bind_adapter(camera_names=["head"], arm_names=["right"], state_dim_per_arm=7)
+
+
+def test_policy_maps_require_string_names():
+    with pytest.raises(ValueError, match="string names"):
+        BasePolicyClient({"arm_map": {"right": 1}})
 
 
 def test_resize_with_pad_center_pads():

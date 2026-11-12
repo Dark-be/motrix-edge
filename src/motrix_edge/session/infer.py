@@ -12,6 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+import math
 import threading
 import time
 
@@ -79,8 +80,15 @@ class InferSession(PolicyConfigFeature, BaseSession):
         self.policy_config = self.base_cfg.get("policy", {})
         # 推理步进频率（Hz）：会话 观测→推理→下发动作 的节奏。``policy.infer_freq`` 可调
         # （默认 10Hz ≈ 0.1s/步；测试传 1000 让主循环几乎不 sleep）。间隔 = 1 / infer_freq。
-        infer_freq = float(self.policy_config.get("infer_freq", 10.0))
-        self.step_interval = 1.0 / infer_freq if infer_freq > 0 else 0.1
+        raw_infer_freq = self.policy_config.get("infer_freq", 10.0)
+        try:
+            infer_freq = float(raw_infer_freq)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"policy.infer_freq must be a positive finite number, got {raw_infer_freq!r}") from exc
+        if not math.isfinite(infer_freq) or infer_freq <= 0:
+            raise ValueError(f"policy.infer_freq must be a positive finite number, got {raw_infer_freq!r}")
+        self.infer_freq = infer_freq
+        self.step_interval = 1.0 / infer_freq
         # 运行时策略选择：session run infer 携带 policy_type（HTTP / 命令）；由节点校验
         self.policy_type = policy_type
         self.policy = get_policy(base_cfg, policy_type=self.policy_type)
@@ -708,9 +716,9 @@ class InferSession(PolicyConfigFeature, BaseSession):
         返回 ``False`` = 本拍被拒（遥操作 / 人工接管中）；两条通路的返回语义一致。
         """
         layout = getattr(self.policy, "action_layout", ACTION_LAYOUT_JOINT)
-        if layout == ACTION_LAYOUT_JOINT:
-            return self.adapter.rollout(action)  # 缺省：启用臂 + HOME 展开（旧行为，逐字不变）
-        arms = list(getattr(self.adapter, "enabled_arms", []) or []) or None
+        arms = getattr(self.policy, "rollout_arms", None)
+        if arms is None:
+            arms = getattr(self.adapter, "enabled_arms", None) or None
         return self.adapter.rollout(action, layout=layout, arms=arms)
 
     @staticmethod

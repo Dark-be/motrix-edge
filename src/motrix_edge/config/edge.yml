@@ -102,15 +102,14 @@ policy:
   # 与文本指令（openpi 的 prompt，`infer config set`）由调用方 / 前端按所选策略动态填写。
   deployment: null # lerobot-remote：服务端 deployment 名（== server.yaml 的 deployment）
   semantics: null # lerobot-remote：动作单位/顺序标识，必须与服务端逐字一致
+  infer_freq: 10 # 动作块内每步下发频率（Hz）；必须与 lerobot 服务端 action_interval 相匹配
   mode: chunk # lerobot-remote：执行模式（块缓存/切分/预取由 edge RTC 负责）
   chunk_merge: append # lerobot-remote：块拼接语义（append | aligned，需服务端能力）
   encoding: raw # lerobot-remote：图像编码（raw | jpeg）
   # π₀.₅ MEM 历史 deployment 必须在进入会话时覆盖为 jpeg；多帧 raw 不适合 Zenoh 单消息。
   observation_layout: qpos+qpos_err # state = concat(qpos, Robot 同帧提供的 qpos_err)
   action_layout: joint_delta # 模型输出叠加到 Robot 当前关节 target
-  image_cameras: [cam_head, cam_right_wrist] # 只声明并上传 checkpoint 使用的两路图像
-  # camera_map: # 可选：端上相机名 → 服务端特征名（缺省按短名后缀自动匹配，如 cam_head → ..._cam_head）
-  #   cam_head: observation.images.piper_0_cam_head
+  # arm_map / camera_map 由每份 policy YAML 显式提供；adapter 配置只决定 Edge 全局可获得的观测。
   # --- RTC（实时动作块管理：异步预取 + 三元切分 + 过渡策略；见 wiki/design/motrix_edge_rtc.md）---
   # 策略只返回原始动作块（openpi / lerobot-remote 通用）；块缓存 / 切分 / 过渡 / 预取由 rtc 统一负责。
   # 预取在后台线程完成（控制环不阻塞）：推理期间走过的步会在返回时按步号自动跳过。
@@ -123,5 +122,4 @@ policy:
     suffix_len: 20 # 后缀段 S（与下一块执行段的重叠窗口，同时是预取提前量）；须满足 P + S < H
     aggregate_fn: weighted_average # 过渡策略：weighted_average(0.3+0.7)/conservative(0.7+0.3)/average/latest_only/continuous(按步号 0→1)
   # 其余策略参数（openpi 的 action_horizon/image_size/rename_cameras 等）
-  # **一律用代码缺省值**，不在 yaml 维护；布局（单臂/双相机）由 adapter 运行时配置决定
-  # 并自动传入策略（bind_adapter），openpi 侧无相机配置。
+  # **一律用代码缺省值**，不在 Edge 全局 yaml 维护。

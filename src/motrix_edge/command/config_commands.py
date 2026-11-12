@@ -211,6 +211,14 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
             raise ValueError(f"{key} must be within [{low}, {high}], got {value}")
     elif kind == "bool":
         value = parse_bool(raw)
+    elif kind == "string_map":
+        if not isinstance(raw, dict):
+            raise ValueError(f"{key} must be a mapping of strings, got {raw!r}")
+        if any(not isinstance(source, str) or not isinstance(target, str) for source, target in raw.items()):
+            raise ValueError(f"{key} must be a mapping of strings, got {raw!r}")
+        value = {source.strip(): target.strip() for source, target in raw.items()}
+        if not value or any(not source or not target for source, target in value.items()):
+            raise ValueError(f"{key} must be a non-empty mapping with non-empty string names")
     else:
         value = str(raw).strip()
     options = item.get("options") or []

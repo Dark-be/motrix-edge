@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -98,19 +99,17 @@ class LerobotRemoteClient(BasePolicyClient):
         self._config = self._build_config()
         self._client: RemoteClient | None = None
         self._admitted = False
-        self._adapter_cameras: list[str] | None = None
         self._camera_map: dict[str, str] = {}
         self._lock = threading.Lock()
         self._request_lock = threading.RLock()
         self._history: dict[str, deque[np.ndarray]] = {}
         self._history_steps = 0
         self._task = str(self.policy_config.get("task") or self.policy_config.get("prompt") or "")
-        # 显式相机映射（yaml 的 policy.camera_map：端上相机名 → 服务端特征名）
-        raw_map = self.policy_config.get("camera_map") or {}
-        if not isinstance(raw_map, dict):
-            raise ValueError("policy.camera_map must be a mapping of edge camera name -> server feature name")
-        self._explicit_camera_map = {str(key).strip(): str(value).strip() for key, value in raw_map.items()}
         self._observation_layout = _normalize_observation_layout(self.policy_config.get("observation_layout"))
+        raw_infer_freq = self.policy_config.get("infer_freq")
+        self._infer_freq = None if raw_infer_freq in (None, "") else float(raw_infer_freq)
+        if self._infer_freq is not None and (not math.isfinite(self._infer_freq) or self._infer_freq <= 0):
+            raise ValueError("policy.infer_freq must be a positive finite number")
 
     # -- 配置 ---------------------------------------------------------------
     def _build_config(self) -> RemoteInferenceConfig:
@@ -171,9 +170,14 @@ class LerobotRemoteClient(BasePolicyClient):
             if client is not None:
                 client.close()
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
-        """绑定 adapter 启用的相机名（相机名单一事实来源 = adapter 配置）。"""
-        self._adapter_cameras = [str(c).strip() for c in camera_names] if camera_names else None
+    def bind_adapter(self, action_dim=None, camera_names=None, arm_names=None, state_dim_per_arm=None):
+        """Bind Edge-global observations; policy maps select the inference subset."""
+        super().bind_adapter(
+            action_dim=action_dim,
+            camera_names=camera_names,
+            arm_names=arm_names,
+            state_dim_per_arm=state_dim_per_arm,
+        )
 
     def prepare(self, observation=None):
         """预热：提前完成 admission（占会话 + 校验契约），让首个 rollout 不再等握手。
@@ -203,7 +207,6 @@ class LerobotRemoteClient(BasePolicyClient):
         features: dict[str, np.ndarray] = {}
         padding: dict[str, np.ndarray] = {}
         self._history_steps += 1
-        state = self._state_values(observation)
         for spec in caps.features:
             if spec.kind == "rgb_sequence":
                 _, height, width, _ = spec.shape
@@ -219,9 +222,9 @@ class LerobotRemoteClient(BasePolicyClient):
                 )
                 continue
             elif len(spec.shape) == 2:
-                current = state.astype(np.float32, copy=False)
+                current = self._state_values(observation, spec.name).astype(np.float32, copy=False)
             else:
-                features[spec.name] = state.astype(np.float32, copy=False)
+                features[spec.name] = self._state_values(observation, spec.name).astype(np.float32, copy=False)
                 continue
             queue = self._history.get(spec.name)
             if queue is None or queue.maxlen != maxlen:
@@ -311,6 +314,20 @@ class LerobotRemoteClient(BasePolicyClient):
                 return
             caps = self._client.capabilities
             self._camera_map = self._resolve_cameras(caps, observation)
+            if self._infer_freq is not None:
+                requested_interval = 1.0 / self._infer_freq
+                server_interval = float(caps.action_interval)
+                if not math.isfinite(server_interval) or server_interval <= 0:
+                    raise ValueError(
+                        f"lerobot-remote: server declares invalid action_interval={server_interval!r}"
+                    )
+                if not math.isclose(requested_interval, server_interval, rel_tol=1e-3, abs_tol=1e-6):
+                    raise ValueError(
+                        "lerobot-remote: policy.infer_freq does not match server action_interval: "
+                        f"{self._infer_freq:g} Hz -> {requested_interval:g}s, "
+                        f"server declares {server_interval:g}s; set infer_freq to "
+                        f"{1.0 / server_interval:g} Hz"
+                    )
             self._client.admit(
                 features=caps.features,
                 action_feature=caps.action_feature,
@@ -333,13 +350,15 @@ class LerobotRemoteClient(BasePolicyClient):
         for spec in caps.features:
             if spec.kind not in {"rgb", "rgb_sequence"}:
                 continue
-            explicit = next(
-                (edge for edge, feature_name in self._explicit_camera_map.items() if feature_name == spec.name),
-                None,
-            )
+            explicit = next((edge for edge, feature_name in self.camera_map.items() if feature_name == spec.name), None)
             if explicit is not None:
                 mapping[spec.name] = explicit
                 continue
+            if self.camera_map:
+                raise ValueError(
+                    f"lerobot-remote: server camera {spec.name!r} is not declared in policy.camera_map "
+                    f"targets {list(self.camera_map.values())!r}"
+                )
             short = _short_name(spec.name)
             matches = [c for c in candidates if c == short or short.endswith(c) or c.endswith(short)]
             if len(matches) != 1:
@@ -357,16 +376,30 @@ class LerobotRemoteClient(BasePolicyClient):
             )
         return mapping
 
-    def _state_values(self, observation) -> np.ndarray:
-        """按 ``observation_layout`` 组装 state 向量。"""
-        qpos = np.asarray(observation[KEY_OBS_QPOS], dtype=np.float32).reshape(-1)
+    def _state_values(self, observation, feature_name: str | None = None) -> np.ndarray:
+        """Select mapped arms and assemble one inference-side state feature."""
+        arms = None
+        if self.arm_map:
+            if feature_name is None:
+                targets = list(dict.fromkeys(self.arm_map.values()))
+                if len(targets) == 1:
+                    feature_name = targets[0]
+            arms = [arm for arm, target in self.arm_map.items() if target == feature_name]
+            if not arms:
+                raise ValueError(
+                    f"lerobot-remote: state feature {feature_name!r} is not declared in policy.arm_map "
+                    f"targets {list(self.arm_map.values())!r}"
+                )
+        qpos = self.state_for_arms(observation[KEY_OBS_QPOS], arms)
         if self._observation_layout != OBSERVATION_LAYOUT_QPOS_ERR:
             return qpos
         if KEY_OBS_QPOS_ERR not in observation:
             raise KeyError(f"{KEY_OBS_QPOS_ERR!r} is required by observation_layout={self._observation_layout!r}")
-        qpos_err = np.asarray(observation[KEY_OBS_QPOS_ERR], dtype=np.float32).reshape(-1)
-        if qpos_err.shape != qpos.shape:
-            raise ValueError(f"qpos_err shape {qpos_err.shape} != qpos shape {qpos.shape}")
+        raw_qpos = np.asarray(observation[KEY_OBS_QPOS], dtype=np.float32).reshape(-1)
+        raw_qpos_err = np.asarray(observation[KEY_OBS_QPOS_ERR], dtype=np.float32).reshape(-1)
+        if raw_qpos_err.shape != raw_qpos.shape:
+            raise ValueError(f"qpos_err shape {raw_qpos_err.shape} != qpos shape {raw_qpos.shape}")
+        qpos_err = self.state_for_arms(observation[KEY_OBS_QPOS_ERR], arms)
         return np.concatenate((qpos, qpos_err))
 
     def _observation_features(self, observation) -> dict[str, np.ndarray]:
@@ -381,7 +414,6 @@ class LerobotRemoteClient(BasePolicyClient):
                     f"{sorted(history)} != {sorted(expected)}"
                 )
             return {name: np.asarray(value) for name, value in history.items()}
-        state = self._state_values(observation)
         features: dict[str, np.ndarray] = {}
         for spec in caps.features:
             if spec.kind == "rgb":
@@ -391,6 +423,7 @@ class LerobotRemoteClient(BasePolicyClient):
             elif spec.kind == "rgb_sequence":
                 raise ValueError("lerobot-remote: MEM deployment requires prepare_observation() history")
             else:
+                state = self._state_values(observation, spec.name)
                 expected = int(np.prod(spec.shape)) if spec.shape else state.size
                 if state.size != expected:
                     raise ValueError(

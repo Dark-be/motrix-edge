@@ -12,7 +12,22 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
+import numpy as np
+
 from motrix_edge.policy.contract import POLICY_KEY_ACTION_LAYOUT, normalize_action_layout
+
+
+def _string_map(config: dict, key: str) -> dict[str, str]:
+    """Normalize ``Edge name -> inference feature name`` policy mappings."""
+    raw = config.get(key) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"policy.{key} must be a mapping of edge name -> inference feature name")
+    if any(not isinstance(source, str) or not isinstance(target, str) for source, target in raw.items()):
+        raise ValueError(f"policy.{key} must map string names to string names")
+    mapping = {source.strip(): target.strip() for source, target in raw.items()}
+    if any(not source or not target for source, target in mapping.items()):
+        raise ValueError(f"policy.{key} names must be non-empty")
+    return mapping
 
 
 class BasePolicyClient:
@@ -38,6 +53,11 @@ class BasePolicyClient:
         self.server_metadata: dict = {}
         # 动作布局（策略配置项；缺省 joint）：非法取值在**进入会话时**就报错，不拖到每步下发。
         self.action_layout = normalize_action_layout(self.policy_config.get(POLICY_KEY_ACTION_LAYOUT))
+        self.camera_map = _string_map(self.policy_config, "camera_map")
+        self.arm_map = _string_map(self.policy_config, "arm_map")
+        self._adapter_cameras: list[str] = []
+        self._adapter_arms: list[str] = []
+        self._state_dim_per_arm: int | None = None
         # 文本指令（prompt）：**仅语言条件策略（``requires_prompt=True``，如 openpi）使用**——
         # 推理前必须非空（InferSession 门控），录制 rollout 时作 episode 的 task_name。
         # 非语言条件策略（lerobot-act）不使用 prompt：保持 None，不参与门控、不下发。
@@ -94,15 +114,46 @@ class BasePolicyClient:
         """Whether a prepared observation may be submitted to the inference engine."""
         return True
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
-        """绑定推理时机器人适配器启用的布局（启用臂 qpos 维数 + 启用相机名）。
+    def bind_adapter(self, action_dim=None, camera_names=None, arm_names=None, state_dim_per_arm=None):
+        """Bind Edge-global observation availability and validate the policy subset.
 
-        由推理会话（InferSession）在进入会话时调用：把 adapter 运行时配置（``adapter
-        config set`` 的 enabled_arms / enabled_cameras）传给策略客户端，使布局的单一
-        事实来源 = adapter（策略**不另读** edge.yml 的相机名）。默认 no-op；需要按启用
-        相机过滤 / 按启用臂切分的策略（如 openpi）覆盖。
+        Adapter configuration controls what Edge can observe. ``camera_map`` / ``arm_map`` then
+        select a policy-local subset and map it to inference-side feature names.
         """
-        pass
+        del action_dim  # compatibility input; state slicing uses the explicit per-arm width
+        self._adapter_cameras = [str(name).strip() for name in (camera_names or [])]
+        self._adapter_arms = [str(name).strip() for name in (arm_names or [])]
+        self._state_dim_per_arm = int(state_dim_per_arm) if state_dim_per_arm else None
+        missing_cameras = [name for name in self.camera_map if name not in self._adapter_cameras]
+        missing_arms = [name for name in self.arm_map if name not in self._adapter_arms]
+        if missing_cameras:
+            raise ValueError(
+                f"policy.camera_map requests unavailable Edge camera(s) {missing_cameras}; "
+                f"available: {self._adapter_cameras}"
+            )
+        if missing_arms:
+            raise ValueError(
+                f"policy.arm_map requests unavailable Edge arm(s) {missing_arms}; available: {self._adapter_arms}"
+            )
+
+    @property
+    def rollout_arms(self) -> list[str] | None:
+        """Policy output arm order; absent map keeps the adapter-compatible legacy scope."""
+        return list(self.arm_map) or (list(self._adapter_arms) or None)
+
+    def state_for_arms(self, values, arms: list[str] | None = None) -> np.ndarray:
+        """Select equal-width arm blocks from an adapter-global flattened state vector."""
+        array = np.asarray(values, dtype=np.float32).reshape(-1)
+        selected = arms or self.rollout_arms
+        if not selected or selected == self._adapter_arms:
+            return array
+        if not self._adapter_arms or not self._state_dim_per_arm:
+            raise ValueError("policy arm selection requires adapter arm names and state_dim_per_arm")
+        expected = len(self._adapter_arms) * self._state_dim_per_arm
+        if array.size != expected:
+            raise ValueError(f"adapter state size {array.size} != {expected} for arms {self._adapter_arms}")
+        blocks = array.reshape(len(self._adapter_arms), self._state_dim_per_arm)
+        return np.concatenate([blocks[self._adapter_arms.index(arm)] for arm in selected])
 
     def infer_chunk(self, observation: dict, index: int | None = None):
         """输入观测，返回**一次推理的原始动作块**（策略唯一职责：取推理结果）。

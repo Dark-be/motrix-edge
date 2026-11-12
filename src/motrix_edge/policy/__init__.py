@@ -105,6 +105,18 @@ POLICY_ENDPOINT_CONFIG_ITEMS: dict[str, list[dict]] = {
 # 通道、同一校验；也是**会话级**配置（runtime=False：进入会话时读取，会话内改需退出重进）。
 POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
     {
+        "key": "infer_freq",
+        "label": "动作下发频率 infer_freq",
+        "type": "float",
+        "required": False,
+        "runtime": False,
+        "default": 10.0,
+        "min": 0.001,
+        "help": "动作块内每步动作的下发频率（Hz）；例如 4 = 每 250ms 下发一个动作。"
+        "它同时决定观测采样、RTC 步进和动作块消耗节奏；进入会话后固化。"
+        "lerobot-remote 会在 admission 时校验它与服务端声明的 action_interval 一致。",
+    },
+    {
         "key": "warmup_required",
         "label": "必须先预热 warmup_required",
         "type": "bool",
@@ -136,6 +148,24 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "joint_delta 为叠加到机器人当前 target 的关节增量；可与 gripper / gripper_delta 组合。"
         "布局**不按动作长度猜测**，是否支持及每段维数由机器人能力校验；"
         "**会话内改需退出重进**",
+    },
+    {
+        "key": "arm_map",
+        "label": "机械臂映射 arm_map",
+        "type": "string_map",
+        "required": False,
+        "runtime": False,
+        "default": None,
+        "help": "Edge 机械臂名 → 推理端 state 特征键名；键同时选择策略使用的臂，顺序决定状态拼接与动作回写。",
+    },
+    {
+        "key": "camera_map",
+        "label": "相机映射 camera_map",
+        "type": "string_map",
+        "required": False,
+        "runtime": False,
+        "default": None,
+        "help": "Edge 相机名 → 推理端图像特征键名；键同时选择策略上传的相机。",
     },
 ]
 

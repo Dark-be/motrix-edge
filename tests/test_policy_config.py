@@ -54,7 +54,17 @@ def _cfg(**policy):
 def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
     """清单顺序 = 本策略端点项 + 公共项（warmup_required / action_layout）+ 策略自身项。"""
     keys = [item["key"] for item in policy_config_items(schema_policy)]
-    assert keys == ["host", "port", "warmup_required", "action_layout", "model", "device"]
+    assert keys == [
+        "host",
+        "port",
+        "infer_freq",
+        "warmup_required",
+        "action_layout",
+        "arm_map",
+        "camera_map",
+        "model",
+        "device",
+    ]
 
 
 def test_each_policy_exposes_only_its_own_endpoint_shape():
@@ -118,3 +128,18 @@ def test_float_config_rejects_boolean(schema_policy):
 
     with pytest.raises(ValueError, match="timeout must be a number"):
         set_policy_config(_cfg(), schema_policy, {"timeout": True})
+
+
+def test_string_map_config_normalizes_and_rejects_invalid_entries():
+    cfg = {"policy": {}}
+    written = set_policy_config(
+        cfg,
+        "openpi",
+        {"arm_map": {" right ": " observation.state "}},
+    )
+    assert written == {"arm_map": {"right": "observation.state"}}
+    assert cfg["policy"]["arm_map"] == {"right": "observation.state"}
+
+    for value in ([], {}, {"": "state"}, {"right": ""}, {"right": 1}):
+        with pytest.raises(ValueError, match="arm_map"):
+            set_policy_config(cfg, "openpi", {"arm_map": value})

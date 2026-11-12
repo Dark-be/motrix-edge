@@ -150,15 +150,21 @@ def test_health_returns_identity_and_version():
     assert [item["key"] for item in by_type["openpi"]["config_items"]] == [
         "host",
         "port",
+        "infer_freq",
         "warmup_required",
         "action_layout",
+        "arm_map",
+        "camera_map",
         "prompt",
         "image_size",
     ]
     assert [item["key"] for item in by_type["lerobot-remote"]["config_items"]] == [
         "endpoint",
+        "infer_freq",
         "warmup_required",
         "action_layout",
+        "arm_map",
+        "camera_map",
         "task",
         "deployment",
         "semantics",
@@ -1951,12 +1957,18 @@ def test_infers_status_exposes_policy_config():
     assert [item["key"] for item in cfg["items"]] == [
         "host",
         "port",
+        "infer_freq",
         "warmup_required",
         "action_layout",
+        "arm_map",
+        "camera_map",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
     assert [item["runtime"] for item in cfg["items"]] == [
+        False,
+        False,
+        False,
         False,
         False,
         False,

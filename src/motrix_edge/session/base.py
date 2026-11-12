@@ -501,12 +501,10 @@ class BaseSession:
         return True
 
     def _bind_policy_adapter(self):
-        """把 adapter 运行时启用的布局（qpos 维数 + 相机名）传给策略客户端。
+        """Bind adapter-global observation availability to the policy-local mapping.
 
-        布局单一事实来源 = adapter 配置（``adapter config set`` 的 enabled_arms /
-        enabled_cameras）：openpi 客户端据此过滤要下发的相机（**不另读 edge.yml 的相机名**）；
-        策略无 ``bind_adapter``（如 lerobot-act / 测试替身）→ no-op。adapter 未提供相机名 /
-        绑定失败不致命（observe 本就只含启用相机，仍按观测透传）。
+        Invalid policy subsets are fatal at session creation: silently falling back would send
+        differently ordered state/actions to the inference service or robot.
         """
         bind = getattr(getattr(self, "policy", None), "bind_adapter", None)
         adapter = getattr(self, "adapter", None)
@@ -516,16 +514,21 @@ class BaseSession:
         if not camera_names:
             caps = getattr(adapter, "capabilities", None)
             camera_names = list(getattr(caps, "image_names", None) or [])
+        arm_names = list(getattr(adapter, "enabled_arms", None) or [])
+        state_dim = getattr(adapter, "state_dim_per_arm", None)
+        state_dim_per_arm = state_dim() if callable(state_dim) else None
         action_dim = getattr(adapter, "action_dim", None)
-        try:
-            bind(action_dim=action_dim, camera_names=camera_names or None)
-            debug_print(
-                self.name,
-                f"Policy bound to adapter layout: action_dim={action_dim}, cameras={camera_names}",
-                "INFO",
-            )
-        except Exception as exc:  # noqa: BLE001 布局绑定失败不致命
-            debug_print(self.name, f"policy bind_adapter failed: {exc}", "WARNING")
+        bind(
+            action_dim=action_dim,
+            camera_names=camera_names or None,
+            arm_names=arm_names or None,
+            state_dim_per_arm=state_dim_per_arm,
+        )
+        debug_print(
+            self.name,
+            f"Policy bound to adapter observations: arms={arm_names}, cameras={camera_names}",
+            "INFO",
+        )
 
     def run(self):
         """基座默认循环（**无引擎装配**）：复位 → 等待就绪 → 持续消费公共命令。

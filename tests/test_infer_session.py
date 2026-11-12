@@ -81,10 +81,12 @@ class _FakePolicy:
         self.chunk_seen = False
         self.observed_chunk_len = None
 
-    def bind_adapter(self, action_dim=None, camera_names=None):
+    def bind_adapter(self, action_dim=None, camera_names=None, arm_names=None, state_dim_per_arm=None):
         self.bind_calls += 1
         self.bound_action_dim = action_dim
         self.bound_cameras = camera_names
+        self.bound_arms = arm_names
+        self.bound_state_dim_per_arm = state_dim_per_arm
 
     def connect(self):
         self.connect_calls += 1
@@ -528,13 +530,16 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
     assert [item["key"] for item in snapshot["items"]] == [
         "host",
         "port",
+        "infer_freq",
         "warmup_required",
         "action_layout",
+        "arm_map",
+        "camera_map",
         "prompt",
         "image_size",
     ]
-    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 4
-    assert [item["runtime"] for item in snapshot["items"]] == [False] * 4 + [True, True]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 7
+    assert [item["runtime"] for item in snapshot["items"]] == [False] * 7 + [True, True]
     assert snapshot["values"]["warmup_required"] is True  # 缺省要求先预热
     # 会话内即时生效的键 = runtime=True（端点 / 预热门是会话级配置：进入会话时固化）
     assert snapshot["runtime_keys"] == ["image_size", "prompt"]
@@ -690,6 +695,7 @@ def test_infer_session_binds_adapter_layout_to_policy(monkeypatch):
     assert policy.bind_calls == 1  # InferSession 构造即 bind
     assert policy.bound_action_dim == 7  # 单臂 qpos 维数
     assert policy.bound_cameras == ["cam_head", "cam_right_wrist"]  # adapter 启用相机
+    assert policy.bound_arms == ["right"]
     session.session_finish()  # 回收 infer connect 启动的预热线程，避免日志泄漏到后续测试
 
 

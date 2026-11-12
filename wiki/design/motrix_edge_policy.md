@@ -60,7 +60,7 @@ src/lerobot/        # vendored 新版 lerobot 子集（Apache-2.0）：
 | `connected`                              | 是否已连上推理节点（委托传输层）                                                                                       |
 | `connect()` / `ensure_connected()`       | 显式连接 / 惰性连接                                                                                                    |
 | `prepare(observation)`                   | 可选预热（下发策略指令 / 触发服务端加载模型）；无实现 → no-op                                                          |
-| `bind_adapter(action_dim, camera_names)` | 会话进入时绑定 adapter 运行时布局（启用相机等），策略据此过滤下发内容                                                  |
+| `bind_adapter(..., camera_names, arm_names, state_dim_per_arm)` | 会话进入时绑定 adapter 的全局观测能力，并校验 policy 选择的相机 / 机械臂是其子集                              |
 | `infer_chunk(observation, index=None)`   | **策略唯一职责**：真实请求一次推理，返回 `ActionChunk`（含首步绝对步号）                                               |
 | `observed_chunk_len`                     | **块长**（最近一次服务端返回的步数；lerobot-remote 直接取服务端声明的 `caps.execution_steps`），rtc 据此校准块长上限 H |
 | `reset()` / `disconnect()`               | 复位策略状态 / 断开连接（幂等）                                                                                        |
@@ -121,7 +121,7 @@ connect 时现算，端点**随会话固化**（改端点 = 退出会话改配�
 | 观测 wire        | `{"state", "images", "prompt"?}`（官方 flat）    | msgpack 信封（按服务端声明的特征名 + 图像编码）      |
 | 响应 wire        | `{"actions": [H, dim]}`                          | `canonical_actions[H, A]`（float32）                 |
 | 图像尺寸 / 几何  | `image_size`（默认 224×224）**letterbox**        | 服务端 `caps.features[i].shape`，端侧 **letterbox**  |
-| 相机名           | 边缘名，或服务端 metadata 声明的 `cameras`       | **服务端特征名**（短名自动匹配 / `camera_map` 覆盖） |
+| 相机名           | `camera_map` 显式映射后的推理键名（缺省兼容边缘名 / metadata） | **服务端特征名**（短名自动匹配 / `camera_map` 覆盖） |
 | 块长             | **实测**（`observed_chunk_len`）→ rtc 校准上限 H | 服务端声明 `caps.execution_steps`                    |
 | 文本指令         | **必需**（`requires_prompt = True`）             | 不使用（ACT 非语言条件；`task` 可空）                |
 | 输出动作语义     | 关节空间                                         | 关节空间（由 `action_layout` 声明）                  |
@@ -161,7 +161,7 @@ server → client: {"actions": [horizon, dim], ...}      # 附带 state / policy
 -   `prepare(observation)`：预热——发一帧触发服务端加载模型并**丢弃结果**（官方推荐做法），
     副产品是拿到实测块长。
 -   `infer_chunk(observation, index)`：qpos 原样上传（服务端按 norm_stats 归一化）；相机经
-    `bind_adapter` / metadata 过滤后 letterbox 到 `image_size` 并转 uint8；`prompt` 每次请求
+    policy `camera_map`（缺省兼容 adapter / metadata）过滤并重命名后 letterbox 到 `image_size` 并转 uint8；`prompt` 每次请求
     携带（服务端每帧重新 tokenize，可运行时更换）。
 -   超时：`connect_timeout`（默认 5s）、`request_timeout`（默认 60s）。
 -   **每帧自包含**（服务端**无会话状态**）：`websocket_policy_server` 连接后先发一次 metadata，
@@ -192,12 +192,17 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
     `action_interval`、执行模式与块长（`execution_steps` = 一次返回的步数）。端上**直接采用**
     `caps.action_interval` 完成 admission（频率必须与之一致，否则被拒）；图像尺寸也取自
     `caps.features[i].shape`，端侧 letterbox 到该尺寸（与训练分辨率一致，不拉伸）。
--   **相机名必须等于服务端特征名**（如 `observation.images.piper_0_cam_head`）。缺省按**短名
-    后缀**自动匹配（`cam_head` → `..._cam_head`）；匹配不唯一 / 匹配不到时报错，可用 yaml 的
-    `policy.camera_map`（端上相机名 → 服务端特征名）显式指定。**相机名单一事实来源**仍是
-    adapter 的 `enabled_cameras`（`bind_adapter` 传入，只在其范围内匹配）。
--   **state**：按 `observation_layout` 组装（`qpos` / `qpos+qpos_err`），维度必须等于服务端声明
-    的 state 特征形状；顺序即服务端 `names` 声明的分量顺序。
+-   **策略观测作用域由 policy 显式声明**：`camera_map` / `arm_map` 都是
+    `Edge 观测名称 → 推理端特征键名`。map 的键同时选择本策略消费的相机 / 机械臂，值直接使用
+    服务端声明的 feature 名（如 `cam_head: observation.images.piper_0_cam_head`、
+    `right: observation.state`）。多个臂映射到同一个 state feature 时按 map 顺序拼接；映射到不同
+    feature 时分别组装。策略选择必须是 adapter 当前全局可用观测的子集，缺失在 admission 前报错。
+    未配置 map 时保留旧行为：相机按短名后缀匹配、机械臂使用 adapter 当前启用集。
+-   **adapter 配置只定义全局观测能力**：`enabled_cameras` / `enabled_arms` 决定 Edge 是否取得对应
+    图像与状态，不再隐式决定某个 policy 必须使用哪些观测。policy map 在该全局集合上做二次选择和
+    推理端命名映射，不修改 adapter，也不影响预览、录制等其它消费者。
+-   **state**：按 `arm_map` 选臂后再按 `observation_layout` 组装（`qpos` /
+    `qpos+qpos_err`），维度必须等于对应服务端 feature 形状；动作按相同臂顺序回写，仅影响被选臂。
 -   **块与调度**：服务端只返回**一块**整块（`mode=chunk`，`chunk_merge=append`）；块缓存 / 三元
     切分 / 过渡 / 预取仍由 `motrix_edge.rtc` 负责。`start_index` = 请求的绝对步号，rtc 据此跳过
     过期步。`observed_chunk_len` 直接取 `caps.execution_steps`（服务端声明，非猜测）。
@@ -234,8 +239,9 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 ## 配置项（POLICY_CONFIG_ITEMS）
 
 端点项按策略独立声明：`openpi` 使用 `host` / `port`，`lerobot-remote` 使用 Zenoh `endpoint`；
-三者不作为跨策略兼容输入。真正的公共项是 `warmup_required`（预热门控，缺省 true）和
-`action_layout`（模型动作布局，缺省 `joint`）。这些配置都与策略自身项**完全同级**，使用同一张
+三者不作为跨策略兼容输入。真正的公共项是 `warmup_required`（预热门控，缺省 true）、
+`action_layout`（模型动作布局，缺省 `joint`）、`camera_map` 与 `arm_map`（Edge 名称到推理端
+特征键名）。这些配置都与策略自身项**完全同级**，使用同一张
 表单与同一通道；端点项和公共项也是**会话级**配置
 （`runtime: False`：进入会话时读取，会话内改需退出重进），**没有专用命令**——同一个键只有一套规则。
 
@@ -267,12 +273,12 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
         `joint`（缺省）= 绝对关节目标；`joint_delta` = 叠加到机器人当前 target 的关节增量；两者均可与
         `gripper` / `gripper_delta` 组合（未选臂由机器人保持，逐臂块与 `observations/qpos` 同构，
         见 [robot-pipeline 动作空间](./robot_pipeline_action_spaces.md)）。**布局不按动作长度猜测**
-        （非法取值在进入会话时报错），且与会话的 `enabled_arms` 共同决定动作维度。
+        （非法取值在进入会话时报错），且与 policy `arm_map` 选择的机械臂共同决定动作维度。
 -   运行时写入内存态 `base_cfg["policy"]`（不写回 yaml），按策略 schema 白名单校验（类型不符 /
     `min`–`max` 越界 / 必填为空 → 400；**空值 `null` 或空串 = 清除该项回到缺省**，必填项空值 →
     400；`int` 项只接受整数，`bool` / 带小数的浮点 → 400，不静默截断）；**先全量校验通过才写入**
     （一批里任一项非法 → 整批 400，不留部分写入）；未在
-    schema 内的键（如 `rename_cameras` / `image_cameras` / 各类超时）可在 `edge.yml` 的
+    schema 内的内部兼容键（如各类传输超时）仍可在 `edge.yml` 的
     `policy` 段静态配置。
 
 ### 每项配置的真实作用（谁在什么时候用它）
@@ -288,6 +294,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 | `image_size`（openpi）     | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |
 | `deployment` / `semantics` | 服务端 + 客户端      | 选中服务端部署并校验动作语义（两端必须逐字一致）                                            |
 | `camera_map`               | 客户端               | 端上相机名 → 服务端特征名的显式映射（缺省按短名后缀自动匹配）                               |
+| `arm_map`                  | 客户端 + 会话        | 端上臂名 → 服务端 state 特征名；键序决定拼接及动作回写顺序                                  |
 | `device`                   | 服务端               | checkpoint 跑在哪块设备（握手时下发）                                                       |
 | `caps.execution_steps`     | 服务端               | 一次推理返回的步数（服务端 deployment YAML 的 `n_action_steps` / 模型块长），端上只读       |
 
