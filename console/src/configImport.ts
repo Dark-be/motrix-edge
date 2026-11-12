@@ -53,6 +53,24 @@ const normalizeValue = (item: PolicyConfigItem, value: unknown): string => {
         );
         return JSON.stringify(mapping);
     }
+    if (item.type === "float_vector_map") {
+        if (!isMap(value) || Object.keys(value).length === 0) throw new Error(`${item.key} 必须是非空映射`);
+        const width = item.vector_len ?? 0;
+        const mapping = Object.fromEntries(
+            Object.entries(value).map(([source, vector]) => {
+                if (
+                    source.trim() === "" ||
+                    !Array.isArray(vector) ||
+                    vector.length !== width ||
+                    vector.some((entry) => typeof entry !== "number" || !Number.isFinite(entry))
+                ) {
+                    throw new Error(`${item.key}.${source} 必须是 ${width} 个有限数字`);
+                }
+                return [source.trim(), vector];
+            })
+        );
+        return JSON.stringify(mapping);
+    }
     if (item.type === "rtc") {
         if (!isMap(value)) throw new Error(`${item.key} 必须是映射`);
         const unknown = Object.keys(value).filter((key) => !(RTC_KEYS as readonly string[]).includes(key));

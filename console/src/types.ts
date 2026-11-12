@@ -17,8 +17,8 @@ export interface PolicyConfigItem {
     key: string;
     /** 展示名（表单标签） */
     label: string;
-    /** 控件 / 校验类型；string_map 在 YAML 中表示字符串到字符串的映射。 */
-    type: "text" | "int" | "float" | "bool" | "string_map" | "rtc";
+    /** 控件 / 校验类型；map 类型在 YAML 中表示按名称索引的映射。 */
+    type: "text" | "int" | "float" | "bool" | "string_map" | "float_vector_map" | "rtc";
     /** 是否必填（缺失时 `missing` 会列出该项；推理 / 录制按钮据此门控） */
     required?: boolean;
     /** 会话内改动是否**立即生效**：true = 策略每次请求现读；false = 会话级 / 握手级（退出重进才生效） */
@@ -33,10 +33,12 @@ export interface PolicyConfigItem {
     /** 数值项下界 / 上界（`type` 为 int / float 时用于表单校验） */
     min?: number;
     max?: number;
+    /** float_vector_map 每个向量要求的固定长度。 */
+    vector_len?: number;
     /** 敏感项（密钥）：后端不回显值（`value` 恒空 + `configured` 标记），前端渲染密码框 */
     secret?: boolean;
     /** 代码缺省值（可选） */
-    default?: string | number | boolean | Record<string, string> | null;
+    default?: string | number | boolean | Record<string, string | number[]> | null;
     /** 固定候选值；存在时渲染下拉框，提交值仍按 `type` 转换。 */
     options?: Array<string | number | boolean>;
     placeholder?: string;
@@ -45,7 +47,7 @@ export interface PolicyConfigItem {
 
 /** schema 项 + 当前值（GET /v1/infers 的 policy_config.items）。 */
 export interface PolicyConfigItemValue extends PolicyConfigItem {
-    value: string | number | boolean | Record<string, string> | null;
+    value: string | number | boolean | Record<string, string | number[]> | null;
     /** 敏感项专用：后端内存态是否已设置（值不回显） */
     configured?: boolean;
 }
@@ -57,7 +59,7 @@ export interface PolicyConfigStatus {
     /** 配置项清单（schema + 当前值） */
     items: PolicyConfigItemValue[];
     /** 当前值字典（key → value） */
-    values: Record<string, string | number | boolean | Record<string, string> | null>;
+    values: Record<string, string | number | boolean | Record<string, string | number[]> | null>;
     /** 缺失的必填项键（非空 → 不能开始推理 / 录制） */
     missing: string[];
     /** 会话内可运行时修改的键 */

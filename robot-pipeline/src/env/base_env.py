@@ -199,26 +199,29 @@ class BaseEnv:
             return None
         return self._queue_motion(command_id, ("reset",), "reset", command_id)
 
-    def _check_payload(self, action, *, layout=None, arms=None) -> None:
+    def _check_payload(self, action, *, layout=None, arms=None, joint_offsets=None) -> None:
         """同步校验一条下发（HTTP 线程即时反馈，**不触碰 robot 状态**）。
 
         交给 ``BaseRobot.plan_layout``：按 layout + 作用域校验维度 / 有限性 / 段名
         （同一个内核，控制线程与 HTTP 线程不各写一份），非法 → ``ValueError``（server 映射 422）。
         """
         self.robot.plan_layout(action, layout, arms)
+        if joint_offsets is not None:
+            self.robot.validate_joint_offsets(joint_offsets, arms)
 
-    def robot_execute(self, flat_action, *, layout=None, arms=None):
+    def robot_execute(self, flat_action, *, layout=None, arms=None, joint_offsets=None):
         """直接下发动作指令（raw）：入队，由控制线程执行（同步校验维度 / 段名 / 作用域）。
 
         ``layout`` / ``arms`` 见 ``BaseRobot.execute``（缺省 = ``joint`` + 全部臂）；
         ``layout="pose"`` 时由 robot 在控制线程**解算一次**再运行（失败只影响该条命令：
         日志 WARNING + 目标不变，见 ``_drain_commands``）。
         """
-        self._check_payload(flat_action, layout=layout, arms=arms)
+        self._check_payload(flat_action, layout=layout, arms=arms, joint_offsets=joint_offsets)
         debug_print(self.robot.name, f"HTTP 收到命令: execute dim={len(flat_action)} layout={layout}", "INFO")
-        self.commands.put(("execute", (flat_action, layout, arms)))
+        payload = (flat_action, layout, arms) if joint_offsets is None else (flat_action, layout, arms, joint_offsets)
+        self.commands.put(("execute", payload))
 
-    def robot_rollout(self, flat_action, *, layout=None, arms=None, command_id=None):
+    def robot_rollout(self, flat_action, *, layout=None, arms=None, joint_offsets=None, command_id=None):
         """推理闭环：入队，由控制线程执行（同步校验 + **遥操作中同步拒绝**）。
 
         **遥操作（人工接管，不分模式）进行中** → 抛 ``TakeoverActiveError``（server 映射 HTTP 409）：
@@ -226,15 +229,34 @@ class BaseEnv:
         **再判一次**（权威）——两次判定之间遥操作状态可能变化，以控制线程为准。
         ``layout`` / ``arms`` 语义同 ``robot_execute``。
         """
-        self._check_payload(flat_action, layout=layout, arms=arms)
+        self._check_payload(flat_action, layout=layout, arms=arms, joint_offsets=joint_offsets)
         if self.robot.teleop_enabled:
             raise TakeoverActiveError("teleop (human takeover) active: rollout refused")
         debug_print(self.robot.name, f"HTTP 收到命令: rollout dim={len(flat_action)} layout={layout}", "INFO")
         if command_id is None:
-            self.commands.put(("rollout", (flat_action, layout, arms)))
+            payload = (
+                (flat_action, layout, arms) if joint_offsets is None else (flat_action, layout, arms, joint_offsets)
+            )
+            self.commands.put(("rollout", payload))
             return None
-        fingerprint = (tuple(float(v) for v in flat_action), layout, None if arms is None else tuple(arms))
-        return self._queue_motion(command_id, fingerprint, "rollout", (list(flat_action), layout, arms, command_id))
+        offset_fingerprint = None if joint_offsets is None else tuple(float(v) for v in joint_offsets)
+        fingerprint = (
+            tuple(float(v) for v in flat_action),
+            layout,
+            None if arms is None else tuple(arms),
+            offset_fingerprint,
+        )
+        payload = (
+            (list(flat_action), layout, arms, command_id)
+            if joint_offsets is None
+            else (list(flat_action), layout, arms, joint_offsets, command_id)
+        )
+        return self._queue_motion(
+            command_id,
+            fingerprint,
+            "rollout",
+            payload,
+        )
 
     def _queue_motion(self, command_id, fingerprint, command, payload):
         with self._motion_lock:
@@ -750,16 +772,26 @@ class BaseEnv:
                 cmd, payload = self.commands.get_nowait()
             except queue.Empty:
                 break
-            command_id = payload if cmd == "reset" else payload[3] if cmd == "rollout" and len(payload) == 4 else None
+            command_id = (
+                payload if cmd == "reset" else payload[-1] if cmd == "rollout" and len(payload) in (4, 5) else None
+            )
             try:
                 if cmd == "reset":
                     self.robot.reset()
                 elif cmd == "execute":
-                    action, layout, arms = payload
-                    self.robot.execute(action, layout=layout, arms=arms)
+                    action, layout, arms = payload[:3]
+                    joint_offsets = payload[3] if len(payload) == 4 else None
+                    kwargs = {"layout": layout, "arms": arms}
+                    if joint_offsets is not None:
+                        kwargs["joint_offsets"] = joint_offsets
+                    self.robot.execute(action, **kwargs)
                 elif cmd == "rollout":
                     action, layout, arms = payload[:3]
-                    if not self.robot.rollout(action, layout=layout, arms=arms):
+                    joint_offsets = payload[3] if len(payload) == 5 else None
+                    kwargs = {"layout": layout, "arms": arms}
+                    if joint_offsets is not None:
+                        kwargs["joint_offsets"] = joint_offsets
+                    if not self.robot.rollout(action, **kwargs):
                         # 遥操作中：推理让位（预期状态，只记日志，不置 last_error / 不影响 health）
                         debug_print(self.robot.name, "rollout ignored: teleop (human takeover) active.", "WARNING")
                         self._finish_motion_command(command_id, "rejected", "human takeover")

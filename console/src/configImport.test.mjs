@@ -54,6 +54,7 @@ test("every checked-in preset has metadata and is accepted as one policy config"
         { key: "infer_freq", label: "Frequency", type: "float" },
         { key: "warmup_required", label: "Warmup", type: "bool" },
         { key: "action_layout", label: "Action", type: "text" },
+        { key: "joint_offsets", label: "Offsets", type: "float_vector_map", vector_len: 6 },
         { key: "arm_map", label: "Arms", type: "string_map" },
         { key: "camera_map", label: "Cameras", type: "string_map" },
         { key: "rtc", label: "RTC", type: "rtc", required: true },

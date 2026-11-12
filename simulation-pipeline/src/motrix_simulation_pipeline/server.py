@@ -32,6 +32,7 @@ class Motion(BaseModel):
     layout: str = "joint"
     arms: list[str] | None = None
     command_id: str | None = None
+    joint_offsets: list[float] | None = None
 
 
 class Reset(BaseModel):

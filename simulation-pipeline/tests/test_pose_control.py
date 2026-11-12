@@ -53,6 +53,36 @@ def test_pose_with_gripper_is_resolved_to_one_atomic_joint_target(tmp_path):
     assert np.array(sim.target) == pytest.approx(sim.home)
 
 
+@pytest.mark.parametrize("layout", ["joint+gripper", "pose+gripper"])
+def test_joint_offsets_apply_to_final_joint_target_after_optional_ik(tmp_path, layout):
+    sim = _simulation(tmp_path)
+    expected = np.array([0.1, 0.45, -0.75, 0.05, 0.15, -0.05])
+    motion = expected if layout.startswith("joint") else sim.kinematics.pose(expected)
+    offsets = np.array([0.01, -0.02, 0.03, -0.04, 0.05, -0.06])
+    resolved_before_offset = (
+        expected
+        if layout.startswith("joint")
+        else sim.kinematics.solve(motion, sim.target[:6], sim.home[:6]).q
+    )
+
+    receipt = sim.submit(
+        [*motion, 0.25],
+        layout=layout,
+        arms=["right"],
+        joint_offsets=offsets,
+    )
+
+    assert np.asarray(receipt["resolved_action"][:6]) == pytest.approx(resolved_before_offset + offsets, abs=1e-3)
+    assert receipt["resolved_action"][-1] == pytest.approx(0.25)
+
+
+def test_joint_offsets_are_checked_against_final_joint_limits(tmp_path):
+    sim = _simulation(tmp_path)
+    with pytest.raises(ValueError, match="joint target outside model limits"):
+        sim.submit(sim.home[:6], layout="joint", joint_offsets=[100.0, 0, 0, 0, 0, 0])
+    assert not sim.commands
+
+
 def test_policy_pose_uses_tcp_origin_not_flange_origin(tmp_path):
     sim = _simulation(tmp_path)
     q = sim.home[:6]

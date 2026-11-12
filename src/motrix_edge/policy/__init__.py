@@ -150,6 +150,17 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "**会话内改需退出重进**",
     },
     {
+        "key": "joint_offsets",
+        "label": "最终关节偏置 joint_offsets",
+        "type": "float_vector_map",
+        "required": False,
+        "runtime": False,
+        "default": None,
+        "vector_len": 6,
+        "help": "Edge 机械臂名 → J1～J6 最终关节目标偏置（rad）；夹爪不变。"
+        "作用于绝对 joint 原值或 pose 逆解后的最终关节目标，delta 布局不应用；进入会话后固化。",
+    },
+    {
         "key": "arm_map",
         "label": "机械臂映射 arm_map",
         "type": "string_map",

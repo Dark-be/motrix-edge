@@ -444,6 +444,46 @@ def test_pose_layout_writes_selected_arm_only(test_robot):
     assert robot.gripper_target.tolist() == pytest.approx([0.2, 0.8])
 
 
+@pytest.mark.parametrize("layout", ["joint+gripper", "pose+gripper"])
+def test_joint_offsets_apply_after_joint_or_pose_resolution(test_robot, layout):
+    """同一偏置作用于 joint 原值或 pose IK 结果，夹爪不变。"""
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+    desired = np.asarray([0.4, 0.6, 0.8, 1.0, 1.2, 1.4])
+    motion = desired if layout.startswith("joint") else test_robot.TestArmController.joint_to_pose(desired)
+
+    robot.apply_layout(
+        [*motion, 0.35],
+        layout=layout,
+        arms=["right"],
+        joint_offsets=[0.01, 0.02, 0.03, 0.04, 0.05, 0.06],
+    )
+
+    assert robot.joint_target[6:12].tolist() == pytest.approx(desired + [0.01, 0.02, 0.03, 0.04, 0.05, 0.06])
+    assert robot.gripper_target.tolist() == pytest.approx([_GRIPPER[0], 0.35])
+
+
+def test_joint_offsets_do_not_accumulate_on_delta_layout(test_robot):
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+    initial = np.asarray(_QPOS, dtype=float)
+    robot.set_joint_target(initial)
+
+    robot.apply_layout(
+        [0.1] * 6,
+        layout="joint_delta",
+        arms=["right"],
+        joint_offsets=[0.2] * 6,
+    )
+
+    assert robot.joint_target[6:12].tolist() == pytest.approx(initial[6:12] + 0.1)
+
+
+def test_joint_offsets_validate_scope_dimension_before_target_change(test_robot):
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+    with pytest.raises(ValueError, match="joint_offsets must contain 6 finite values"):
+        robot.apply_layout([0.0] * 6, layout="joint", arms=["right"], joint_offsets=[0.0] * 5)
+    assert robot.joint_target is None
+
+
 def test_pose_delta_layout_writes_selected_arm_only(test_robot):
     """部分臂 pose_delta：未选臂增量为 0，不能混入该臂现有的关节目标。"""
     robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})

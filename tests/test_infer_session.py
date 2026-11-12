@@ -132,6 +132,7 @@ class _FakeAdapter:
         self.teleop_calls: list[tuple[bool, str | None]] = []
         self.rollout_layouts: list[str | None] = []  # rollout 收到的 layout（None = 未指定，缺省 joint）
         self.rollout_arms: list[list[str] | None] = []  # rollout 收到的作用域（None = 缺省）
+        self.rollout_joint_offsets: list[list[float] | None] = []
         self.enabled_arms = ["right"]  # 启用臂（会话据此传作用域）
         self.execute_layouts: list[str | None] = []
         self.teleop_refused = False  # True = 模拟 SDK 409（遥操作中）：rollout 本拍被拒
@@ -167,12 +168,15 @@ class _FakeAdapter:
         self.teleop_values.append(bool(enabled))
         self.teleop_calls.append((bool(enabled), mode))
 
-    def rollout(self, action, *, layout=None, arms=None) -> bool:
+    def rollout(self, action, *, layout=None, arms=None, joint_offsets=None) -> bool:
         if self.teleop_refused:  # 模拟 SDK 409（遥操作 / 人工接管中）：本拍不下发
             return False
         self.executed.append(action)
         self.rollout_layouts.append(None if layout is None else str(layout))
         self.rollout_arms.append(None if arms is None else list(arms))
+        self.rollout_joint_offsets.append(
+            None if joint_offsets is None else np.asarray(joint_offsets, dtype=float).reshape(-1).tolist()
+        )
         return True
 
     def start_capture(self):
@@ -533,14 +537,15 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
         "infer_freq",
         "warmup_required",
         "action_layout",
+        "joint_offsets",
         "arm_map",
         "camera_map",
         "rtc",
         "prompt",
         "image_size",
     ]
-    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 8
-    assert [item["runtime"] for item in snapshot["items"]] == [False] * 8 + [True, True]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 9
+    assert [item["runtime"] for item in snapshot["items"]] == [False] * 9 + [True, True]
     assert snapshot["values"]["warmup_required"] is True  # 缺省要求先预热
     # 会话内即时生效的键 = runtime=True（端点 / 预热门是会话级配置：进入会话时固化）
     assert snapshot["runtime_keys"] == ["image_size", "prompt"]
@@ -807,6 +812,22 @@ def test_infer_rollout_uses_state_endpoint_for_joint_gripper_layout(monkeypatch)
     assert adapter.rollout_arms == [["right"]]
     assert len(adapter.executed) == 1
     np.testing.assert_allclose(adapter.executed[0], np.arange(7, dtype=float))
+
+
+def test_infer_rollout_forwards_joint_offsets_without_mutating_pose_action(monkeypatch):
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy(requires_prompt=False)
+    policy.action_layout = "pose+gripper"
+    policy.action = np.arange(7, dtype=float)
+    source_action = policy.action.copy()
+    policy.joint_offsets_for_arms = lambda arms: np.asarray([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    _patch(monkeypatch, policy)
+    session = _build_session(adapter, policy, ("infer rollout", "session quit"), warmup_required=False)
+
+    assert session.run() == RunResult.FINISHED
+    np.testing.assert_allclose(adapter.executed[0], source_action)
+    np.testing.assert_allclose(adapter.rollout_joint_offsets[0], [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    np.testing.assert_allclose(policy.action, source_action)
 
 
 def test_continuous_rollout_also_uses_state_endpoint(monkeypatch):

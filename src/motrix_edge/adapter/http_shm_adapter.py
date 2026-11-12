@@ -72,6 +72,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_ENABLED,
     FIELD_FRAMES,
     FIELD_GRAVITY,
+    FIELD_JOINT_OFFSETS,
     FIELD_LAYOUT,
     FIELD_MEASURED_HZ,
     FIELD_META,
@@ -299,6 +300,7 @@ class HttpShmAdapter(RobotAdapter):
         *,
         layout: str | None = None,
         arms: list[str] | None = None,
+        joint_offsets=None,
     ) -> None:
         """直接下发动作指令（raw）：本地记录 + HTTP 转发 SDK 进程。
 
@@ -309,6 +311,8 @@ class HttpShmAdapter(RobotAdapter):
         name = self.layout_name(self.parse_layout(layout))
         target, arms_out = self._expand_layout(action, "execute", layout, arms)
         body: dict = {FIELD_ACTION: target.tolist(), FIELD_LAYOUT: name}
+        if joint_offsets is not None:
+            body[FIELD_JOINT_OFFSETS] = np.asarray(joint_offsets, dtype=float).reshape(-1).tolist()
         if arms_out is not None:
             body[FIELD_ARMS] = arms_out
         response = self._client().post(PATH_EXECUTE, json=body)
@@ -401,6 +405,7 @@ class HttpShmAdapter(RobotAdapter):
         *,
         layout: str | None = None,
         arms: list[str] | None = None,
+        joint_offsets=None,
     ) -> bool:
         """推理闭环：经 ``_expand_layout`` 校验（必要时展开）后 HTTP 转发（见 ``/v1/rollout``）。
 
@@ -411,6 +416,8 @@ class HttpShmAdapter(RobotAdapter):
         target, arms_out = self._expand_layout(action, "rollout", layout, arms)
         self.rollout_calls += 1
         body: dict = {FIELD_ACTION: target.tolist(), FIELD_LAYOUT: name}
+        if joint_offsets is not None:
+            body[FIELD_JOINT_OFFSETS] = np.asarray(joint_offsets, dtype=float).reshape(-1).tolist()
         if arms_out is not None:
             body[FIELD_ARMS] = arms_out
         return self._post_rollout(PATH_ROLLOUT, body)

@@ -114,7 +114,7 @@ export function usePolicyConfig({
                     ? Number(raw)
                     : item.type === "bool"
                     ? raw === "true"
-                    : item.type === "string_map" || item.type === "rtc"
+                    : item.type === "string_map" || item.type === "float_vector_map" || item.type === "rtc"
                     ? JSON.parse(raw)
                     : raw;
         }

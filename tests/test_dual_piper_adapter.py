@@ -32,7 +32,9 @@ from motrix_edge.adapter.base import (
 from motrix_edge.adapter.dual_piper_adapter import DualPiperAdapter
 from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
+    FIELD_ARMS,
     FIELD_CAMERAS,
+    FIELD_JOINT_OFFSETS,
     FIELD_LAYOUT,
     FIELD_TELEOP_ENABLED,
     PATH_CAMERAS,
@@ -455,6 +457,27 @@ def test_pose_layout_is_advertised_and_forwarded():
     assert http.posts == [
         (PATH_ROLLOUT, {FIELD_ACTION: action.tolist(), FIELD_LAYOUT: "pose"}),
         (PATH_EXECUTE, {FIELD_ACTION: action.tolist(), FIELD_LAYOUT: "pose"}),
+    ]
+
+
+def test_joint_offsets_are_forwarded_without_modifying_pose_action():
+    http = _FakeHttp()
+    adapter = _adapter(http)
+    action = np.arange(6, dtype=np.float64)
+    offsets = np.arange(6, dtype=np.float64) / 10
+
+    adapter.rollout(action, layout="pose", arms=["right"], joint_offsets=offsets)
+
+    assert http.posts == [
+        (
+            PATH_ROLLOUT,
+            {
+                FIELD_ACTION: action.tolist(),
+                FIELD_LAYOUT: "pose",
+                FIELD_JOINT_OFFSETS: offsets.tolist(),
+                FIELD_ARMS: ["right"],
+            },
+        )
     ]
 
 

@@ -66,6 +66,35 @@ def test_policy_maps_require_string_names():
         BasePolicyClient({"arm_map": {"right": 1}})
 
 
+@pytest.mark.parametrize("layout", ["joint", "joint+gripper", "pose", "pose+gripper"])
+def test_policy_joint_offsets_are_layout_independent_and_follow_policy_arm_order(layout):
+    client = BasePolicyClient(
+        {
+            "action_layout": layout,
+            "arm_map": {"right": "observation.state"},
+            "joint_offsets": {"right": [1, 2, 3, 4, 5, 6]},
+        }
+    )
+    client.bind_adapter(arm_names=["right"], state_dim_per_arm=7)
+    np.testing.assert_allclose(client.joint_offsets_for_arms(), np.arange(1, 7))
+
+
+def test_policy_joint_offsets_follow_policy_arm_order():
+    client = BasePolicyClient(
+        {
+            "action_layout": "joint+gripper",
+            "arm_map": {"right": "right_state", "left": "left_state"},
+            "joint_offsets": {"left": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]},
+        }
+    )
+    client.bind_adapter(arm_names=["left", "right"], state_dim_per_arm=7)
+
+    actual = client.joint_offsets_for_arms()
+
+    np.testing.assert_allclose(actual[:6], 0)
+    np.testing.assert_allclose(actual[6:], [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+
+
 def test_resize_with_pad_center_pads():
     img = np.zeros((100, 200, 3), dtype=np.uint8)
     out = resize_with_pad(img, 224, 224)

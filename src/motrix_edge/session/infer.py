@@ -696,7 +696,12 @@ class InferSession(PolicyConfigFeature, BaseSession):
         arms = getattr(self.policy, "rollout_arms", None)
         if arms is None:
             arms = getattr(self.adapter, "enabled_arms", None) or None
-        return self.adapter.rollout(action, layout=layout, arms=arms)
+        offsets_for_arms = getattr(self.policy, "joint_offsets_for_arms", None)
+        joint_offsets = offsets_for_arms(arms) if callable(offsets_for_arms) else None
+        kwargs = {"layout": layout, "arms": arms}
+        if joint_offsets is not None:
+            kwargs["joint_offsets"] = joint_offsets
+        return self.adapter.rollout(action, **kwargs)
 
     @staticmethod
     def _action_repr(action):

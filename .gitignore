@@ -35,6 +35,9 @@ data/
 /motrix-edge/
 /robot-pipeline/motrix-robot-pipeline/
 
+# Local inference policy experiments
+/edge_pi05_press_4hz_openloop100_30k.yml
+
 # Local environment (copy from .env.example)
 /.env
 

@@ -643,6 +643,7 @@ class RobotAdapter(ABC):
         *,
         layout: str | None = None,
         arms: list[str] | None = None,
+        joint_offsets: Action | None = None,
     ) -> None:
         """直接下发一维 array-like 动作指令（raw 指令，立即执行）。
 
@@ -748,12 +749,16 @@ class RobotAdapter(ABC):
         *,
         layout: str | None = None,
         arms: list[str] | None = None,
+        joint_offsets: Action | None = None,
     ) -> bool:
         """接收一维 array-like 模型动作，按 capabilities.action_dim 解析并推进一帧。
 
         ``layout``（缺省 ``joint``）= 动作语义：每臂块内的段序列（如 ``joint`` / ``joint+gripper`` /
         ``pose``），不在本适配器 ``ACTION_SPACES`` 内的段 → ``ValueError``（调用方应回执拒绝，
         不要猜语义下发）。笛卡尔动作的 IK 由机器人进程负责。
+
+        ``joint_offsets`` 按 ``arms`` 顺序每臂 6 维，在机器人进程完成 joint/pose → 最终关节目标后
+        应用；``None`` 表示不修正。
 
         返回是否**已下发**：``False`` = 进程侧拒绝本拍（遥操作 / 人工接管中，见
         `wiki/design/robot_pipeline_teleop.md`），调用方应跳过本拍、下拍重试（遥操作关闭后
@@ -780,6 +785,10 @@ class RobotAdapter(ABC):
 
     def motion_snapshot(self) -> dict | None:
         """Return a fresh, identified control sample without camera data."""
+        return None
+
+    def task_status(self) -> dict | None:
+        """Return an optional task status snapshot with generic progress fields."""
         return None
 
     # ---- 动作空间校验（子类在 execute / rollout 内调用）------------------------

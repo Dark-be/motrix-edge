@@ -108,19 +108,37 @@ class Simulation:
             and bool(self.snapshot)
         )
 
-    def submit(self, action=None, layout="joint", arms=None, command_id=None, operation="move") -> dict:
+    def submit(
+        self,
+        action=None,
+        layout="joint",
+        arms=None,
+        command_id=None,
+        operation="move",
+        joint_offsets=None,
+    ) -> dict:
         if arms is not None and arms != ["right"]:
             raise ValueError("arms must be ['right']")
         layouts = {"joint": 6, "gripper": 1, "joint+gripper": 7, "pose": 6, "pose+gripper": 7}
         if layout not in layouts:
             raise ValueError(f"supported layouts: {', '.join(layouts)}")
         values = np.asarray(action if action is not None else [], dtype=float)
+        offsets = None if joint_offsets is None else np.asarray(joint_offsets, dtype=float).reshape(-1)
         if operation == "move" and (values.shape != (layouts[layout],) or not np.all(np.isfinite(values))):
             raise ValueError("invalid action dimensions or nonfinite values")
+        if offsets is not None and (offsets.shape != (6,) or not np.all(np.isfinite(offsets))):
+            raise ValueError("joint_offsets must contain 6 finite values for arms ['right']")
+        if offsets is not None and layout == "gripper":
+            raise ValueError("joint_offsets require a joint or pose motion segment")
         if command_id is not None and (not isinstance(command_id, str) or not 0 < len(command_id) <= 128):
             raise ValueError("command_id must be a nonempty string of at most 128 characters")
         key = command_id or uuid4().hex
-        request = {"operation": operation, "layout": layout, "action": values.tolist()}
+        request = {
+            "operation": operation,
+            "layout": layout,
+            "action": values.tolist(),
+            "joint_offsets": None if offsets is None else offsets.tolist(),
+        }
         with self.lock:
             if not self.healthy():
                 raise RuntimeError(self.error or "simulation not ready")
@@ -141,8 +159,10 @@ class Simulation:
                         raise ValueError(f"pose target rejected ({result.describe()})")
                     resolved_action = result.q if layout == "pose" else np.r_[result.q, values[-1]]
                     resolved_layout = "joint" if layout == "pose" else "joint+gripper"
-                elif layout != "gripper" and np.any(
-                    (values[:6] < self.limits[:, 0]) | (values[:6] > self.limits[:, 1])
+                if layout != "gripper" and offsets is not None:
+                    resolved_action[:6] += offsets
+                if layout != "gripper" and np.any(
+                    (resolved_action[:6] < self.limits[:, 0]) | (resolved_action[:6] > self.limits[:, 1])
                 ):
                     raise ValueError("joint target outside model limits")
             if operation == "stop":

@@ -198,6 +198,21 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
         value = {source.strip(): target.strip() for source, target in raw.items()}
         if not value or any(not source or not target for source, target in value.items()):
             raise ValueError(f"{key} must be a non-empty mapping with non-empty string names")
+    elif kind == "float_vector_map":
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError(f"{key} must be a non-empty mapping of numeric vectors, got {raw!r}")
+        width = int(item.get("vector_len", 0))
+        value = {}
+        for source, vector in raw.items():
+            name = source.strip() if isinstance(source, str) else ""
+            if not name or not isinstance(vector, (list, tuple)) or len(vector) != width:
+                raise ValueError(f"{key}.{source} must contain exactly {width} finite numbers")
+            if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in vector):
+                raise ValueError(f"{key}.{source} must contain exactly {width} finite numbers")
+            numbers = [float(item) for item in vector]
+            if not all(math.isfinite(item) for item in numbers):
+                raise ValueError(f"{key}.{source} must contain exactly {width} finite numbers")
+            value[name] = numbers
     elif kind == "rtc":
         if not isinstance(raw, dict):
             raise ValueError(f"{key} must be an RTC mapping, got {raw!r}")

@@ -151,6 +151,7 @@ def test_health_returns_identity_and_version():
         "infer_freq",
         "warmup_required",
         "action_layout",
+        "joint_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -162,6 +163,7 @@ def test_health_returns_identity_and_version():
         "infer_freq",
         "warmup_required",
         "action_layout",
+        "joint_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -1956,6 +1958,7 @@ def test_infers_status_exposes_policy_config():
         "infer_freq",
         "warmup_required",
         "action_layout",
+        "joint_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -1963,6 +1966,7 @@ def test_infers_status_exposes_policy_config():
         "image_size",
     ]  # 端点公共项在前
     assert [item["runtime"] for item in cfg["items"]] == [
+        False,
         False,
         False,
         False,

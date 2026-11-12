@@ -292,6 +292,10 @@ class ActionRequest(BaseModel):
         default=None,
         description="作用域：缺省 = 全部臂（值按全部臂展开）；给出 = 只写这些臂，其余臂目标保持不动",
     )
+    joint_offsets: list[float] | None = Field(
+        default=None,
+        description="最终关节目标偏置：按 arms 顺序逐臂 J1～J6（rad），在 pose IK 后应用",
+    )
 
 
 class TeleopRequest(BaseModel):
@@ -589,7 +593,10 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         if req.command_id is not None:
             raise HTTPException(status_code=422, detail="command_id is supported by rollout, not raw execute")
         try:
-            env.robot_execute(req.action, layout=req.layout, arms=req.arms)
+            kwargs = {"layout": req.layout, "arms": req.arms}
+            if req.joint_offsets is not None:
+                kwargs["joint_offsets"] = req.joint_offsets
+            env.robot_execute(req.action, **kwargs)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         return {FIELD_STATUS: VALUE_STATUS_ACCEPTED}
@@ -612,11 +619,12 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
         """
         _require_ready()
         try:
-            receipt = (
-                env.robot_rollout(req.action, layout=req.layout, arms=req.arms, command_id=req.command_id)
-                if req.command_id
-                else env.robot_rollout(req.action, layout=req.layout, arms=req.arms)
-            )
+            kwargs = {"layout": req.layout, "arms": req.arms}
+            if req.joint_offsets is not None:
+                kwargs["joint_offsets"] = req.joint_offsets
+            if req.command_id:
+                kwargs["command_id"] = req.command_id
+            receipt = env.robot_rollout(req.action, **kwargs)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except TakeoverActiveError as e:

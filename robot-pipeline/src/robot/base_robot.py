@@ -606,7 +606,27 @@ class BaseRobot:
         """段序列 → layout 名（保持请求里写的段序）。"""
         return cls.LAYOUT_SEPARATOR.join(str(kind) for kind, _ in segments)
 
-    def apply_layout(self, action, layout: str | None = None, arms: list[str] | None = None) -> None:
+    def validate_joint_offsets(self, joint_offsets, arms: list[str] | None = None) -> np.ndarray | None:
+        """Validate and flatten final-joint offsets in the request arm order."""
+        if joint_offsets is None:
+            return None
+        names = self.state_arms()
+        scope = list(names) if arms is None else [str(arm) for arm in arms]
+        if not scope or len(set(scope)) != len(scope) or any(arm not in names for arm in scope):
+            raise ValueError(f"{self.name}: arms must be a nonempty unique subset of {names} (got {arms})")
+        values = np.asarray(joint_offsets, dtype=np.float64).reshape(-1)
+        expected = len(scope) * self.JOINT_DIM_PER_ARM
+        if values.shape != (expected,) or not np.all(np.isfinite(values)):
+            raise ValueError(f"joint_offsets must contain {expected} finite values for arms {scope}")
+        return values
+
+    def apply_layout(
+        self,
+        action,
+        layout: str | None = None,
+        arms: list[str] | None = None,
+        joint_offsets=None,
+    ) -> None:
         """按 ``layout`` / ``arms`` 写目标。
 
         - 运动段写关节目标：绝对段覆盖，delta 段叠加在当前目标；位姿类先完成 FK / IK；
@@ -616,6 +636,7 @@ class BaseRobot:
         解算失败（超限位 / 不收敛）→ ``CartesianActionError`` 且不改目标。
         """
         plan = self.plan_layout(action, layout, arms)
+        final_offsets = self.validate_joint_offsets(joint_offsets, plan.scope)
         joint_target = self._joint_target_snapshot()
         gripper_target = self._gripper_target_snapshot()
         offsets: dict[str, tuple[int, int]] = {}
@@ -647,11 +668,14 @@ class BaseRobot:
                 else:
                     full[span] = values
             solved = full if motion_kind == self.ACTION_SPACE_JOINT_DELTA else self._prepare_target(full, motion_kind)
-            for arm in plan.scope:
+            for row, arm in enumerate(plan.scope):
                 index = names.index(arm)
-                joint_target[index * joint_per_arm : (index + 1) * joint_per_arm] = solved[
-                    index * joint_per_arm : (index + 1) * joint_per_arm
-                ]
+                span = slice(index * joint_per_arm, (index + 1) * joint_per_arm)
+                target = solved[span].copy()
+                if final_offsets is not None and motion_kind in (self.ACTION_SPACE_JOINT, self.ACTION_SPACE_POSE):
+                    offset_span = slice(row * joint_per_arm, (row + 1) * joint_per_arm)
+                    target += final_offsets[offset_span]
+                joint_target[span] = target
         gripper_kind = next((kind for kind, _ in plan.segments if kind in self.GRIPPER_ACTION_SPACES), None)
         if gripper_kind is not None:
             offset, _ = offsets[gripper_kind]
@@ -671,6 +695,7 @@ class BaseRobot:
         *,
         layout: str | None = None,
         arms: list[str] | None = None,
+        joint_offsets=None,
     ):
         """直接下发动作指令（程控抢回：会结束遥操作）：按 ``layout`` 写目标。
 
@@ -679,7 +704,7 @@ class BaseRobot:
         - ``arms``（缺省 = 全部臂）：只写这些臂，其余臂目标原样保留；给出时 ``action`` 维度按
           所选臂算（要「只控部分臂」必须显式给 ``arms``）。
         """
-        self.apply_layout(action, layout, arms)
+        self.apply_layout(action, layout, arms, joint_offsets)
         self.disable_teleop()  # 仅成功落地后抢回；非法动作 / IK 失败保持原遥操作状态
 
     def rollout(
@@ -688,6 +713,7 @@ class BaseRobot:
         *,
         layout: str | None = None,
         arms: list[str] | None = None,
+        joint_offsets=None,
     ) -> bool:
         """推理闭环：遥操作进行中则拒绝（返回 False）。
 
@@ -698,7 +724,7 @@ class BaseRobot:
         if self.teleop_enabled:
             debug_print(self.name, "rollout refused: teleop (human takeover) active.", "WARNING")
             return False
-        self.execute(action, layout=layout, arms=arms)
+        self.execute(action, layout=layout, arms=arms, joint_offsets=joint_offsets)
         return True
 
     def safe_stop(self):

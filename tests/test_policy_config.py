@@ -60,6 +60,7 @@ def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
         "infer_freq",
         "warmup_required",
         "action_layout",
+        "joint_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -144,6 +145,17 @@ def test_string_map_config_normalizes_and_rejects_invalid_entries():
     for value in ([], {}, {"": "state"}, {"right": ""}, {"right": 1}):
         with pytest.raises(ValueError, match="arm_map"):
             set_policy_config(cfg, "openpi", {"arm_map": value})
+
+
+def test_joint_offsets_validate_six_finite_numbers_per_arm():
+    cfg = {"policy": {}}
+    offsets = {"right": [0, 0.2, 0, 0, 0, 0]}
+    assert set_policy_config(cfg, "openpi", {"joint_offsets": offsets}) == {
+        "joint_offsets": {"right": [0.0, 0.2, 0.0, 0.0, 0.0, 0.0]}
+    }
+    for value in ({}, {"right": [0] * 5}, {"right": [0, 0, 0, 0, 0, float("inf")]}, {"right": [0] * 5 + [True]}):
+        with pytest.raises(ValueError, match="joint_offsets"):
+            set_policy_config(cfg, "openpi", {"joint_offsets": value})
 
 
 def test_rtc_is_validated_as_nested_policy_config():

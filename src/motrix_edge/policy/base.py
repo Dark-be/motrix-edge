@@ -53,6 +53,14 @@ class BasePolicyClient:
         self.server_metadata: dict = {}
         # 动作布局（策略配置项；缺省 joint）：非法取值在**进入会话时**就报错，不拖到每步下发。
         self.action_layout = normalize_action_layout(self.policy_config.get(POLICY_KEY_ACTION_LAYOUT))
+        self.joint_offsets = {
+            str(arm): np.asarray(offset, dtype=float)
+            for arm, offset in (self.policy_config.get("joint_offsets") or {}).items()
+        }
+        if self.joint_offsets:
+            for arm, offset in self.joint_offsets.items():
+                if not arm.strip() or offset.shape != (6,) or not np.all(np.isfinite(offset)):
+                    raise ValueError(f"policy.joint_offsets.{arm} must contain exactly 6 finite numbers")
         self.camera_map = _string_map(self.policy_config, "camera_map")
         self.arm_map = _string_map(self.policy_config, "arm_map")
         self._adapter_cameras: list[str] = []
@@ -135,6 +143,13 @@ class BasePolicyClient:
             raise ValueError(
                 f"policy.arm_map requests unavailable Edge arm(s) {missing_arms}; available: {self._adapter_arms}"
             )
+        available_offset_arms = self.rollout_arms or []
+        missing_offset_arms = [name for name in self.joint_offsets if name not in available_offset_arms]
+        if missing_offset_arms:
+            raise ValueError(
+                f"policy.joint_offsets requests unavailable policy arm(s) {missing_offset_arms}; "
+                f"available: {available_offset_arms}"
+            )
 
     @property
     def rollout_arms(self) -> list[str] | None:
@@ -154,6 +169,15 @@ class BasePolicyClient:
             raise ValueError(f"adapter state size {array.size} != {expected} for arms {self._adapter_arms}")
         blocks = array.reshape(len(self._adapter_arms), self._state_dim_per_arm)
         return np.concatenate([blocks[self._adapter_arms.index(arm)] for arm in selected])
+
+    def joint_offsets_for_arms(self, arms: list[str] | None = None) -> np.ndarray | None:
+        """Flatten configured final-joint offsets in the action's policy arm order."""
+        if not self.joint_offsets:
+            return None
+        selected = arms or self.rollout_arms
+        if not selected:
+            raise ValueError("policy.joint_offsets requires named rollout arms")
+        return np.concatenate([self.joint_offsets.get(arm, np.zeros(6, dtype=float)) for arm in selected])
 
     def infer_chunk(self, observation: dict, index: int | None = None):
         """输入观测，返回**一次推理的原始动作块**（策略唯一职责：取推理结果）。
