@@ -31,8 +31,8 @@ Edge 边界后，再组装成每臂 7 维 `observations/qpos`、`observations/qp
 `layout` 决定每臂块的段序，`arms` 决定块对应的臂。组合与作用域的完整契约见
 [下发布局](./robot_pipeline_action_layouts.md)。
 
-动作请求可附带 `joint_offsets`：按 `arms` 顺序每臂 J1～J6 六维弧度。绝对 `joint` 直接取目标、
-绝对 `pose` 先完成 TCP→法兰与 IK，随后统一把偏置加到最终关节目标；夹爪不受影响。纯 delta
+动作请求可附带 `joint_offsets`：按 `arms` 顺序每臂 J1 ～ J6 六维弧度。绝对 `joint` 直接取目标、
+绝对 `pose` 先完成 TCP→ 法兰与 IK，随后统一把偏置加到最终关节目标；夹爪不受影响。纯 delta
 布局不应用坐标常量偏置，防止连续控制拍累计。偏置维度或有限性非法时整条请求拒绝，目标保持不变。
 
 ## robot 原始观测键

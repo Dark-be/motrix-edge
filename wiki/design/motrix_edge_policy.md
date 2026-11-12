@@ -280,7 +280,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
         见 [robot-pipeline 动作空间](./robot_pipeline_action_spaces.md)）。**布局不按动作长度猜测**
         （非法取值在进入会话时报错），且与 policy `arm_map` 选择的机械臂共同决定动作维度。
     -   公共项 `joint_offsets`（最终关节目标偏置）：`Edge 臂名 → 6 维有限数值`，六维依次是
-        J1～J6 弧度。Edge 按本拍作用臂展开后随动作请求透传；机器人进程把 `joint` 原值或 `pose`
+        J1 ～ J6 弧度。Edge 按本拍作用臂展开后随动作请求透传；机器人进程把 `joint` 原值或 `pose`
         经 IK 得到的关节解统一加偏置，再做最终限位并原子提交，夹爪不变。因此配置不受 joint/pose
         layout 限制，也不会为了修正关节而修改 TCP 目标、增加 IK 失败。纯 `*_delta` 只表达差量，
         坐标常量偏置不参与，避免每拍累计。原始推理块和 RTC 缓存不被改写。未来若需要修改 TCP
@@ -300,7 +300,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 | `endpoint`                 | LerobotRemoteClient  | Lerobot Remote Zenoh 端点；不读取 OpenPI 的 `host` / `port`                                 |
 | `warmup_required`          | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
 | `action_layout`            | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                       |
-| `joint_offsets`            | 策略客户端 + 机器人  | 按臂修正 joint 原值或 pose IK 后的最终关节目标（J1～J6）；夹爪不变                          |
+| `joint_offsets`            | 策略客户端 + 机器人  | 按臂修正 joint 原值或 pose IK 后的最终关节目标（J1 ～ J6）；夹爪不变                        |
 | `observation_layout`       | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                           |
 | `prompt`（openpi）         | 服务端（每帧）       | 语言条件：帧里带就用帧里的，缺了才由 checkpoint 的 `default_prompt` 兜底，随后逐帧 tokenize |
 | `image_size`（openpi）     | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |

@@ -60,9 +60,7 @@ def test_joint_offsets_apply_to_final_joint_target_after_optional_ik(tmp_path, l
     motion = expected if layout.startswith("joint") else sim.kinematics.pose(expected)
     offsets = np.array([0.01, -0.02, 0.03, -0.04, 0.05, -0.06])
     resolved_before_offset = (
-        expected
-        if layout.startswith("joint")
-        else sim.kinematics.solve(motion, sim.target[:6], sim.home[:6]).q
+        expected if layout.startswith("joint") else sim.kinematics.solve(motion, sim.target[:6], sim.home[:6]).q
     )
 
     receipt = sim.submit(
