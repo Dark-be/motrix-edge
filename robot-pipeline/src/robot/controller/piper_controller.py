@@ -289,40 +289,6 @@ class PiperController(ArmController):
         start = np.zeros(_KINEMATICS.DOF) if seed is None else seed
         return solve_ik(_KINEMATICS, pose, start, fallback_seeds=tuple(fallback_seeds), **ik_config)
 
-    # ---- 运动学转换（**静态纯函数**，无实例状态；robot 层调用）------------------------
-    @staticmethod
-    def joint_to_pose(q: np.ndarray) -> np.ndarray:
-        """正解：关节角 → 末端位姿 ``[x, y, z, roll, pitch, yaw]``（米 / 弧度）。
-
-        与 ``pose_to_joint()`` 共用同一个运动学模型，所以「读到的位姿」与「下发的目标」同系可闭合。
-        """
-        values = np.asarray(q, dtype=np.float64).reshape(-1)
-        if values.shape != (_KINEMATICS.DOF,) or not np.all(np.isfinite(values)):
-            raise ValueError("joint vector must contain exactly six finite values")
-        return pose7_to_pose6(_KINEMATICS.pose(values))
-
-    @staticmethod
-    def pose_to_joint(
-        pose: np.ndarray,
-        seed: np.ndarray | None = None,
-        fallback_seeds: tuple[np.ndarray, ...] = (),
-        **ik_config,
-    ) -> IkResult:
-        """位姿 → 关节目标（**只解算、不下发**）：调用方拿 ``IkResult.q`` 去写控制目标，
-        之后逐拍 ``set_joint()``——位姿目标与关节目标因此在控制链路上走**同一条**通路，
-        且解算只发生在这个调用里（不进控制拍）。
-
-        解算失败不抛错（返回 ``ok=False`` + 原因，由调用方决定拒绝还是保持原目标）；
-        ``seed`` 缺省零位形（离当前位形越近，解越“就近”），``ik_config`` 可覆盖
-        ``solve_ik`` 的缺省参数（``pos_tol`` / ``rot_tol`` / ``max_iters`` / ``step_size`` / ``damping``）。
-        """
-        start = np.zeros(_KINEMATICS.DOF) if seed is None else seed
-        try:
-            target = pose6_to_pose7(pose)
-        except (TypeError, ValueError, OverflowError):
-            return IkResult(False, None, float("inf"), float("inf"), 0, "bad_input")
-        return solve_ik(_KINEMATICS, target, start, fallback_seeds=fallback_seeds, **ik_config)
-
     @_require_robot
     def set_pose(self, pose: np.ndarray) -> None:
         """兼容旧接口：用 SDK ``move_p`` 下发法兰位姿（米 / 弧度）。
