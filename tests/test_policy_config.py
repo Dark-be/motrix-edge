@@ -62,6 +62,7 @@ def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
         "action_layout",
         "arm_map",
         "camera_map",
+        "rtc",
         "model",
         "device",
     ]
@@ -143,3 +144,19 @@ def test_string_map_config_normalizes_and_rejects_invalid_entries():
     for value in ([], {}, {"": "state"}, {"right": ""}, {"right": 1}):
         with pytest.raises(ValueError, match="arm_map"):
             set_policy_config(cfg, "openpi", {"arm_map": value})
+
+
+def test_rtc_is_validated_as_nested_policy_config():
+    cfg = {"policy": {}}
+    rtc = {
+        "enabled": False,
+        "action_horizon": 7,
+        "prefix_len": 0,
+        "execution_horizon": 7,
+        "suffix_len": 0,
+        "aggregate_fn": "weighted_average",
+    }
+    assert set_policy_config(cfg, "openpi", {"rtc": rtc}) == {"rtc": rtc}
+    assert cfg["policy"]["rtc"] == rtc
+    with pytest.raises(ValueError, match="rtc prefix_len"):
+        set_policy_config(cfg, "openpi", {"rtc": {**rtc, "prefix_len": 4, "suffix_len": 4}})

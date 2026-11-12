@@ -243,10 +243,10 @@ def parse_rollout_mode(raw) -> str:
 
 
 def parse_meta(raw, what: str = "capture sync") -> dict:
-    """解析 JSON 对象参数（``capture sync --meta`` / ``infer rtc set`` / ``infer config set``）。
+    """解析 JSON 对象参数（``capture sync --meta`` / ``infer config set``）。
 
-    ``raw`` 已经是 ``dict`` 时原样返回 —— HTTP 端点直接提交 JSON 对象（``POST /v1/infers/rtc``
-    的 body、``POST /v1/commands`` 的 ``params``），与 ``parse_bool`` 同理：**同一条命令在
+    ``raw`` 已经是 ``dict`` 时原样返回 —— HTTP 端点直接提交 JSON 对象（``POST /v1/commands``
+    的 ``params``），与 ``parse_bool`` 同理：**同一条命令在
     CLI（文本）与 HTTP（原生值）下都可用**，路由层不必再做 ``json.dumps``。为字符串时按
     JSON 对象解析。``what`` 仅用于错误信息（默认 ``capture sync``）。
     缺失 / 非法 / 非对象 JSON → ``ValueError``（命令处理器回执 rejected，不崩溃）。

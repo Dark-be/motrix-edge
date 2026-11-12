@@ -82,7 +82,7 @@ def test_rtc_engine_delegates_to_manager():
 
     manager = _Manager()
     engine = RtcEngine(manager)
-    assert engine.rtc is manager  # 会话仍直接持 manager（infer rtc set / rtc 状态上报）
+    assert engine.rtc is manager  # 会话仍直接持 manager（完整策略配置 / rtc 状态上报）
     assert np.array_equal(engine.step("obs"), [9.0])
     engine.reset()
     assert engine.status() == {"step": 1}

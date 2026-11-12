@@ -14,7 +14,7 @@
 
 """配置级命令的实现（无状态纯函数，node 主循环与会话循环共用）。
 
-``infer rtc(set)`` / ``infer config(set)`` / ``infer model(set)`` /
+``infer config(set)`` / ``infer model(set)`` /
 ``capture meta *`` 都是**配置级**命令：任何状态可用、写内存态配置（不写回 yaml）、
 与状态机解耦。参数非法 → 回执 ``rejected``（400）。
 """
@@ -42,7 +42,6 @@ from .naming import (
     CMD_INFER_CONFIG_SET,
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
-    CMD_INFER_RTC_SET,
     CMD_ROBOT_TCP,
 )
 from .params import (
@@ -126,26 +125,6 @@ def get_rtc_params(base_cfg) -> dict:
     return {**DEFAULT_RTC_CONFIG, **(policy.get("rtc") or {})}
 
 
-def handle_infer_rtc(base_cfg, cmd) -> CommandResult:
-    """处理 RTC 配置命令（``infer rtc`` / ``infer rtc set <json>``）。
-
-    写内存态 ``base_cfg["policy"]["rtc"]``（不写回 yaml），下次 ``session run infer``
-    实例化 RTCManager 时生效；会话内由 InferSession 额外应用到**正在运行的** manager
-    （下一块起生效）。节点主循环（非任务态）与会话循环（任务态）**共用**本函数，保证
-    配置命令「任何状态可用」（与 ``infer config`` 同款）。参数非法 → rejected（400）。
-    """
-    if cmd.name != CMD_INFER_RTC_SET:
-        return ok_result(rtc=get_rtc_params(base_cfg))
-    try:
-        patch = validate_params(parse_meta(cmd.params.get("json"), what="infer rtc set"))
-        merged = {**get_rtc_params(base_cfg), **patch}
-        validate_config(merged)  # 交叉约束（P + S < H、E > P）：配置错误在设置时就拦住
-    except ValueError as exc:
-        return CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
-    base_cfg.setdefault("policy", {})["rtc"] = merged
-    return ok_result(rtc=merged)
-
-
 def policy_config_status(base_cfg, policy_type=None) -> dict:
     """策略配置项状态：schema 清单 + 当前值 + 缺失必填项（供 CLI ``infer config`` / 前端表单）。
 
@@ -219,6 +198,11 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
         value = {source.strip(): target.strip() for source, target in raw.items()}
         if not value or any(not source or not target for source, target in value.items()):
             raise ValueError(f"{key} must be a non-empty mapping with non-empty string names")
+    elif kind == "rtc":
+        if not isinstance(raw, dict):
+            raise ValueError(f"{key} must be an RTC mapping, got {raw!r}")
+        value = {**DEFAULT_RTC_CONFIG, **validate_params(raw)}
+        validate_config(value)
     else:
         value = str(raw).strip()
     options = item.get("options") or []

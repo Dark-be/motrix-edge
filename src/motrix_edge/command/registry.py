@@ -42,8 +42,6 @@ from .naming import (
     CMD_INFER_MODEL_SET,
     CMD_INFER_ROLLOUT,
     CMD_INFER_ROLLOUT_STOP,
-    CMD_INFER_RTC,
-    CMD_INFER_RTC_SET,
     CMD_LEASE_REVOKE,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
@@ -194,8 +192,6 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
         CommandSpec(name=CMD_INFER_ROLLOUT_STOP),  # infer rollout stop：停止持续推理（会话保持）
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：连接 + 启动异步预热（下发动作之外的推理）
-        CommandSpec(name=CMD_INFER_RTC),  # infer rtc：查询 RTC 参数 / 运行状态
-        CommandSpec(name=CMD_INFER_RTC_SET, positional=("json",)),  # infer rtc set <json>：设置 RTC 参数
         CommandSpec(name=CMD_INFER_MODEL),  # infer model：查询策略模型路径（lerobot 类）
         CommandSpec(name=CMD_INFER_MODEL_SET, positional=("path",)),  # infer model set <path>
         CommandSpec(name=CMD_INFER_CONFIG),  # infer config：查询策略配置项（schema + 当前值）

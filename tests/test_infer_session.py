@@ -535,11 +535,12 @@ def test_infer_config_command_queries_policy_items(monkeypatch):
         "action_layout",
         "arm_map",
         "camera_map",
+        "rtc",
         "prompt",
         "image_size",
     ]
-    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 7
-    assert [item["runtime"] for item in snapshot["items"]] == [False] * 7 + [True, True]
+    assert [item.get("group") for item in snapshot["items"]] == ["endpoint"] * 2 + [None] * 8
+    assert [item["runtime"] for item in snapshot["items"]] == [False] * 8 + [True, True]
     assert snapshot["values"]["warmup_required"] is True  # 缺省要求先预热
     # 会话内即时生效的键 = runtime=True（端点 / 预热门是会话级配置：进入会话时固化）
     assert snapshot["runtime_keys"] == ["image_size", "prompt"]

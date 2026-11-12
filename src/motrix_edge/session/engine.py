@@ -42,7 +42,7 @@ class Engine(Protocol):
 class RtcEngine:
     """RTC 引擎：薄包装 ``RTCManager``（``step`` = ``infer``，``reset`` = ``reset``）。
 
-    manager 本身仍是 RTC 参数（``infer rtc set``）与状态上报（``/v1/infers`` 的 ``rtc`` 字段）
+    manager 本身仍承载 RTC 参数与状态上报（``/v1/infers`` 的 ``rtc`` 字段）
     的作用对象，经 :attr:`rtc` 暴露给会话，故引擎这层只提供统一的取步面。
     """
 

@@ -113,7 +113,7 @@ policy:
   # --- RTC（实时动作块管理：异步预取 + 三元切分 + 过渡策略；见 wiki/design/motrix_edge_rtc.md）---
   # 策略只返回原始动作块（openpi / lerobot-remote 通用）；块缓存 / 切分 / 过渡 / 预取由 rtc 统一负责。
   # 预取在后台线程完成（控制环不阻塞）：推理期间走过的步会在返回时按步号自动跳过。
-  # 运行期可经 `infer rtc`（查询）/ `infer rtc set <json>`（设置）或 POST /v1/infers/rtc 修改。
+  # RTC 属于完整策略配置；进入推理会话时固化，不提供独立运行期写命令。
   rtc:
     enabled: true # 关闭 → 每步一次推理只取块首步（无块缓存 / 无过渡）
     action_horizon: 50 # 块长上限 H：一次推理只取策略块的前 H 步（如 10 = 10Hz × 1s 预测）

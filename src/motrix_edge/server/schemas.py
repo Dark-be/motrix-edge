@@ -101,7 +101,7 @@ class WebRTCOfferRequest(BaseModel):
 class InferEnterRequest(BaseModel):
     """POST /v1/infers 请求体：可选推理策略类型 + 进入会话前的策略配置项。
 
-    ``config`` 为**该策略的配置项**（如需端点的策略含端点项 ``host`` / ``port``，即 openpi /
+    ``config`` 为**该策略的完整配置项**（包括嵌套 ``rtc``；如需端点的策略含端点项 ``host`` / ``port``，即 openpi /
     lerobot-act；openpi → prompt；
     lerobot-remote → deployment / semantics / chunk_merge），见
     ``policy.POLICY_CONFIG_ITEMS``；前端按 ``/v1/health`` 的 ``policy_config_items``
@@ -130,31 +130,6 @@ class InferSyncRequest(BaseModel):
     """POST /v1/infers/sync 请求体：录制 rollout 时同步的采集元信息（operator / task_name 等）。"""
 
     meta: dict = Field(default_factory=dict, description="采集元信息（默认 operator=policy、task_name=prompt）")
-
-
-class InferRTCRequest(BaseModel):
-    """POST /v1/infers/rtc 请求体：RTC（实时动作块）参数（可部分更新）。
-
-    对应命令 ``infer rtc set <json>``；参数写入内存态 ``policy.rtc`` 并应用到正在运行的
-    RTCManager（下一块起生效）；见 wiki/design/motrix_edge_rtc.md。
-    """
-
-    enabled: bool | None = Field(default=None, description="是否启用 RTC（关闭 → 每步一次推理只取块首步）")
-    action_horizon: int | None = Field(default=None, ge=1, description="块长上限 H（一次推理只取块的前 H 步）")
-    prefix_len: int | None = Field(
-        default=None, ge=0, description="前置段 P（额外强制跳过的前 P 步；真实过期步自动跳过）"
-    )
-    execution_horizon: int | None = Field(default=None, ge=1, description="执行段 E（缺省 = H - P - S）；须 > P")
-    suffix_len: int | None = Field(
-        default=None, ge=0, description="后缀段 S（与下一块执行段的重叠窗口，也是预取提前量）；须满足 P + S < H"
-    )
-    aggregate_fn: str | None = Field(
-        default=None,
-        description=(
-            "重叠过渡策略：weighted_average(0.3 本段+0.7 下一段)/conservative(0.7+0.3)/"
-            "average/latest_only/continuous(按步号 0→1 线性过渡)"
-        ),
-    )
 
 
 class InferConfigRequest(BaseModel):
@@ -228,7 +203,6 @@ __all__ = [
     "CommandResponse",
     "InferConfigRequest",
     "InferEnterRequest",
-    "InferRTCRequest",
     "InferRolloutRequest",
     "InferSyncRequest",
     "LeaseInstallRequest",

@@ -21,12 +21,9 @@ from motrix_edge.command import (
     CMD_INFER_CONNECT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_ROLLOUT_STOP,
-    CMD_INFER_RTC,
-    CMD_INFER_RTC_SET,
     ROLLOUT_MODE_CONTINUOUS,
     CommandResult,
     deadline_exceeded,
-    handle_infer_rtc,
     ok_result,
     parse_rollout_mode,
 )
@@ -52,8 +49,8 @@ class InferSession(PolicyConfigFeature, BaseSession):
     需要 prompt 的策略（openpi）在推理/录制开始前必须已预置非空文本（策略配置项 prompt，经
     ``infer config set`` / ``POST /v1/infers/config`` 写入），否则拒绝；非语言条件策略
     （lerobot-act）不需要 prompt，不参与门控。录制时由调用方显式
-    ``capture sync`` 同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。RTC 参数经
-    ``infer rtc`` / ``infer rtc set <json>`` 查询与运行期修改（见 wiki/design/motrix_edge_rtc.md）。
+    ``capture sync`` 同步采集元信息（operator=policy、task_name=prompt 由会话默认上报）。RTC 参数是
+    完整策略配置的 ``policy.rtc`` 段，进入会话时固化（见 wiki/design/motrix_edge_rtc.md）。
     """
 
     required_capability = AdapterCapability.EXECUTE
@@ -100,7 +97,7 @@ class InferSession(PolicyConfigFeature, BaseSession):
         self._bind_policy_adapter()
         # 实时动作块管理器（RTC）：策略只提供原始动作块（infer_chunk），块长上限 H / 三元切分
         # （前置段 P 跳过 + 执行段 + 后缀段）/ 时序平滑 / **异步预取** 由 RTCManager 负责
-        # （参数 = base_cfg policy.rtc，运行期可改）。control_hz = 控制频率：把实测推理耗时折算成
+        # （参数 = 完整策略配置的 policy.rtc，进入会话时固化）。control_hz = 控制频率：把实测推理耗时折算成
         # 步数上报（供人工设定前置段 P）。配置非法（P + S >= H / E <= P）不应到此——命令层已拦截。
         try:
             self.rtc = build_rtc(
@@ -112,7 +109,7 @@ class InferSession(PolicyConfigFeature, BaseSession):
             debug_print(self.name, f"RTC config invalid ({exc}); falling back to defaults", "WARNING")
             self.rtc = build_rtc(self.policy, control_hz=(1.0 / self.step_interval) if self.step_interval > 0 else None)
         # 步进引擎：本会话的「本步动作从哪来」= RTC（块缓存 / 切分 / 平滑 / 预取）。manager 仍归
-        # 本会话持有（``infer rtc set`` / ``rtc_status`` 直接作用于它），引擎只是一层统一的取步面。
+        # 本会话持有（``rtc_status`` 只读上报），引擎只是一层统一的取步面。
         self.engine = RtcEngine(self.rtc)
 
         # 录制状态归基座 ``self.recorder``（capture / infer / rl 共用一份）：recording 属性直接
@@ -513,15 +510,12 @@ class InferSession(PolicyConfigFeature, BaseSession):
         - ``infer config(set)`` / ``infer model(set)``：策略配置项（**功能模块**
           :class:`~motrix_edge.session.policy_config.PolicyConfigFeature`，与 RL 会话共用），
           会话内可改（下个请求生效）；
-        - ``infer rtc(set)``：RTC 参数查询 / 设置（应用到运行中的 manager，下一块起生效）。
+        RTC 参数随完整策略配置进入会话，不在会话内单独修改。
 
         ``runtime=False`` 的配置项（host / port 等）在**进入会话时**固化：会话内设置只写内存态
         配置（回执 ``deferred``），下次会话生效——不额外拒绝，也不需要单独一条命令。
         """
         if self.dispatch_policy_config(name, cmd):  # 策略配置项（功能模块）
-            return True
-        if name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数（操作运行中的 manager）
-            self._reply(cmd, self._on_infer_rtc(cmd))
             return True
         return False
 
@@ -616,23 +610,6 @@ class InferSession(PolicyConfigFeature, BaseSession):
         self.recorder.cancel()
         debug_print(self.name, "Rollout recording cancelled (episode discarded).", "INFO")
         self._reply(cmd, ok_result(state="ready", episode="cancel", recording=False))
-
-    def _on_infer_rtc(self, cmd):
-        """``infer rtc`` / ``infer rtc set <json>``：查询 / 设置 RTC 参数（应用到运行中 manager）。
-
-        先经 ``handle_infer_rtc`` 校验并写入内存态 ``base_cfg["policy"]["rtc"]``（下次会话
-        生效）；设置成功时额外 ``self.rtc.configure`` 应用到当前会话的 manager（下一块起生效）。
-        参数非法 → rejected（400，不崩溃）。
-        """
-        result = handle_infer_rtc(self.base_cfg, cmd)
-        if result.status != "ok":
-            return result
-        if cmd.name == CMD_INFER_RTC_SET:
-            try:
-                self.rtc.configure(**result.data["rtc"])
-            except ValueError as exc:  # 理论上 handle_infer_rtc 已校验，双保险
-                return CommandResult(status="rejected", error=str(exc), code=ErrorCode.INVALID_ARGUMENT)
-        return ok_result(state=getattr(self, "state", "ready"), rtc=self.rtc.status())
 
     def rtc_status(self) -> dict | None:
         """RTC 运行状态（server ``/v1/infers`` 的 ``rtc`` 字段）；无 manager → None。"""

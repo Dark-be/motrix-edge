@@ -178,8 +178,8 @@ def _policy_ref(session):
 def _rtc_status(node, session) -> dict | None:
     """RTC 状态：有推理会话 → 运行状态（会话的 RTCManager）；无会话 → **配置级**参数快照。
 
-    无会话时给的是 ``policy.rtc``（``infer rtc`` / ``infer rtc set`` 读写的同一份，**任何状态
-    都接受**），只有 ``enabled`` / ``params``——没有步号 / 预取计数等运行字段（那些只存在于
+    无会话时给的是完整策略配置中的 ``policy.rtc``，只有 ``enabled`` / ``params``——没有步号 /
+    预取计数等运行字段（那些只存在于
     会话内）；仅供前端在**未进入会话**时展示当前生效的 H / P / E / S（编辑仍限推理会话内）。
     无节点（未注入）→ None。
     """

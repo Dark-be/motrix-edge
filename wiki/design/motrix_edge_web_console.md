@@ -96,8 +96,7 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 
 8. **状态面板（右栏）**：节点状态（`node_state`）、会话状态（`state`）、**匹配到的适配器**（name / type / running / control_hz / measured_hz）、磁盘。
 
-9. **推理面板（两张卡，配置在前）**：会话区选中「推理」后先渲染**策略配置卡片**（在推理卡片之前），
-   再渲染**推理会话卡片**——用户顺序是「选策略 / 填配置 → 进入推理」。
+9. **推理面板（配置在前）**：会话区选中「推理」后按「选策略 / 填完整配置 → 进入推理」组织。
 
     - **策略配置卡片**：从 `/v1/health` 的已注册策略列表中必选策略 + 按所选策略动态渲染配置项
       （schema 来自 `/v1/health` 的 `adapters.policies[].config_items`，会话内改用 `GET /v1/infers`
@@ -111,13 +110,16 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
       （`group=endpoint`）为空 / 越界时「进入推理」禁用（端点门控按 schema 的端点分组推导，
       不硬编码键名）。
       为减少逐项填写，页面把包内 `console/src/config/infer-presets/*.yml` 自动发现为「策略配置」预设；
-      每份文件用顶层 `preset.id` / `preset.label` 描述选项，并同时携带 `policy` 与 `policy.rtc`。
+      每份文件用顶层 `preset.id` / `preset.label` 描述选项，并在同一个 `policy` 对象内携带策略参数与
+      `rtc`。
       内置 OpenPI、Lerobot Remote 两份默认预设，后续叠碗等任务通过新增 YAML 文件直接成为选项，
-      无需修改组件。选择预设后立即解析并同步策略草稿与 RTC 草稿；当前会话只把策略 schema 声明的键
-      写入进入会话 payload，RTC 仍经独立接口应用。策略卡首行只展示预设选择、策略类型与校验状态；
+      无需修改组件。选择预设后立即解析完整策略草稿；`rtc` 与其它策略配置一起写入进入会话 payload，
+      不存在第二条 RTC 写接口。策略卡首行只展示预设选择、策略类型与校验状态；
       YAML 唯一编辑入口、重新解析操作及同步摘要统一放入默认收起的「配置详情」。用户需要修改时只能
       编辑 YAML 并重新解析，避免出现两个可写事实来源；「恢复预设」可丢弃本地编辑并重新载入包内文本。
       未知键、未知策略、类型或候选值不合法都在本地明确报错，不静默丢弃。
+      完整 YAML 按 Edge 地址写入浏览器本地缓存；节点离线、会话异常结束、页面刷新或重新连接时优先恢复
+      缓存，不用远端状态或包内默认值覆盖用户最近一次已解析配置。包内预设仅在该 Edge 尚无缓存时载入。
     - **进入推理 = 进入会话 + 自动连接预热**：`POST /v1/infers` 成功后**前端自动调用**
       `POST /v1/infers/connect`（`infer connect`：连接策略服务端 → lerobot-act 下发策略指令 /
       服务端加载模型，openpi 预热一帧），**连接成功后其余操作（推理一步 / 持续推理 / 重新连接 /
@@ -136,7 +138,9 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
     - **已同步 meta**（采集 / 推理两处）：只展示**非空值**（`null` / 空串 / 空列表 / 空对象不显示）——
       meta 分类多时不该把面板撑长；全空时提示「尚未同步元信息」。前端用 `metaEntries()` 统一过滤。
 
-10. **RTC 配置（内嵌在策略配置内，默认收起）**：默认只展示启用状态与 `H/P/E/S` 摘要，不再占用独立卡片；展开后才展示步号、剩余、最近切分与实测推理耗时。选择策略配置预设时，其 `policy.rtc` 自动同步为 RTC 草稿，并标明来源，不会在选择时自动写后端。RTC 与策略共用上方完整 YAML 作为唯一编辑入口；重新解析后以纯文本字段只读预览（不使用禁用输入框）并可「应用 RTC 参数」（`POST /v1/infers/rtc`），参数会话内即时生效（下一块起）。RTC 与策略 payload 仍是两个独立应用通道。
+10. **RTC 配置（内嵌在策略配置内）**：策略栏紧凑展示启用状态与 `H/P/E/S` 摘要，完整参数只存在于
+    同一份 YAML 的 `policy.rtc`；解析后与策略端点、观测映射一起进入同一个 payload。运行中的步号、
+    剩余、最近切分与实测推理耗时继续由推理状态区只读展示。
 11. **操作反馈**：每次受控操作弹 **toast**（右下角，约 4.5s 自动消失，只给一行摘要），完整记录进**左下角日志抽屉**（可展开 / 清空）；完整 JSON 回执留在各面板内部，不刷日志。
 12. **数值展示口径（日志 = 网页）**：动作 / qpos 等浮点**统一保留 3 位小数**（`-0.062` 而不是
     `-0.06196591258049011`）。⚠️ **本节的服务端取整随后续控制面 MR 提供**：master 上
@@ -161,7 +165,6 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 | `POST /v1/infers/episode/cancel`                       | `capture episode cancel`   |
 | `POST /v1/infers/sync`                                 | `capture sync`             |
 | `POST /v1/infers/config`                               | `infer config set <json>`  |
-| `POST /v1/infers/rtc`                                  | `infer rtc set <json>`     |
 | `DELETE /v1/infers?lease_id=`                          | `session quit`             |
 | `POST /v1/commands`（`capability=robot/estop`）        | `robot estop`              |
 
@@ -183,7 +186,7 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 -   采集元信息选项：`GET /v1/captures/meta` 读列表（免租约）与写回执同构 `{meta: {分类: [选项]}}`；前端按返回的分类动态渲染选择框与管理的下拉（不硬编码分类，新分类无需改前端）。
 -   推理面板提供 Prompt 输入（经 `POST /v1/infers/config` 写入策略配置项 `prompt`，推理/录制前必须非空）；单步响应展示最后动作及 `actions` 列表。
 -   **RTC 卡片**：展示 `GET /v1/infers` 的 `rtc`（enabled / 块长 H / 执行段 E / 后缀 S / 聚合函数 /
-    步号与剩余 / 最近一块的 prefix·execution·suffix 切分），并可经 `POST /v1/infers/rtc` 运行期改参数。
+    步号与剩余 / 最近一块的 prefix·execution·suffix 切分）。修改参数需退出会话并重新解析完整策略配置。
 -   WebRTC：`RTCPeerConnection` recvonly 视频轨 → `createOffer` → `setLocalDescription` →
     `POST /v1/webrtc/offer`（body `{sdp: pc.localDescription.sdp, type}`）→ `setRemoteDescription(answer)`；
     **必须发送含 ICE 候选的 `localDescription.sdp`**。PeerConnection 由 Console 外壳常驻持有，页面标签只

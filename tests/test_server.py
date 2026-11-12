@@ -38,8 +38,6 @@ from motrix_edge.command import (
     CMD_INFER_MODEL,
     CMD_INFER_MODEL_SET,
     CMD_INFER_ROLLOUT,
-    CMD_INFER_RTC,
-    CMD_INFER_RTC_SET,
     CMD_NODE_RESET,
     CMD_ROBOT_ESTOP,
     CMD_ROBOT_EXECUTE,
@@ -155,6 +153,7 @@ def test_health_returns_identity_and_version():
         "action_layout",
         "arm_map",
         "camera_map",
+        "rtc",
         "prompt",
         "image_size",
     ]
@@ -165,6 +164,7 @@ def test_health_returns_identity_and_version():
         "action_layout",
         "arm_map",
         "camera_map",
+        "rtc",
         "task",
         "deployment",
         "semantics",
@@ -439,7 +439,7 @@ class FakeInferSession:
         self.prompt_required = True  # 是否语言条件策略（openpi=True 门控；lerobot-remote=False 不门控）
         # 会话使用的策略类型（决定配置项 schema）；缺省取配置 policy.type
         self.policy_config_type = policy_type or BASE_CFG.get("policy", {}).get("type", "openpi")
-        self._rtc_params = {"enabled": True, "suffix_len": 10}  # RTC 参数（infer rtc set 可改）
+        self._rtc_params = get_rtc_params(BASE_CFG)
 
     def policy_config_status(self):
         """仿 InferSession.policy_config_status（server /v1/infers 的 policy_config 字段）。"""
@@ -525,10 +525,6 @@ class FakeInferSession:
             elif name == CMD_CAPTURE_SYNC:  # 推理录制同步采集元信息（operator/task_name 等）
                 # 与产线一致：走 parse_meta（同时接受 CLI 文本与 HTTP 原生 dict）
                 self._reply(cmd, ok_result(state="ready", meta=parse_meta((cmd.params or {}).get("meta"))))
-            elif name in (CMD_INFER_RTC, CMD_INFER_RTC_SET):  # RTC 参数：查询 / 设置
-                if name == CMD_INFER_RTC_SET:
-                    self._rtc_params.update(parse_meta((cmd.params or {}).get("json"), what="infer rtc set"))
-                self._reply(cmd, ok_result(state="ready", rtc=self.rtc_status()))
             elif name == CMD_SESSION_QUIT:  # 退出推理会话
                 self._reply(cmd, ok_result(node_state="finished"))
                 return RunResult.FINISHED
@@ -1962,6 +1958,7 @@ def test_infers_status_exposes_policy_config():
         "action_layout",
         "arm_map",
         "camera_map",
+        "rtc",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
@@ -1970,11 +1967,12 @@ def test_infers_status_exposes_policy_config():
         False,
         False,
         False,
-        False,
-        False,
-        False,
-        True,
-        True,
+            False,
+            False,
+            False,
+            False,
+            True,
+            True,
     ]  # 公共项会话级（进入会话时固化）
     assert cfg["runtime_keys"] == ["image_size", "prompt"]  # 会话内即时生效的键
     assert next(item for item in cfg["items"] if item["key"] == "prompt")["type"] == "text"
@@ -2042,20 +2040,37 @@ def test_infers_config_reports_deferred_for_session_level_keys():
     wait_node_state(node, NodeState.READY)
 
 
-def test_infers_enter_config_applies_endpoint():
-    """POST /v1/infers 的 config 含公共项 host / port → 进入会话前写入推理端点（进入会话时固化）。"""
+def test_infers_enter_config_applies_endpoint_and_rtc():
+    """完整策略 config 把端点与嵌套 RTC 一次写入并在进入会话时固化。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
     r = client.post(
         "/v1/infers",
         headers={"X-Lease-Id": lease},
-        json={"policy_type": "openpi", "config": {"host": "10.0.0.7", "port": 9000, "prompt": "把零件放好"}},
+        json={
+            "policy_type": "openpi",
+            "config": {
+                "host": "10.0.0.7",
+                "port": 9000,
+                "prompt": "把零件放好",
+                "rtc": {
+                    "enabled": False,
+                    "action_horizon": 7,
+                    "prefix_len": 0,
+                    "execution_horizon": 7,
+                    "suffix_len": 0,
+                    "aggregate_fn": "weighted_average",
+                },
+            },
+        },
     )
     assert r.status_code == 200
     assert BASE_CFG["policy"]["host"] == "10.0.0.7"
     assert BASE_CFG["policy"]["port"] == 9000
     assert BASE_CFG["policy"]["prompt"] == "把零件放好"
+    assert BASE_CFG["policy"]["rtc"]["action_horizon"] == 7
+    assert BASE_CFG["policy"]["rtc"]["enabled"] is False
     assert r.json()["policy_config"]["values"]["host"] == "10.0.0.7"  # 回执含端点当前值
     # 非法端口 → 400（且不进入会话）
     assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
@@ -2167,7 +2182,7 @@ def test_infers_sync_syncs_capture_meta():
 def test_infers_rtc_status_without_session_reports_configured_params():
     """无推理会话时 status 的 rtc = **配置级** ``policy.rtc`` 快照（enabled / params；无运行字段）。
 
-     未进入会话也要能看到当前生效的 H / P / E / S（与 ``infer rtc`` 回读同一份，任何状态可用）；
+     未进入会话也要能看到当前完整策略配置中的 H / P / E / S；
     步号 / 预取计数等运行字段只在会话内上报（不在这里编造默认值）。
     """
     node = FakeNode()
@@ -2177,41 +2192,24 @@ def test_infers_rtc_status_without_session_reports_configured_params():
     assert snap["rtc"]["enabled"] is True
     for key in ("index", "remaining", "fetches", "last_chunk"):
         assert key not in snap["rtc"]
-    # 配置级写入（``infer rtc set`` 写的就是这一份，任何状态可用）后快照跟随
+    # 完整策略配置里的 RTC 改变后快照跟随
     node.base_cfg["policy"] = {"rtc": {"suffix_len": 7, "enabled": False}}
     snap = client.get("/v1/infers").json()
     assert snap["rtc"]["params"]["suffix_len"] == 7
     assert snap["rtc"]["enabled"] is False
 
 
-def test_infers_rtc_configure_and_status():
-    """RTC 参数：POST /v1/infers/rtc → infer rtc set → 应用到会话并反映在 status。"""
+def test_infers_has_no_standalone_rtc_write_endpoint():
+    """RTC 只随完整策略配置进入，不再暴露独立写端点。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
-    # 未进入推理会话：rtc → 409
-    assert client.post("/v1/infers/rtc", headers={"X-Lease-Id": lease}, json={"suffix_len": 5}).status_code == 409
-    assert client.post("/v1/infers", headers={"X-Lease-Id": lease}).status_code == 200
-    # 设置 RTC 参数（部分更新）：回执生效后的状态
-    r = client.post(
-        "/v1/infers/rtc",
-        headers={"X-Lease-Id": lease},
-        json={"suffix_len": 5, "aggregate_fn": "latest_only"},
+    assert (
+        client.post(
+            "/v1/infers/rtc", headers={"X-Lease-Id": lease, "content-type": "application/json"}, content="{}"
+        ).status_code
+        == 404
     )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "accepted"
-    assert body["rtc"]["params"]["suffix_len"] == 5
-    assert body["rtc"]["params"]["aggregate_fn"] == "latest_only"
-    # status 同步暴露 rtc（enabled / params / index / remaining / last_chunk）
-    snap = client.get("/v1/infers").json()
-    assert snap["rtc"]["params"]["suffix_len"] == 5
-    assert snap["rtc"]["enabled"] is True
-    assert CMD_INFER_RTC_SET in [getattr(c, "name", None) for c in node.session.pulled]
-    # 非法参数（负数）→ pydantic 422
-    assert client.post("/v1/infers/rtc", headers={"X-Lease-Id": lease}, json={"suffix_len": -1}).status_code == 422
-    assert client.delete("/v1/infers", params={"lease_id": lease}).status_code == 200
-    wait_node_state(node, NodeState.READY)
 
 
 def test_infers_connect_exposes_status():

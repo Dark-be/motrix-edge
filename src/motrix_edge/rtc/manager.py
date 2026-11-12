@@ -27,9 +27,8 @@
     ``P + S`` 用尽）时**在后台线程**拉下一块——控制环不阻塞，推理耗时期间由队列里的后缀段继续
     供电；响应回来时按**当时**的步号切分，推理期间已经走过的步自动落进 ``prefix``（真实过期步
     由 ``_index`` 与块首步之差算出，不必人工精确设定 P）；
-  - **运行期参数**：``configure``；``status`` 上报。**命令 / HTTP 入口（``infer rtc set`` /
-    ``POST /v1/infers/rtc``）与 ``status().rtc`` 字段随接线提交（#8）落地**，本包只提供参数校验与
-    运行状态。
+  - **参数与状态**：完整策略配置在构造时提供参数，``configure`` 供管理器内部测试与复用；
+    ``status`` 只读上报运行状态。
 
 关键关系：``P + E + S = H``（三段把一块切开）、``P + S < H``、``E > P``（执行段要长于推理耗时，
 否则每步都触发推理）、稳态重叠步数 ≈ ``min(S, E)``（真实值取决于响应到达时刻，上报为
@@ -56,7 +55,7 @@ import numpy as np
 
 from motrix_edge.rtc.base import DEFAULT_AGGREGATE_FN, as_action_chunk, chunk_step_action, get_aggregate_fn, split_lens
 
-# 代码缺省参数（edge.yml ``policy.rtc`` 段可覆盖；运行期可经 ``configure`` 改，命令入口见 #8）。
+# 代码缺省参数（edge.yml / 完整策略配置的 ``policy.rtc`` 段可覆盖）。
 DEFAULT_RTC_CONFIG = {
     "enabled": True,  # 关闭 → 每步一次推理只取块首步（无块缓存 / 无平滑）
     "action_horizon": 50,  # 块长上限 H：一次推理只取策略块的前 H 步（>= 1；实际取 min(H, 块长)）
@@ -93,7 +92,7 @@ def _snapshot(observation):
 def validate_params(params: dict) -> dict:
     """校验 RTC 参数（可部分）→ 规范化 ``dict``；未知键 / 非法值 → ``ValueError``。
 
-    供 ``infer rtc set`` 命令处理器（接线见 #8；回执 rejected）与 ``RTCManager.configure`` 共用。
+    供完整策略配置校验与 ``RTCManager.configure`` 共用。
     """
     if not isinstance(params, dict):
         raise ValueError("rtc params must be a JSON object")
@@ -270,7 +269,7 @@ class RTCManager:
         - 缩放结果不满足交叉约束（``E > P`` 等）→ 保持原参数。
 
         校准后 ``execution_horizon`` 回到缺省（= ``H - P - S`` 推导）：不把缩放后的绝对步数固化，
-        否则后续只改 H（``infer rtc set``）会与固化的 E 冲突而被校验拒绝。
+        否则后续只改 H 会与固化的 E 冲突而被校验拒绝。
 
         实测块长取 ``policy.observed_chunk_len``（客户端每次拿到块回填，见
         ``BasePolicyClient._note_chunk_len``）；``infer()`` 每步按需调用（幂等）。

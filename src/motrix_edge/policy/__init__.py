@@ -40,7 +40,7 @@ POLICY_REGISTRY = {
 # 元素字段：
 #   key         配置键（写入 base_cfg["policy"][key]；运行时经 infer config set / POST /v1/infers/config）
 #   label       展示名（前端表单标签）
-#   type        text | int | float | bool（校验 / 控件类型）
+#   type        text | int | float | bool | string_map | rtc（校验 / 控件类型）
 #   required    是否必填（缺失时前端提示；后端在设置时校验非空）
 #   runtime     会话内能否运行时修改（True = 会话内改**立即生效**——客户端每次请求现读；
 #               False = 握手级配置（只在进入会话 / 重连时随策略指令下发），会话内改需退出重进；
@@ -166,6 +166,15 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "runtime": False,
         "default": None,
         "help": "Edge 相机名 → 推理端图像特征键名；键同时选择策略上传的相机。",
+    },
+    {
+        "key": "rtc",
+        "label": "实时动作块 rtc",
+        "type": "rtc",
+        "required": False,
+        "runtime": False,
+        "default": None,
+        "help": "策略执行的实时动作块参数；随完整策略配置进入会话，会话内不可单独修改。",
     },
 ]
 

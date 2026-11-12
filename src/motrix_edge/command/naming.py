@@ -29,7 +29,6 @@ from dataclasses import dataclass
 #   node reset          节点复位 / ERROR 恢复 → IDLE
 #   infer rollout       单步推理闭环（会话内消费）
 #   infer connect       连接 + 启动异步预热（会话内消费；立即回执，可被急停/退出中断）
-#   infer rtc           查询 / 设置 RTC 参数（实时动作块管理器；配置级，任何状态可用）
 #   infer model         查询 / 设置策略模型路径（lerobot 类策略；运行时提供，配置级）
 #   infer config        查询 / 设置策略配置项（每个策略有自己的独立配置项；配置级）
 #   capture sync        同步采集元信息到机器人进程（会话内消费）
@@ -67,8 +66,6 @@ CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous
 CMD_INFER_ROLLOUT_STOP = "infer rollout stop"  # 停止持续推理（回到会话 READY，不退会话也不断策略连接）
 CMD_INFER_CONNECT = "infer connect"  # 连接 + 启动异步预热（推理会话内消费；立即回执，重复调用幂等）
 
-CMD_INFER_RTC = "infer rtc"  # 查询 RTC 参数与运行状态（内存态 policy.rtc）
-CMD_INFER_RTC_SET = "infer rtc set"  # 设置 RTC 参数（位置参数 json，JSON 对象；内存态 policy.rtc）
 CMD_INFER_MODEL = "infer model"  # 查询远端部署名（内存态 policy.deployment，lerobot-remote）
 CMD_INFER_MODEL_SET = "infer model set"  # 设置远端部署名（位置参数 path 位置；运行时提供，不写回 yaml）
 CMD_INFER_CONFIG = "infer config"  # 查询当前策略的配置项（schema 清单 + 当前值 + 缺失必填项）

@@ -339,7 +339,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
     **预热进行中一律 409**（与 `warmup_required` 无关）：策略客户端的契约是「可跨线程调用，同一时刻
     至多一个请求」（`rtc/manager.py`）——预热线程与 rollout 并发会破坏 ws / zenoh 的一问一答
     的单飞取块，并并发 `adapter.observe()`。预热期间允许的其它命令（`infer config` /
-    `infer rtc` / 录制 / status）都**不发起策略请求**，因此不在此限。
+    录制 / status）都**不发起策略请求**，因此不在此限。
 -   **异步**：预热可能持续几十秒～几分钟（加载 checkpoint / 首帧推理），占住会话循环就会把急停、
     退出、状态查询一起挡住（node 主循环在任务运行期间不 poll 普通命令）。故 `infer connect` 把它
     交给**工作线程**并**立刻回执**：`started`（本次是否新启动）/ `warming` / `warmed_up` /

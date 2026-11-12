@@ -34,7 +34,6 @@ from motrix_edge.command import (
     CMD_INFER_CONNECT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_ROLLOUT_STOP,
-    CMD_INFER_RTC_SET,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
 )
@@ -45,7 +44,6 @@ from motrix_edge.server.schemas import (
     InferConfigRequest,
     InferEnterRequest,
     InferRolloutRequest,
-    InferRTCRequest,
     InferSyncRequest,
 )
 from motrix_edge.server.status import infer_snapshot
@@ -80,8 +78,9 @@ def build_router(services: Services) -> APIRouter:
         """进入推理会话（READY → ACTIVE）：连接推理会话并启动任务循环，需先持有有效租约。
 
         请求体可选：``policy_type`` 指定推理策略（缺省用配置 policy.type）、``config`` 指定
-        **该策略的配置项**（OpenPI 端点为 ``host`` / ``port``，Lerobot Remote 端点为
-        ``endpoint``，另含各自 prompt / deployment 等）；非法键、类型不符、越界或必填项为空 → 400。
+        **该策略的完整配置项**（包括嵌套 ``rtc``；OpenPI 端点为 ``host`` / ``port``，
+        Lerobot Remote 端点为 ``endpoint``，另含各自 prompt / deployment 等）；非法键、类型不符、
+        越界或必填项为空 → 400。
         """
         policy_type = req.policy_type if req is not None else None
         config = req.config if req is not None else None
@@ -154,18 +153,6 @@ def build_router(services: Services) -> APIRouter:
         提交本端点（Edge 不自动 sync；也不在状态里代报默认值）。受控操作：须持有租约。
         """
         return accepted(_commands().submit(CMD_CAPTURE_SYNC, {"meta": req.meta}, lease_id=x_lease_id))
-
-    @router.post("/v1/infers/rtc")
-    def infers_rtc(req: InferRTCRequest, x_lease_id: str | None = Header(default=None)):
-        """运行期设置 RTC（实时动作块）参数（``infer rtc set``）。
-
-        body 为参数对象（可部分：enabled / action_horizon / prefix_len / execution_horizon /
-        suffix_len / aggregate_fn）→ 写入内存态 ``policy.rtc`` 并应用到正在运行的
-        RTCManager（下一块起生效）；非法参数或违反交叉约束（P + S < H、E > P）→ 400。
-        受控操作：须持有租约。
-        """
-        params = {key: value for key, value in req.model_dump().items() if value is not None}
-        return accepted(_commands().submit(CMD_INFER_RTC_SET, {"json": params}, lease_id=x_lease_id))
 
     @router.post("/v1/infers/config")
     def infers_config(req: InferConfigRequest, x_lease_id: str | None = Header(default=None)):
