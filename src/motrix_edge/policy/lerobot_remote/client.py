@@ -318,9 +318,7 @@ class LerobotRemoteClient(BasePolicyClient):
                 requested_interval = 1.0 / self._infer_freq
                 server_interval = float(caps.action_interval)
                 if not math.isfinite(server_interval) or server_interval <= 0:
-                    raise ValueError(
-                        f"lerobot-remote: server declares invalid action_interval={server_interval!r}"
-                    )
+                    raise ValueError(f"lerobot-remote: server declares invalid action_interval={server_interval!r}")
                 if not math.isclose(requested_interval, server_interval, rel_tol=1e-3, abs_tol=1e-6):
                     raise ValueError(
                         "lerobot-remote: policy.infer_freq does not match server action_interval: "

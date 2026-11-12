@@ -55,16 +55,16 @@ src/lerobot/        # vendored 新版 lerobot 子集（Apache-2.0）：
 
 ## BasePolicyClient
 
-| 成员                                     | 语义                                                                                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `connected`                              | 是否已连上推理节点（委托传输层）                                                                                       |
-| `connect()` / `ensure_connected()`       | 显式连接 / 惰性连接                                                                                                    |
-| `prepare(observation)`                   | 可选预热（下发策略指令 / 触发服务端加载模型）；无实现 → no-op                                                          |
-| `bind_adapter(..., camera_names, arm_names, state_dim_per_arm)` | 会话进入时绑定 adapter 的全局观测能力，并校验 policy 选择的相机 / 机械臂是其子集                              |
-| `infer_chunk(observation, index=None)`   | **策略唯一职责**：真实请求一次推理，返回 `ActionChunk`（含首步绝对步号）                                               |
-| `observed_chunk_len`                     | **块长**（最近一次服务端返回的步数；lerobot-remote 直接取服务端声明的 `caps.execution_steps`），rtc 据此校准块长上限 H |
-| `reset()` / `disconnect()`               | 复位策略状态 / 断开连接（幂等）                                                                                        |
-| `requires_prompt` / `prompt`             | 是否语言条件策略 + 当前文本指令（仅语言条件策略使用）                                                                  |
+| 成员                                                            | 语义                                                                                                                   |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `connected`                                                     | 是否已连上推理节点（委托传输层）                                                                                       |
+| `connect()` / `ensure_connected()`                              | 显式连接 / 惰性连接                                                                                                    |
+| `prepare(observation)`                                          | 可选预热（下发策略指令 / 触发服务端加载模型）；无实现 → no-op                                                          |
+| `bind_adapter(..., camera_names, arm_names, state_dim_per_arm)` | 会话进入时绑定 adapter 的全局观测能力，并校验 policy 选择的相机 / 机械臂是其子集                                       |
+| `infer_chunk(observation, index=None)`                          | **策略唯一职责**：真实请求一次推理，返回 `ActionChunk`（含首步绝对步号）                                               |
+| `observed_chunk_len`                                            | **块长**（最近一次服务端返回的步数；lerobot-remote 直接取服务端声明的 `caps.execution_steps`），rtc 据此校准块长上限 H |
+| `reset()` / `disconnect()`                                      | 复位策略状态 / 断开连接（幂等）                                                                                        |
+| `requires_prompt` / `prompt`                                    | 是否语言条件策略 + 当前文本指令（仅语言条件策略使用）                                                                  |
 
 `index` = rtc 传入的**绝对步号**：按步号组织请求的策略（lerobot-remote 用它作 `start_index`，
 `TimedObservation.timestep`）使用；openpi 忽略它，只用于回填 `start_index`。
@@ -114,18 +114,18 @@ connect 时现算，端点**随会话固化**（改端点 = 退出会话改配�
 
 ### 汇总
 
-|                  | `OpenPIClient`                                   | `LerobotRemoteClient`                                |
-| ---------------- | ------------------------------------------------ | ---------------------------------------------------- |
-| 注册类型         | `openpi`                                         | `lerobot-remote`                                     |
-| 传输             | websocket（msgpack-numpy）                       | zenoh（`lerobot/inference/v1`）                      |
-| 观测 wire        | `{"state", "images", "prompt"?}`（官方 flat）    | msgpack 信封（按服务端声明的特征名 + 图像编码）      |
-| 响应 wire        | `{"actions": [H, dim]}`                          | `canonical_actions[H, A]`（float32）                 |
-| 图像尺寸 / 几何  | `image_size`（默认 224×224）**letterbox**        | 服务端 `caps.features[i].shape`，端侧 **letterbox**  |
+|                  | `OpenPIClient`                                                 | `LerobotRemoteClient`                                |
+| ---------------- | -------------------------------------------------------------- | ---------------------------------------------------- |
+| 注册类型         | `openpi`                                                       | `lerobot-remote`                                     |
+| 传输             | websocket（msgpack-numpy）                                     | zenoh（`lerobot/inference/v1`）                      |
+| 观测 wire        | `{"state", "images", "prompt"?}`（官方 flat）                  | msgpack 信封（按服务端声明的特征名 + 图像编码）      |
+| 响应 wire        | `{"actions": [H, dim]}`                                        | `canonical_actions[H, A]`（float32）                 |
+| 图像尺寸 / 几何  | `image_size`（默认 224×224）**letterbox**                      | 服务端 `caps.features[i].shape`，端侧 **letterbox**  |
 | 相机名           | `camera_map` 显式映射后的推理键名（缺省兼容边缘名 / metadata） | **服务端特征名**（短名自动匹配 / `camera_map` 覆盖） |
-| 块长             | **实测**（`observed_chunk_len`）→ rtc 校准上限 H | 服务端声明 `caps.execution_steps`                    |
-| 文本指令         | **必需**（`requires_prompt = True`）             | 不使用（ACT 非语言条件；`task` 可空）                |
-| 输出动作语义     | 关节空间                                         | 关节空间（由 `action_layout` 声明）                  |
-| 连接后需重发策略 | 不涉及                                           | admission 每连接一次（重连需重新 admit）             |
+| 块长             | **实测**（`observed_chunk_len`）→ rtc 校准上限 H               | 服务端声明 `caps.execution_steps`                    |
+| 文本指令         | **必需**（`requires_prompt = True`）                           | 不使用（ACT 非语言条件；`task` 可空）                |
+| 输出动作语义     | 关节空间                                                       | 关节空间（由 `action_layout` 声明）                  |
+| 连接后需重发策略 | 不涉及                                                         | admission 每连接一次（重连需重新 admit）             |
 
 ### 图像约定（两个策略一致）
 

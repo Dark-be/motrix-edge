@@ -1967,12 +1967,12 @@ def test_infers_status_exposes_policy_config():
         False,
         False,
         False,
-            False,
-            False,
-            False,
-            False,
-            True,
-            True,
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
     ]  # 公共项会话级（进入会话时固化）
     assert cfg["runtime_keys"] == ["image_size", "prompt"]  # 会话内即时生效的键
     assert next(item for item in cfg["items"] if item["key"] == "prompt")["type"] == "text"
