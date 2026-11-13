@@ -124,6 +124,7 @@ class Simulation:
         command_id=None,
         operation="move",
         joint_offsets=None,
+        gripper_offsets=None,
     ) -> dict:
         if arms is not None and arms != ["right"]:
             raise ValueError("arms must be ['right']")
@@ -132,12 +133,19 @@ class Simulation:
             raise ValueError(f"supported layouts: {', '.join(layouts)}")
         values = np.asarray(action if action is not None else [], dtype=float)
         offsets = None if joint_offsets is None else np.asarray(joint_offsets, dtype=float).reshape(-1)
+        gripper_offset_values = (
+            None if gripper_offsets is None else np.asarray(gripper_offsets, dtype=float).reshape(-1)
+        )
         if operation == "move" and (values.shape != (layouts[layout],) or not np.all(np.isfinite(values))):
             raise ValueError("invalid action dimensions or nonfinite values")
         if offsets is not None and (offsets.shape != (6,) or not np.all(np.isfinite(offsets))):
             raise ValueError("joint_offsets must contain 6 finite values for arms ['right']")
         if offsets is not None and layout == "gripper":
             raise ValueError("joint_offsets require a joint or pose motion segment")
+        if gripper_offset_values is not None and (
+            gripper_offset_values.shape != (1,) or not np.all(np.isfinite(gripper_offset_values))
+        ):
+            raise ValueError("gripper_offsets must contain 1 finite value for arms ['right']")
         if command_id is not None and (not isinstance(command_id, str) or not 0 < len(command_id) <= 128):
             raise ValueError("command_id must be a nonempty string of at most 128 characters")
         key = command_id or uuid4().hex
@@ -146,6 +154,7 @@ class Simulation:
             "layout": layout,
             "action": values.tolist(),
             "joint_offsets": None if offsets is None else offsets.tolist(),
+            "gripper_offsets": None if gripper_offset_values is None else gripper_offset_values.tolist(),
         }
         with self.lock:
             if not self.healthy():
@@ -169,6 +178,8 @@ class Simulation:
                     resolved_layout = "joint" if layout == "pose" else "joint+gripper"
                 if layout != "gripper" and offsets is not None:
                     resolved_action[:6] += offsets
+                if "gripper" in layout and gripper_offset_values is not None:
+                    resolved_action[-1] = np.clip(resolved_action[-1] + gripper_offset_values[0], 0.0, 1.0)
                 if layout != "gripper" and np.any(
                     (resolved_action[:6] < self.limits[:, 0]) | (resolved_action[:6] > self.limits[:, 1])
                 ):

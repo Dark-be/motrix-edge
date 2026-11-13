@@ -55,6 +55,7 @@ test("every checked-in preset has metadata and is accepted as one policy config"
         { key: "warmup_required", label: "Warmup", type: "bool" },
         { key: "action_layout", label: "Action", type: "text" },
         { key: "joint_offsets", label: "Offsets", type: "float_vector_map", vector_len: 6 },
+        { key: "gripper_offsets", label: "Gripper offsets", type: "float_map" },
         { key: "arm_map", label: "Arms", type: "string_map" },
         { key: "camera_map", label: "Cameras", type: "string_map" },
         { key: "rtc", label: "RTC", type: "rtc", required: true },
@@ -124,6 +125,7 @@ test("default three-button preset uses slow local pose dispatch", () => {
     assert.deepEqual(preset.arm_map, { right: "observation.state" });
     assert.deepEqual(preset.camera_map, { cam_head: "observation.images.cam_head" });
     assert.deepEqual(preset.joint_offsets.right, [0, 0, 0, 0, 0, 0]);
+    assert.equal(preset.gripper_offsets.right, 0.5);
     assert.deepEqual(preset.rtc, {
         enabled: true,
         action_horizon: 10,

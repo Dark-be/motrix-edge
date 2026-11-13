@@ -34,6 +34,7 @@ from motrix_edge.adapter.http_contract import (
     FIELD_ACTION,
     FIELD_ARMS,
     FIELD_CAMERAS,
+    FIELD_GRIPPER_OFFSETS,
     FIELD_JOINT_OFFSETS,
     FIELD_LAYOUT,
     FIELD_TELEOP_ENABLED,
@@ -475,6 +476,26 @@ def test_joint_offsets_are_forwarded_without_modifying_pose_action():
                 FIELD_ACTION: action.tolist(),
                 FIELD_LAYOUT: "pose",
                 FIELD_JOINT_OFFSETS: offsets.tolist(),
+                FIELD_ARMS: ["right"],
+            },
+        )
+    ]
+
+
+def test_gripper_offsets_are_forwarded_without_modifying_action():
+    http = _FakeHttp()
+    adapter = _adapter(http)
+    action = np.arange(7, dtype=np.float64)
+
+    adapter.rollout(action, layout="pose+gripper", arms=["right"], gripper_offsets=[0.2])
+
+    assert http.posts == [
+        (
+            PATH_ROLLOUT,
+            {
+                FIELD_ACTION: action.tolist(),
+                FIELD_LAYOUT: "pose+gripper",
+                FIELD_GRIPPER_OFFSETS: [0.2],
                 FIELD_ARMS: ["right"],
             },
         )

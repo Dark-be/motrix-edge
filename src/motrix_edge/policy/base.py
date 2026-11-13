@@ -61,6 +61,13 @@ class BasePolicyClient:
             for arm, offset in self.joint_offsets.items():
                 if not arm.strip() or offset.shape != (6,) or not np.all(np.isfinite(offset)):
                     raise ValueError(f"policy.joint_offsets.{arm} must contain exactly 6 finite numbers")
+        self.gripper_offsets = {
+            str(arm): float(offset) for arm, offset in (self.policy_config.get("gripper_offsets") or {}).items()
+        }
+        if self.gripper_offsets:
+            for arm, offset in self.gripper_offsets.items():
+                if not arm.strip() or not np.isfinite(offset):
+                    raise ValueError(f"policy.gripper_offsets.{arm} must be a finite number")
         self.camera_map = _string_map(self.policy_config, "camera_map")
         self.arm_map = _string_map(self.policy_config, "arm_map")
         self._adapter_cameras: list[str] = []
@@ -144,10 +151,12 @@ class BasePolicyClient:
                 f"policy.arm_map requests unavailable Edge arm(s) {missing_arms}; available: {self._adapter_arms}"
             )
         available_offset_arms = self.rollout_arms or []
-        missing_offset_arms = [name for name in self.joint_offsets if name not in available_offset_arms]
+        missing_offset_arms = [
+            name for name in {*self.joint_offsets, *self.gripper_offsets} if name not in available_offset_arms
+        ]
         if missing_offset_arms:
             raise ValueError(
-                f"policy.joint_offsets requests unavailable policy arm(s) {missing_offset_arms}; "
+                f"policy offsets request unavailable policy arm(s) {missing_offset_arms}; "
                 f"available: {available_offset_arms}"
             )
 
@@ -178,6 +187,15 @@ class BasePolicyClient:
         if not selected:
             raise ValueError("policy.joint_offsets requires named rollout arms")
         return np.concatenate([self.joint_offsets.get(arm, np.zeros(6, dtype=float)) for arm in selected])
+
+    def gripper_offsets_for_arms(self, arms: list[str] | None = None) -> np.ndarray | None:
+        """Flatten configured final-gripper offsets in the action's policy arm order."""
+        if not self.gripper_offsets:
+            return None
+        selected = arms or self.rollout_arms
+        if not selected:
+            raise ValueError("policy.gripper_offsets requires named rollout arms")
+        return np.asarray([self.gripper_offsets.get(arm, 0.0) for arm in selected], dtype=float)
 
     def infer_chunk(self, observation: dict, index: int | None = None):
         """输入观测，返回**一次推理的原始动作块**（策略唯一职责：取推理结果）。

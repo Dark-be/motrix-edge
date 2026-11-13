@@ -61,6 +61,7 @@ def test_items_are_endpoint_first_then_common_then_policy(schema_policy):
         "warmup_required",
         "action_layout",
         "joint_offsets",
+        "gripper_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -156,6 +157,14 @@ def test_joint_offsets_validate_six_finite_numbers_per_arm():
     for value in ({}, {"right": [0] * 5}, {"right": [0, 0, 0, 0, 0, float("inf")]}, {"right": [0] * 5 + [True]}):
         with pytest.raises(ValueError, match="joint_offsets"):
             set_policy_config(cfg, "openpi", {"joint_offsets": value})
+
+
+def test_gripper_offsets_validate_one_finite_number_per_arm():
+    cfg = {"policy": {}}
+    assert set_policy_config(cfg, "openpi", {"gripper_offsets": {"right": 0.2}}) == {"gripper_offsets": {"right": 0.2}}
+    for value in ({}, [], {"": 0.1}, {"right": True}, {"right": "0.1"}, {"right": float("nan")}):
+        with pytest.raises(ValueError, match="gripper_offsets"):
+            set_policy_config(cfg, "openpi", {"gripper_offsets": value})
 
 
 def test_rtc_is_validated_as_nested_policy_config():

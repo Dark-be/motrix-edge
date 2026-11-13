@@ -213,6 +213,18 @@ def _coerce_policy_config_value(key: str, item: dict, raw):
             if not all(math.isfinite(item) for item in numbers):
                 raise ValueError(f"{key}.{source} must contain exactly {width} finite numbers")
             value[name] = numbers
+    elif kind == "float_map":
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError(f"{key} must be a non-empty mapping of finite numbers, got {raw!r}")
+        value = {}
+        for source, number in raw.items():
+            name = source.strip() if isinstance(source, str) else ""
+            if not name or isinstance(number, bool) or not isinstance(number, (int, float)):
+                raise ValueError(f"{key}.{source} must be a finite number")
+            converted = float(number)
+            if not math.isfinite(converted):
+                raise ValueError(f"{key}.{source} must be a finite number")
+            value[name] = converted
     elif kind == "rtc":
         if not isinstance(raw, dict):
             raise ValueError(f"{key} must be an RTC mapping, got {raw!r}")

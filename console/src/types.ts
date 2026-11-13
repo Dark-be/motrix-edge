@@ -18,7 +18,7 @@ export interface PolicyConfigItem {
     /** 展示名（表单标签） */
     label: string;
     /** 控件 / 校验类型；map 类型在 YAML 中表示按名称索引的映射。 */
-    type: "text" | "int" | "float" | "bool" | "string_map" | "float_vector_map" | "rtc";
+    type: "text" | "int" | "float" | "bool" | "string_map" | "float_map" | "float_vector_map" | "rtc";
     /** 是否必填（缺失时 `missing` 会列出该项；推理 / 录制按钮据此门控） */
     required?: boolean;
     /** 会话内改动是否**立即生效**：true = 策略每次请求现读；false = 会话级 / 握手级（退出重进才生效） */

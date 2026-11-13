@@ -12,6 +12,8 @@ policy:
   # Final absolute joint target offsets in J1..J6 order (rad).
   joint_offsets:
     right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  gripper_offsets:
+    right: 0.0
   arm_map:
     right: state
   camera_map:

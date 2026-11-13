@@ -296,6 +296,10 @@ class ActionRequest(BaseModel):
         default=None,
         description="最终关节目标偏置：按 arms 顺序逐臂 J1～J6（rad），在 pose IK 后应用",
     )
+    gripper_offsets: list[float] | None = Field(
+        default=None,
+        description="最终夹爪目标偏置：按 arms 顺序逐臂一个归一化值，仅用于绝对 gripper",
+    )
 
 
 class TeleopRequest(BaseModel):
@@ -596,6 +600,8 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             kwargs = {"layout": req.layout, "arms": req.arms}
             if req.joint_offsets is not None:
                 kwargs["joint_offsets"] = req.joint_offsets
+            if req.gripper_offsets is not None:
+                kwargs["gripper_offsets"] = req.gripper_offsets
             env.robot_execute(req.action, **kwargs)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
@@ -622,6 +628,8 @@ def create_app(env, host: str | None = None, port: int | None = None) -> FastAPI
             kwargs = {"layout": req.layout, "arms": req.arms}
             if req.joint_offsets is not None:
                 kwargs["joint_offsets"] = req.joint_offsets
+            if req.gripper_offsets is not None:
+                kwargs["gripper_offsets"] = req.gripper_offsets
             if req.command_id:
                 kwargs["command_id"] = req.command_id
             receipt = env.robot_rollout(req.action, **kwargs)

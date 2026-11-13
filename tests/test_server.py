@@ -152,6 +152,7 @@ def test_health_returns_identity_and_version():
         "warmup_required",
         "action_layout",
         "joint_offsets",
+        "gripper_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -164,6 +165,7 @@ def test_health_returns_identity_and_version():
         "warmup_required",
         "action_layout",
         "joint_offsets",
+        "gripper_offsets",
         "arm_map",
         "camera_map",
         "rtc",
@@ -1994,25 +1996,14 @@ def test_infers_status_exposes_policy_config():
         "warmup_required",
         "action_layout",
         "joint_offsets",
+        "gripper_offsets",
         "arm_map",
         "camera_map",
         "rtc",
         "prompt",
         "image_size",
     ]  # 端点公共项在前
-    assert [item["runtime"] for item in cfg["items"]] == [
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
-        False,
-        True,
-        True,
-    ]  # 公共项会话级（进入会话时固化）
+    assert [item["runtime"] for item in cfg["items"]] == [False] * 10 + [True, True]
     assert cfg["runtime_keys"] == ["image_size", "prompt"]  # 会话内即时生效的键
     assert next(item for item in cfg["items"] if item["key"] == "prompt")["type"] == "text"
     # 会话内设置 prompt（走 infer config set 写路径）→ 写入内存态 → 缺失清空

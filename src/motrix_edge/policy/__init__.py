@@ -161,6 +161,16 @@ POLICY_COMMON_CONFIG_ITEMS: list[dict] = [
         "作用于绝对 joint 原值或 pose 逆解后的最终关节目标，delta 布局不应用；进入会话后固化。",
     },
     {
+        "key": "gripper_offsets",
+        "label": "最终夹爪偏置 gripper_offsets",
+        "type": "float_map",
+        "required": False,
+        "runtime": False,
+        "default": None,
+        "help": "Edge 机械臂名 → 最终夹爪目标偏置（归一化值）；绝对 gripper 相加后钳制到 [0,1]，"
+        "gripper_delta 不应用；进入会话后固化。",
+    },
+    {
         "key": "arm_map",
         "label": "机械臂映射 arm_map",
         "type": "string_map",

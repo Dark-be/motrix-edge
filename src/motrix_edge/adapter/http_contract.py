@@ -106,6 +106,7 @@ PATH_CAPTURE_CANCEL = "/v1/capture/cancel"  # 取消当前采集（停止并丢�
 # ---- 请求 body 字段 ----
 FIELD_ACTION = "action"  # execute / rollout：动作数据（按 layout 的段序逐臂块拼接）
 FIELD_JOINT_OFFSETS = "joint_offsets"  # 最终关节目标偏置：按 arms 顺序逐臂 6 维（rad）
+FIELD_GRIPPER_OFFSETS = "gripper_offsets"  # 最终夹爪目标偏置：按 arms 顺序逐臂 1 维（归一化）
 FIELD_ARMS = "arms"  # 作用域：本次控制的臂名列表（其余臂保持原目标）
 FIELD_LAYOUT = "layout"  # rollout / execute：下发布局（每臂块内的段序列，如 joint+gripper）
 FIELD_ACTION_LAYOUTS = "action_layouts"  # robot：本机器人支持的 layout（name / per_arm / segments）
@@ -213,6 +214,7 @@ __all__ = [
     "DEFAULT_TELEOP_MODE",
     "FIELD_ACTION",
     "FIELD_JOINT_OFFSETS",
+    "FIELD_GRIPPER_OFFSETS",
     "FIELD_ACTION_DIM",
     "FIELD_ACTION_DIMS",
     "FIELD_ACTION_LAYOUTS",

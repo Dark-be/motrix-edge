@@ -644,6 +644,7 @@ class RobotAdapter(ABC):
         layout: str | None = None,
         arms: list[str] | None = None,
         joint_offsets: Action | None = None,
+        gripper_offsets: Action | None = None,
     ) -> None:
         """直接下发一维 array-like 动作指令（raw 指令，立即执行）。
 
@@ -750,6 +751,7 @@ class RobotAdapter(ABC):
         layout: str | None = None,
         arms: list[str] | None = None,
         joint_offsets: Action | None = None,
+        gripper_offsets: Action | None = None,
     ) -> bool:
         """接收一维 array-like 模型动作，按 capabilities.action_dim 解析并推进一帧。
 
@@ -759,6 +761,7 @@ class RobotAdapter(ABC):
 
         ``joint_offsets`` 按 ``arms`` 顺序每臂 6 维，在机器人进程完成 joint/pose → 最终关节目标后
         应用；``None`` 表示不修正。
+        ``gripper_offsets`` 按 ``arms`` 顺序每臂 1 维，只修正绝对 gripper 最终目标。
 
         返回是否**已下发**：``False`` = 进程侧拒绝本拍（遥操作 / 人工接管中，见
         `wiki/design/robot_pipeline_teleop.md`），调用方应跳过本拍、下拍重试（遥操作关闭后

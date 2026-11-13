@@ -620,12 +620,26 @@ class BaseRobot:
             raise ValueError(f"joint_offsets must contain {expected} finite values for arms {scope}")
         return values
 
+    def validate_gripper_offsets(self, gripper_offsets, arms: list[str] | None = None) -> np.ndarray | None:
+        """Validate and flatten final-gripper offsets in the request arm order."""
+        if gripper_offsets is None:
+            return None
+        names = self.state_arms()
+        scope = list(names) if arms is None else [str(arm) for arm in arms]
+        if not scope or len(set(scope)) != len(scope) or any(arm not in names for arm in scope):
+            raise ValueError(f"{self.name}: arms must be a nonempty unique subset of {names} (got {arms})")
+        values = np.asarray(gripper_offsets, dtype=np.float64).reshape(-1)
+        if values.shape != (len(scope),) or not np.all(np.isfinite(values)):
+            raise ValueError(f"gripper_offsets must contain {len(scope)} finite values for arms {scope}")
+        return values
+
     def apply_layout(
         self,
         action,
         layout: str | None = None,
         arms: list[str] | None = None,
         joint_offsets=None,
+        gripper_offsets=None,
     ) -> None:
         """按 ``layout`` / ``arms`` 写目标。
 
@@ -637,6 +651,7 @@ class BaseRobot:
         """
         plan = self.plan_layout(action, layout, arms)
         final_offsets = self.validate_joint_offsets(joint_offsets, plan.scope)
+        final_gripper_offsets = self.validate_gripper_offsets(gripper_offsets, plan.scope)
         joint_target = self._joint_target_snapshot()
         gripper_target = self._gripper_target_snapshot()
         offsets: dict[str, tuple[int, int]] = {}
@@ -684,6 +699,8 @@ class BaseRobot:
                 value = float(plan.blocks[row][offset])
                 if gripper_kind == self.ACTION_SPACE_GRIPPER_DELTA:
                     value += gripper_target[index]
+                elif final_gripper_offsets is not None:
+                    value += final_gripper_offsets[row]
                 gripper_target[index] = float(np.clip(value, 0.0, 1.0))
         self.joint_target = joint_target
         self.gripper_target = gripper_target
@@ -696,6 +713,7 @@ class BaseRobot:
         layout: str | None = None,
         arms: list[str] | None = None,
         joint_offsets=None,
+        gripper_offsets=None,
     ):
         """直接下发动作指令（程控抢回：会结束遥操作）：按 ``layout`` 写目标。
 
@@ -704,7 +722,7 @@ class BaseRobot:
         - ``arms``（缺省 = 全部臂）：只写这些臂，其余臂目标原样保留；给出时 ``action`` 维度按
           所选臂算（要「只控部分臂」必须显式给 ``arms``）。
         """
-        self.apply_layout(action, layout, arms, joint_offsets)
+        self.apply_layout(action, layout, arms, joint_offsets, gripper_offsets)
         self.disable_teleop()  # 仅成功落地后抢回；非法动作 / IK 失败保持原遥操作状态
 
     def rollout(
@@ -714,6 +732,7 @@ class BaseRobot:
         layout: str | None = None,
         arms: list[str] | None = None,
         joint_offsets=None,
+        gripper_offsets=None,
     ) -> bool:
         """推理闭环：遥操作进行中则拒绝（返回 False）。
 
@@ -724,7 +743,13 @@ class BaseRobot:
         if self.teleop_enabled:
             debug_print(self.name, "rollout refused: teleop (human takeover) active.", "WARNING")
             return False
-        self.execute(action, layout=layout, arms=arms, joint_offsets=joint_offsets)
+        self.execute(
+            action,
+            layout=layout,
+            arms=arms,
+            joint_offsets=joint_offsets,
+            gripper_offsets=gripper_offsets,
+        )
         return True
 
     def safe_stop(self):

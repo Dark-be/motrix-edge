@@ -245,6 +245,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 端点项按策略独立声明：`openpi` 使用 `host` / `port`，`lerobot-remote` 使用 Zenoh `endpoint`；
 三者不作为跨策略兼容输入。真正的公共项是 `warmup_required`（预热门控，缺省 true）、
 `action_layout`（模型动作布局，缺省 `joint`）、`joint_offsets`（最终关节目标偏置）、
+`gripper_offsets`（最终夹爪目标偏置）、
 `camera_map` 与 `arm_map`（Edge 名称到推理端
 特征键名）。这些配置都与策略自身项**完全同级**，使用同一张
 表单与同一通道；端点项和公共项也是**会话级**配置
@@ -285,6 +286,9 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
         layout 限制，也不会为了修正关节而修改 TCP 目标、增加 IK 失败。纯 `*_delta` 只表达差量，
         坐标常量偏置不参与，避免每拍累计。原始推理块和 RTC 缓存不被改写。未来若需要修改 TCP
         目标，使用独立的 `pose_offsets` 契约，不与关节偏置复用。
+    -   公共项 `gripper_offsets`（最终夹爪目标偏置）：`Edge 臂名 → 有限标量`，单位与策略夹爪动作
+        一致（归一化 `[0, 1]`）。机器人进程只对绝对 `gripper` 段相加并把最终目标钳制到 `[0, 1]`；
+        `gripper_delta` 不应用常量偏置，避免逐拍累积。没有夹爪段的布局忽略该配置。
 -   运行时写入内存态 `base_cfg["policy"]`（不写回 yaml），按策略 schema 白名单校验（类型不符 /
     `min`–`max` 越界 / 必填为空 → 400；**空值 `null` 或空串 = 清除该项回到缺省**，必填项空值 →
     400；`int` 项只接受整数，`bool` / 带小数的浮点 → 400，不静默截断）；**先全量校验通过才写入**
@@ -301,6 +305,7 @@ connect()   →  DESCRIBE 查询（发现唯一 ready 的 deployment）
 | `warmup_required`          | 会话（InferSession） | 未预热时是否允许 `infer rollout`（缺省 true = 不允许，先 `infer connect`）                  |
 | `action_layout`            | 会话（InferSession） | 模型输出动作语义，如绝对 `joint` 或叠加机器人 target 的 `joint_delta`                       |
 | `joint_offsets`            | 策略客户端 + 机器人  | 按臂修正 joint 原值或 pose IK 后的最终关节目标（J1 ～ J6）；夹爪不变                        |
+| `gripper_offsets`          | 策略客户端 + 机器人  | 按臂修正绝对 gripper 的最终归一化目标并钳制到 `[0, 1]`；delta 不应用                        |
 | `observation_layout`       | LerobotActClient     | `qpos` 或 `concat(qpos, qpos_err)`；误差必须由 Robot 观测显式提供                           |
 | `prompt`（openpi）         | 服务端（每帧）       | 语言条件：帧里带就用帧里的，缺了才由 checkpoint 的 `default_prompt` 兜底，随后逐帧 tokenize |
 | `image_size`（openpi）     | **客户端**           | **端侧上传前的 letterbox 压缩目标**（省带宽 / 省端侧算力）；模型端按 checkpoint 尺寸兜底    |

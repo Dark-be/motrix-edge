@@ -95,6 +95,19 @@ def test_policy_joint_offsets_follow_policy_arm_order():
     np.testing.assert_allclose(actual[6:], [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
 
 
+def test_policy_gripper_offsets_follow_policy_arm_order_and_default_to_zero():
+    client = BasePolicyClient(
+        {
+            "action_layout": "joint+gripper",
+            "arm_map": {"right": "right_state", "left": "left_state"},
+            "gripper_offsets": {"left": 0.15},
+        }
+    )
+    client.bind_adapter(arm_names=["left", "right"], state_dim_per_arm=7)
+
+    np.testing.assert_allclose(client.gripper_offsets_for_arms(), [0.0, 0.15])
+
+
 def test_resize_with_pad_center_pads():
     img = np.zeros((100, 200, 3), dtype=np.uint8)
     out = resize_with_pad(img, 224, 224)

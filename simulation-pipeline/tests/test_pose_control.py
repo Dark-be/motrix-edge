@@ -81,6 +81,24 @@ def test_joint_offsets_are_checked_against_final_joint_limits(tmp_path):
     assert not sim.commands
 
 
+@pytest.mark.parametrize("layout", ["joint+gripper", "pose+gripper"])
+def test_gripper_offset_applies_to_absolute_target_and_clips(tmp_path, layout):
+    sim = _simulation(tmp_path)
+    expected = np.array([0.1, 0.45, -0.75, 0.05, 0.15, -0.05])
+    motion = expected if layout.startswith("joint") else sim.kinematics.pose(expected)
+
+    receipt = sim.submit([*motion, 0.9], layout=layout, arms=["right"], gripper_offsets=[0.2])
+
+    assert receipt["resolved_action"][-1] == pytest.approx(1.0)
+
+
+def test_gripper_offset_is_validated_before_queueing(tmp_path):
+    sim = _simulation(tmp_path)
+    with pytest.raises(ValueError, match="gripper_offsets must contain 1 finite value"):
+        sim.submit([*sim.home[:6], 0.3], layout="joint+gripper", gripper_offsets=[float("nan")])
+    assert not sim.commands
+
+
 def test_policy_pose_uses_tcp_origin_not_flange_origin(tmp_path):
     sim = _simulation(tmp_path)
     q = sim.home[:6]

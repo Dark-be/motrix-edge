@@ -20,6 +20,8 @@ policy:
   chunk_merge: append
   joint_offsets:
     right: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  gripper_offsets:
+    right: 0.5
   encoding: jpeg
   jpeg_quality: 95
   rtc:
