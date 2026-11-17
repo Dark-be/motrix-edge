@@ -32,9 +32,9 @@
     `get_flange_pose()`）：调置方下发的目标与它读到的位姿在同一模型、同一系下可直接比较。
 -   **失败要响**：目标不可达（超限位 / 解不收敛）时**拒绝该指令并回错**，绝不把「解不出来的位姿」
     当成关节角静默下发。
--   **零额外运行时依赖**：求解器只用 numpy（现场无需安装 pinocchio / CasADi，离线可单测）；
-    位姿观测与 IK 共用控制器里的同一个 `PiperKinematics` 实例（模型必须同源，否则「看见的」与
-    「算的」是两件事）。
+-   **单一运行时模型**：FK、逐连杆变换、雅可比和 IK 都由 `motrixsim==0.10.1` 加载同一份 Piper
+    MJCF；位姿观测与 IK 共用控制器里的同一个 `PiperKinematics` 实例，避免「看见的」与「算的」
+    来自两套模型。
 
 ## 契约
 
@@ -88,24 +88,10 @@ kp`，0.05–0.25 rad 量级）。以实测为基准时每一条增量都把当�
 
 ## 运动学模型
 
-`robot/kinematics/piper.py` 用 **Modified DH（Craig 约定）** 描述 Piper 六轴，纯 numpy 实现；
-控制器以**静态函数**（`PiperController.joint_to_pose` / `pose_to_joint`）对外暴露，机器人层直接调用，
-控制器本身**不持有**运动学状态：
-
-$$
-{}^{i-1}T_i = R_x(\alpha_{i-1})\,T_x(a_{i-1})\,R_z(\theta_i)\,T_z(d_i),\qquad \theta_i = q_i + \theta^{off}_i
-$$
-
-| 关节 | $\alpha$ | $a$ (m)   | $d$ (m) | $\theta^{off}$ |
-| ---- | -------- | --------- | ------- | -------------- |
-| 1    | 0        | 0         | 0.123   | 0              |
-| 2    | $-\pi/2$ | 0         | 0       | $-172.22°$     |
-| 3    | 0        | 0.28503   | 0       | $-102.78°$     |
-| 4    | $\pi/2$  | -0.021984 | 0.25075 | 0              |
-| 5    | $-\pi/2$ | 0         | 0       | 0              |
-| 6    | $\pi/2$  | 0         | 0.091   | 0              |
-
-参数与关节零位偏移来自 AgileX 官方教程；**末杆即法兰**（`link6`），与 `get_flange_pose()` 同系。
+`robot/kinematics/piper.py` 通过 MotrixSim 加载
+`robot-pipeline/assets/robots/piper/mjcf/arm/piper.xml`。该模型由 AgileX 官方 URDF 转换，末杆
+`link6` 即法兰。控制器仍以**静态函数**（`PiperController.joint_to_pose` / `pose_to_joint`）对外
+暴露，robot 层契约不感知 MotrixSim 的 Pose7 和原生雅可比行序。
 
 -   `fk(q)`：4×4 齐次变换（基座 → 法兰）；`pose(q)`：`[x, y, z, roll, pitch, yaw]`（按上文 rpy 约定
     反解，`pitch` 在主值域上取 `±π/2` 内的解）。
@@ -121,14 +107,14 @@ $$
 
 ## IK 求解器
 
-`robot/kinematics/ik.py`：阻尼最小二乘（Levenberg–Marquardt）迭代；经
+`robot/kinematics/ik.py`：适配 MotrixSim `DlsSolver`；经
 `PiperController.pose_to_joint(pose, seed, fallback_seeds=(), **ik_config)`（**静态**）暴露——
 **只解算不下发**：机器人类拿 `IkResult.q` 写 `joint_target`，再逐拍 `set_joint`。
 
--   **误差**：$e = \big[p_{des}-p_{cur};\ \log_3(R_{des}R_{cur}^{\top})\big]\in\mathbb{R}^6$（基座系）；
-    收敛判据为位置误差 ≤ `pos_tol`（缺省 1e-4 m）且姿态误差 ≤ `rot_tol`（缺省 1e-3 rad）。
--   **更新**：$\Delta q = J^{\top}(JJ^{\top}+\lambda^2 I)^{-1}e$，$\lambda$ 为阻尼（缺省 1e-2，抑制
-    奇异位形附近的大步长）；$\Delta q$ 按 `step_limit`（缺省 0.2 rad）裁切后 clip 到关节限位。
+-   **误差**：适配层以 Pose7 的位置欧氏距离和四元数最短角距离分别复核；收敛判据为位置误差 ≤
+    `pos_tol`（缺省 1e-4 m）且姿态误差 ≤ `rot_tol`（缺省 1e-3 rad）。
+-   **更新**：MotrixSim 执行阻尼最小二乘；`damping` 直接传入，现有配置名 `step_limit` 保持兼容并
+    映射为 DLS 的 `step_size`。求解后再次检查仓库软限位，越界结果不会下发。
 -   **种子**：机器人类传**当前关节命令**（`_joint_command_or_fallback()`，离目标近日与硬件同步），
     兜底 `init_joint` 段（`fallback_seeds`：仍不收敛时用 home 重试一次）。
 -   **返回**：`IkResult`（`ok` / `q` / `pos_err` / `rot_err` / `iterations` / `reason`）——**成功才给
@@ -151,7 +137,7 @@ flowchart LR
 
 **职责边界（依赖方向 robot → controller → kinematics）**：
 
--   `robot/kinematics`：纯运动学 / 求解器（无硬件、无状态）；
+-   `robot/kinematics`：MotrixSim 运动学 / 求解器（无硬件；线程内复用独立 `SceneData`）；
 -   `PiperController`：**只管关节 / 夹爪读写 + 限位把关**，并对外提供**静态**位姿转换
     （`joint_to_pose(q)` 正解 / `pose_to_joint(pose, seed)` 解算，只解算不下发）；
     `set_joint(...)` 只给 `p_des`（`kp` / `kd` / `t_ff` 用缺省值）；真机依赖只有
@@ -184,9 +170,9 @@ robot 内部的 `joint_target` / `joint_command` 始终是关节空间；只有 
 
 ## 标定与验证
 
-DH 参数、关节读数方向、关节限位与缺省 IK 参数已完成真机核验。复核方式：
+MJCF 关节帧、关节读数方向、关节限位与缺省 IK 参数需按以下方式复核：
 
 1.  `robot-pipeline/scripts/verify_cartesian.py` 读若干位形，比较 `fk(q)` 与 `get_flange_pose()` 的
-    位置 / 姿态误差（默认只读；`--cycles` 才小幅摆动）——偏差应在毫米级，否则先修正 DH 或关节符号。
+    位置 / 姿态误差（默认只读；`--cycles` 才小幅摆动）——偏差应在毫米级，否则先修正 MJCF 或关节符号。
 2.  同一脚本可做往返（位姿 → 关节 → 正解 → 位姿）与「限位边界拒绝」冒烟。
 3.  离线单测（`robot-pipeline/tests/test_piper_kinematics.py`）钉住 FK↔IK 自洽、rpy 往返、限位裁切与失败语义。

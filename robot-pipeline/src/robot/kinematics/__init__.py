@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""机器人运动学（纯 numpy）：正解 / 雅可比 / 逆解 / 末端 TCP 帧换算。
+"""机器人运动学：MotrixSim MJCF 正解 / 雅可比 / 逆解与末端 TCP 帧换算。
 
 **位姿观测与位姿控制同源**：``PiperKinematics.fk()`` 既产出 ``observations/pose``（机器人侧
 位姿观测），又服务 ``solve_ik()``（位姿目标解算），因此「读到的位姿」与「下发的目标」在同一
@@ -36,7 +36,18 @@ from .tcp import (
     to_tcp,
     to_tcp_block,
 )
-from .transforms import log3, matrix_to_rpy, rpy_to_matrix, skew, vee, wrap_angles
+from .transforms import (
+    log3,
+    matrix_to_rpy,
+    pose6_to_pose7,
+    pose7_to_pose6,
+    quat_xyzw_to_rpy,
+    rpy_to_matrix,
+    rpy_to_quat_xyzw,
+    skew,
+    vee,
+    wrap_angles,
+)
 
 __all__ = [
     "FRAME_FLANGE",
@@ -52,8 +63,12 @@ __all__ = [
     "from_tcp_block",
     "log3",
     "matrix_to_rpy",
+    "pose6_to_pose7",
+    "pose7_to_pose6",
+    "quat_xyzw_to_rpy",
     "resolve_tcp",
     "rpy_to_matrix",
+    "rpy_to_quat_xyzw",
     "skew",
     "solve_ik",
     "to_tcp",

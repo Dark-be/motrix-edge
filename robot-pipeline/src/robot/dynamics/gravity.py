@@ -93,7 +93,7 @@ class GravityModel:
 
 
 def dh_rows(kinematics=None) -> list[list[float]]:
-    """返回用于参数兼容性校验的当前 DH 表。"""
+    """返回用于既有参数产物兼容性校验的 DH 元数据；运行时变换来自 MotrixSim MJCF。"""
     kinematics = default_kinematics() if kinematics is None else kinematics
     return [[float(link.alpha), float(link.a), float(link.d), float(link.theta_offset)] for link in kinematics.links]
 

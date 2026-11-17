@@ -30,7 +30,7 @@ src/                      # robot-pipeline 包（src 布局，包名 config/env/
                           # 实际配置在 <根>/config/：<机型>.yml（整份）或 robot/<machine>.yml（差异）
   env/                    # BaseEnv：控制线程（30Hz 限速步进）/ 观测线程（取帧发布）/ 命令队列 / 采集控制
   robot/                  # BaseRobot + 具体机器人 + controller / sensor
-    kinematics/           # 运动学（纯 numpy Modified DH）：正解 / 雅可比 / 逆解
+    kinematics/           # 运动学（MotrixSim MJCF）：正解 / 雅可比 / 逆解
     dynamics/             # 动力学模型与运行期前馈（纯 numpy）
     calibration/          # 外参及重力标定的采样、求解与产物
   server/                 # robot_server.py 入口 + contract_server.py（/v1 契约服务器）
@@ -456,7 +456,7 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 
 机器人只暴露**一条**控制通路：关节目标 + MIT（`move_mit`）。`layout="pose"` 是
 **动作语义**，不是控制模式——机器人收到每臂 `xyz + rpy + 夹爪` 后，由**自己**用仓库内运动学
-（`src/robot/kinematics/`，纯 numpy Modified DH）通过控制器的**静态**转换函数**解算一次**，
+（`src/robot/kinematics/`，MotrixSim + Piper MJCF）通过控制器的**静态**转换函数**解算一次**，
 再按关节目标下发（限速、采样、观测全部不变），**不切 `move_p`**（SDK 的 `move_mit` / `move_j` /
 `move_p` 互斥，交替下发会逐帧互切）。
 
@@ -491,7 +491,9 @@ robot:
         ik: { pos_tol: 0.0001, rot_tol: 0.001, max_iters: 200, damping: 0.01, step_limit: 0.2 }
 ```
 
-**现场标定**：DH 参数 / 关节零位必须与真机一致，用 `scripts/verify_cartesian.py` 对照 `fk(q)`
+`step_limit` 保留现有配置名，并作为 MotrixSim DLS 的单步尺度传入。
+
+**现场标定**：MJCF 关节帧 / 关节零位必须与真机一致，用 `scripts/verify_cartesian.py` 对照 `fk(q)`
 与 SDK 法兰位姿（默认**只读**，`--cycles` 才小幅摆动）：
 
 ```bash

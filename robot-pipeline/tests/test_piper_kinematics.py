@@ -12,7 +12,7 @@
 # the terms and conditions in the license file accompanying. You may not use this software except
 # in compliance with the license file.
 
-"""Piper 运动学 / IK / 阻抗求解器的离线测试（纯 numpy，不需要硬件 SDK）。
+"""Piper MotrixSim 运动学 / IK / 阻抗求解器的离线测试（不需要硬件 SDK）。
 
 钉住三件事：① 运动学自身正确（rpy 往返、FK↔pose 一致、雅可比 = FK 数值导数）；
 ② IK 能到位且解在限位内、不可达时**明确失败**（不返回一个凑合的解）；③ 阻抗映射的
@@ -79,21 +79,28 @@ def test_pose_matches_fk(kinematics):
     assert np.allclose(kinematics.rpy_to_matrix(pose[3:]), transform[:3, :3], atol=1e-12)
     assert np.allclose(kine.pose_matrix(pose), transform, atol=1e-12)
 
+    prefixes = kine.prefix_transforms(q)
+    assert len(prefixes) == 7
+    assert np.allclose(prefixes[0], np.eye(4))
+    assert np.allclose(prefixes[-1], transform)
+    assert kine.pose7(q).shape == (7,)
+
 
 def test_jacobian_matches_finite_difference(kinematics):
     """雅可比 = FK 的数值导数（线速度 + ``log3`` 角速度）——IK 收敛的前提。"""
     kine = kinematics.PiperKinematics()
     q = np.array([0.3, 0.9, -1.0, 0.2, 0.6, -0.4])
     jacobian = kine.jacobian(q)
-    eps = 1e-6
+    # MotrixSim 0.10.1 的状态与雅可比输出为 float32；过小差分会被量化噪声淹没。
+    eps = 1e-3
     for index in range(6):
         q_plus = q.copy()
         q_plus[index] += eps
         pose0, pose1 = kine.pose(q), kine.pose(q_plus)
         linear = (pose1[:3] - pose0[:3]) / eps
         angular = kinematics.log3(kinematics.rpy_to_matrix(pose1[3:]) @ kinematics.rpy_to_matrix(pose0[3:]).T) / eps
-        assert np.allclose(jacobian[:3, index], linear, atol=1e-6)
-        assert np.allclose(jacobian[3:, index], angular, atol=1e-6)
+        assert np.allclose(jacobian[:3, index], linear, atol=3e-4)
+        assert np.allclose(jacobian[3:, index], angular, atol=3e-4)
 
 
 def test_dh_and_limits_shape(kinematics):
