@@ -95,6 +95,10 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     return result;
 }
 
+export function resolveServerConfig(argv = process.argv.slice(2), config = loadConfig()) {
+    return { ...config, ...parseServerArgs(argv) };
+}
+
 export function requireAllowedTenant(allowedTenants, tenantKey) {
     if (allowedTenants.size && !allowedTenants.has(tenantKey)) throw httpError(403, "Feishu tenant is not allowed");
 }
@@ -499,9 +503,7 @@ function redirect(res, status, location) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-    const args = parseServerArgs();
-    if (!args.frontendUrl) throw new Error("Console requires --public-url for the OAuth/public origin");
-    const config = { ...loadConfig(), ...args };
+    const config = resolveServerConfig();
     createConsoleServer(config).listen(config.port, config.host, () => {
         console.log(`Motrix Console listening on http://${config.host}:${config.port}`);
     });

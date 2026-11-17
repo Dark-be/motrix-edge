@@ -18,7 +18,7 @@ server:
   port: 8000
   # Console 直连 Edge 时的浏览器来源；显式来源允许 credentials，不使用通配符 *。
   cors_origins:
-    - http://10.30.20.64:5183
+    - http://10.30.20.64:5174
     - http://localhost:5173
     - http://localhost:5174
   # RPent 兼容的 RPC 面（POST /call；见 wiki/design/motrix_edge_rpent_bridge.md）：

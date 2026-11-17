@@ -15,8 +15,9 @@ OAuth 回调；Console 使用每台 Edge 独立的共享密钥签署用户身份
     为单台设备显式启用 `trustedNetwork`，不配置 HMAC，但必须用网络 ACL 限制 Edge 入口。
 -   Console 不取代 Edge 租约和状态机；受控请求仍携带原 `X-Lease-Id`，Edge 作最终校验。
 -   Console 只在已登录后代理 Edge API；代理时附加签名身份，但不信任浏览器提交的 `operator`。
--   `http://localhost:8000` 是浏览器内建的本机直连目标，不经过 BFF、无需出现在静态注册表；请求不携带
-    Console Cookie，适用于 Console 与 Edge 同机的开发 / 现场调试。
+-   `http://localhost:8000` 是浏览器所在机器的内建直连目标，不经过 BFF、无需出现在静态注册表；请求不携带
+    Console Cookie。若浏览器与 Console 部署机不是同一台机器，部署机上的 Edge 必须用部署机可达地址登记到
+    `edges`，不能用 `localhost`。
 -   首版代理普通 HTTP API 与 WebRTC offer 信令；WebRTC 媒体仍由浏览器和 Edge 直接协商。
 -   Harness Provider 同样只来自 `harnessProviders` 静态注册表，并限制为任务目录、session、事件、
     primitive 和媒体读取路由；Provider 不能借代理访问任意路径。

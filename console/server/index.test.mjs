@@ -10,6 +10,7 @@ import {
     loadPolicyPresets,
     parseServerArgs,
     requireAllowedTenant,
+    resolveServerConfig,
     safeReturnTo,
     signIdentityHeaders,
 } from "./index.mjs";
@@ -76,6 +77,21 @@ test("server CLI separates listen overrides from the public OAuth URL", () => {
     assert.throws(() => parseServerArgs(["--public-url", "http://127.0.0.1:5183/path"]), /invalid baseUrl/);
 });
 
+test("server uses configured public URL when CLI does not override it", () => {
+    const config = resolveServerConfig([], {
+        host: "0.0.0.0",
+        port: 5174,
+        frontendUrl: "http://10.30.20.64:5174",
+        redirectUri: "http://10.30.20.64:5174/api/auth/feishu/callback",
+    });
+    assert.equal(config.frontendUrl, "http://10.30.20.64:5174");
+    assert.equal(config.redirectUri, "http://10.30.20.64:5174/api/auth/feishu/callback");
+
+    const overridden = resolveServerConfig(["--public-url", "http://127.0.0.1:5183"], config);
+    assert.equal(overridden.frontendUrl, "http://127.0.0.1:5183");
+    assert.equal(overridden.redirectUri, "http://127.0.0.1:5183/api/auth/feishu/callback");
+});
+
 test("return path rejects open redirects", () => {
     assert.equal(safeReturnTo("/collect"), "/collect");
     assert.equal(safeReturnTo("https://evil.example"), "/");
@@ -119,13 +135,20 @@ test("trusted LAN capture sync replaces spoofed operator identity", () => {
     assert.equal(meta.task_name, "整理桌面");
 });
 
-test("checked-in Console registry contains only trusted static Edge targets", () => {
+test("checked-in Console registry contains the deployment host and trusted static Edge targets", () => {
     const config = loadConfig(new URL("../console.config.json", import.meta.url));
-    assert.equal(config.edges.size, 7);
+    assert.equal(config.edges.size, 8);
+    assert.deepEqual(config.edges.get("console-local"), {
+        id: "console-local",
+        label: "Console 部署机 Edge",
+        baseUrl: "http://10.30.20.64:8000",
+        secret: undefined,
+        trustedNetwork: true,
+    });
     for (const edge of config.edges.values()) {
         assert.equal(edge.trustedNetwork, true);
         assert.equal(edge.secret, undefined);
-        assert.match(edge.baseUrl, /^http:\/\/10\.30\.(30|40)\./);
+        assert.match(edge.baseUrl, /^http:\/\/10\.30\.(20|30|40)\./);
     }
     assert.deepEqual(
         [...config.harnessProviders.values()],

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { EdgeApi } from "./api";
+import { isLegacyEdgeProxyUrl } from "./edgeTargets";
 import { useLease } from "./hooks/useLease";
 import { usePolling } from "./hooks/usePolling";
 import { useToasts } from "./hooks/useToasts";
@@ -26,6 +27,15 @@ export const SESSION_POLL_MS = 200;
 /** 预览频率可选项（Hz）：3D 视口靠它刷新，1 Hz 够看状态，10 Hz 才跟得上运动。 */
 export const PREVIEW_RATES = [1, 5, 10] as const;
 const MAX_LOG = 80;
+
+function loadStoredBaseUrl(): string {
+    const saved = localStorage.getItem(STORAGE_KEY) ?? "";
+    if (saved && isLegacyEdgeProxyUrl(saved, window.location.origin)) {
+        localStorage.removeItem(STORAGE_KEY);
+        return "";
+    }
+    return saved;
+}
 
 export interface LogEntry {
     ts: number;
@@ -128,7 +138,7 @@ export function useEdge(): EdgeState {
 }
 
 export function EdgeProvider({ children }: { children: ReactNode }) {
-    const [baseUrl, setBaseUrl] = useState<string>(() => localStorage.getItem(STORAGE_KEY) ?? "");
+    const [baseUrl, setBaseUrl] = useState<string>(loadStoredBaseUrl);
     const [api, setApi] = useState<EdgeApi | null>(null);
     const [since, setSince] = useState<number>(0);
     const [logs, setLogs] = useState<LogEntry[]>([]);

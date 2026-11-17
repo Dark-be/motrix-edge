@@ -138,10 +138,10 @@ cp .env.example .env
     `motrix-edge run`）。也可裸跑：`uv run --env-file .env motrix-edge run`。
 -   Edge 本机人工安全更新：`bash scripts/update.sh`；只允许干净的 `dev` 工作树快进到
     `origin/dev`，本地修改、领先或分叉时拒绝更新，且不会自动同步依赖或重启服务。
--   固定网页服务器进入 `console/` 执行 `npm ci && npm run build`，再运行
-    `npm start -- --public-url http://10.30.20.64:5174`。Console 默认监听
-    `0.0.0.0:5174`，`--public-url` 仍必须显式指定，且飞书后台须登记对应 callback；Console 只发现
-    Edge 地址，浏览器随后直连 Edge。
+-   固定网页服务器进入 `console/` 执行 `npm ci && npm run build`，再运行 `npm start`。Console 默认从
+    `console.config.json` 读取监听地址和公开 OAuth 地址；需要临时覆盖时传
+    `--public-url http://10.30.20.64:5174`。飞书后台须登记对应 callback；Console 只发现 Edge 地址，
+    浏览器随后直连 Edge。
 
 分布式部署中，浏览器从 Console 获取 Edge Base URL 后直接连接 Edge，飞书只登记 Console 的固定回调
 `https://console.example.com/api/auth/feishu/callback`。配置与签名契约见

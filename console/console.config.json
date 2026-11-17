@@ -18,6 +18,11 @@
     }
   },
   "edges": {
+    "console-local": {
+      "label": "Console 部署机 Edge",
+      "baseUrl": "http://10.30.20.64:8000",
+      "trustedNetwork": true
+    },
     "piper01": {
       "label": "家居区 piper01",
       "baseUrl": "http://10.30.40.110:8000",

@@ -186,9 +186,12 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 ## 契约要点（前端实现，单点定义）
 
 -   受控请求封装：统一注入 `X-Lease-Id`；非 2xx 抛出 `{ status, detail }`；**请求带超时**（缺省 15s，上传扫描 / 打包 120s），超时抛明确文案而不是永久 busy。
--   浏览器凭据只跟随请求目标：同源 Console BFF（`/api/edges/<id>`）携带登录 Cookie；跨域直连
-    Edge（`http://<edge>:8000`）不携带 BFF Cookie。BFF 是否启用认证不能让任意直连 Edge 请求进入
+-   浏览器凭据只跟随请求目标：同源 Console 认证、注册表和 Harness 请求携带登录 Cookie；跨域直连
+    Edge（`http://<edge>:8000`）不携带 Console Cookie。Console 是否启用认证不能让任意直连 Edge 请求进入
     `credentials=include`，否则通配 CORS 响应会被浏览器拒绝。
+-   Edge 连接地址只持久化真实 `baseUrl`；启动时若发现旧版本遗留的同源
+    `/api/edges/<id>` 代理地址，必须清除缓存并回到连接页，不能继续向 discovery-only Console 发送
+    `/v1/*` 请求。
 -   命令回执 `POST /v1/commands`：`status` 即命令结果（`ok` / `rejected` / `error`；`accepted` = push 型无回执），`data` 带结果字段（teleop 当前的 `teleop`/`mode`/`follow_space`/`follow_axes`，以及本地后端已支持的 `pose_position_scale`、episode 的 `episode`/`recording`）；前端据此展示命令处理结果；teleop `data.configuration_status=queued` 的配置回显不代表锚点或 IK 就绪，运行位由状态轮询确认。
 -   租约状态 `GET /v1/leases`：`expires_at` 为 ISO 字符串（北京时区），倒计时 = 本地时间差；续租定时器 = `renew_interval * 1000` ms。
 -   租约签发字段不向操作员暴露内部身份：每次签发生成新的 `lease_id`，`edge_id` 自动绑定当前

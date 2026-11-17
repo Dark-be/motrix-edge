@@ -121,7 +121,7 @@ function ConnectGate() {
                                 value={draft}
                                 onChange={(event) => setDraft(event.target.value)}
                             >
-                                <option value={LOCAL_EDGE_URL}>本机 Edge · localhost:8000（直连）</option>
+                                <option value={LOCAL_EDGE_URL}>浏览器本机 Edge · localhost:8000（直连）</option>
                                 {edges.map((edge) => {
                                     const value = edge.baseUrl;
                                     return (
@@ -135,7 +135,7 @@ function ConnectGate() {
                     )}
                     {edges.length === 0 && (
                         <p className="rounded border border-line bg-panel2 p-2 text-amber-400">
-                            Console 尚未发现远端 Edge；仍可直连本机 localhost:8000。
+                            Console 尚未发现已登记 Edge；仍可直连浏览器本机 localhost:8000。
                             {consoleError ? `（${consoleError}）` : ""}
                         </p>
                     )}
