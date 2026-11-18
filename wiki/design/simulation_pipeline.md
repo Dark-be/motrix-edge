@@ -6,7 +6,9 @@
 
 ## 目标与边界
 
-场景来自用户指定的 MotrixGen 工作区、session TOML 和 scene JSON，资产不复制。支持单机械臂六关节、Piper 基座系 TCP 位姿和一个归一化夹爪，两路 RGB 可绑定任意场景相机。通过专用 simulation_piper adapter 如实声明能力；不声明 depth、capture。
+场景来自用户指定的 MotrixGen 工作区、session TOML 和 scene JSON，资产不复制。支持单机械臂六关节、
+Piper 世界系 `grasp_site` 位姿和一个归一化夹爪，两路 RGB 可绑定任意场景相机。通过专用
+simulation_piper adapter 如实声明能力；不声明 depth、capture。
 
 ## 执行与观测
 
@@ -17,11 +19,16 @@ MotrixGen 的通用技能执行器以 9000 控制拍为任务上限。该任务�
 进程退出。`discover` 仅在仿真线程健康时返回机器人，否则回 503；不允许出现物理线程已结束但 HTTP
 壳仍可发现机器人的半在线状态。需要继续运行时由外部进程管理器重新启动一个新实例。
 
-控制目标经过维数、有限性、关节限位及夹爪范围校验；`pose` 使用 Piper Modified-DH
-运动学和阻尼最小二乘逆解，在命令入队前原子转换为关节目标。逆解以当前关节目标为首选种子、home
+控制目标经过维数、有限性、关节限位及夹爪范围校验；`pose` 表示场景 `world` 下的
+`grasp_site` 绝对位姿。仿真线程启动时，以 MotrixSim 中法兰的实际世界位姿和同一关节状态的 Piper
+Modified-DH 正解求出 `T_world_base`；命令入队前先按 `T_base_tcp = T_world_base^-1 · T_world_tcp`
+转换到机器人基座系，再使用阻尼最小二乘逆解原子转换为关节目标。逆解以当前关节目标为首选种子、home
 为回退种子，并使用仿真模型限位与 Piper 软限位的交集；不可达、越界或不收敛返回 422，且不修改目标。
-输入位姿的原点是 TCP；缺省 `T_flange_tcp` 为法兰 `+z` 方向 0.12 m，与 single/dual Piper 出厂配置一致，
-可由启动参数 `--tcp-offset X Y Z` 覆盖。IK 前先将 TCP 目标还原为法兰目标，FK 对外时做相反换算。
+输入位姿的原点是 MJCF `grasp_site`；缺省 `T_flange_tcp` 为法兰 `+z` 方向 0.13 m，与任务 Piper
+MJCF 定义一致，可由启动参数 `--tcp-offset X Y Z` 覆盖。IK 前先将 TCP 目标还原为法兰目标，FK
+对外时做相反换算。健康与发现接口按 Edge 既有工具点契约声明 `pose_frame=tcp`、逐臂
+`tcp_offset.right=[0,0,0.13]`，另以 `pose_reference_frame=world` 声明绝对位姿的参考坐标系，使调用方
+不靠字段维数猜测坐标语义。
 `pose+gripper` 先完成整条动作校验和逆解，再一拍提交关节与夹爪目标。
 关节按速度限制逐步下发。命令 ID 在进程内去重并核对原始载荷，回执区分 queued/applied/rejected/failed。
 applied 表示目标被执行线程采用，不等于已到位。运动采样含进程实例、目标修订号和单调序号。共享内存只由创建者关闭和删除，不覆盖其他进程的段。

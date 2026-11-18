@@ -19,7 +19,7 @@ import pytest
 from motrix_simulation_pipeline.piper_kinematics import PIPER_LIMITS, PiperKinematics
 from motrix_simulation_pipeline.runtime import Settings, Simulation
 
-from motrix_edge.geometry.transforms import rpy_to_matrix, transform_to_pose
+from motrix_edge.geometry.transforms import make_transform, pose_to_transform, rpy_to_matrix, transform_to_pose
 
 
 def _simulation(tmp_path: Path) -> Simulation:
@@ -51,6 +51,20 @@ def test_pose_with_gripper_is_resolved_to_one_atomic_joint_target(tmp_path):
     assert resolved[-1] == pytest.approx(0.25)
     assert sim.kinematics.pose(resolved[:6]) == pytest.approx(target_pose, abs=1e-3)
     assert np.array(sim.target) == pytest.approx(sim.home)
+
+
+def test_world_pose_is_transformed_to_robot_base_before_ik(tmp_path):
+    sim = _simulation(tmp_path)
+    sim.world_from_base = make_transform(rpy_to_matrix([0.0, 0.0, 0.35]), [0.12, -0.08, 0.0882])
+    expected = np.array([0.1, 0.45, -0.75, 0.05, 0.15, -0.05])
+    base_tcp = pose_to_transform(sim.kinematics.pose(expected))
+    world_tcp = transform_to_pose(sim.world_from_base @ base_tcp)
+
+    receipt = sim.submit([*world_tcp, 0.25], layout="pose+gripper", arms=["right"])
+
+    resolved = np.asarray(receipt["resolved_action"][:6])
+    assert sim.kinematics.pose(resolved) == pytest.approx(transform_to_pose(base_tcp), abs=1e-3)
+    assert np.asarray(receipt["resolved_pose_base"]) == pytest.approx(transform_to_pose(base_tcp), abs=1e-9)
 
 
 @pytest.mark.parametrize("layout", ["joint+gripper", "pose+gripper"])
@@ -105,7 +119,7 @@ def test_policy_pose_uses_tcp_origin_not_flange_origin(tmp_path):
     flange = transform_to_pose(sim.kinematics.fk(q))
     tcp = sim.kinematics.pose(q)
 
-    assert tcp[:3] == pytest.approx(flange[:3] + rpy_to_matrix(flange[3:6]) @ np.array([0.0, 0.0, 0.12]))
+    assert tcp[:3] == pytest.approx(flange[:3] + rpy_to_matrix(flange[3:6]) @ np.array([0.0, 0.0, 0.13]))
     assert tcp[3:] == pytest.approx(flange[3:])
 
 

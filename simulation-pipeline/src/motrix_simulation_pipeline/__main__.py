@@ -37,9 +37,9 @@ def main():
         "--tcp-offset",
         nargs=3,
         type=float,
-        default=(0.0, 0.0, 0.12),
+        default=(0.0, 0.0, 0.13),
         metavar=("X", "Y", "Z"),
-        help="TCP position in flange frame, metres (default: 0 0 0.12)",
+        help="grasp_site position in flange frame, metres (default: 0 0 0.13)",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8090)

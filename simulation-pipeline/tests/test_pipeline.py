@@ -30,6 +30,7 @@ from motrix_simulation_pipeline.piper_kinematics import PIPER_LIMITS, PiperKinem
 from motrix_edge.adapter import discover_adapter
 from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS
 from motrix_edge.adapter.simulation_piper_adapter import SimulationPiperAdapter
+from motrix_edge.geometry.transforms import pose_to_transform, transform_to_pose
 
 
 @pytest.mark.parametrize("task", ["press_three_buttons", "stack_color_blocks"])
@@ -87,10 +88,15 @@ def test_scene_control_and_video(tmp_path, task):
                 assert discovery["capabilities"]["task_status"] is (task == "press_three_buttons")
                 assert discovery["type"] == "simulation_piper"
                 assert discovery["action_dims"]["pose"] == 6
+                assert discovery["pose_frame"] == "tcp"
+                assert discovery["pose_reference_frame"] == "world"
+                assert discovery["tcp_offset"] == {"right": [0.0, 0.0, 0.13]}
                 assert "pose+gripper" in {layout["name"] for layout in discovery["action_layouts"]}
                 adapter = discover_adapter(host="127.0.0.1", port=port)
                 assert isinstance(adapter, SimulationPiperAdapter)
                 assert adapter.health().ok
+                assert adapter.pose_frame() == "tcp"
+                assert adapter.tcp_offset_by_arm()["right"] == pytest.approx([0.0, 0.0, 0.13])
                 adapter_task_status = adapter.task_status()
                 assert adapter_task_status is not None
                 assert adapter_task_status["available"] is (task == "press_three_buttons")
@@ -146,7 +152,9 @@ def test_scene_control_and_video(tmp_path, task):
                     PIPER_LIMITS[0, 0] + 0.01,
                     PIPER_LIMITS[0, 1] - 0.01,
                 )
-                pose_target = kinematics.pose(pose_joint_target)
+                pose_target_base = kinematics.pose(pose_joint_target)
+                world_from_base = np.asarray(health["world_from_base"], dtype=float).reshape(4, 4)
+                pose_target = transform_to_pose(world_from_base @ pose_to_transform(pose_target_base))
                 pose_result = adapter.submit_motion(
                     [*pose_target, 0.4], command_id="pose-1", layout="pose+gripper", arms=["right"]
                 )

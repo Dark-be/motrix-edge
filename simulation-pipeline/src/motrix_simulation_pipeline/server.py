@@ -61,6 +61,10 @@ def create_app(sim: Simulation) -> FastAPI:
             "detail": sim.error or ("" if fresh else "starting or stalled"),
             "control_hz": 1 / sim.period if sim.period else None,
             "measured_hz": None,
+            "pose_frame": "tcp",
+            "pose_reference_frame": "world",
+            "tcp_offset": {"right": list(sim.settings.tcp_offset)},
+            "world_from_base": sim.world_from_base.reshape(-1).tolist(),
         }
 
     @app.post(contract.PATH_DISCOVER)
@@ -80,6 +84,9 @@ def create_app(sim: Simulation) -> FastAPI:
                 "robot_model_version": "0.1.0",
                 "action_dim": 6,
                 "action_dims": {"joint": 6, "pose": 6, "gripper": 1},
+                "pose_frame": "tcp",
+                "pose_reference_frame": "world",
+                "tcp_offset": {"right": list(sim.settings.tcp_offset)},
                 "state_arms": ["right"],
                 "action_layouts": [
                     {

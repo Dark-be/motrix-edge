@@ -36,9 +36,31 @@ from msgspec.structs import replace
 
 from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
 from motrix_edge.adapter.shm_contract import ObsShmWriter
+from motrix_edge.geometry.transforms import invert_transform, make_transform, pose_to_transform, transform_to_pose
 
 from .piper_kinematics import PiperKinematics, effective_limits
 from .task_status import TaskStatusContext, TaskStatusProvider, create_task_status_provider
+
+
+def _pose7_to_transform(pose) -> np.ndarray:
+    """MotrixSim ``xyz+xyzw`` pose to a homogeneous transform."""
+    values = np.asarray(pose, dtype=np.float64).reshape(-1)
+    if values.shape != (7,) or not np.all(np.isfinite(values)):
+        raise ValueError("MotrixSim pose must contain seven finite values")
+    quaternion = values[3:]
+    norm = float(np.linalg.norm(quaternion))
+    if not np.isclose(norm, 1.0, atol=1e-6, rtol=0.0):
+        raise ValueError("MotrixSim pose quaternion must be normalized")
+    x, y, z, w = quaternion / norm
+    rotation = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    return make_transform(rotation, values[:3])
 
 
 @dataclass(frozen=True)
@@ -52,7 +74,7 @@ class Settings:
     render: bool = True
     observation_hz: float = 10.0
     joint_speed: float = 0.7
-    tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.12)
+    tcp_offset: tuple[float, float, float] = (0.0, 0.0, 0.13)
     task_name: str | None = None
 
     def __post_init__(self):
@@ -83,6 +105,7 @@ class Simulation:
         self.home = np.zeros(7)
         self.limits = np.zeros((6, 2))
         self.kinematics: PiperKinematics | None = None
+        self.world_from_base = np.eye(4, dtype=np.float64)
         self.snapshot: dict = {}
         self.revision = 0
         self.seq = 0
@@ -165,13 +188,16 @@ class Simulation:
                     raise ValueError("command_id reused with a different request")
                 return dict(prior)
             resolved_layout, resolved_action = layout, values.copy()
+            resolved_pose_base = None
             if operation == "move":
                 if "gripper" in layout and not 0 <= values[-1] <= 1:
                     raise ValueError("gripper must be in [0,1]")
                 if layout.startswith("pose"):
                     if self.kinematics is None:
                         raise RuntimeError("Piper kinematics not initialized")
-                    result = self.kinematics.solve(values[:6], self.target[:6], self.home[:6])
+                    base_from_world = invert_transform(self.world_from_base)
+                    resolved_pose_base = transform_to_pose(base_from_world @ pose_to_transform(values[:6]))
+                    result = self.kinematics.solve(resolved_pose_base, self.target[:6], self.home[:6])
                     if not result.ok:
                         raise ValueError(f"pose target rejected ({result.describe()})")
                     resolved_action = result.q if layout == "pose" else np.r_[result.q, values[-1]]
@@ -203,6 +229,8 @@ class Simulation:
                 "resolved_layout": resolved_layout,
                 "resolved_action": resolved_action.tolist(),
             }
+            if resolved_pose_base is not None:
+                receipt["resolved_pose_base"] = resolved_pose_base.tolist()
             self.commands[key] = receipt
             self.pending.append(key)
             return dict(receipt)
@@ -292,6 +320,7 @@ class ExternalControl(PrimitiveSkill):
         if (
             robot.chain is None
             or len(robot.arm_actuator_indices) != 6
+            or robot.end_link is None
             or robot.jaw_joint is None
             or robot.gripper_actuator_index is None
         ):
@@ -307,6 +336,8 @@ class ExternalControl(PrimitiveSkill):
         sim.home[:6] = np.clip(
             runtime.sim.data.actuator_ctrls[list(robot.arm_actuator_indices)], sim.limits[:, 0], sim.limits[:, 1]
         )
+        world_flange = _pose7_to_transform(robot.end_link.get_pose(runtime.sim.data))
+        sim.world_from_base = world_flange @ invert_transform(sim.kinematics.fk(sim.home[:6]))
         sim.target = sim.home.copy()
         sim.task_status_provider = create_task_status_provider(
             TaskStatusContext(workspace=sim.settings.workspace, task_name=sim.task_name)

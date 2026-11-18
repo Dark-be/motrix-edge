@@ -31,6 +31,7 @@ class SimulationPiperAdapter(HttpShmAdapter):
     ACTION_SPACES = (ActionSpace.JOINT, ActionSpace.POSE, ActionSpace.GRIPPER)
     ACTION_DIM_PER_ARM = {"joint": 6, "pose": 6, "gripper": 1}
     POSE_DIM_PER_ARM = 6
+    POSE_FRAME = "tcp"
     HOME = {"joint": [0.0, 0.1, 0.0, 0.0, 0.0, 0.0], "gripper": [1.0]}
     IMAGES = {"cam_head": (640, 480), "cam_right_wrist": (640, 480)}
     DEPTH_CAMERAS = ()

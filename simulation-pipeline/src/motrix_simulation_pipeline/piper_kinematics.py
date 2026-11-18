@@ -70,7 +70,7 @@ class IkResult:
 
 
 class PiperKinematics:
-    def __init__(self, joint_limits: np.ndarray, tcp_offset=(0.0, 0.0, 0.12)):
+    def __init__(self, joint_limits: np.ndarray, tcp_offset=(0.0, 0.0, 0.13)):
         limits = np.asarray(joint_limits, dtype=np.float64)
         if limits.shape != (6, 2) or np.any(limits[:, 0] > limits[:, 1]):
             raise ValueError(f"invalid Piper joint limits: {limits.tolist()}")
