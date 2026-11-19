@@ -88,11 +88,13 @@ def test_joint_offsets_apply_to_final_joint_target_after_optional_ik(tmp_path, l
     assert receipt["resolved_action"][-1] == pytest.approx(0.25)
 
 
-def test_joint_offsets_are_checked_against_final_joint_limits(tmp_path):
+def test_joint_offsets_are_clipped_to_final_joint_limits(tmp_path):
     sim = _simulation(tmp_path)
-    with pytest.raises(ValueError, match="joint target outside model limits"):
-        sim.submit(sim.home[:6], layout="joint", joint_offsets=[100.0, 0, 0, 0, 0, 0])
-    assert not sim.commands
+    receipt = sim.submit(sim.home[:6], layout="joint", joint_offsets=[100.0, 0, 0, 0, 0, 0])
+
+    expected = np.clip(sim.home[:6] + [100.0, 0, 0, 0, 0, 0], sim.limits[:, 0], sim.limits[:, 1])
+    assert receipt["resolved_action"] == pytest.approx(expected)
+    assert receipt["execution_status"] == "queued"
 
 
 @pytest.mark.parametrize("layout", ["joint+gripper", "pose+gripper"])

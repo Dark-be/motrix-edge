@@ -180,7 +180,10 @@ def test_scene_control_and_video(tmp_path, task):
                     ).status_code
                     == 422
                 )
-                for action, layout in (([2], "gripper"), ([99] * 6, "joint"), ([0] * 5, "joint")):
+                clipped = client.post("/v1/rollout", json={"action": [99] * 6, "layout": "joint"})
+                assert clipped.status_code == 200
+                assert np.asarray(clipped.json()["resolved_action"]) == pytest.approx(PIPER_LIMITS[:, 1])
+                for action, layout in (([2], "gripper"), ([0] * 5, "joint")):
                     assert client.post("/v1/rollout", json={"action": action, "layout": layout}).status_code == 422
                 assert client.post("/v1/capture/start").status_code == 404
                 stop = client.post("/v1/safe_stop").json()

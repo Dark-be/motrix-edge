@@ -206,10 +206,11 @@ class Simulation:
                     resolved_action[:6] += offsets
                 if "gripper" in layout and gripper_offset_values is not None:
                     resolved_action[-1] = np.clip(resolved_action[-1] + gripper_offset_values[0], 0.0, 1.0)
-                if layout != "gripper" and np.any(
-                    (resolved_action[:6] < self.limits[:, 0]) | (resolved_action[:6] > self.limits[:, 1])
-                ):
-                    raise ValueError("joint target outside model limits")
+                if layout != "gripper":
+                    if self.kinematics is None:
+                        raise RuntimeError("Piper kinematics not initialized")
+                    limits = self.kinematics.joint_limits
+                    resolved_action[:6] = np.clip(resolved_action[:6], limits[:, 0], limits[:, 1])
             if operation == "stop":
                 for pending in self.pending:
                     self.commands[pending].update(execution_status="rejected", error="superseded by safe stop")
