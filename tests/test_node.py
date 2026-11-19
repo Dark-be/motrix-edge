@@ -933,17 +933,19 @@ def test_switch_commands_rejected_while_a_session_is_active():
 
 
 def test_recover_releases_adapter_and_goes_idle(monkeypatch):
-    """ERROR 恢复（rr）→ IDLE：释放 adapter 重新探测。"""
+    """ERROR 恢复（rr）→ IDLE：释放 adapter、清旧观测后重新探测。"""
     adapter = _FakeAdapter(available=True)
     _patch_discover_adapter(monkeypatch, adapter)
     node = EdgeNode({}, command_source=lambda: None, probe_interval=0.0)
     node.initialize()  # INIT → IDLE
     node._tick()
     assert node.state == NodeState.READY
+    node.frame_manager.update({"observations/qpos": [1.0]})
     node._enter_error("boom")
     node._recover()
     assert node.adapter is None
     assert adapter.release_calls == 1
+    assert node.frame_manager.latest() is None
     assert node.state == NodeState.IDLE
 
 

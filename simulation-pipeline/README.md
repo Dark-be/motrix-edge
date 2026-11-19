@@ -74,6 +74,44 @@ curl -X POST http://127.0.0.1:8090/v1/safe_stop
 reset 回到启动后的机械臂姿态，不重置物体；重新布置场景需重启进程。停止清空排队动作并保持当前
 实际姿态，物理继续运行。
 
+## 批量策略评测
+
+`motrix-simulation-eval` 自动按 seed 调用任务项目的 `sample-scene`、逐轮启动和关闭 pipeline，并通过
+已经运行的 Edge 服务完成租约、错误恢复、推理预热、持续 rollout 和真实任务成功判定。首版串行执行；
+远程策略服务保持常驻，但每轮重新建立推理会话，避免历史观测或动作块跨场景污染。
+评测器会在预热前等待 Edge 取得状态和策略要求的全部相机首帧，不用人为增加启动延时。
+
+先启动 Edge，但不要手工启动 simulation pipeline；确认没有其它控制租约或会话后执行：
+
+```bash
+uv run --locked motrix-simulation-eval \
+  --workspace /home/pc16/project/manipulation-tasks \
+  --task turn_on_light_switch \
+  --policy /home/pc16/project/motrix-edge/motrix-edge/policy/turn-on-light-switch.yml \
+  --seed-start 1000 \
+  --episodes 100 \
+  --episode-timeout 60 \
+  --output /home/pc16/project/manipulation-tasks/output/evals/light-switch-v3
+```
+
+三按钮使用同一评测入口，只需切换任务、策略和输出目录：
+
+```bash
+uv run --locked motrix-simulation-eval \
+  --workspace /home/pc16/project/manipulation-tasks \
+  --task press_three_buttons \
+  --policy /home/pc16/project/motrix-edge/motrix-edge/policy/press-three-buttons.yml \
+  --seed-start 1000 \
+  --episodes 100 \
+  --episode-timeout 60 \
+  --output /home/pc16/project/manipulation-tasks/output/evals/press-three-buttons-v4
+```
+
+输出目录必须尚不存在；中断后加 `--resume` 可跳过已有终态结果，未完成目录会保留为
+`.incomplete-<id>` 后重跑。每轮目录包含任务生成的场景和随机化信息、pipeline 日志及 `result.json`；
+批次根目录包含 `episodes.jsonl` 和 `summary.json`。`--no-render` 只适合不依赖图像的链路测试，视觉
+策略评测不可使用。Edge 上已有有效租约或会话时命令会拒绝接管，不会擅自撤销操作员控制。
+
 任务状态由 session 所在目录名自动选择，也可用 `--task <任务名>` 显式指定。已注册的
 `press_three_buttons` 会在 `GET /v1/task/status` 返回三枚按钮的实际弹簧行程、稳定按压、回弹、首次
 按压顺序和总体成功状态；判据读取任务自身 `success.json`。机器人 reset 会清空累计判定。没有注册状态

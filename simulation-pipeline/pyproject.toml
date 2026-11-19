@@ -8,10 +8,17 @@ version = "0.1.0"
 description = "Configurable simulation robot process for Motrix Edge"
 requires-python = ">=3.11,<3.14"
 readme = "README.md"
-dependencies = ["motrix-edge", "motrix-gen[motrix-assets]==0.1.1.dev128916", "numpy>=1.26.4", "msgspec>=0.21.1"]
+dependencies = [
+    "motrix-edge",
+    "motrix-gen[motrix-assets]==0.1.1.dev128916",
+    "numpy>=1.26.4",
+    "msgspec>=0.21.1",
+    "pyyaml>=6.0.3",
+]
 
 [project.scripts]
 motrix-simulation-pipeline = "motrix_simulation_pipeline.__main__:main"
+motrix-simulation-eval = "motrix_simulation_pipeline.evaluation:main"
 
 [dependency-groups]
 dev = ["pytest", "ruff"]

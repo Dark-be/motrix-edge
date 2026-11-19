@@ -33,7 +33,7 @@ from motrix_edge.adapter.simulation_piper_adapter import SimulationPiperAdapter
 from motrix_edge.geometry.transforms import pose_to_transform, transform_to_pose
 
 
-@pytest.mark.parametrize("task", ["press_three_buttons", "stack_color_blocks"])
+@pytest.mark.parametrize("task", ["press_three_buttons", "stack_color_blocks", "turn_on_light_switch"])
 def test_scene_control_and_video(tmp_path, task):
     workspace = Path(
         os.environ.get("SIMULATION_TEST_WORKSPACE", str(Path(__file__).resolve().parents[3] / "manipulation-tasks"))
@@ -85,7 +85,7 @@ def test_scene_control_and_video(tmp_path, task):
                     pytest.fail((tmp_path / "server.log").read_text())
                 discovery = client.post("/v1/discover").json()["robot"]
                 assert discovery["capabilities"]["capture"] is False
-                assert discovery["capabilities"]["task_status"] is (task == "press_three_buttons")
+                assert discovery["capabilities"]["task_status"] is (task != "stack_color_blocks")
                 assert discovery["type"] == "simulation_piper"
                 assert discovery["action_dims"]["pose"] == 6
                 assert discovery["pose_frame"] == "tcp"
@@ -99,14 +99,17 @@ def test_scene_control_and_video(tmp_path, task):
                 assert adapter.tcp_offset_by_arm()["right"] == pytest.approx([0.0, 0.0, 0.13])
                 adapter_task_status = adapter.task_status()
                 assert adapter_task_status is not None
-                assert adapter_task_status["available"] is (task == "press_three_buttons")
+                assert adapter_task_status["available"] is (task != "stack_color_blocks")
                 task_status = client.get("/v1/task/status").json()
-                assert task_status["available"] is (task == "press_three_buttons")
+                assert task_status["available"] is (task != "stack_color_blocks")
                 assert task_status["task"] == task
                 assert task_status["success"] is False
                 if task == "press_three_buttons":
                     assert task_status["expected_order"] == ["pink", "green", "blue"]
                     assert set(task_status["buttons"]) == {"pink", "green", "blue"}
+                if task == "turn_on_light_switch":
+                    assert task_status["criteria_version"] == "turn_on_light_switch_v2"
+                    assert task_status["progress"][0]["key"] == "rocker"
                 obs = None
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:

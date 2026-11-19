@@ -19,7 +19,8 @@ aiortc 标准信令（`POST /v1/webrtc/offer` 交换 SDP）：Edge 作为 Peer�
 -   `update(obs)`：写入最新观测（`adapter.observe()` 返回）；摄像头帧**降采样为 Edge 侧尺寸
     `DEFAULT_IMAGE_SIZE = (320, 240)` JPEG**（`cache_observation`，质量 80）后缓存，方便内网传输。
 -   `latest()`：读取最新观测帧（供 preview / WebRTC）；无帧返回 `None`。
--   `clear()`：清空缓存（会话结束 / 退出时）。
+-   `clear()`：清空缓存；节点释放 adapter 时同步清空，重新探测后必须由新 adapter 写入首帧，不能把
+    上一个机器人实例或仿真 episode 的旧帧继续暴露给 preview、WebRTC 或推理就绪门控。
 -   线程安全（`Lock`），单活跃最新帧。`image_size` 属性供 WebRTC 兜底空白帧用。
 
 ## 预览（GET /v1/preview）

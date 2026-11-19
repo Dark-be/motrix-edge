@@ -14,7 +14,12 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 from motrix_simulation_pipeline.server import create_app
-from motrix_simulation_pipeline.task_status import PressCriteria, PressSequenceTracker
+from motrix_simulation_pipeline.task_status import (
+    PressCriteria,
+    PressSequenceTracker,
+    SwitchCriteria,
+    SwitchTracker,
+)
 
 
 def _tracker() -> PressSequenceTracker:
@@ -62,6 +67,29 @@ def test_out_of_order_press_is_latched_until_reset():
     status = _sample(tracker)
     assert status["pressed_order"] == []
     assert status["order_valid"] is True
+
+
+def test_light_switch_requires_target_angle_low_velocity_and_stability():
+    tracker = SwitchTracker(
+        SwitchCriteria(
+            "turn_on_light_switch_v2",
+            angle_tolerance_rad=0.01,
+            velocity_tolerance_rad_s=0.02,
+            stable_seconds=0.5,
+            home_tolerance_rad=0.02,
+        )
+    )
+
+    assert tracker.update(-0.06, 0.03, -0.066, 0.25)["stable_seconds"] == 0
+    assert tracker.update(-0.06, 0.01, -0.066, 0.25)["success"] is False
+    status = tracker.update(-0.06, 0.01, -0.066, 0.25)
+    assert status["success"] is True
+    assert status["progress"][0]["complete"] is True
+
+    tracker.reset()
+    status = tracker.update(0.066, 0.0, -0.066, 1.0)
+    assert status["status"] == "pending"
+    assert status["stable_seconds"] == 0
 
 
 def test_task_status_endpoint_returns_owner_thread_snapshot():

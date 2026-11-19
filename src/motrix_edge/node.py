@@ -1013,3 +1013,4 @@ class EdgeNode:
             self.adapter = None
             self.adapter_name = None
             self.adapter_type = None
+        self.frame_manager.clear()

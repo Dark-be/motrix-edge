@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
 from motrix_gen.api.core.runtime import ArticulatedPartEntity, ObjectEntity, RuntimeData
 
 
@@ -174,6 +175,84 @@ class PressSequenceTracker:
         }
 
 
+@dataclass(frozen=True)
+class SwitchCriteria:
+    version: str
+    angle_tolerance_rad: float
+    velocity_tolerance_rad_s: float
+    stable_seconds: float
+    home_tolerance_rad: float
+
+    @classmethod
+    def load(cls, path: Path) -> "SwitchCriteria":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        criteria = cls(
+            version=payload["version"],
+            angle_tolerance_rad=float(payload["angle_tolerance_rad"]),
+            velocity_tolerance_rad_s=float(payload["velocity_tolerance_rad_s"]),
+            stable_seconds=float(payload["stable_seconds"]),
+            home_tolerance_rad=float(payload["home_tolerance_rad"]),
+        )
+        values = (
+            criteria.angle_tolerance_rad,
+            criteria.velocity_tolerance_rad_s,
+            criteria.stable_seconds,
+            criteria.home_tolerance_rad,
+        )
+        if criteria.version != "turn_on_light_switch_v2" or not all(
+            math.isfinite(value) and value > 0 for value in values
+        ):
+            raise ValueError(f"invalid turn_on_light_switch success criteria: {path}")
+        return criteria
+
+
+class SwitchTracker:
+    """Require the rocker to remain at its target limit with low velocity."""
+
+    def __init__(self, criteria: SwitchCriteria):
+        self.criteria = criteria
+        self.reset()
+
+    def reset(self) -> None:
+        self.stable_seconds = 0.0
+
+    def update(self, angle: float, velocity: float, target: float, dt: float) -> dict[str, object]:
+        values = (angle, velocity, target, dt)
+        if not all(math.isfinite(value) for value in values) or dt < 0:
+            raise ValueError("switch status sample must contain finite values and nonnegative dt")
+        angle_error = abs(angle - target)
+        at_target = angle_error <= self.criteria.angle_tolerance_rad
+        stationary = abs(velocity) <= self.criteria.velocity_tolerance_rad_s
+        self.stable_seconds = self.stable_seconds + dt if at_target and stationary else 0.0
+        success = self.stable_seconds >= self.criteria.stable_seconds
+        state = "complete" if success else "stabilizing" if self.stable_seconds > 0 else "pending"
+        return {
+            "criteria_version": self.criteria.version,
+            "status": "success" if success else "running" if at_target else "pending",
+            "success": success,
+            "angle_rad": angle,
+            "target_angle_rad": target,
+            "angle_error_rad": angle_error,
+            "velocity_rad_s": velocity,
+            "stable_seconds": self.stable_seconds,
+            "progress": [
+                {
+                    "key": "rocker",
+                    "label": "light switch",
+                    "state": state,
+                    "complete": success,
+                    "metrics": {
+                        "angle_rad": angle,
+                        "target_angle_rad": target,
+                        "angle_error_rad": angle_error,
+                        "velocity_rad_s": velocity,
+                        "stable_seconds": self.stable_seconds,
+                    },
+                }
+            ],
+        }
+
+
 class PressThreeButtonsStatus:
     provider_name = "press_three_buttons_v1"
     task_name = "press_three_buttons"
@@ -219,3 +298,48 @@ class PressThreeButtonsStatus:
 @register_task_status_provider("press_three_buttons")
 def _press_three_buttons(context: TaskStatusContext) -> TaskStatusProvider:
     return PressThreeButtonsStatus(context)
+
+
+class TurnOnLightSwitchStatus:
+    provider_name = "turn_on_light_switch_v2"
+    task_name = "turn_on_light_switch"
+
+    def __init__(self, context: TaskStatusContext):
+        criteria_path = context.workspace / "tasks" / context.task_name / "success.json"
+        self.tracker = SwitchTracker(SwitchCriteria.load(criteria_path))
+        self.joint_name = ""
+        self.target_angle = 0.0
+
+    def start(self, runtime: RuntimeData) -> None:
+        objects = [
+            entity
+            for entity in runtime.gen.entities()
+            if isinstance(entity, ObjectEntity) and entity.raw_object_name == "socket"
+        ]
+        if len(objects) != 1:
+            raise ValueError(f"expected one socket object, found {len(objects)}")
+        prefix = objects[0].root_body_name.removesuffix("socket")
+        self.joint_name = prefix + "JNT_socket_switch"
+        joint = runtime.sim.model.get_joint(self.joint_name)
+        if joint is None:
+            raise ValueError("socket rocker joint is missing")
+        limits = np.asarray(joint.range, dtype=float).reshape(-1)
+        if limits.shape != (2,) or not np.all(np.isfinite(limits)):
+            raise ValueError("socket rocker joint must have two finite limits")
+        self.target_angle = float(limits[0])
+
+    def reset(self) -> None:
+        self.tracker.reset()
+
+    def snapshot(self, runtime: RuntimeData, dt: float) -> dict[str, object]:
+        joint = runtime.sim.model.get_joint(self.joint_name)
+        if joint is None:
+            raise ValueError("socket rocker joint disappeared")
+        angle = float(joint.get_dof_pos(runtime.sim.data)[0])
+        velocity = float(joint.get_dof_vel(runtime.sim.data)[0])
+        return self.tracker.update(angle, velocity, self.target_angle, dt)
+
+
+@register_task_status_provider("turn_on_light_switch")
+def _turn_on_light_switch(context: TaskStatusContext) -> TaskStatusProvider:
+    return TurnOnLightSwitchStatus(context)

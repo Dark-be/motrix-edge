@@ -53,12 +53,36 @@ applied 表示目标被执行线程采用，不等于已到位。运动采样含
 `capabilities.task_status` 表示当前任务是否有提供器。
 状态接口是诊断与评测面，不加入策略 observation，避免训练 / 推理输入契约被任务专用字段污染。
 
+`turn_on_light_switch` 提供器从任务 `success.json` 读取冻结判据，定位唯一 `socket` 的 rocker
+关节，按目标限位角误差、关节速度和稳定时间判断开关是否完成切换。状态对外给出当前角度、目标角度、
+角速度、稳定时长和一个通用进度项；reset 只清空判定器累计时间，不篡改开关关节。
+
+## 批量策略评测
+
+批量评测由独立 `motrix-simulation-eval` 命令编排，不把场景生成或模型评测逻辑放入通用控制循环。
+首版是单 worker 串行执行，并复用一个已经启动的 Edge 服务；每个 episode 都使用独立 pipeline 子进程，
+从而隔离 MotrixGen 全局状态、renderer、共享内存和 9000 控制拍上限。远程策略服务可常驻，但每轮重新
+建立 Edge 推理会话，禁止跨 episode 复用策略历史。
+
+评测器从任务工作区调用 `python -m tasks.<task> sample-scene`，以 seed 生成任务拥有的 scene JSON；
+pipeline 只加载该文件，不导入任务私有模块、不自行随机化场景。随后评测器启动 pipeline、等待其健康，
+为本轮签发短租约；若 Edge 因上一 pipeline 下线进入 `ERROR`，则发送 `node/reset` 并等待重新发现到
+`READY`。READY 只代表节点生命周期就绪，不代表共享内存首帧已经进入 Edge；评测器还必须持租约轮询
+`GET /v1/preview`，直到状态向量和策略 `camera_map` 声明的相机全部出现，之后才能进入推理、异步预热和
+持续 rollout。任务结果以 `GET /v1/task/status` 的真实物理判定作为唯一成功来源；动作已应用、推理停止
+或超时都不能冒充成功。
+
+每轮达到成功、任务失败、超时或基础设施错误后，评测器停止 rollout、退出推理会话、撤销自己的租约并
+终止 pipeline。输出目录按 seed 保留场景、随机化摘要、pipeline 日志和 `result.json`；批次根目录维护
+`episodes.jsonl` 与 `summary.json`。`--resume` 只跳过已有终态结果的 seed，未完成目录可以重试，但不得
+覆盖一个已成功 episode。首版遇到非本评测器持有的有效租约或已有会话时直接失败，不擅自撤销或接管。
+
 ## 验证
 
-使用真实 `press_three_buttons` 与 `stack_color_blocks` 场景验证可配置加载，通过 Edge
+使用真实 `press_three_buttons`、`stack_color_blocks` 与 `turn_on_light_switch` 场景验证可配置加载，通过 Edge
 HttpShmAdapter 读取观测及控制目标，检查实际运动、双路非空图像、停止/回零、非法指令拒绝和退出清理。
 每个场景使用同名任务目录的 session 配置；不实现 capture 端点或数据写盘功能。SDK 自身的任务诊断产物保存在独立运行目录。
 
 ## 验证结果
 
-真实三按钮与叠方块场景均通过 HTTP 命令、Edge 适配器及共享内存集成测试，包括关节和夹爪实际运动、双相机图像、重复命令去重、非法动作拒绝、回零、停止及退出清理。测试命令和资产前提见 [使用说明](../../simulation-pipeline/README.md#测试)。
+真实三按钮、叠方块与单开关场景均通过 HTTP 命令、Edge 适配器及共享内存集成测试，包括关节和夹爪实际运动、双相机图像、任务状态、重复命令去重、非法动作拒绝、回零、停止及退出清理。测试命令和资产前提见 [使用说明](../../simulation-pipeline/README.md#测试)。

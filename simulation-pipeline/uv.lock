@@ -1680,6 +1680,7 @@ dependencies = [
     { name = "motrix-gen", extra = ["motrix-assets"] },
     { name = "msgspec" },
     { name = "numpy" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1694,6 +1695,7 @@ requires-dist = [
     { name = "motrix-gen", extras = ["motrix-assets"], specifier = "==0.1.1.dev128916", index = "http://pypi.mp/simple" },
     { name = "msgspec", specifier = ">=0.21.1" },
     { name = "numpy", specifier = ">=1.26.4" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [package.metadata.requires-dev]
