@@ -14,7 +14,8 @@
 
 """飞书 OAuth 与 Edge 自有登录会话。
 
-OAuth token 只活到回调处理结束；浏览器与采集 JSON 均只接触规范化用户身份。服务默认使用
+OAuth token 只活到回调处理结束；浏览器只接触规范化用户身份，采集 JSON 只取展示名作负责人默认值。
+服务默认使用
 进程内存储，符合 Edge 当前单进程 uvicorn 装配；多 worker 部署需换成共享 session store。
 """
 
@@ -240,21 +241,10 @@ class AuthService:
         if lease.holder_subject_id != session.user.subject:
             raise AuthError("authenticated user does not own the active lease", code=ErrorCode.FORBIDDEN)
         trusted = dict(meta)
-        for key in ("operator", "operator_identity", "capture_context", "meta_schema_version"):
+        for key in ("operator_identity", "capture_context", "meta_schema_version"):
             trusted.pop(key, None)
-        trusted.update(
-            {
-                "meta_schema_version": 2,
-                "operator": session.user.display_name,
-                "operator_identity": session.user.public_dict(),
-                "capture_context": {
-                    "source": "web_console",
-                    "lease_id": lease.lease_id,
-                    "authenticated_at": session.authenticated_at.isoformat(),
-                    "synced_at": datetime.now(BEIJING_TZ).isoformat(),
-                },
-            }
-        )
+        if not isinstance(trusted.get("operator"), str) or not trusted["operator"].strip():
+            trusted["operator"] = session.user.display_name
         return trusted
 
     def _require_session(self, session_id: str | None) -> _Session:

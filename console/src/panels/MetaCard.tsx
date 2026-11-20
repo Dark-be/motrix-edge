@@ -69,9 +69,13 @@ export function MetaCard() {
     const keys = useMemo(() => orderedKeys(options), [options]);
     const syncedMeta = useMemo(() => captureStatus?.meta ?? {}, [captureStatus?.meta]);
     const effectiveSelection = useMemo(
-        () => ({ ...selection, operator: auth?.user.display_name ?? operator.trim() }),
+        () => ({ ...selection, operator: operator.trim() || auth?.user.display_name || "" }),
         [auth, operator, selection]
     );
+
+    useEffect(() => {
+        if (auth?.user.display_name) setOperator((current) => current || auth.user.display_name);
+    }, [auth]);
     const missingSelection = useMemo(() => missingCaptureMeta(effectiveSelection), [effectiveSelection]);
 
     /** 写回执与 GET 同构（`{meta: 全量}`）：直接替换本地选项，清掉失效引用。 */
@@ -176,11 +180,7 @@ export function MetaCard() {
             <div className="space-y-1.5">
                 <div className="flex items-center gap-1">
                     <span className="w-[3.6rem] shrink-0 text-[10px] text-faint">采集人 *</span>
-                    {auth ? (
-                        <span className="min-w-0 flex-1 truncate rounded border border-line bg-panel2 px-2 py-1 text-[11px] text-ink">
-                            {auth.user.display_name}
-                        </span>
-                    ) : authStatus?.enabled ? (
+                    {authStatus?.enabled && !auth ? (
                         <Button
                             size="xs"
                             variant="primary"
@@ -193,7 +193,7 @@ export function MetaCard() {
                         <input
                             className={`${inputCls} min-w-0 flex-1`}
                             value={operator}
-                            placeholder="请输入采集员姓名（不可信）"
+                            placeholder="多人姓名请用英文逗号分隔"
                             onChange={(e) => setOperator(e.target.value)}
                         />
                     )}

@@ -5,14 +5,14 @@ import { captureSyncMeta, missingCaptureMeta } from "./captureMeta.ts";
 
 test("capture sync includes the authenticated operator used by required-field validation", () => {
     const effectiveSelection = {
-        operator: " 张三 ",
+        operator: " 张三， 李四 , 王五 ",
         task_name: " 桌面整理 ",
         optional: "   ",
     };
 
     assert.deepEqual(missingCaptureMeta(effectiveSelection), []);
     assert.deepEqual(captureSyncMeta(effectiveSelection), {
-        operator: "张三",
+        operator: "张三,李四,王五",
         task_name: "桌面整理",
     });
 });

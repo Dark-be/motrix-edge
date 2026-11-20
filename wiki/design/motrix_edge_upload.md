@@ -23,11 +23,14 @@
 ## 元信息解析（schema 驱动）
 
 -   JSON 描述文件（`episode_<n>.json`）的已知字段由 **schema** 单点定义：`字段名 → (类型, 描述)`；新增字段只需在 schema 加一行，解析与前端展示自动跟随。
--   当前 schema 覆盖：`relative_path` / `robot_name` / `robot_type` / `operator` / `task_name` / `frames` / `size_bytes` / `duration` / `sha256` / `created_at`。
+-   当前 schema 覆盖：`schema_version` / `robot` / `task` / `created_at` / `duration_s` /
+    `vector_layout` / `control` / `action_semantics` / `dropped` / `sha256`。各 topic 实际样本数从
+    MCAP summary 获取，不在 JSON 内再写一份容易歧义或漂移的计数。
 -   **字段名的权威在写侧**：这些字段由 robot-pipeline 的 `ActMcapCollector`（`finish()` 写同名 `.json`）
     产出；本 schema 只是读取侧的投影——改名 / 新增字段时**两侧一起改**（本文件与 collector 的
     `_write_meta_json`），未识别的字段会落到 `metadata_unknown` 不会丢。
--   类型归一化：`frames` / `size_bytes` → `int`，`duration` → `float`，其余 → `str`；缺省字段可空（不判 invalid），仅 JSON 损坏 / 顶层非对象 / 配对缺失才 `invalid`。
+-   类型归一化：`schema_version` → `int`，`duration_s` → `float`，结构字段保留 object，
+    其余 → `str`；缺省字段可空（不判 invalid），仅 JSON 损坏 / 顶层非对象 / 配对缺失才 `invalid`。
 -   解析产物三份：
     -   `meta`：结构化已知字段（前端展示用）。
     -   `metadata_unknown`：schema 未识别的原始字段（向前兼容新数据）。

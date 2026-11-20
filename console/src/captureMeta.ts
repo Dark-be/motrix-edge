@@ -16,7 +16,15 @@ export function missingCaptureMeta(meta: Record<string, unknown>): string[] {
 export function captureSyncMeta(selection: Record<string, string>): Record<string, string> {
     const meta: Record<string, string> = {};
     for (const [key, value] of Object.entries(selection)) {
-        const trimmed = value.trim();
+        const trimmed =
+            key === "operator"
+                ? value
+                      .replaceAll("，", ",")
+                      .split(",")
+                      .map((name) => name.trim())
+                      .filter(Boolean)
+                      .join(",")
+                : value.trim();
         if (trimmed !== "") meta[key] = trimmed;
     }
     return meta;

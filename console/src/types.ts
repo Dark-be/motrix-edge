@@ -206,7 +206,7 @@ export interface UploadEpisode {
     mcap: UploadFileInfo | null;
     metadata: UploadFileInfo | null;
     /** JSON 描述文件的结构化字段（schema 提取；缺省/类型不符为 null） */
-    meta: Record<string, string | number | null>;
+    meta: Record<string, unknown>;
     metadata_content: Record<string, unknown> | null;
     /** schema 未识别的原始字段（向前兼容新数据） */
     metadata_unknown: Record<string, unknown> | null;

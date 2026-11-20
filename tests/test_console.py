@@ -125,7 +125,7 @@ def test_edge_capture_sync_requires_signature_and_binds_lease_owner():
     commands = _Commands()
     verifier = ProxyIdentityVerifier("edge-secret", leases)
     client = TestClient(create_app({}, commands=commands, lease_manager=leases, proxy_auth=verifier))
-    body = json.dumps({"meta": {"operator": "伪造", "task_name": "桌面前移"}}, separators=(",", ":")).encode()
+    body = json.dumps({"meta": {"operator": "张三,李四", "task_name": "桌面前移"}}, separators=(",", ":")).encode()
     headers = signed_identity_headers(
         "edge-secret",
         method="POST",
@@ -142,7 +142,7 @@ def test_edge_capture_sync_requires_signature_and_binds_lease_owner():
 
     assert response.status_code == 200
     meta = commands.calls[-1].params["meta"]
-    assert meta["operator"] == "张三"
-    assert meta["operator_identity"]["subject"] == subject
-    assert meta["operator_identity"]["open_id"] == "ou_console"
+    assert meta["operator"] == "张三,李四"
+    assert "operator_identity" not in meta
+    assert "capture_context" not in meta
     assert meta["task_name"] == "桌面前移"

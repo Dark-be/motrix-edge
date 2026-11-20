@@ -38,6 +38,24 @@ const shown = (v: unknown): string | null => {
     return s === "" || s === "None" || s === "null" ? null : s;
 };
 
+const objectValue = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const episodeFields = (episode: UploadEpisode) => {
+    const meta = episode.meta ?? {};
+    const robot = objectValue(meta.robot);
+    const task = objectValue(meta.task);
+    return {
+        meta,
+        // HTTP 控制协议不随落盘 schema 迁移；回退扁平字段让新版 Console 仍可查看旧 Edge 的扫描结果。
+        robotName: shown(robot.name) ?? shown(meta.robot_name),
+        robotType: shown(robot.type) ?? shown(meta.robot_type),
+        operator: shown(task.operator) ?? shown(meta.operator),
+        taskName: shown(task.task_name) ?? shown(meta.task_name),
+        duration: meta.duration_s ?? meta.duration,
+    };
+};
+
 const statusTone = (status: string): "green" | "red" | "amber" | "slate" =>
     status === "ready" || status === "succeeded"
         ? "green"
@@ -50,12 +68,11 @@ const statusTone = (status: string): "green" | "red" | "amber" | "slate" =>
 // ---- Episode 列表工具（搜索 / 状态筛选 / 排序 / 分页）----
 const PAGE_SIZE = 10; // 每页渲染条数（几十上百个 episode 时分页，避免全量 DOM）
 
-type SortKey = "name" | "time" | "size" | "frames" | "duration";
+type SortKey = "name" | "time" | "size" | "duration";
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
     { key: "time", label: "创建时间" },
     { key: "name", label: "名称" },
     { key: "size", label: "大小" },
-    { key: "frames", label: "帧数" },
     { key: "duration", label: "时长" },
 ];
 
@@ -149,8 +166,8 @@ export function UploadPanel({ api, onLog }: { api: EdgeApi; onLog: (msg: string,
         return episodes.filter((ep) => {
             if (statusFilter !== "all" && ep.status !== statusFilter) return false;
             if (!q) return true;
-            const meta = ep.meta ?? {};
-            const haystack = [ep.episode_id, meta.robot_name, meta.robot_type, meta.operator, meta.task_name]
+            const { robotName, robotType, operator, taskName } = episodeFields(ep);
+            const haystack = [ep.episode_id, robotName, robotType, operator, taskName]
                 .filter(Boolean)
                 .join(" ")
                 .toLowerCase();
@@ -160,14 +177,12 @@ export function UploadPanel({ api, onLog }: { api: EdgeApi; onLog: (msg: string,
 
     const sorted = useMemo(() => {
         const valueOf = (ep: UploadEpisode): string | number => {
-            const meta = ep.meta ?? {};
+            const { meta, duration } = episodeFields(ep);
             switch (sortKey) {
                 case "size":
-                    return Number(meta.size_bytes) || 0;
-                case "frames":
-                    return Number(meta.frames) || 0;
+                    return ep.mcap?.size ?? 0;
                 case "duration":
-                    return Number(meta.duration) || 0;
+                    return Number(duration) || 0;
                 case "name":
                     return ep.episode_id;
                 case "time":
@@ -382,14 +397,14 @@ export function UploadPanel({ api, onLog }: { api: EdgeApi; onLog: (msg: string,
                                 </p>
                             ) : (
                                 pageEpisodes.map((episode) => {
-                                    const meta = episode.meta ?? {};
+                                    const { meta, robotName, robotType, operator, taskName, duration } =
+                                        episodeFields(episode);
                                     const invalid = episode.status === "invalid";
-                                    // 指标行：帧 / 时长 / 大小 / 时间（sha256 进 title，不占版面）
+                                    // 指标行：时长 / 大小 / 时间（sha256 进 title，不占版面）
                                     const metrics = [
-                                        meta.frames != null && `${meta.frames} 帧`,
-                                        meta.duration != null && fmtDuration(meta.duration),
-                                        meta.size_bytes != null && fmtBytes(meta.size_bytes),
-                                        meta.created_at && fmtTime(meta.created_at),
+                                        duration != null && fmtDuration(duration as number),
+                                        episode.mcap?.size != null && fmtBytes(episode.mcap.size),
+                                        meta.created_at != null && fmtTime(String(meta.created_at)),
                                     ]
                                         .filter(Boolean)
                                         .join(" · ");
@@ -419,24 +434,23 @@ export function UploadPanel({ api, onLog }: { api: EdgeApi; onLog: (msg: string,
                                                         {episode.episode_id}
                                                     </span>
                                                     <Badge tone={statusTone(episode.status)}>{episode.status}</Badge>
-                                                    {meta.robot_name && (
+                                                    {robotName && (
                                                         <span className="truncate text-slate-300">
-                                                            {meta.robot_name}
-                                                            {meta.robot_type ? ` (${meta.robot_type})` : ""}
+                                                            {robotName}
+                                                            {robotType ? ` (${robotType})` : ""}
                                                         </span>
                                                     )}
                                                     {/* 采集人 / 任务（都为空则不占位：机器人进程写的是 null / None） */}
-                                                    {(shown(meta.operator) || shown(meta.task_name)) && (
+                                                    {(operator || taskName) && (
                                                         <span className="truncate text-slate-400">
-                                                            {shown(meta.operator) ?? "—"} ·{" "}
-                                                            {shown(meta.task_name) ?? "—"}
+                                                            {operator ?? "—"} · {taskName ?? "—"}
                                                         </span>
                                                     )}
                                                 </span>
                                                 {/* 指标行：帧 / 时长 / 大小 / 时间（sha256 悬浮可见） */}
                                                 <span
                                                     className="mt-0.5 block truncate font-mono text-[10px] text-slate-500"
-                                                    title={meta.sha256 ? `sha256 ${meta.sha256}` : undefined}
+                                                    title={meta.sha256 ? `sha256 ${String(meta.sha256)}` : undefined}
                                                 >
                                                     {metrics || "—"}
                                                 </span>

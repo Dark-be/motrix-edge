@@ -29,8 +29,9 @@ episode 录制与观测发布解耦。控制线程产生状态事件，观测线
 只组合最新缓存，不再次访问相机。
 
 录制会话边界固定为：打开 writer → 开放事件准入 → capture end 关闭准入 → 排空已接收事件 → 写
-footer 与 JSON。capture cancel 关闭准入、丢弃排队事件并删除本轮文件。JSON 记录各流 accepted、
-dropped 与 writer 错误；HTTP capture 契约不变。
+footer 与 JSON。capture cancel 关闭准入、丢弃排队事件并删除本轮文件。JSON 只记录 MCAP 无法
+反推的逐流 `dropped`；各 topic accepted 数由 MCAP summary 统计，writer phase / 错误仍由 HTTP
+capture 运行契约提供。
 
 运行时只有 `BaseEnv` 一套实现。未配置 `streams.enabled` 时仍使用同一 recorder 和 action 语义，只是
 沿用控制线程内状态采样与观测线程统一取相机；启用后控制、状态、逐相机和观测各自按配置调度。双臂
@@ -207,8 +208,8 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
     采集器就拿到原始 `joint` / `gripper` → 每拍 `KeyError: 'observations/qpos'`、episode 0 帧。
 -   采集（`ActMcapCollector`）落 `observations/qpos`（**状态向量** = 每臂「值 + 夹爪」）+ `action`
     （**目标向量**，同维同布局）+ 相机 topic，**位姿不入 mcap**（数据集格式未定，暂不扩 schema）；
-    每轮 mcap 的同名 JSON 里写 `state_space` / `state_dims` / `action_space` / `action_dims`
-    （逐维 `{index, arm, kind, name}`）——下游按 `kind` 解释每个下标。
+    每轮 mcap 的同名 JSON 里只写一份 `vector_layout`（`space` + 逐维
+    `{index, arm, kind, name}`）——状态与动作固定同维同布局，下游按 `kind` 解释每个下标。
 
 ## 位姿动作下发：不经 `move_p`
 

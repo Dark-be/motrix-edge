@@ -85,20 +85,16 @@ class UploadService:
     # 类型：str / int / float / object；类型不符或缺省 → meta 中该字段为 None（不判 invalid）。
     # 新增已知字段只需在此加一行。
     METADATA_SCHEMA: dict[str, tuple[str, str]] = {
-        "relative_path": ("str", "相对路径"),
-        "robot_name": ("str", "机器人名称"),
-        "robot_type": ("str", "机器人类型"),
-        "operator": ("str", "采集员"),
-        "operator_identity": ("object", "采集员认证身份"),
-        "capture_context": ("object", "采集上下文"),
-        "meta_schema_version": ("int", "采集元信息版本"),
-        "task_name": ("str", "任务名称"),
-        "runtime_context": ("object", "LLM 数据采集运行时上下文"),
-        "frames": ("int", "帧数"),
-        "size_bytes": ("int", "数据大小（字节）"),
-        "duration": ("float", "时长（秒）"),
-        "sha256": ("str", "数据 SHA-256"),
+        "schema_version": ("int", "episode 元信息版本"),
+        "robot": ("object", "机器人身份"),
+        "task": ("object", "任务与现场业务信息"),
         "created_at": ("str", "创建时间"),
+        "duration_s": ("float", "时长（秒）"),
+        "vector_layout": ("object", "状态与动作向量布局"),
+        "control": ("object", "控制器配置"),
+        "action_semantics": ("str", "动作语义"),
+        "dropped": ("object", "未写入 MCAP 的逐流丢弃计数"),
+        "sha256": ("str", "数据 SHA-256"),
     }
 
     def __init__(self, base_cfg: dict | None = None, allowed_roots=None):

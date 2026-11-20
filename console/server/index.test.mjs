@@ -105,12 +105,12 @@ test("tenant allowlist accepts configured tenants and rejects others", () => {
     assert.doesNotThrow(() => requireAllowedTenant(new Set(), "development-tenant"));
 });
 
-test("trusted LAN capture sync replaces spoofed operator identity", () => {
+test("trusted LAN capture sync preserves operator names and removes identity payloads", () => {
     const body = bindTrustedCaptureBody(
         Buffer.from(
             JSON.stringify({
                 meta: {
-                    operator: "伪造",
+                    operator: "张三,李四",
                     operator_identity: { subject: "attacker" },
                     capture_context: { source: "browser" },
                     task_name: "整理桌面",
@@ -128,10 +128,9 @@ test("trusted LAN capture sync replaces spoofed operator identity", () => {
         "2026-11-03T00:00:00.000Z"
     );
     const { meta } = JSON.parse(body.toString("utf8"));
-    assert.equal(meta.operator, "张三");
-    assert.equal(meta.operator_identity.subject, "feishu:tenant:ou_user");
-    assert.equal(meta.capture_context.source, "motrix_console_trusted_network");
-    assert.equal(meta.capture_context.lease_id, "lease-1");
+    assert.equal(meta.operator, "张三,李四");
+    assert.equal(meta.operator_identity, undefined);
+    assert.equal(meta.capture_context, undefined);
     assert.equal(meta.task_name, "整理桌面");
 });
 

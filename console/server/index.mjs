@@ -136,7 +136,7 @@ export function signIdentityHeaders(secret, { method, target, body, identity, ti
     };
 }
 
-export function bindTrustedCaptureBody(body, identity, leaseId, syncedAt = new Date().toISOString()) {
+export function bindTrustedCaptureBody(body, identity) {
     let payload;
     try {
         payload = JSON.parse(body.toString("utf8"));
@@ -157,15 +157,8 @@ export function bindTrustedCaptureBody(body, identity, leaseId, syncedAt = new D
     validateHeaderText(subject, "subject");
     validateHeaderText(displayName, "display_name");
     const meta = { ...payload.meta };
-    for (const key of ["operator", "operator_identity", "capture_context", "meta_schema_version"]) delete meta[key];
-    meta.meta_schema_version = 2;
-    meta.operator = displayName;
-    meta.operator_identity = { ...identity, provider: "feishu", subject, display_name: displayName };
-    meta.capture_context = {
-        source: "motrix_console_trusted_network",
-        ...(leaseId ? { lease_id: leaseId } : {}),
-        synced_at: syncedAt,
-    };
+    for (const key of ["operator_identity", "capture_context", "meta_schema_version"]) delete meta[key];
+    if (typeof meta.operator !== "string" || meta.operator.trim() === "") meta.operator = displayName;
     return Buffer.from(JSON.stringify({ ...payload, meta }));
 }
 

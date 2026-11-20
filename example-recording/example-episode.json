@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "robot": {
+    "name": "dual_piper_001",
+    "type": "dual_piper"
+  },
+  "task": {
+    "operator": "张三,李四",
+    "task_name": "DualPiper 异频三相机示例采集"
+  },
+  "created_at": "2026-11-20T15:28:33",
+  "duration_s": 0.063352986,
+  "vector_layout": {
+    "space": "joint",
+    "dims": [
+      {
+        "index": 0,
+        "arm": "left",
+        "kind": "joint",
+        "name": "j1"
+      },
+      {
+        "index": 1,
+        "arm": "left",
+        "kind": "joint",
+        "name": "j2"
+      },
+      {
+        "index": 2,
+        "arm": "left",
+        "kind": "joint",
+        "name": "j3"
+      },
+      {
+        "index": 3,
+        "arm": "left",
+        "kind": "joint",
+        "name": "j4"
+      },
+      {
+        "index": 4,
+        "arm": "left",
+        "kind": "joint",
+        "name": "j5"
+      },
+      {
+        "index": 5,
+        "arm": "left",
+        "kind": "joint",
+        "name": "j6"
+      },
+      {
+        "index": 6,
+        "arm": "left",
+        "kind": "gripper",
+        "name": "gripper"
+      },
+      {
+        "index": 7,
+        "arm": "right",
+        "kind": "joint",
+        "name": "j1"
+      },
+      {
+        "index": 8,
+        "arm": "right",
+        "kind": "joint",
+        "name": "j2"
+      },
+      {
+        "index": 9,
+        "arm": "right",
+        "kind": "joint",
+        "name": "j3"
+      },
+      {
+        "index": 10,
+        "arm": "right",
+        "kind": "joint",
+        "name": "j4"
+      },
+      {
+        "index": 11,
+        "arm": "right",
+        "kind": "joint",
+        "name": "j5"
+      },
+      {
+        "index": 12,
+        "arm": "right",
+        "kind": "joint",
+        "name": "j6"
+      },
+      {
+        "index": 13,
+        "arm": "right",
+        "kind": "gripper",
+        "name": "gripper"
+      }
+    ]
+  },
+  "control": {
+    "left_arm": {
+      "mode": "mit+gravity",
+      "ctrl_mode": "mit",
+      "role": "follower",
+      "mit_profile": "default",
+      "mit_params": [
+        {
+          "vel_ref": 0.0,
+          "kp": 6.0,
+          "kd": 0.8,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 4.0,
+          "kd": 1.0,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 6.0,
+          "kd": 0.9,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 3.0,
+          "kd": 0.5,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 3.0,
+          "kd": 0.5,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 2.0,
+          "kd": 0.4,
+          "t_ref": 0.0
+        }
+      ],
+      "gravity": {
+        "active": true,
+        "alpha": 1.0,
+        "limit_nm": 16.0,
+        "params": "gravity/piper_6dof.json",
+        "placeholder": false
+      }
+    },
+    "right_arm": {
+      "mode": "mit+gravity",
+      "ctrl_mode": "mit",
+      "role": "follower",
+      "mit_profile": "default",
+      "mit_params": [
+        {
+          "vel_ref": 0.0,
+          "kp": 6.0,
+          "kd": 0.8,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 4.0,
+          "kd": 1.0,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 6.0,
+          "kd": 0.9,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 3.0,
+          "kd": 0.5,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 3.0,
+          "kd": 0.5,
+          "t_ref": 0.0
+        },
+        {
+          "vel_ref": 0.0,
+          "kp": 2.0,
+          "kd": 0.4,
+          "t_ref": 0.0
+        }
+      ],
+      "gravity": {
+        "active": true,
+        "alpha": 1.0,
+        "limit_nm": 16.0,
+        "params": "gravity/piper_6dof.json",
+        "placeholder": false
+      }
+    }
+  },
+  "action_semantics": "submitted_command",
+  "dropped": {},
+  "sha256": "750033bde6a259a38030544f9d4a578a00088d8042054c5bcdbbe52b5bb68067"
+}

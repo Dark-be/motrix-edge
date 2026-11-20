@@ -277,9 +277,11 @@ def test_collector_consumes_standard_observation(dual_piper, collector, tmp_path
 
     assert path is not None and path.exists()
     meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-    assert meta["frames"] == 2  # 每拍都真的落了帧（不是 0）
-    assert meta["state_dims"] == robot.state_layout()["state_dims"]
-    assert meta["action_dims"] == robot.state_layout()["action_dims"]
+    assert "frames" not in meta  # 异频 topic 无统一“帧数”；数量从 MCAP 消息统计获取
+    assert meta["vector_layout"] == {
+        "space": "joint",
+        "dims": robot.state_layout()["state_dims"],
+    }
     from mcap.reader import make_reader
 
     with path.open("rb") as stream:
@@ -577,7 +579,25 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     instance.set_robot_meta(robot_name="dual_piper_001", robot_type="dual_piper")
     instance.set_state_layout(layout)
     runtime_context = {"log_path": "/rpent/runs/42/run.log", "model": "rpent-agent-v1"}
-    instance.set_meta({"operator": "张三", "task_name": "桌面整理", "runtime_context": runtime_context})
+    instance.set_meta(
+        {
+            "operator": " 张三， 李四 ",
+            "task_name": "桌面整理",
+            "description": "演示",
+            "runtime_context": runtime_context,
+            "operator_identity": {"subject": "legacy"},
+            "action_semantics": "submitted_command",
+            "recording": {
+                "accepted": {"state": 12, "action": 12, "meta": 1},
+                "dropped": {"image:head": 2},
+                "started_ns": 1,
+                "stopped_ns": 2,
+                "data_loss": True,
+                "errors": [],
+                "cancelled": False,
+            },
+        }
+    )
 
     assert instance.meta["state_space"] == "joint"  # /v1/capture/status 的 meta 同源
     assert instance.meta["runtime_context"] == runtime_context
@@ -585,12 +605,14 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     episode.write_bytes(b"not-a-real-mcap")  # 只验证元信息，不真写 mcap
     meta = json.loads(instance._write_meta_json(episode).read_text(encoding="utf-8"))
 
-    assert meta["robot_name"] == "dual_piper_001"
-    assert meta["state_space"] == "joint"
-    assert meta["state_dims"] == layout["state_dims"]
-    assert meta["action_space"] == "joint" and meta["action_dims"] == layout["action_dims"]
-    assert meta["operator"] == "张三" and meta["task_name"] == "桌面整理"
-    assert meta["runtime_context"] == runtime_context
+    assert meta["schema_version"] == 1
+    assert meta["robot"] == {"name": "dual_piper_001", "type": "dual_piper"}
+    assert meta["vector_layout"] == {"space": "joint", "dims": layout["state_dims"]}
+    assert meta["task"] == {"operator": "张三,李四", "task_name": "桌面整理", "description": "演示"}
+    assert meta["dropped"] == {"image:head": 2}
+    assert "recording" not in meta
+    assert "runtime_context" not in meta
+    assert "relative_path" not in meta and "size_bytes" not in meta
 
 
 def test_collector_layout_defaults_to_empty(collector, tmp_path):
@@ -726,7 +748,6 @@ def test_collector_writes_control_into_episode_json(collector, tmp_path):
     episode.write_bytes(b"not-a-real-mcap")  # 只验证元信息，不真写 mcap
     meta = json.loads(instance._write_meta_json(episode).read_text(encoding="utf-8"))
 
-    assert meta["control_mode"] == "mixed"
     assert meta["control"] == control["arms"]
 
 

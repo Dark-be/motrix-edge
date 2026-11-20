@@ -135,7 +135,7 @@ def test_oauth_state_is_single_use_and_return_to_rejects_external_url():
     )
 
 
-def test_capture_sync_injects_trusted_user_and_overwrites_spoofed_fields():
+def test_capture_sync_keeps_operator_names_and_drops_identity_fields():
     leases = LeaseManager()
     _install_lease(leases, "feishu:tenant-1:ou_operator")
     auth = _auth(leases)
@@ -148,7 +148,7 @@ def test_capture_sync_injects_trusted_user_and_overwrites_spoofed_fields():
         headers={"X-Lease-Id": "lease-1"},
         json={
             "meta": {
-                "operator": "伪造用户",
+                "operator": "张三,李四",
                 "operator_identity": {"subject": "fake"},
                 "capture_context": {"source": "fake"},
                 "task_name": "桌面前移",
@@ -158,11 +158,11 @@ def test_capture_sync_injects_trusted_user_and_overwrites_spoofed_fields():
 
     assert response.status_code == 200
     synced = commands.calls[-1]["params"]["meta"]
-    assert synced["operator"] == "张三"
-    assert synced["operator_identity"]["subject"] == "feishu:tenant-1:ou_operator"
-    assert synced["capture_context"]["lease_id"] == "lease-1"
+    assert synced["operator"] == "张三,李四"
+    assert "operator_identity" not in synced
+    assert "capture_context" not in synced
     assert synced["task_name"] == "桌面前移"
-    assert synced["meta_schema_version"] == 2
+    assert "meta_schema_version" not in synced
 
 
 def test_capture_sync_requires_login_and_matching_lease_subject():

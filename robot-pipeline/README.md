@@ -382,16 +382,15 @@ collector:
     `{uuid}.mcap`（文件名用 UUID，全局唯一）；每信号一个 topic——`observations/qpos`（**状态向量**
     = 每臂「值 + 夹爪」交错）/ `action`（实际成功返回的控制器提交命令，同维同布局）用
     `std_msgs/msg/Float64MultiArray`，`observations/images/<cam>` 用
-    `sensor_msgs/msg/CompressedImage`（JPEG）。**逐维含义写在同名 `{uuid}.json`**
-    （`state_space` / `state_dims` / `action_space` / `action_dims`，每项 `{index, arm, kind, name}`）——
-    机器人整体切位姿时只改 `state_space`，下游不必改代码。各话题按源头采样时间写入 MCAP，
+    `sensor_msgs/msg/CompressedImage`（JPEG）。**逐维含义写在同名 `{uuid}.json` 的
+    `vector_layout`**（`space` + 每项 `{index, arm, kind, name}`）——状态与动作共享同一布局。各话题按源头采样时间写入 MCAP，
     图片消息头与该图片的话题时间一致，详见 [逐话题采样时间](../wiki/design/robot_pipeline_runtime.md#逐话题采样时间)。
     **流式写入**：`start` → `collect` 直接落盘 → `finish`。
 
 默认录制由专用 writer 线程完成：100Hz state 与 30Hz image 分别进入有界队列，控制 / 观测生产方
 不等待磁盘。正常结束会先关闭准入、排空已接收事件再写 footer；取消会丢弃排队事件并删除本轮文件。
-队列 accepted / dropped、writer phase 与错误通过 `/v1/capture/status` 的 `recording` 字段提供，并写入
-episode JSON 的 `recording` 元信息。共享内存实时观测中的 `action` 仍表示目标；MCAP `action` 表示
+队列 accepted / dropped、writer phase 与错误通过 `/v1/capture/status` 的 `recording` 字段提供；episode
+JSON 只额外保留 MCAP 无法反推的非零 `dropped`。共享内存实时观测中的 `action` 仍表示目标；MCAP `action` 表示
 限速后实际尝试提交且 SDK 调用成功返回的 command，JSON 用 `action_semantics=submitted_command` 明示。
 
 `dual_piper.yml` 把控制、状态和每台相机拆成独立调度：逐相机 worker 按各自
@@ -412,10 +411,15 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
 
 ```json
 {
-    "relative_path": "383af95f31d744f5b49630125c5f0caf.mcap",
-    "robot_name": "test_001",
-    "robot_type": "test_robot",
-    "control_mode": "mit+gravity",
+    "schema_version": 1,
+    "robot": { "name": "test_001", "type": "test_robot" },
+    "task": { "operator": "Yu Hongzhen,Li Ming", "task_name": "put bowls" },
+    "created_at": "2026-09-01T10:00:00",
+    "duration_s": 12.34,
+    "vector_layout": {
+        "space": "joint",
+        "dims": [{ "index": 0, "arm": "left", "kind": "joint", "name": "j1" }]
+    },
     "control": {
         "left_arm": {
             "mode": "mit+gravity",
@@ -430,27 +434,25 @@ collector 每轮采集维护一条元信息 `meta`，结束一轮后写为**与 
             }
         }
     },
-    "operator": "Yu Hongzhen",
-    "task_name": "put bowls",
-    "frames": 370,
-    "size_bytes": 12345678,
-    "duration": 12.34,
-    "sha256": "e3f0c1b8a2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8g9h0i1j2k3l4m5n6o7p8q9r0",
-    "created_at": "2026-09-01T10:00:00"
+    "action_semantics": "submitted_command",
+    "dropped": {},
+    "sha256": "e3f0c1b8a2d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"
 }
 ```
 
--   自动统计：`relative_path`（mcap 文件名）、`robot_name` / `robot_type`（env 注入）、
-    `frames`（帧数）、`size_bytes`（文件字节）、`duration`（秒）、`sha256`（文件哈希）、
-    `created_at`（采集开始时间，ISO）。
--   控制模式（env 注入）：`control_mode` = 各**执行**臂的聚合值（`mit` / `mit+gravity` /
-    `joint`；双臂不同 → `mixed`；没有执行控制器 → `null`）+ `control` = 逐控制器明细
+-   自动统计：`duration_s`（秒）、`sha256`（文件哈希）、`created_at`（采集开始时间，ISO）。
+    文件名和大小可从配对文件直接获得，不重复写入 JSON。异频采集没有唯一“帧数”；各 topic
+    实际样本数以 MCAP summary 为准。
+-   `dropped`：未进入 MCAP 的逐流丢弃数；已写入数可从 MCAP 重建，不在 JSON 重复保存。
+-   `vector_layout`：状态与动作共享的逐维布局；当前二者固定一致，只保存一份。
+-   控制模式（env 注入）：`control` = 逐控制器明细
     （`mode` / `ctrl_mode` / `role` / `gravity`：`active` / `alpha` / `limit_nm` / `params` /
     `placeholder`）。**主手（leader）不记录**。注意 `joint` 通路不下发 `t_ff`，重力前馈在该
     模式下**不生效**（此时 `mode` 只报 `joint`）。
--   同步字段（`operator` / `task_name` / `description` 等）：默认留空（null），由 Edge
+-   同步字段归入 `task`（`operator` / `task_name` / `description` 等）：空值不写，由 Edge
     侧 adapter 的 `capture sync` 同步——`POST /v1/capture/sync`，body `{"meta": {...}}`，
-    在采集开始前或采集中同步均可；结束写 JSON 时附加。
+    在采集开始前或采集中同步均可；`operator` 支持多人并规范化为英文逗号分隔。认证身份、租约和
+    `runtime_context` 不写入 episode。
 
 ## 位姿动作（末端位姿）
 

@@ -89,7 +89,8 @@ Console 与该 Edge 的两个环境变量值必须相同。
 
 实验室固定 IP 设备可在单条静态注册项设置 `"trustedNetwork": true` 并省略 `sharedSecretEnv`。该模式
 仍要求浏览器先登录飞书，且 Console 在转发 `POST /v1/captures/sync` 前删除浏览器提交的
-`operator` / `operator_identity` / `capture_context`，用服务端登录 Session 重建采集身份。但是 Edge
+历史 `operator_identity` / `capture_context`，用服务端登录 Session 校验控制面身份；`operator` 缺失
+时才使用飞书展示名补默认负责人。但是 Edge
 不再能独立验证请求是否来自 Console，因此部署必须通过主机防火墙、交换机 ACL 或隔离管理网保证 Edge
 控制端口只接受 Console 主机。`trustedNetwork` 与 `sharedSecretEnv` 互斥；非固定可信网络必须使用
 HMAC 模式。
@@ -112,7 +113,7 @@ Edge 校验时间窗口、常量时间签名比较和 nonce 未使用；同一 n
 ## 采集身份
 
 `POST /v1/captures/sync` 在启用 Console proxy 验证时必须带有效签名。Edge 要求签名 subject 与
-活跃租约 `holder_subject_id` 相同，再覆盖 `operator` / `operator_identity` / `capture_context`。
+活跃租约 `holder_subject_id` 相同；历史身份结构不再进入采集元信息，`operator` 只在缺失时补默认值。
 浏览器 body 中的同名字段永远不作为可信事实。
 
 ## 运行

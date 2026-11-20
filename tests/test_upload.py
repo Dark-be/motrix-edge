@@ -90,7 +90,7 @@ def test_scan_survives_file_vanishing_mid_scan(tmp_path, monkeypatch):
     assert any("vanished during scan" in error for error in episode["errors"])
     # 未受影响的文件照常解析（只有失联文件的那一项降级）
     assert episode["metadata"]["size"] == len(b"{}")
-    assert episode["meta"]["task_name"] is None
+    assert episode["meta"]["task"] is None
 
 
 def test_select_replaces_episode_selection_and_enqueue_requires_endpoint(tmp_path):
@@ -133,21 +133,16 @@ def test_scan_extracts_structured_metadata_fields(tmp_path):
     (tmp_path / "episode_0.json").write_text(
         json.dumps(
             {
-                "relative_path": "3ded50a2b2f74ed097c42687a38c73a5.mcap",
-                "robot_name": "test_robot_my_pc",
-                "robot_type": "test_robot",
-                "operator": "李四",
-                "task_name": "桌面前移",
-                "runtime_context": {
-                    "log_path": "/rpent/runs/42/run.log",
-                    "model": "rpent-agent-v1",
-                    "session_id": "run-42",
-                },
-                "frames": 110,
-                "size_bytes": 1056419,
-                "duration": 3.6409189701080322,
-                "sha256": "d721f62bf386028a6d09e41dfb128d6ef5597b5772a21493e42aa96d7c74dfe8",
+                "schema_version": 1,
+                "robot": {"name": "test_robot_my_pc", "type": "test_robot"},
+                "task": {"operator": "李四,王五", "task_name": "桌面前移"},
                 "created_at": "2026-09-01T16:01:08",
+                "duration_s": 3.6409189701080322,
+                "vector_layout": {"space": "joint", "dims": []},
+                "control": {},
+                "action_semantics": "submitted_command",
+                "dropped": {"image:cam_head": 2},
+                "sha256": "d721f62bf386028a6d09e41dfb128d6ef5597b5772a21493e42aa96d7c74dfe8",
             }
         ),
         encoding="utf-8",
@@ -157,26 +152,16 @@ def test_scan_extracts_structured_metadata_fields(tmp_path):
 
     assert episode["status"] == "ready"
     meta = episode["meta"]
-    assert meta["relative_path"] == "3ded50a2b2f74ed097c42687a38c73a5.mcap"
-    assert meta["robot_name"] == "test_robot_my_pc"
-    assert meta["robot_type"] == "test_robot"
-    assert meta["operator"] == "李四"
-    assert meta["task_name"] == "桌面前移"
-    assert meta["runtime_context"] == {
-        "log_path": "/rpent/runs/42/run.log",
-        "model": "rpent-agent-v1",
-        "session_id": "run-42",
-    }
-    assert meta["frames"] == 110
-    assert isinstance(meta["frames"], int)
-    assert meta["size_bytes"] == 1056419
-    assert isinstance(meta["size_bytes"], int)
-    assert meta["duration"] == pytest.approx(3.6409189701080322)
-    assert isinstance(meta["duration"], float)
+    assert meta["schema_version"] == 1
+    assert meta["robot"] == {"name": "test_robot_my_pc", "type": "test_robot"}
+    assert meta["task"] == {"operator": "李四,王五", "task_name": "桌面前移"}
+    assert meta["dropped"] == {"image:cam_head": 2}
+    assert meta["duration_s"] == pytest.approx(3.6409189701080322)
+    assert isinstance(meta["duration_s"], float)
     assert len(meta["sha256"]) == 64
     assert meta["created_at"] == "2026-09-01T16:01:08"
     assert episode["metadata_unknown"] == {}
-    assert episode["metadata_content"]["operator"] == "李四"  # 原始 JSON 保留
+    assert episode["metadata_content"]["task"]["operator"] == "李四,王五"  # 原始 JSON 保留
 
 
 def test_scan_metadata_unknown_and_type_mismatch_handled(tmp_path):
@@ -185,7 +170,7 @@ def test_scan_metadata_unknown_and_type_mismatch_handled(tmp_path):
     (tmp_path / "episode_0.json").write_text(
         json.dumps(
             {
-                "frames": "not-an-int",  # 类型不符 → None
+                "dropped": "not-an-object",  # 类型不符 → None
                 "future_field": {"nested": 1},  # schema 未识别 → metadata_unknown
             }
         ),
@@ -195,8 +180,8 @@ def test_scan_metadata_unknown_and_type_mismatch_handled(tmp_path):
     episode = _session(tmp_path).scan(str(tmp_path))["episodes"][0]
 
     assert episode["status"] == "ready"  # 类型不符不判 invalid
-    assert episode["meta"]["frames"] is None
-    assert episode["meta"]["duration"] is None  # 缺失字段补 None
+    assert episode["meta"]["dropped"] is None
+    assert episode["meta"]["duration_s"] is None  # 缺失字段补 None
     assert episode["metadata_unknown"] == {"future_field": {"nested": 1}}
 
 

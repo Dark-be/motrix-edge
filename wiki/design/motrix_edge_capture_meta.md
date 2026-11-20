@@ -2,8 +2,10 @@
 
 ## 摘要
 
-采集任务等**业务选项**在 `capture.yml` 中维护为可拓展的「分类 → 选项数组」；采集员身份只来自
-飞书登录，不属于本文件。包内默认只读，可写文件固定为 `<MOTRIX_EDGE_DIR>/config/capture.yml`；环境变量
+采集任务等**业务选项**在 `capture.yml` 中维护为可拓展的「分类 → 选项数组」；`operator` 是由现场
+填写的人名字符串，可写一个或多个姓名，多人用英文逗号分隔。飞书登录只提供小组负责人姓名作为
+默认值，不再把身份或审计结构写入 episode。包内默认只读，可写文件固定为
+`<MOTRIX_EDGE_DIR>/config/capture.yml`；环境变量
 未设置时根为 `<cwd>/motrix-edge`。管理入口有两条、写的是同一份数据：CLI 命令族
 `capture meta`（list / add / edit / delete /
 delete-key）与 HTTP `/v1/captures/meta`（GET 读列表，POST / PATCH / DELETE 增改删）。前端（web
@@ -16,7 +18,7 @@ console）从 `GET /v1/captures/meta` 取**选择列表**并按返回的分类�
 -   **单一事实来源**：元信息选项存于运行根 `config/capture.yml` 的 `meta` 段，CLI / HTTP 统一经
     `CaptureMetaStore` 读写（写回保留文件其它顶层键），无内存态副本。
 -   **可拓展**：任意业务分类（key）→ 选项数组；`capture meta add <新key> <值>` 自动创建新分类。
-    身份与审计保留键由认证服务生成，Store 不读取也不允许维护。
+    `operator` 是独立的现场输入，不属于候选清单；历史身份与审计键不读取也不允许维护。
 -   **命令化**：`capture meta` 为**配置级命令**（与 `infer config` 一致）——节点主循环（任何
     状态）与任务态会话循环共用同一处理器，保证「任何状态可用」。
 -   **线程安全**：`CaptureMetaStore` 用 `RLock` 保护读写，且**全进程只有一个实例**
@@ -30,9 +32,9 @@ meta:
     task_name: [桌面前移, 双臂搬运] # 采集任务
 ```
 
-`meta` 为顶层映射：分类名 → 选项字符串数组。身份与审计键（`operator` / `operator_identity` /
-`capture_context` / `meta_schema_version`）是保留键：Store 会过滤旧文件中的遗留值并拒绝维护。
-采集员只由飞书登录提供；文件不存在时视为空（命令自动创建），写回保留其它顶层键。
+`meta` 为顶层映射：分类名 → 选项字符串数组。`operator` 以及历史身份与审计键
+（`operator_identity` / `capture_context` / `meta_schema_version`）是保留键：Store 会过滤旧文件中的
+遗留值并拒绝维护。文件不存在时视为空（命令自动创建），写回保留其它顶层键。
 
 ## 命令形式（决定）
 
@@ -97,10 +99,9 @@ READY 状态即可提前同步；进入采集 / 推理会话后仍由会话消�
 也原样回报 `meta`——**不设** `operator` / `task_name` 之类的同义顶层字段，以免同一事实两处
 维护（消费方按需读 `meta["operator"]`）。
 
-RPent 数采另把 `runtime_context` 作为已知 object 字段同步，用于保存提供给 LLM 数据采集的运行信息，
-例如 RPent 日志 / artifact 路径、模型、agent 与会话标识。Edge 与 robot-pipeline 只保留 JSON 结构，
-不解释其中路径或检查本地存在性。最终 MCAP 同名 JSON 固定包含 `operator` / `task_name` /
-`runtime_context`（未同步时为 `null`），Edge upload 扫描也把三者作为结构化字段。
+最终 MCAP 同名 JSON 把同步字段归入 `task` 对象：`operator` 规范化为去除姓名两侧空白、由英文逗号
+连接的字符串，`task_name` 写为 `task.name`，其它业务分类原名保留。空值不落盘。身份、租约、来源、
+运行日志路径等控制面上下文不属于数据语义，不写入 episode。
 
 ## 分发与状态可用性
 
@@ -120,9 +121,8 @@ RPent 数采另把 `runtime_context` 作为已知 object 字段同步，用于�
 ## 未来方向（值来源可插拔）
 
 本清单是**候选值**来源之一，**实际取值**始终由调用方经 `capture sync` 提交（见上节）。
-`operator` 已可来自[飞书登录](./motrix_edge_feishu_auth.md)：启用认证时服务端根据登录会话覆盖
-调用方提交的采集员字段，本地清单退化为未启用认证时的兼容选项；`task_name` 这类现场自由维护的
-分类仍来自本地清单。
+`operator` 可由[飞书登录](./motrix_edge_feishu_auth.md)提供小组负责人姓名作为初始值，但始终允许现场
+编辑或追加其他姓名；服务端只在调用方未填写时补默认值，不覆盖调用方提交的多人名单。
 
 ## 相关文档
 

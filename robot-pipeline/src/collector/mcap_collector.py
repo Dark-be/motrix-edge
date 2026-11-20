@@ -29,8 +29,8 @@
     observations/images/<cam>    sensor_msgs/msg/CompressedImage      JPEG（format='jpeg'）
 
 > 数采请留意：``observations/qpos`` / ``action`` **同维同布局**（每臂「值 + 夹爪」交错，双臂 7 + 7）；
-> 值段当前是关节角、夹爪是每臂块末位——**逐维含义写在同名 JSON 元信息的 ``state_space`` /
-> ``state_dims`` / ``action_space`` / ``action_dims`` 里**（机器人整体切位姿时只改 ``state_space``）。
+> 值段当前是关节角、夹爪是每臂块末位——**逐维含义写在同名 JSON 元信息的
+> ``vector_layout`` 里**。
 > 位姿**不入 mcap**（见 wiki/design/robot_pipeline_action_spaces.md）。
 
 每条消息按 ``timestamps_ns[topic]``（源头采样的 Unix 纳秒时间）写入
@@ -47,9 +47,8 @@
     c.finish()                # -> 已写入的 .mcap 文件 Path（并写同名 .json 元信息）
     c.cancel()                # -> 关闭并删除本轮 .mcap，不写 .json
 
-结束一轮时写与 mcap 同名的 JSON 元信息文件（``{uuid}.json``），描述该 mcap（见
-``_write_meta_json``）：含**控制模式**（``control_mode`` / ``control``——``mit`` /
-``mit+gravity`` / ``joint``，主手不记录），下游据此判断这段数据是否带重力前馈。
+结束一轮时写与 mcap 同名的精简 JSON 元信息文件（``{uuid}.json``），描述 robot / task / 向量布局 /
+控制明细 / 未落盘的丢弃计数与校验和（见 ``_write_meta_json``）。各 topic 实际样本数以 MCAP 为准。
 """
 
 from __future__ import annotations
@@ -132,7 +131,7 @@ class ActMcapCollector:
         # ---- 元信息（finish 时写与 mcap 同名 JSON，描述该 mcap）----
         # 跨 episode 保留的字段（start() 时快照进新 episode）：
         self._identity: dict = {}  # 机器人身份（robot_name / robot_type），set_robot_meta() 设置
-        # 同步字段（operator / task_name / runtime_context / description ...），set_meta() 设置
+        # 同步字段（operator / task_name / description ...），set_meta() 设置
         self._pending: dict = {}
         self._state_layout: dict = {}  # 状态 / 目标向量的逐维含义，set_state_layout() 设置
         self._control_layout: dict = {}  # 各执行控制器的控制模式，set_control_layout() 设置
@@ -218,7 +217,7 @@ class ActMcapCollector:
         self._step_count = 0
         self._message_seq = 0
         # 本轮元信息基线（finish 写同名 JSON）：created_at = 采集开始时间（ISO 本地）；
-        # identity（robot_name/robot_type）与已同步字段（operator/task_name/runtime_context/...）跨
+        # identity（robot_name/robot_type）与已同步字段（operator/task_name/...）跨
         # episode 保留，在此快照进本轮基线——采集开始前同步的信息不会因新 episode 丢失。
         self._meta = {"created_at": datetime.now().isoformat(timespec="seconds")}
         self._meta.update(self._identity)
@@ -385,9 +384,7 @@ class ActMcapCollector:
         """结束当前 episode：写入 MCAP footer、写同名 JSON 元信息，返回 mcap 文件路径。
 
         未 start 过返回 None。JSON 元信息文件与 mcap 同名（``{uuid}.json``，把
-        ``.mcap`` 后缀替换为 ``.json``），描述该 mcap（relative_path / robot_name /
-        robot_type / operator / task_name / frames / size_bytes / duration / sha256 /
-        created_at + 同步字段）。
+        ``.mcap`` 后缀替换为 ``.json``），采用 ``schema_version=1`` 的精简 episode schema。
         """
         path = self._close_writer()
         if path is not None:
@@ -416,12 +413,15 @@ class ActMcapCollector:
 
     # ---- 采集元信息（meta）：写入接口统一为 set_*_meta，读取用 meta property ----
     def set_meta(self, meta: dict) -> None:
-        """设置同步/附加元信息字段（由 adapter ``capture sync`` 同步：operator / task_name / runtime_context 等）。
+        """设置同步/附加元信息字段（由 adapter ``capture sync`` 同步：operator / task_name 等）。
 
         ``pending`` 跨 episode 保留，start() 快照进本轮基线；finish() 写 JSON 时并入。
         ``meta`` 为 None 或空 dict 时安全 no-op。
         """
-        self._pending.update(meta or {})
+        meta = dict(meta or {})
+        if "operator" in meta:
+            meta["operator"] = self._normalize_operator(meta["operator"])
+        self._pending.update(meta)
         debug_print(self.name, f"set meta: {meta}", "INFO")
 
     @property
@@ -441,7 +441,6 @@ class ActMcapCollector:
             "operator": self._pending.get("operator"),
             "task_name": self._pending.get("task_name"),
             "runtime_context": self._pending.get("runtime_context"),
-            "frames": self._step_count,
             "size_bytes": self._path.stat().st_size if self._path and self._path.exists() else None,
             "duration": self._duration_seconds(),
             "sha256": None,  # finish 关闭文件后才计算
@@ -463,44 +462,80 @@ class ActMcapCollector:
     def _write_meta_json(self, path: Path) -> Path:
         """写与 mcap 同名的 JSON 元信息文件（``{uuid}.json``），描述该 mcap。
 
-        - 自动统计：``relative_path``（mcap 文件名）/ ``robot_name`` / ``robot_type`` /
-          ``frames``（帧数）/ ``size_bytes``（文件字节）/ ``duration``（秒）/ ``sha256``
-          （文件哈希）/ ``created_at``（采集开始时间 ISO）；
-        - 状态 / 目标向量布局：``state_space`` / ``state_dims`` / ``action_space`` / ``action_dims``
-          （逐维 ``{index, arm, kind, name}``，见 ``set_state_layout()``）；
-        - 控制模式：``control_mode``（各执行臂的聚合值，双臂不同时 ``mixed``）/ ``control``
-          （逐控制器明细，见 ``set_control_layout()``；主手不记录）；
-        - 同步字段：``operator`` / ``task_name`` / ``runtime_context`` 未同步以 null 占位（等待 capture sync）；
-          其余同步字段（``description`` 等）附加在末尾。
+        JSON 只保存解释与校验数据所需的信息；文件名 / 文件大小由配对文件本身提供，认证身份、租约和
+        运行上下文属于控制面，不进入 episode。状态与动作当前共享同一逐维布局，因此只写一份。
         """
-        meta = {
-            "relative_path": path.name,
-            "robot_name": self._identity.get("robot_name", ""),
-            "robot_type": self._identity.get("robot_type", ""),
-            # 状态 / 目标向量的逐维含义（机器人侧自描述）
-            "state_space": self._state_layout.get("state_space"),
-            "state_dims": self._state_layout.get("state_dims") or [],
-            "action_space": self._state_layout.get("action_space"),
-            "action_dims": self._state_layout.get("action_dims") or [],
-            "control_mode": self._control_layout.get("control_mode"),
-            "control": self._control_layout.get("arms") or {},
-            "operator": self._pending.get("operator"),
-            "task_name": self._pending.get("task_name"),
-            "runtime_context": self._pending.get("runtime_context"),
-            "frames": self._step_count,
-            "size_bytes": path.stat().st_size,
-            "duration": self._duration_seconds(),
-            "sha256": self._sha256(path),
-            "created_at": self._meta.get("created_at"),
+        task = {}
+        operator = self._normalize_operator(self._pending.get("operator"))
+        if operator:
+            task["operator"] = operator
+        task_name = self._clean_text(self._pending.get("task_name"))
+        if task_name:
+            task["task_name"] = task_name
+        system_keys = {
+            "operator",
+            "task_name",
+            "runtime_context",
+            "operator_identity",
+            "capture_context",
+            "meta_schema_version",
+            "recording",
+            "action_semantics",
         }
         for key, value in self._pending.items():
-            if key not in meta:
-                meta[key] = value
+            if key not in system_keys and value not in (None, "", [], {}):
+                task[key] = value
+
+        recording = self._pending.get("recording")
+        dropped = {}
+        if isinstance(recording, dict) and isinstance(recording.get("dropped"), dict):
+            dropped = {
+                str(key): int(value)
+                for key, value in recording["dropped"].items()
+                if key != "meta" and isinstance(value, int) and value > 0
+            }
+
+        meta = {
+            "schema_version": 1,
+            "robot": {
+                "name": self._identity.get("robot_name", ""),
+                "type": self._identity.get("robot_type", ""),
+            },
+            "task": task,
+            "created_at": self._meta.get("created_at"),
+            "duration_s": self._duration_seconds(),
+            "vector_layout": {
+                "space": self._state_layout.get("state_space"),
+                "dims": self._state_layout.get("state_dims") or [],
+            },
+            "control": self._control_layout.get("arms") or {},
+            "action_semantics": self._pending.get("action_semantics", "submitted_command"),
+            # MCAP summary can reconstruct accepted counts per topic; only rejected samples need
+            # an out-of-band counter because they never entered the file.
+            "dropped": dropped,
+            "sha256": self._sha256(path),
+        }
         json_path = path.with_suffix(".json")  # episode_N.json（mcap 后缀改为 json）
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         debug_print(self.name, f"Meta written -> {json_path}", "INFO")
         return json_path
+
+    @staticmethod
+    def _clean_text(value) -> str | None:
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    @classmethod
+    def _normalize_operator(cls, value) -> str | None:
+        """规范化现场人名列表；多人在落盘时一律使用英文逗号且不保留多余空白。"""
+        value = cls._clean_text(value)
+        if value is None:
+            return None
+        names = [name.strip() for name in value.replace("，", ",").split(",") if name.strip()]
+        return ",".join(names) or None
 
     @staticmethod
     def _sha256(path: Path) -> str:

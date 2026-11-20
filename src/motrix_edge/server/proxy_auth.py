@@ -28,7 +28,7 @@ from binascii import Error as Base64Error
 from dataclasses import dataclass
 
 from motrix_edge.errors import ErrorCode, ServiceError
-from motrix_edge.lease import BEIJING_TZ, LeaseManager
+from motrix_edge.lease import LeaseManager
 
 HEADER_SUBJECT = "X-Motrix-Subject"
 HEADER_NAME = "X-Motrix-Name"
@@ -48,9 +48,6 @@ class ProxyIdentity:
     subject: str
     display_name: str
     claims: dict
-
-    def operator_identity(self) -> dict:
-        return dict(self.claims)
 
 
 def signed_identity_headers(
@@ -144,22 +141,10 @@ class ProxyIdentityVerifier:
         if lease.holder_subject_id != identity.subject:
             raise ProxyAuthError("signed Console user does not own the active lease", code=ErrorCode.FORBIDDEN)
         trusted = dict(meta)
-        for key in ("operator", "operator_identity", "capture_context", "meta_schema_version"):
+        for key in ("operator_identity", "capture_context", "meta_schema_version"):
             trusted.pop(key, None)
-        from datetime import datetime
-
-        trusted.update(
-            {
-                "meta_schema_version": 2,
-                "operator": identity.display_name,
-                "operator_identity": identity.operator_identity(),
-                "capture_context": {
-                    "source": "motrix_console",
-                    "lease_id": lease.lease_id,
-                    "synced_at": datetime.now(BEIJING_TZ).isoformat(),
-                },
-            }
-        )
+        if not isinstance(trusted.get("operator"), str) or not trusted["operator"].strip():
+            trusted["operator"] = identity.display_name
         return trusted
 
     def _prune_nonces(self, now: float) -> None:
