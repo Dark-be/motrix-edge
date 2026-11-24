@@ -971,3 +971,13 @@ def test_single_piper_rejects_unknown_profile_resources(config):
     single = _load("robot.single_piper_robot")
     with pytest.raises(ValueError):
         single.SinglePiperRobot({**_DEVICES, **config})
+
+
+def test_current_command_falls_back_to_init_before_first_step(test_robot):
+    """采集侧按状态拍取当前生效命令：尚未下发过命令时回退初始位姿，保证每个状态拍都有 action。"""
+    robot = test_robot.TestRobot({"init_joint": _QPOS, "init_gripper": _GRIPPER})
+
+    joints, gripper = robot.current_command()
+
+    assert joints.tolist() == pytest.approx(_QPOS)
+    assert gripper.tolist() == pytest.approx(_GRIPPER)

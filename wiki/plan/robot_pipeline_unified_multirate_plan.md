@@ -8,7 +8,8 @@
 ## 实施
 
 -   [x] BaseRobot 提供按相机取帧与缓存帧组装接口。
--   [x] BaseEnv 增加独立状态线程和逐相机 worker，观测线程只消费最新缓存。
+-   [x] BaseEnv 增加独立状态线程（`follower_state_hz`）和逐相机 worker，观测线程只消费最新缓存；
+        action 在状态拍与 qpos 同拍记录（同频成对，控制拍独立）。
 -   [x] Recorder 增加独立 action 与逐相机队列。
 -   [x] MCAP 分开写 qpos 与实际 command action，保留直接 collector API 兼容。
 -   [x] 增加频率、生命周期、失败隔离和 action 语义测试。

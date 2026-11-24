@@ -19,8 +19,8 @@
   ``OBS_HZ`` 取全部相机。采集始终交给独立 writer 线程。
 - **显式多频调度**（``streams.enabled``）：控制、状态、观测和每台相机分别调度；逐相机 worker
   独占对应 sensor，观测线程只组合最新缓存，不重复访问硬件。
-- **多流录制**：state、实际 command action 和逐相机 image 各自进入有界队列；生产方不等待磁盘，
-  writer 是 MCAP 后端唯一调用者。
+- **多流录制**：state（含**同拍生效命令** action）与逐相机 image 各自进入有界队列；生产方不等待
+  磁盘，writer 是 MCAP 后端唯一调用者。action 在状态拍记录（零阶保持），与 qpos 同频成对。
 - **命令队列**：HTTP 线程（server handler）调用 ``robot_reset`` / ``robot_execute`` /
   ``robot_rollout`` / ``robot_safe_stop`` / ``robot_set_teleop`` **只把运动指令入队**，由
   控制线程每拍取出执行；``robot_capture_*`` **只把采集指令入队**，由观测线程取出执行。
@@ -56,7 +56,7 @@ from streams import MultiStreamRecorder
 from utils.data_handler import debug_print
 from utils.observation_time import KEY_TIMESTAMPS_NS
 
-from motrix_edge.adapter.base import KEY_ACTION
+from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS
 
 
 class TakeoverActiveError(RuntimeError):
@@ -159,7 +159,7 @@ class BaseEnv:
             capacity=(recording_config or {}).get("queue_size", 512),
             image_names=self.robot.IMAGE_NAMES if self.multirate else (),
         )
-        self.robot.on_command = self._record_command
+        # action 不再由控制拍回调记录：状态拍（STATE_HZ）与 qpos 成对记录当前生效命令
         self._collector.set_meta({"action_semantics": "submitted_command"})
         # 注入机器人身份：collector 写 JSON 元信息时附带 robot_name / robot_type
         set_robot_meta = getattr(self._collector, "set_robot_meta", None)
@@ -913,7 +913,11 @@ class BaseEnv:
         self._sample_state()
 
     def _sample_state(self):
-        """采样一拍状态并把可采集的状态快照排入 MCAP 队列。"""
+        """采样一拍状态，并在同一拍发布 qpos 与**当前生效命令**（action）——两者同频成对。
+
+        ``STATE_HZ``（``streams.follower_state_hz``，默认 100Hz）独立于控制拍 ``HZ``（默认 30Hz）：
+        控制拍之间命令不变（零阶保持），所以 action 与 qpos 条数一致、共用本拍时间戳。
+        """
         sampled_at = time.monotonic()
         state = self.robot.sample_state()
         if state is not None:
@@ -926,7 +930,12 @@ class BaseEnv:
                 "observation": self.robot.standard_observation(state),
             }
             if self.capturing and self._head_skip is None and self._recorder.active:
-                self._recorder.publish_state(self._motion_snapshot["observation"])
+                observation = self._motion_snapshot["observation"]
+                action = self._action_payload(observation)
+                if action is None:  # 非 BaseRobot 的命令来源（无 current_command）：只记状态
+                    self._recorder.publish_state(observation)
+                else:  # 成对入队：两条都接住或都丢弃，保证采集里 qpos / action 条数一致
+                    self._recorder.publish_state_action(observation, action)
 
     def step_observe(self):
         """观测拍（观测线程，OBS_HZ）：取相机帧 + 缓存状态 → 契约观测 → 帧回调 → 采集落盘。
@@ -1065,14 +1074,23 @@ class BaseEnv:
         self._episode_open = False
         self._recorder.cancel()
 
-    def _record_command(self, joints: np.ndarray, gripper: np.ndarray, timestamp_ns: int) -> None:
-        """机器人成功返回一拍硬件提交后发布实际 command action。"""
-        if not self.capturing or not self._recorder.active:
-            return
+    def _action_payload(self, observation: dict) -> dict | None:
+        """构造与同拍 qpos 配对的**当前生效命令** payload（``STATE_HZ``，ZOH：控制拍之间值不变）。
+
+        ``action`` 的值是最近一次成功下发的限速命令（控制拍 ``HZ``，默认 30Hz 更新），尚未下发过
+        命令时回退到目标 / 初始位姿——**每个状态拍都恰好一条 action**。时间戳与该拍 qpos 相同。
+        机器人未提供 ``current_command``（非 BaseRobot）→ ``None``（调用方只记状态）。
+        """
+        current_command = getattr(self.robot, "current_command", None)
+        command = current_command() if callable(current_command) else None
+        if command is None:
+            return None
+        joints, gripper = command
         action = self.robot.interleave_state(joints, gripper)
-        self._recorder.publish_action(
-            {
-                KEY_ACTION: action,
-                KEY_TIMESTAMPS_NS: {KEY_ACTION: int(timestamp_ns)},
-            }
-        )
+        timestamps = observation.get(KEY_TIMESTAMPS_NS) or {}
+        state_ts_ns = timestamps.get(KEY_QPOS)
+        ts_ns = int(state_ts_ns) if state_ts_ns is not None else time.time_ns()
+        return {
+            KEY_ACTION: action,
+            KEY_TIMESTAMPS_NS: {KEY_ACTION: ts_ns},
+        }

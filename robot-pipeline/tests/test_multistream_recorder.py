@@ -150,3 +150,28 @@ def test_each_camera_has_an_independent_bounded_queue(tmp_path):
         ("image", {"seq": 1}),
         ("image", {"seq": 2}),
     ]
+
+
+def test_paired_state_action_enqueue_keeps_counts_equal_under_backpressure(tmp_path):
+    """state + action 成对入队：满载时一起丢弃，采集条数与顺序不因背压而错拍。"""
+    collector = Collector(tmp_path)
+    collector.block_state = threading.Event()
+    recorder = MultiStreamRecorder(collector, capacity=2)
+    recorder.start()
+
+    assert recorder.publish_state_action({"seq": 0}, {"command": 0})
+    assert collector.state_started.wait(1)
+    # writer 阻塞在 state：两条队列很快积满 → 后续成对请求应当**两条一起丢弃**
+    for index in range(1, 8):
+        recorder.publish_state_action({"seq": index}, {"command": index})
+
+    collector.block_state.set()
+    summary = recorder.finish()
+
+    assert summary["accepted"]["state"] == summary["accepted"]["action"]
+    assert summary["dropped"].get("state", 0) == summary["dropped"].get("action", 0) > 0
+    events = [call for call in collector.calls if isinstance(call, tuple)]
+    states = [payload for kind, payload in events if kind == "state"]
+    actions = [payload for kind, payload in events if kind == "action"]
+    for state, action in zip(states, actions, strict=True):
+        assert state["seq"] == action["command"]

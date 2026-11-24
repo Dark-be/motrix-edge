@@ -61,9 +61,11 @@ robot（BaseRobot：joint/gripper command 与 target 分离）
 collector（act_mcap：流式写 {uuid}.mcap + 元信息 JSON）
 ```
 
-**控制 / 观测分线程**：`BaseEnv` 起**控制线程**（`HZ`=30Hz：运动指令 → `step()` 限速步进 →
-`sample_state()` 采样机械臂状态）与**观测线程**（`OBS_HZ`=10Hz，**真实取观测的频率**：取相机帧 + 拼装观测 →
-共享内存发布 → 采集落盘）；相机或磁盘卡顿只表现为观测丢帧，机械臂仍按 30Hz 稳定步进。
+**控制 / 状态 / 观测分线程**：`BaseEnv` 起**控制线程**（`HZ`=30Hz：运动指令 → `step()` 限速步进）、
+**状态线程**（`STATE_HZ`=`streams.follower_state_hz`=100Hz：`sample_state()` 采样反馈，并在同一拍记录
+**当前生效命令** action——qpos 与 action 同频成对）与**观测线程**（`OBS_HZ`=10Hz，**真实取观测的频率**：
+取相机帧 + 拼装观测 → 共享内存发布 → 采集落盘）；相机或磁盘卡顿只表现为观测丢帧，机械臂仍按 30Hz
+稳定步进。`streams.enabled=false` 时没有独立状态线程，控制线程每轮先采样再下发（state 频率 = `HZ`）。
 **队列 / 单写者 / 频率与诊断 / 停机语义等设计细节**见
 [robot-pipeline 运行时](../wiki/design/robot_pipeline_runtime.md)（单一事实来源）。
 
@@ -384,14 +386,16 @@ collector:
     `std_msgs/msg/Float64MultiArray`，`observations/images/<cam>` 用
     `sensor_msgs/msg/CompressedImage`（JPEG）。**逐维含义写在同名 `{uuid}.json` 的
     `vector_layout`**（`space` + 每项 `{index, arm, kind, name}`）——状态与动作共享同一布局。各话题按源头采样时间写入 MCAP，
+    `action` 在状态拍记录（零阶保持：控制拍之间值不变），因此与 qpos 同频、同一拍，可直接配对；
     图片消息头与该图片的话题时间一致，详见 [逐话题采样时间](../wiki/design/robot_pipeline_runtime.md#逐话题采样时间)。
     **流式写入**：`start` → `collect` 直接落盘 → `finish`。
 
-默认录制由专用 writer 线程完成：100Hz state 与 30Hz image 分别进入有界队列，控制 / 观测生产方
+默认录制由专用 writer 线程完成：100Hz state（含同拍 action）与 30Hz image 分别进入有界队列，状态 / 观测生产方
 不等待磁盘。正常结束会先关闭准入、排空已接收事件再写 footer；取消会丢弃排队事件并删除本轮文件。
 队列 accepted / dropped、writer phase 与错误通过 `/v1/capture/status` 的 `recording` 字段提供；episode
 JSON 只额外保留 MCAP 无法反推的非零 `dropped`。共享内存实时观测中的 `action` 仍表示目标；MCAP `action` 表示
-限速后实际尝试提交且 SDK 调用成功返回的 command，JSON 用 `action_semantics=submitted_command` 明示。
+限速后实际尝试提交且 SDK 调用成功返回的 command（按状态拍采样，与 qpos 同拍），
+JSON 用 `action_semantics=submitted_command` 明示。
 
 `dual_piper.yml` 把控制、状态和每台相机拆成独立调度：逐相机 worker 按各自
 `read_hz` 取帧并写各自队列，观测线程只组合最新缓存，不重复访问 sensor。100Hz 等配置均为调度目标，

@@ -23,8 +23,11 @@ episode 录制与观测发布解耦。控制线程产生状态事件，观测线
 专用 writer 线程是 MCAP 后端的唯一调用者。state 与 image 使用独立有界队列，队列满时丢弃本流的
 新事件并分类计数，不用阻塞机器人控制或相机预览。
 
-`observations/qpos` 与 `action` 是独立流：state 记录反馈状态，action 只在控制器调用成功返回后记录
-本拍限速后的实际请求值。目标值继续存在于共享内存实时观测，但不再冒充采集 action。逐相机 worker
+`observations/qpos` 与 `action` 是两条流但**同频成对**：状态线程每拍采样反馈（qpos / 力矩 / 位姿）时，
+同时记录**当前生效命令**（最近一次成功下发的限速 command；控制拍之间零阶保持，尚未下发过命令时
+回退初始位姿，保证每个状态拍都恰好一条 action），两条流同为 `STATE_HZ`（`streams.follower_state_hz`，
+默认 100Hz）、共用同一拍时间戳，可直接配对。
+目标值继续存在于共享内存实时观测，但不再冒充采集 action。逐相机 worker
 各自独占一个 sensor，按 `streams.cameras.profiles.<name>.read_hz` 取帧并写入对应 image 队列；观测线程
 只组合最新缓存，不再次访问相机。
 
@@ -77,10 +80,14 @@ FK / IK、TCP 位姿、遥操作目标和标准观测均以 `DualPiperRobot` 为
 
 ## 线程职责
 
-| 线程     | 频率             | 唯一写者                                                         | 消费队列           | 每拍动作                                       |
-| -------- | ---------------- | ---------------------------------------------------------------- | ------------------ | ---------------------------------------------- |
-| 控制线程 | `HZ`（30Hz）     | 机器人控制器 / `*_command` / `*_target` / `motion_state` / `seq` | `commands`         | 运动指令 → `step()` → `sample_state()`         |
-| 观测线程 | `OBS_HZ`（10Hz） | collector / `observation`                                        | `capture_commands` | 采集指令 → `build_observation()` → 发布 → 落盘 |
+| 线程     | 频率                | 唯一写者                                          | 消费队列           | 每拍动作                                                        |
+| -------- | ------------------- | ------------------------------------------------- | ------------------ | --------------------------------------------------------------- |
+| 控制线程 | `HZ`（30Hz）        | 机器人控制器 / `*_command` / `*_target`           | `commands`         | 运动指令 → `step()`（限速插值 + 下发）                          |
+| 状态线程 | `STATE_HZ`（100Hz） | `motion_state` / `seq` / 采集 state + action 事件 | —                  | `sample_state()` → 发布 qpos（+ 位姿 / 力矩）与**同拍生效命令** |
+| 观测线程 | `OBS_HZ`（10Hz）    | collector / `observation`                         | `capture_commands` | 采集指令 → `build_observation()` → 发布 → 落盘                  |
+
+`streams.enabled=false`（单循环）时没有独立状态线程：控制线程每轮先 `sample_state()` 再 `step()`，
+状态采样频率等于 `HZ`；`multirate`（两台双臂机型默认）才有 100Hz 状态线程与 30Hz 控制拍的分工。
 
 指令分类固定：`robot_reset` / `robot_execute` / `robot_rollout` / `robot_safe_stop` /
 `robot_set_teleop` 入 `commands`；`robot_capture_start` / `robot_capture_end` / `robot_capture_cancel` /
@@ -256,7 +263,8 @@ qpos/action 仍照常产出。采集器把力矩写为独立 ROS2 `Float64MultiA
 否则会破坏 qpos/action 同维契约。共享内存为该流保留独立可选区，维度为 0 表示开关关闭或机型
 不支持。
 
--   **频率**：`HZ`（控制线程，默认 30Hz）与 `OBS_HZ`（观测线程，默认 10Hz）是 `BaseEnv` 类常量；
+-   **频率**：`HZ`（控制线程，默认 30Hz）、`STATE_HZ`（状态线程 / 采集 state+action，`streams.follower_state_hz`，默认 100Hz）
+    与 `OBS_HZ`（观测线程，默认 10Hz）相互独立；
     `OBS_HZ` 是**真实取观测的频率**（取帧 + 发布 + 落盘），低一档是**有意**的——相机取帧 +
     MCAP 落盘成本远高于机械臂步进，观测 10Hz 足够，机械臂仍按 30Hz 稳定步进。`OBS_SLOW_FRAME_S`（0.5s）为观测慢帧告警阈值。
 -   **实测频率**：`measured_hz` = 控制线程最近 30 拍平均周期倒推；相机 / 落盘卡顿不影响它。

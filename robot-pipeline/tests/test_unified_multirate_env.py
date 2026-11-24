@@ -39,6 +39,8 @@ class Robot:
         self.seq = 0
         self.state_count = 0
         self.command_count = 0
+        self.joint_command = None
+        self.gripper_command = None
         self.camera_count = {name: 0 for name in self.IMAGE_NAMES}
         self.disconnected = False
         self.max_joint_step_rad = None
@@ -65,8 +67,15 @@ class Robot:
 
     def step(self):
         self.command_count += 1
+        self.joint_command = np.full(12, self.command_count, dtype=float)
+        self.gripper_command = np.array([0.2, 0.8], dtype=float)
         if self.on_command is not None:
-            self.on_command(np.full(12, self.command_count), np.array([0.2, 0.8]), time.time_ns())
+            self.on_command(self.joint_command, self.gripper_command, time.time_ns())
+
+    def current_command(self):
+        if self.joint_command is None:
+            return None
+        return self.joint_command.copy(), self.gripper_command.copy()
 
     def sample_state(self):
         self.state_count += 1
@@ -171,7 +180,7 @@ def test_torque_stream_defaults_enabled(tmp_path, monkeypatch):
     assert robot.torque_stream_enabled is True
 
 
-def test_unified_env_records_independent_state_action_and_camera_streams(tmp_path, monkeypatch):
+def test_unified_env_records_paired_state_action_and_camera_streams(tmp_path, monkeypatch):
     robot = Robot()
     monkeypatch.setattr(env_module, "get_collector", lambda config: Collector(config))
     env = env_module.BaseEnv(
@@ -208,7 +217,10 @@ def test_unified_env_records_independent_state_action_and_camera_streams(tmp_pat
     summary = env._recorder.last_summary
     assert summary is not None and not summary["errors"]
     assert summary["accepted"].get("state", 0) > 0, (summary, env.last_error, robot.state_count, robot.command_count)
+    # action 与 qpos 同频成对：都在状态拍记录（STATE_HZ），条数一致且多于控制拍数
     assert summary["accepted"]["action"] > 0
+    assert abs(summary["accepted"]["state"] - summary["accepted"]["action"]) <= 1
+    assert env.STATE_HZ == 60 and env.HZ == 80  # 状态 / action 同频成对，控制拍仍独立
     assert summary["accepted"]["image:head"] > summary["accepted"]["image:wrist"] > 0
     assert robot.max_joint_step_rad == 2.0 / 80
     assert robot.torque_stream_enabled is True

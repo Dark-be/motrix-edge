@@ -134,7 +134,7 @@ class BaseRobot:
         self.joint_target: np.ndarray | None = None
         self.gripper_command: np.ndarray | None = None
         self.gripper_target: np.ndarray | None = None
-        self.on_command = None  # env 注入：成功提交后发布实际 command 事件
+        self.on_command = None  # 可选回调：控制拍成功提交后触发（不再用于采集 action，见 env._sample_state）
         self.torque_stream_enabled = False
         self.init_joint = self._init_vector("init_joint", self.joint_dim(), required=True)
         self.init_gripper = self._init_vector("init_gripper", self.gripper_dim(), required=False, fill=1.0)
@@ -1071,6 +1071,16 @@ class BaseRobot:
             return False
         self.set_gripper_target(self.teleop_slave_gripper_ref + np.asarray(delta, dtype=np.float64))
         return True
+
+    def current_command(self) -> tuple[np.ndarray, np.ndarray]:
+        """当前**生效**的关节 / 夹爪命令 ``(joint, gripper)``：状态拍与 qpos 成对记录它。
+
+        最近一次成功下发的限速命令；控制拍之间保持不变（零阶保持），所以 action 与 qpos 同频、
+        同一拍，可直接配对训练 / 回放。尚未产生控制拍（启动瞬间 / 还没有任何目标）时回退到
+        目标或初始位姿（``init_joint`` / ``init_gripper``），保证每个状态拍都有一条 action——
+        否则采集开头的 qpos 会没有配对项（条数不一致）。
+        """
+        return self._joint_command_or_fallback(), self._gripper_command_or_fallback()
 
     def _joint_command_or_fallback(self) -> np.ndarray:
         """当前关节命令；尚未产生控制拍时依次回退目标与初始值。

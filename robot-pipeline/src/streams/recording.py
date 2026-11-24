@@ -115,6 +115,27 @@ class MultiStreamRecorder:
     def publish_action(self, observation: dict) -> bool:
         return self._publish("action", observation)
 
+    def publish_state_action(self, state: dict, action: dict) -> bool:
+        """同一拍的 state 与 action **成对入队**：两条都接住，或两条都丢弃（各自计数）。
+
+        两条流是两个独立有界队列：分别入队时，高负载下可能只丢其中一条（writer 按队列依次排空），
+        采集里于是出现「qpos 与 action 条数不一致 / 错拍」。成对准入把两者绑定，保证条数与顺序一致。
+        """
+        state_payload = copy.deepcopy(state)
+        action_payload = copy.deepcopy(action)
+        with self._lock:
+            if not self._admitting:
+                return False
+            if self._queues["state"].full() or self._queues["action"].full():
+                self._dropped["state"] += 1
+                self._dropped["action"] += 1
+                return False
+            self._queues["state"].put_nowait(state_payload)
+            self._queues["action"].put_nowait(action_payload)
+            self._accepted["state"] += 1
+            self._accepted["action"] += 1
+            return True
+
     def publish_image(self, observation: dict, name: str | None = None) -> bool:
         kind = f"image:{name}" if name is not None else "image"
         return self._publish(kind, observation)
