@@ -67,6 +67,9 @@ DEFAULT_RTC_CONFIG = {
 
 # 预取工作线程名（测试据此观测 ``close()`` 是否回收线程）
 PREFETCH_THREAD_NAME = "rtc-prefetch"
+# ``infer_chunk``（动作块推理）等待在途预取结清的单飞槽上限（秒）：超时即本轮无动作可发，
+# 绝不与预取并发调用策略端（策略客户端同一时刻只允许一个在飞请求）
+SINGLE_FLIGHT_WAIT_S = 2.0
 # ``status().last_error`` 长度上限：状态经 GET /v1/infers 被反复轮询，异常文本不做无界外泄
 _MAX_ERROR_LEN = 200
 
@@ -410,6 +413,60 @@ class RTCManager:
         self._infer_and_apply(inline, propagate=True)  # 内联：**锁外**先落块，再下发当前步
         with self._lock:
             return self._pop_locked()
+
+    def infer_chunk(self, observation) -> list[np.ndarray]:
+        """动作块推理：**同步**推理一块并取走块内全部待下发动作帧（供按控制频率逐帧下发）。
+
+        与 :meth:`infer` 的区别是**消费粒度**：`infer` 每步只弹一帧、并按预取提前量提前拉下一块；
+        本方法一次取尽当前块的全部动作帧、**不发起预取**——调用方按 ``1 / infer_freq`` 的节奏把
+        这些帧逐帧下发，块内帧耗尽即结束（``infer rollout chunk``）。
+
+        - 推理在**调用线程**内联完成（单块语义不需要异步提前量），但仍受**单飞**约束：上一轮
+          预取的在途调用没结清时先有界等待，仍占用则本轮返回空列表（不并发调用策略端）；
+        - 块内帧按 RTC 同一套切分入队：``prefix``（配置的安全余量 / 真实过期步）照样跳过，
+          ``suffix`` 不再保留给下一块，而是与执行段一起按步号顺序返回（这一块的动作就是一整块）；
+        - 队列里已有的残留帧（上一次 rollout 的后缀）会按重叠过渡与本次块融合后一并返回——
+          需要「只执行这一块」时调用方先 :meth:`reset`（会话的 chunk 模式即如此）；
+        - 返回空列表 = 策略无数据 / 整块过期 / 单飞槽被占 / 调用期间被 ``reset`` 作废；
+        - ``enabled=False``（RTC 退化）→ 只做一次「请求一块、取块首步」，返回单帧或空列表。
+        """
+        self.calibrate(getattr(self._policy, "observed_chunk_len", None))
+        if not self.enabled:
+            action = self._infer_direct(observation)
+            return [] if action is None else [action]
+        deadline = time.monotonic() + SINGLE_FLIGHT_WAIT_S
+        while True:
+            with self._lock:
+                if self._job is None and not self._running:  # 单飞槽空闲 → 就地占用（同步推理）
+                    self._running = True
+                    self._fetches += 1
+                    generation, step = self._generation, self._index
+                    break
+            if time.monotonic() >= deadline:  # 在途预取迟迟不结清：本轮不下发动作
+                return []
+            time.sleep(0.005)
+        try:
+            started = time.monotonic()
+            try:
+                chunk = as_action_chunk(self._policy.infer_chunk(observation, index=step), start_index=step)
+            except Exception as exc:  # noqa: BLE001 —— 与 infer 的内联路径一致：记账后抛给调用方
+                with self._lock:
+                    if generation == self._generation:
+                        self._record_failure_locked(exc)
+                raise
+            delay = time.monotonic() - started
+            with self._lock:
+                if generation != self._generation:  # 调用期间被 reset / close 作废 → 结果不采用
+                    return []
+                self._last_delay = delay
+                self._apply_locked(chunk)
+                actions = []
+                while self._index in self._queue:  # 块内帧按步号顺序一次取尽
+                    actions.append(self._pop_locked())
+                return actions
+        finally:
+            with self._lock:
+                self._running = False
 
     def _pop_locked(self) -> np.ndarray | None:
         """弹出当前步动作并推进步号（无动作 → ``None``，会话跳过本步）。"""

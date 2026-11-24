@@ -132,6 +132,7 @@ def infer_snapshot(node, leases) -> dict:
 
     - ``prompt`` = 当前推理文本指令（**仅需要 prompt 的策略**：推理 / 录制前必须非空）；
     - ``recording`` = 会话当前是否开启 rollout 录制；``continuous`` = 持续推理是否在跑；
+      ``chunk`` = 动作块推理是否在跑（一块的动作帧按控制频率逐帧下发，期间可 ``infer rollout stop``）；
     - ``capture_status`` = 机器人进程实际采集状态缓存（与 ``/v1/captures`` 同构）；
     - ``policy_config`` = 策略配置项 schema + 当前值 + 缺失必填项（前端据此渲染表单并门控按钮）。
     """
@@ -161,6 +162,8 @@ def infer_snapshot(node, leases) -> dict:
         "recording": bool(getattr(session, "recording", False)) if session is not None else False,
         # 持续推理是否正在运行（infer rollout continuous ↔ infer rollout stop）
         "continuous": bool(getattr(session, "continuous", False)) if session is not None else False,
+        # 动作块推理是否正在运行（infer rollout chunk → 块内帧耗尽 / infer rollout stop）
+        "chunk": bool(getattr(session, "chunk", False)) if session is not None else False,
         "capture_status": capture_agent_status(node),
         "rtc": _rtc_status(node, session),
         "policy_config": _policy_config_status(node, session),

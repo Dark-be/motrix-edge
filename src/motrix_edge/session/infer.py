@@ -21,6 +21,8 @@ from motrix_edge.command import (
     CMD_INFER_CONNECT,
     CMD_INFER_ROLLOUT,
     CMD_INFER_ROLLOUT_STOP,
+    CMD_ROBOT_RESET,
+    ROLLOUT_MODE_CHUNK,
     ROLLOUT_MODE_CONTINUOUS,
     CommandResult,
     deadline_exceeded,
@@ -42,7 +44,8 @@ class InferSession(PolicyConfigFeature, BaseSession):
     """推理会话 —— 组合 RobotAdapter + 推理策略客户端的推理执行器。
 
     生命周期由 EdgeNode 管理（session_start → run → session_finish）。**无「多步推理」模式**：
-    推理由单步 ``infer rollout`` / 持续 ``infer rollout continuous`` 驱动；**动作块切分与
+    推理由单步 ``infer rollout`` / 持续 ``infer rollout continuous`` / 动作块
+    ``infer rollout chunk`` 驱动；**动作块切分与
     时序平滑由 RTCManager 负责**（策略只提供原始动作块：``policy.infer_chunk``）。**推理时
     rollout 录制** = 像采集一样经 ``capture episode start/end`` 控制一轮 episode——robot 不关心
     是推理还是采集（capturing 期间按帧录 mcap，含 action）。**prompt 仅语言条件策略需要**：
@@ -131,6 +134,9 @@ class InferSession(PolicyConfigFeature, BaseSession):
         # 持续推理运行位（infer rollout continuous ↔ infer rollout stop）：供 server
         # 上报（/v1/infers 的 continuous），前端据此门控「持续推理 / 停止推理」。
         self._continuous = False
+        # 动作块推理运行位（infer rollout chunk 执行期间为 True）：供 server 上报（/v1/infers 的
+        # chunk）。前端据此显示「停止推理」——块内帧按控制频率逐帧下发，期间必须可停 / 可退。
+        self._chunk = False
 
         debug_print(
             self.name,
@@ -181,6 +187,11 @@ class InferSession(PolicyConfigFeature, BaseSession):
     def continuous(self) -> bool:
         """持续推理是否正在运行（``infer rollout continuous`` 启动 → ``infer rollout stop`` 结束）。"""
         return bool(self._continuous)
+
+    @property
+    def chunk(self) -> bool:
+        """动作块推理是否正在运行（``infer rollout chunk`` → 块内动作帧耗尽 / ``infer rollout stop``）。"""
+        return bool(self._chunk)
 
     def _sync_warmup_with_connection(self) -> None:
         """连接丢失 → 预热失效（``warmed_up`` 复位），可重新预热。
@@ -479,6 +490,13 @@ class InferSession(PolicyConfigFeature, BaseSession):
                         continue
                     self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
                     return result
+                if mode == ROLLOUT_MODE_CHUNK:  # 动作块推理：启动即回执，块内帧耗尽自动回 READY
+                    result = self._run_chunk(cmd)
+                    if result is None:  # 块耗尽 / infer rollout stop / reset：回到本循环（会话保持 READY）
+                        self.state = SessionState.READY
+                        continue
+                    self.state = SessionState.FINISHED if result == RunResult.FINISHED else SessionState.ERROR
+                    return result
                 self._run_single(cmd)  # 单步推理（缺省）
             else:  # 未识别命令（当前任务不适用）统一回执，避免 submit 挂起
                 self.reject_not_applicable(cmd)
@@ -679,6 +697,91 @@ class InferSession(PolicyConfigFeature, BaseSession):
                 # 遥操作关闭（robot teleop false）后自动恢复下发。
                 self._rollout(action)
             time.sleep(self.step_interval)  # 按 infer_freq 控制步进节奏
+
+    def _run_chunk(self, cmd) -> RunResult | None:
+        """infer rollout chunk：动作块推理 —— 一次推理取一块，按 ``infer_freq`` 逐帧下发到块内帧耗尽。
+
+        与单步 / 持续的区别在**消费粒度**：单步每命令只下发一帧；持续每拍推理（RTC 预取）并下发
+        一帧、永不自行结束；本模式**只推理一次**，把这一块的动作帧按控制频率逐帧下发，块内帧耗尽
+        即回到会话 READY —— 推理耗时不再进入逐步控制环（开环执行一块）。
+
+        **启动即回执**（与 continuous 同款）：一块在 ``infer_freq`` 低时可能持续几十秒，不能让
+        调用方（HTTP / CLI / 前端按钮）一直等——回执带 ``state=chunk`` / ``started`` 与本块动作帧，
+        执行在会话循环里继续；运行位 ``chunk`` 由 ``GET /v1/infers`` 上报，前端据此显示「停止推理」。
+
+        - 进入即 ``rtc.reset()``：丢掉上一轮 rollout 残留的后缀与在途预取，保证只执行**这一块**；
+        - 每帧下发前轮询命令：``infer rollout stop`` 提前结束；退出 / 急停 / 复位 / 录制边界走基座
+          （``STEP_LOOP_COMMANDS``），其余命令按「本轮不适用」拒绝；``robot reset``（回 home）与
+          急停一样**丢弃剩余帧**——它们按复位前状态算，不能再下发。
+        """
+        obs = self.adapter.observe()
+        if obs is None:
+            self._reply(
+                cmd, CommandResult(status="rejected", error="observation not ready", code=ErrorCode.UNAVAILABLE)
+            )
+            return None
+        prepare_observation = getattr(self.policy, "prepare_observation", None)
+        if callable(prepare_observation):
+            obs = prepare_observation(obs)
+        observation_ready = getattr(self.policy, "observation_ready", None)
+        if callable(observation_ready) and not observation_ready(obs):
+            self._reply(
+                cmd, CommandResult(status="rejected", error="observation not ready", code=ErrorCode.UNAVAILABLE)
+            )
+            return None
+        self.rtc.reset()  # 只执行这一块：丢掉上一轮残留后缀 / 作废在途预取
+        chunk = self.engine.step_chunk(obs)  # 引擎（RtcEngine）：同步推理一块，取块内全部动作帧
+        if not chunk:
+            debug_print(self.name, "Chunk rollout produced no actions (empty / stale chunk).", "WARNING")
+            self._reply(cmd, ok_result(state="ready", count=0, action=None, actions=[]))
+            return None
+        reprs = [self._action_repr(action) for action in chunk]
+        # 立即回执：本块动作帧（前端据此画期望轨迹），执行在本会话循环里按控制频率继续
+        self._reply(cmd, ok_result(state="chunk", started=True, count=len(reprs), action=reprs[-1], actions=reprs))
+        self._chunk = True
+        try:
+            for index, action in enumerate(chunk):
+                if self._stop_requested:  # 外部请求停止（node 失联 / 急停）：剩余帧不再下发
+                    return RunResult.ERROR
+                pending = self.command_source()
+                name = _cmd_name(pending)
+                if name == CMD_INFER_ROLLOUT_STOP:  # 提前结束本块（会话保持 READY，策略连接不变）
+                    self.rtc.reset()
+                    self.policy.reset()
+                    self._reply(pending, ok_result(state="ready", continuous=False, chunk=False))
+                    debug_print(self.name, f"Chunk rollout stopped by request ({index} steps sent).", "INFO")
+                    return None
+                if name == CMD_INFER_ROLLOUT:  # 本块执行中重复 rollout：拒绝
+                    self._reply(
+                        pending,
+                        CommandResult(
+                            status="rejected", error="chunk rollout already running", code=ErrorCode.CONFLICT
+                        ),
+                    )
+                elif pending is not None and self._dispatch_session_cmd(name, pending):
+                    pass  # 策略配置 / RTC 参数：已回执
+                else:
+                    outcome = self.dispatch_common(pending, only=STEP_LOOP_COMMANDS)
+                    if outcome == CommonDispatch.HANDLED:
+                        if name == CMD_ROBOT_RESET:  # 复位回 home：本块剩余帧按复位前状态算
+                            debug_print(self.name, "Chunk rollout aborted by robot reset.", "INFO")
+                            return None
+                    if outcome == CommonDispatch.QUIT:
+                        debug_print(self.name, "Chunk rollout stopped, inference finished.", "INFO")
+                        return RunResult.FINISHED
+                    if outcome == CommonDispatch.ESTOP:
+                        return RunResult.ERROR
+                    if outcome == CommonDispatch.UNHANDLED:
+                        self.reject_not_applicable(pending, "during chunk rollout")
+                if self._rollout(action) is False:  # 遥操作（人工接管）中：推理让位（SDK 409）
+                    debug_print(self.name, "Chunk rollout aborted by teleop (human takeover).", "WARNING")
+                    return None
+                if index < len(chunk) - 1:  # 帧间节奏按 infer_freq（末帧后不再等待）
+                    time.sleep(self.step_interval)
+            debug_print(self.name, f"Chunk rollout executed {len(chunk)} step(s).", "INFO")
+            return None
+        finally:
+            self._chunk = False
 
     def _rollout(self, action) -> bool:
         """本步动作下发：按策略声明的**动作布局**选通路（两条通路的下发语义见

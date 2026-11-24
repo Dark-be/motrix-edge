@@ -213,15 +213,18 @@ def teleop_mode_for(name: str, raw=None) -> str | None:
 
 ROLLOUT_MODE_SINGLE = "single"  # 单步推理（infer rollout）
 ROLLOUT_MODE_CONTINUOUS = "continuous"  # 持续推理（直到 infer rollout stop / session quit / estop）
+ROLLOUT_MODE_CHUNK = "chunk"  # 动作块推理（一次推理取一块，逐帧下发到块内动作帧耗尽）
 
 
 def parse_rollout_mode(raw) -> str:
-    """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续）。
+    """解析 ``infer rollout`` 参数 → 模式（``single`` 单步 / ``continuous`` 持续 / ``chunk`` 动作块）。
 
     - 空 / ``"1"`` → ``single``：单步推理（一次 观测 → 推理 → 动作 闭环）；
     - ``"continuous"`` → ``continuous``：持续推理（启动即回执，直到 ``infer rollout
       stop`` / session quit / estop）；
-    - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 + ``capture
+    - ``"chunk"`` → ``chunk``：动作块推理（一次推理取一块，按持续推理的频率逐帧下发，
+      直到 RTC 块内动作帧耗尽）；
+    - 数字 ``>1`` → ``ValueError``（**多步推理已取消**：改用单步 / 持续 / 动作块 + ``capture
       episode start/end`` 录制 rollout 回合，见 wiki/design/motrix_edge_session.md）；
     - ``"drain"`` → ``ValueError``（**缓存推理已取消**：动作块只作策略内部缓存，
       不再提供「只消费缓存块」的命令模式）。
@@ -232,6 +235,8 @@ def parse_rollout_mode(raw) -> str:
         return ROLLOUT_MODE_SINGLE
     if text == ROLLOUT_MODE_CONTINUOUS:
         return ROLLOUT_MODE_CONTINUOUS
+    if text == ROLLOUT_MODE_CHUNK:
+        return ROLLOUT_MODE_CHUNK
     if text == "drain":
         raise ValueError("rollout drain mode removed: use capture episode start/end to record a rollout")
     if text.isdigit():

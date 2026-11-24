@@ -62,7 +62,7 @@ CMD_ADAPTER_CONFIG_SET = "adapter config set"  # 设置运行时 adapter 能力�
 CMD_ADAPTER_CONFIG_CURRENT = "adapter config current"  # 获取当前绑定 adapter 实际生效的能力配置（启用臂 / 相机）
 CMD_LEASE_REVOKE = "lease revoke"  # 撤销 Edge 当前租约（管理员清理幽灵租约，释放可签发槽位）
 CMD_NODE_RESET = "node reset"  # 节点复位 / ERROR 恢复 → IDLE
-CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；多步/drain 已取消）
+CMD_INFER_ROLLOUT = "infer rollout"  # 推理闭环（无参=单步；continuous=持续；chunk=动作块；多步/drain 已取消）
 CMD_INFER_ROLLOUT_STOP = "infer rollout stop"  # 停止持续推理（回到会话 READY，不退会话也不断策略连接）
 CMD_INFER_CONNECT = "infer connect"  # 连接 + 启动异步预热（推理会话内消费；立即回执，重复调用幂等）
 

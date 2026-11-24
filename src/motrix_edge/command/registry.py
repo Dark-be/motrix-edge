@@ -189,7 +189,7 @@ def build_command_registry() -> CommandRegistry:
         CommandSpec(name=CMD_ADAPTER_CONFIG_CURRENT),  # adapter config current：当前生效能力（启用臂 / 相机）
         CommandSpec(name=CMD_LEASE_REVOKE),  # lease revoke：撤销 Edge 当前租约（清理幽灵租约）
         CommandSpec(name=CMD_NODE_RESET),
-        CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous]
+        CommandSpec(name=CMD_INFER_ROLLOUT, positional=("mode",)),  # infer rollout [single|continuous|chunk]
         CommandSpec(name=CMD_INFER_ROLLOUT_STOP),  # infer rollout stop：停止持续推理（会话保持）
         CommandSpec(name=CMD_INFER_CONNECT),  # infer connect：连接 + 启动异步预热（下发动作之外的推理）
         CommandSpec(name=CMD_INFER_MODEL),  # infer model：查询策略模型路径（lerobot 类）

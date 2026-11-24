@@ -269,7 +269,7 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 
 ## /v1/infers（推理会话控制）
 
-推理会话**无「多步推理」模式**：单步 / 持续推理经 `infer rollout` 驱动，推理时
+推理会话**无「多步推理」模式**：单步 / 动作块 / 持续推理经 `infer rollout` 驱动，推理时
 **rollout 录制** = `capture episode start/end/cancel`（robot 不关心推理/采集）；写端点经 `CommandService`
 提交命令（与 CLI 逐条对应），`GET /v1/infers` 读只读快照：
 
@@ -278,7 +278,7 @@ correlation 中间件（必须 `async def`）。原因：handler 内部全是**�
 | POST   | `/v1/infers`                | 必需          | `enter`：`session run infer`（可选 body `policy_type` / `config`——**整份策略配置**，包括嵌套 `rtc`；端点按策略独立：OpenPI = `host` / `port`，Lerobot Remote = `endpoint`；进入会话时固化）                                                                                                                                                                |
 | GET    | `/v1/infers`                | 无            | 状态快照：node_state / session / adapter / policy / connected / **warmed_up / warming / warmup_error / dropped_actions** / metadata / prompt / capture_meta / capture_status / rtc（会话内 = 运行状态；无会话 = 配置级 `policy.rtc` 快照，仅 `enabled` / `params`）/ policy_config（当前策略端点与 warmup_required 在 `policy_config.items` 里）/ lease_id |
 | POST   | `/v1/infers/connect`        | 必需          | `infer connect`：**启动 / 查询异步预热**（连接 + prepare + 取一块丢弃，不下发动作）；立即回执 `started` / `warming` / `warmed_up` / `warmup_error`，重复调用幂等；预热进度看 `GET /v1/infers`                                                                                                                                                              |
-| POST   | `/v1/infers/rollout`        | 必需          | `infer rollout`：单步（缺省）/ `continuous` 持续推理，回执含 action                                                                                                                                                                                                                                                                                        |
+| POST   | `/v1/infers/rollout`        | 必需          | `infer rollout`：单步（缺省，回执 action）/ `continuous` 持续推理（启动即回执）/ `chunk` 动作块推理（启动即回执本块动作帧，逐帧下发）                                                                                                                                                                                                                                                                                        |
 | POST   | `/v1/infers/episode/start`  | 必需          | 开始一轮 rollout 录制（`capture episode start`，机器人按帧录 mcap）                                                                                                                                                                                                                                                                                        |
 | POST   | `/v1/infers/episode/end`    | 必需          | 结束一轮 rollout 录制（`capture episode end`，进程保存 episode）                                                                                                                                                                                                                                                                                           |
 | POST   | `/v1/infers/episode/cancel` | 必需          | 取消本轮 rollout 录制（`capture episode cancel`，停止并删除本轮文件，不生成 JSON）                                                                                                                                                                                                                                                                         |

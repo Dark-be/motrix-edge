@@ -14,7 +14,7 @@ import type { InferRolloutResponse } from "../types";
 /**
  * 03 INFER —— 推理页。
  *
- * 左：推理卡片（策略配置 / 进入并预热 / 单步 / 持续 / 录制 + **推理状态并进同一张卡**）+ Hooks；
+ * 左：推理卡片（策略配置 / 进入并预热 / 单步 / 动作块 / 持续 / 录制 + **推理状态并进同一张卡**）+ Hooks；
  * 中：3D（实测姿态 + 回归动作块的**期望轨迹**）；右：相机。
  */
 export function InferPage() {

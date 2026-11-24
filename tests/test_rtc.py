@@ -1033,3 +1033,66 @@ def test_rtc_policy_without_observed_len_keeps_configured_horizon():
         assert rtc.params["action_horizon"] == 4
     finally:
         rtc.close()
+
+
+# ---- 动作块推理（infer_chunk：一次推理取一块，不预取）--------------------------------
+
+
+def test_infer_chunk_returns_all_frames_without_prefetch():
+    """动作块推理：一次推理返回块内**全部**动作帧（含后缀），不再发起预取、步号一次推进到块尾。"""
+    policy = _FakePolicy([[1, 2, 3, 4, 5, 6]])
+    rtc = _rtc(policy, suffix_len=1)  # H=6, P=0, S=1 → 执行段 5，但 chunk 模式连后缀一起下发
+    try:
+        actions = rtc.infer_chunk(_obs())
+        assert [float(a[0]) for a in actions] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        assert policy.calls == 1  # 整块只推理一次
+        status = rtc.status()
+        assert status["fetches"] == 1
+        assert status["remaining"] == 0  # 块内帧已取尽
+        assert status["index"] == 6
+    finally:
+        rtc.close()
+
+
+def test_infer_chunk_skips_configured_prefix():
+    """动作块推理同样按 RTC 切分跳过 ``prefix_len``（安全余量）→ 返回的帧从块首 +P 开始。"""
+    policy = _FakePolicy([[1, 2, 3, 4, 5, 6]])
+    rtc = _rtc(policy, prefix_len=2, suffix_len=1)
+    try:
+        assert [float(a[0]) for a in rtc.infer_chunk(_obs())] == [3.0, 4.0, 5.0, 6.0]
+    finally:
+        rtc.close()
+
+
+def test_infer_chunk_empty_and_stale_yield_no_frames():
+    """策略无数据 / 整块落在过去 → 空列表（调用方回执 count=0，不拿过期动作驱动真机）。"""
+
+    class _EmptyPolicy:
+        def infer_chunk(self, observation, index=None):
+            return None
+
+    empty = _rtc(_EmptyPolicy())
+    try:
+        assert empty.infer_chunk(_obs()) == []
+        assert empty.status()["failed_chunks"] == 1
+    finally:
+        empty.close()
+
+    stale = _rtc(_FakePolicy([[9, 8, 7, 6]], start_offset=-10))
+    try:
+        assert stale.infer_chunk(_obs()) == []
+        assert stale.status()["stale_chunks"] == 1
+    finally:
+        stale.close()
+
+
+def test_infer_chunk_disabled_mode_returns_single_frame():
+    """RTC 退化（enabled=False）：一次推理只有块首步 → 单帧列表（与单步语义一致）。"""
+    policy = _FakePolicy([[1, 2, 3]])
+    rtc = _rtc(policy, enabled=False)
+    try:
+        actions = rtc.infer_chunk(_obs())
+        assert [float(a[0]) for a in actions] == [1.0]
+        assert policy.calls == 1
+    finally:
+        rtc.close()

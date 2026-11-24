@@ -14,7 +14,7 @@
 
 """InferSession 推理循环测试 —— fake adapter + fake policy + fake signal source。
 
-覆盖：单步 / 持续推理（经 RTCManager 步进）、prompt 门控（为空不能推理/录制）、推理时
+覆盖：单步 / 动作块 / 持续推理（经 RTCManager 步进）、prompt 门控（为空不能推理/录制）、推理时
 rollout 录制（capture episode start/end + capture sync）、多步 & drain 已取消、急停安全停止、
 ready 前退出，无网络无硬件可跑。
 """
@@ -1546,3 +1546,114 @@ def test_infer_rollout_refused_during_teleop(monkeypatch):
     assert replies[0].status == "rejected"
     assert replies[0].code == ErrorCode.CONFLICT
     assert "teleop" in replies[0].error
+
+
+def test_infer_rollout_chunk_replies_started_then_sends_whole_chunk(monkeypatch):
+    """infer rollout chunk：一次推理取一块，启动即回执本块动作帧，再按 infer_freq 逐帧下发到耗尽。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()  # infer_chunk 恒返回 50 步块
+    _patch(monkeypatch, policy)
+    replies = []
+    chunk = _REGISTRY.parse_argv(["infer", "rollout", "chunk"])
+    chunk.reply_to = replies.append
+    # 每帧下发前轮询一次命令：50 帧需要 50 个空档，块耗尽后主循环再收到 session quit
+    session = _build_session(
+        adapter, policy, (PROMPT_CMD, chunk, *([None] * 50), "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert policy.infer_calls == 1  # 整块只推理一次（不像持续推理那样每拍预取）
+    assert len(adapter.executed) == 50  # 块内动作帧全部下发（默认 RTC：H=50 / P=0）
+    assert replies[0].status == "ok"
+    assert replies[0].data["state"] == "chunk"
+    assert replies[0].data["started"] is True
+    assert replies[0].data["count"] == 50
+    assert len(replies[0].data["actions"]) == 50
+    assert replies[0].data["action"] == list(np.arange(14, dtype=float))
+    assert session.chunk is False  # 块耗尽后运行位归零（前端据此收起「停止推理」）
+
+
+def test_infer_rollout_chunk_stops_early_on_stop_command(monkeypatch):
+    """infer rollout chunk 执行中 infer rollout stop：提前结束本块（会话保持 READY，运行位归零）。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    chunk = _REGISTRY.parse_argv(["infer", "rollout", "chunk"])
+    chunk.reply_to = replies.append
+    holder: dict = {"seen": []}
+
+    def _probe():
+        # 每帧前轮询一次命令：这里顺带采样本块运行位（停止前应为 True）
+        holder["seen"].append(holder["session"].chunk)
+        return None
+
+    # 第 1 帧前空档 → 下发第 1 帧；第 2 帧前收到 stop → 剩余 49 帧不再下发
+    session = _build_session(
+        adapter, policy, (PROMPT_CMD, chunk, _probe, "infer rollout stop", "session quit"), warmup_required=False
+    )
+    holder["session"] = session
+
+    assert session.run() == RunResult.FINISHED
+    assert holder["seen"] == [True]  # 执行期间 chunk 运行位为 True（前端显示「停止推理」）
+    assert len(adapter.executed) == 1  # 第一帧下发后收到 stop → 剩余 49 帧不再执行
+    assert replies[0].status == "ok"
+    assert replies[0].data["started"] is True
+    assert session.chunk is False
+
+
+def test_infer_rollout_chunk_empty_chunk_replies_zero(monkeypatch):
+    """策略没返回块（None）→ 动作块推理回执 count=0，不下发任何动作。"""
+
+    class _EmptyPolicy(_FakePolicy):
+        def infer_chunk(self, observation, index=None):
+            self.infer_calls += 1
+            return None
+
+    adapter = _FakeAdapter(ready=True)
+    policy = _EmptyPolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    chunk = _REGISTRY.parse_argv(["infer", "rollout", "chunk"])
+    chunk.reply_to = replies.append
+    session = _build_session(adapter, policy, (PROMPT_CMD, chunk, "session quit"), warmup_required=False)
+
+    assert session.run() == RunResult.FINISHED
+    assert adapter.executed == []
+    assert replies[0].status == "ok"
+    assert replies[0].data["count"] == 0
+    assert replies[0].data["actions"] == []
+
+
+def test_infer_rollout_chunk_aborts_during_teleop(monkeypatch):
+    """遥操作（人工接管）中动作块推理：SDK 拒绝（409）→ 本块剩余帧不再下发（推理让位）。"""
+    adapter = _FakeAdapter(ready=True)
+    adapter.teleop_refused = True
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    chunk = _REGISTRY.parse_argv(["infer", "rollout", "chunk"])
+    chunk.reply_to = replies.append
+    session = _build_session(adapter, policy, (PROMPT_CMD, chunk, None, "session quit"), warmup_required=False)
+
+    assert session.run() == RunResult.FINISHED
+    assert adapter.executed == []  # 首帧即被拒 → 本块中止
+    assert replies[0].data["started"] is True  # 回执在推理后立即发出（此时尚不知道会被拒）
+
+
+def test_infer_rollout_chunk_aborts_on_reset(monkeypatch):
+    """动作块推理执行中 robot reset（回 home）：剩余帧按复位前状态算，立即丢弃。"""
+    adapter = _FakeAdapter(ready=True)
+    policy = _FakePolicy()
+    _patch(monkeypatch, policy)
+    replies = []
+    chunk = _REGISTRY.parse_argv(["infer", "rollout", "chunk"])
+    chunk.reply_to = replies.append
+    session = _build_session(
+        adapter, policy, (PROMPT_CMD, chunk, None, "robot reset", "session quit"), warmup_required=False
+    )
+
+    assert session.run() == RunResult.FINISHED
+    assert len(adapter.executed) == 1  # 第 1 帧后复位 → 剩余 49 帧不再执行
+    assert replies[0].data["started"] is True
+    assert session.chunk is False

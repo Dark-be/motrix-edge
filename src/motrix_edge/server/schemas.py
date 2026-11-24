@@ -115,14 +115,15 @@ class InferEnterRequest(BaseModel):
 
 
 class InferRolloutRequest(BaseModel):
-    """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续）。
+    """POST /v1/infers/rollout 请求体：推理模式（single 单步 / continuous 持续 / chunk 动作块）。
 
     多步（count）与 drain（缓存推理）模式已取消（多余字段被忽略）；prompt 不随 rollout 传，
     由策略配置项 ``prompt`` 预置（经 ``POST /v1/infers/config``；为空不能开始推理 / 录制）。
     """
 
-    mode: Literal["single", "continuous"] | None = Field(
-        default=None, description="推理模式：single（缺省）/ continuous"
+    mode: Literal["single", "continuous", "chunk"] | None = Field(
+        default=None,
+        description="推理模式：single（缺省）/ continuous 持续 / chunk 动作块（一次推理，逐帧下发到块耗尽）",
     )
 
 

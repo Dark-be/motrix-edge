@@ -6,7 +6,8 @@
 `RTCManager` 统一负责**动作块三元切分**（`prefix` 过去已失效 / `execution` 实际执行 / `suffix` 过渡到
 下一块，只算步数不切数组）、**重叠过渡**（重叠步按「下一段权重曲线」融合）、**异步预取**（后台线程拉
 下一块，控制环不阻塞）与**绝对步号推进**。
-会话（InferSession）只调用 `rtc.infer(observation)` 取「本步应下发的动作」。
+会话（InferSession）调用 `rtc.infer(observation)` 取「本步应下发的动作」，或调用
+`rtc.infer_chunk(observation)` 一次取尽一块的动作帧（动作块推理 `infer rollout chunk`）。
 
 两个会话共用它，但**用面不同**：
 
@@ -147,6 +148,7 @@ src/motrix_edge/rtc/
 ```python
 rtc = build_rtc(policy, config, control_hz=None)  # 会话进入时构造（持策略引用）
 rtc.infer(observation)   # 本步动作：必要时登记预取（后台线程）→ 弹出当前步（**不阻塞**）
+rtc.infer_chunk(obs)    # 动作块推理：同步推理一块 → 返回块内**全部**待下发动作帧（不预取）
 rtc.reset()              # 清队列 / 作废在途预取 / 步号归零（策略连接不变）
 rtc.configure(**params)  # 运行期改参数（校验后生效，下一块起用；内部加锁）
 rtc.calibrate(block_len) # 按实测块长收敛 H（幂等，仅第一次生效；infer() 每步自动调用）
@@ -178,6 +180,22 @@ rtc.close()              # 停止预取工作线程（会话退出调用；幂�
     过期返回 `None`）。
 -   **可观测**：`stale_chunks`（整块过期被丢弃 = 策略滞后）/ `failed_chunks`（策略没数据 / 抛异常）/
     `inflight` 用来区分「某一步没有动作可下发」的原因。
+
+## 动作块推理（chunk rollout）
+
+`infer_chunk(observation)` 是**另一条消费粒度**：一次推理、把这一块的动作帧一次取尽并返回列表，
+供会话按控制频率逐帧下发（`infer rollout chunk`，见 [推理会话](./motrix_edge_session.md)）。
+
+-   **同步内联**：单块语义不需要异步提前量，推理在调用线程完成，不发起预取；仍受**单飞**约束
+    （上一轮预取的在途调用没结清时有界等待 ≤ `SINGLE_FLIGHT_WAIT_S`，仍占用则返回空列表）。
+-   **切分口径不变**：`prefix`（安全余量 + 真实过期步）照样跳过；`suffix` 不再留给下一块，而是与
+    执行段一起按步号顺序返回——这一块的动作就是一整块（开环执行）。
+-   **残留队列**：队列里已有的后缀帧会按重叠过渡与本次块融合后一并返回；需要「只执行这一块」时
+    调用方先 `reset()`（会话 chunk 模式即如此）。
+-   **空结果**：策略无数据 / 整块过期 / 单飞槽被占 / 调用期间被 reset 作废 → 空列表；
+    `enabled=false` 退化为「请求一块、只取块首步」的单帧列表。
+-   **上报**：与 `infer` 同口径（`fetches` / `last_chunk` / `last_delay` / `failed_chunks` / `stale_chunks`），
+    取尽后 `status().remaining == 0`。
 
 ## 配置（policy.rtc 段）
 

@@ -413,6 +413,8 @@ export interface InferStatus {
     recording: boolean;
     /** 持续推理是否运行中（`infer rollout continuous` ↔ `infer rollout stop`） */
     continuous: boolean;
+    /** 动作块推理是否运行中（`infer rollout chunk` → 块内帧耗尽 / `infer rollout stop`） */
+    chunk: boolean;
     /** 机器人进程实际采集状态缓存（录制中 running=True + 已同步的元信息全集） */
     capture_status: CaptureStatusSnapshot | null;
     /** RTC（实时动作块）运行状态（enabled / params / index / remaining / last_chunk） */
@@ -454,13 +456,16 @@ export interface InferRolloutResponse {
     count: number | null;
     action: number[] | null;
     actions: (number[] | null)[] | null;
+    /** chunk 动作块推理：启动即回执（count/actions = 本块动作帧，执行在会话循环里继续） */
+    started?: boolean;
 }
 
-/** POST /v1/infers/rollout/stop：停止持续推理（退回会话 READY）。 */
+/** POST /v1/infers/rollout/stop：停止持续 / 动作块推理（退回会话 READY）。 */
 export interface InferRolloutStopResponse {
     status: string;
     state: string | null;
     continuous: boolean;
+    chunk?: boolean;
 }
 
 /** POST /v1/infers/episode/start|end|cancel：推理时 rollout 录制开关。 */

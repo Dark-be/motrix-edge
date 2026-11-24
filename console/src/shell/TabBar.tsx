@@ -4,7 +4,7 @@ export type PageId = "manual" | "collect" | "infer" | "debug" | "harness";
 export const PAGES: { id: PageId; no: string; label: string; title: string }[] = [
     { id: "manual", no: "01", label: "MANUAL", title: "手动：按动作空间拖滑块 → SEND 下发（点发送才生效）" },
     { id: "collect", no: "02", label: "COLLECT", title: "数采：进入采集会话 → 轮次开始 / 结束 + 元信息同步" },
-    { id: "infer", no: "03", label: "INFER", title: "推理：策略配置 → 连接 → 单步 / 持续推理 → 录制" },
+    { id: "infer", no: "03", label: "INFER", title: "推理：策略配置 → 连接 → 单步 / 动作块 / 持续推理 → 录制" },
     { id: "debug", no: "04", label: "DEBUG", title: "调试：适配器能力 / 观测数值 / 原语 / 深度 / 上传 / 日志" },
     { id: "harness", no: "05", label: "HARNESS", title: "RPent Harness：任务 / planner / 工具 / 画面与运行时间线" },
 ];

@@ -45,6 +45,7 @@ from motrix_edge.command import (
     CMD_ROBOT_TELEOP,
     CMD_SESSION_QUIT,
     CMD_SESSION_RUN,
+    ROLLOUT_MODE_CHUNK,
     ROLLOUT_MODE_CONTINUOUS,
     CommandBus,
     CommandDispatcher,
@@ -522,10 +523,21 @@ class FakeInferSession:
                         metadata=None,
                     ),
                 )
-            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步（缺省）/ continuous 持续
+            elif name == CMD_INFER_ROLLOUT:  # 推理闭环：单步（缺省）/ continuous 持续 / chunk 动作块
                 mode = parse_rollout_mode((cmd.params or {}).get("mode"))
                 if mode == ROLLOUT_MODE_CONTINUOUS:
                     self._reply(cmd, ok_result(state="continuous", started=True, count=0, actions=[]))
+                elif mode == ROLLOUT_MODE_CHUNK:  # 启动即回执本块动作帧（执行在会话循环里继续）
+                    self._reply(
+                        cmd,
+                        ok_result(
+                            state="chunk",
+                            started=True,
+                            count=2,
+                            action=[3.0, 4.0],
+                            actions=[[1.0, 2.0], [3.0, 4.0]],
+                        ),
+                    )
                 else:
                     self._reply(
                         cmd,
@@ -1902,7 +1914,7 @@ def test_captures_meta_writes_require_lease(tmp_path):
 
 
 def test_infers_rollout_single_and_continuous():
-    """推理闭环模式：单步（缺省）/ continuous 持续；多步与 drain 已取消。"""
+    """推理闭环模式：单步（缺省）/ continuous 持续 / chunk 动作块；多步与 drain 已取消。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
@@ -1919,7 +1931,15 @@ def test_infers_rollout_single_and_continuous():
     assert r.status_code == 200
     body = r.json()
     assert body["state"] == "continuous"
-    # drain（缓存推理）已取消：mode 只允许 single/continuous → 422
+    # chunk 模式（动作块推理）：启动即回执本块动作帧（逐帧下发在会话循环里继续）
+    r = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "chunk"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "chunk"
+    assert body["started"] is True
+    assert body["count"] == 2
+    assert body["actions"] == [[1.0, 2.0], [3.0, 4.0]]
+    # drain（缓存推理）已取消：mode 只允许 single/continuous/chunk → 422
     assert client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"mode": "drain"}).status_code == 422
     # 多步（count）已取消：字段不再存在 → 忽略，等价单步（不再有专门的 400 分支）
     legacy = client.post("/v1/infers/rollout", headers={"X-Lease-Id": lease}, json={"count": 3})
@@ -1931,7 +1951,7 @@ def test_infers_rollout_single_and_continuous():
 
 
 def test_infers_status_exposes_prompt_and_recording_defaults():
-    """status 携带 prompt / recording / continuous（rollout 运行位）。"""
+    """status 携带 prompt / recording / continuous / chunk（rollout 运行位）。"""
     node = FakeNode()
     client = make_infers_client(node)
     lease = install_lease(client)
@@ -1940,6 +1960,7 @@ def test_infers_status_exposes_prompt_and_recording_defaults():
     assert snap["prompt"] is None
     assert snap["recording"] is False
     assert snap["continuous"] is False  # 持续推理未运行（前端据此门控「持续 / 停止」）
+    assert snap["chunk"] is False  # 动作块推理未运行（前端据此显示「停止推理」）
     # 会话内经策略配置通道设置 prompt → status.prompt 同步
     assert (
         client.post(

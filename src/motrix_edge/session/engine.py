@@ -28,10 +28,18 @@ import numpy as np
 
 
 class Engine(Protocol):
-    """步进引擎协议：``step`` 产出本步动作（``None`` = 本步无动作，会话跳过本步），``reset`` 归零。"""
+    """步进引擎协议：``step`` 产出本步动作（``None`` = 本步无动作，会话跳过本步），``reset`` 归零。
+
+    ``step_chunk`` 是**动作块**粒度的取法：一次取尽一块内的全部动作帧（空列表 = 无动作可发），
+    供会话按控制频率逐帧下发（``infer rollout chunk``）。
+    """
 
     def step(self, observation) -> np.ndarray | None:
         """本步动作（物理空间）；``None`` = 本步无动作（空块 / 整块过期 / 队列暂无）。"""
+        ...
+
+    def step_chunk(self, observation) -> list[np.ndarray]:
+        """一块内的全部待下发动作帧（按步号顺序）；空列表 = 无动作可发。"""
         ...
 
     def reset(self) -> None:
@@ -52,6 +60,10 @@ class RtcEngine:
     def step(self, observation) -> np.ndarray | None:
         """本步动作：交给 ``RTCManager.infer``（必要时预取 / 内联推理 / 弹队）。"""
         return self.rtc.infer(observation)
+
+    def step_chunk(self, observation) -> list[np.ndarray]:
+        """一块内的全部动作帧：交给 ``RTCManager.infer_chunk``（同步推理一块，不预取）。"""
+        return self.rtc.infer_chunk(observation)
 
     def reset(self) -> None:
         """清空块队列、作废在途预取并步号归零（策略连接与工作线程不变）。"""

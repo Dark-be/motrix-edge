@@ -135,11 +135,13 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
       `connected` 回读）。
     - **推理会话卡片按钮区**（一个按钮 = 一个命令）：**进入推理**、**连接推理节点 / 重新连接**
       （同一命令 `infer connect`：未连接时作重试入口，已连接时用于服务端变更后重连并预热）、
-      **推理一步**（`infer rollout`）、**持续推理**（`infer rollout continuous`）/ **停止推理**
-      （`infer rollout stop`，`continuous` 运行位控制两者互斥）、**开始录制 / 结束录制 / 取消录制**
+      **推理一步**（`infer rollout`）、**动作块推理**（`infer rollout chunk`：一次推理，启动即回执
+      本块动作帧，随后按控制频率逐帧下发到块内动作帧耗尽）、**持续推理**（`infer rollout continuous`）
+      / **停止推理**（`infer rollout stop`：`continuous` 或 `chunk` 运行位为真时显示，且两者互斥——
+      动作块执行期间仍可随时停止 / 退出会话）、**开始录制 / 结束录制 / 取消录制**
       （`POST /v1/infers/episode/start·end·cancel` → `capture episode start/end/cancel`，robot 不关心模式；
       开始录制自动 `POST /v1/infers/sync` 同步 `{operator: "policy"}`，需要 prompt 的策略额外带
-      `task_name=prompt`）、**退出推理**。推理只提供「单步」与「持续」两种模式。
+      `task_name=prompt`）、**退出推理**。推理提供「单步」「动作块」「持续」三种模式。
     - 卡片下部：按钮区下方的可折叠策略配置（内嵌 RTC）→ **策略服务器 metadata**（只展示 `metadata` 与「已连接 / 未连接」徽标，
       连接 / 重连按钮统一在按钮区）→ 推理参数（Prompt / 录制 operator / task_name
       / 已同步 meta）。
@@ -172,6 +174,7 @@ Provider 自描述，不硬编码 task ID 或记忆内容。
 | `POST /v1/infers`（必填 `policy_type`；可选 `config`） | `session run infer`        |
 | `POST /v1/infers/rollout`（缺省）                      | `infer rollout`（单步）    |
 | `POST /v1/infers/rollout`（body `mode=continuous`）    | `infer rollout continuous` |
+| `POST /v1/infers/rollout`（body `mode=chunk`）         | `infer rollout chunk`      |
 | `POST /v1/infers/episode/start`                        | `capture episode start`    |
 | `POST /v1/infers/episode/end`                          | `capture episode end`      |
 | `POST /v1/infers/episode/cancel`                       | `capture episode cancel`   |

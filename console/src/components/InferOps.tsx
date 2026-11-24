@@ -8,8 +8,9 @@ import { Badge, Disclosure, KeyValue, KvGrid } from "./ui";
 /**
  * 推理会话内**特有**的操作与状态（录制 / 退出 / 策略配置由上层 `SessionDeck` 统一负责）。
  *
- * 只留三件「推理由谁驱动」的事：**预热**（连接 + prepare + 取一块丢弃，不下发动作）、
- * **单步**、**持续**；RTC 由上层渲染为同级卡片，避免 Infer 卡片内再嵌卡片。
+ * 只留「推理由谁驱动」的事：**预热**（连接 + prepare + 取一块丢弃，不下发动作）、
+ * **单步**、**持续**、**动作块**（一次推理，逐帧下发到块内动作帧耗尽）；RTC 由上层渲染为同级
+ * 卡片，避免 Infer 卡片内再嵌卡片。
  */
 export function InferOps({
     api,
@@ -38,6 +39,10 @@ export function InferOps({
     const warmedUp = infers?.warmed_up ?? false;
     const warmupError = infers?.warmup_error ?? null;
     const continuous = infers?.continuous ?? false;
+    const chunkRunning = infers?.chunk ?? false;
+    // 有界 / 持续推理都在跑时会话循环被占用：单步与再次动作块要等它结束（可随时「停止推理」）
+    const rolloutBusy = continuous || chunkRunning;
+    const stopping = rolloutBusy; // 「停止推理」同时服务 continuous 与 chunk 两种运行位
     const droppedActions = infers?.dropped_actions ?? 0;
     // warmup_required 是公共配置项（缺省 true）：为真时「已预热」是 rollout 的硬前置
     const warmupRequired = (infers?.policy_config?.values?.warmup_required ?? true) !== false;
@@ -59,12 +64,12 @@ export function InferOps({
             command: "infer rollout",
             endpoint: "POST /v1/infers/rollout",
             variant: "default",
-            enabled: connected && hasLease && inInfer && warmupReady && !continuous,
+            enabled: connected && hasLease && inInfer && warmupReady && !rolloutBusy,
             whyDisabled: !inInfer
                 ? "需先进入推理会话"
                 : !warmupReady
                 ? "需先「连接并预热」（未预热时 rollout 会 409）"
-                : "持续推理进行中（先停止）",
+                : "推理进行中（先停止）",
             run: async () => {
                 const resp = await api!.inferRollout();
                 onRollout?.(resp);
@@ -72,14 +77,32 @@ export function InferOps({
             },
         },
         {
-            label: continuous ? "停止推理" : "持续推理",
-            command: continuous ? "infer rollout stop" : "infer rollout continuous",
-            endpoint: continuous ? "POST /v1/infers/rollout/stop" : "POST /v1/infers/rollout",
-            variant: continuous ? "danger" : "primary",
-            enabled: connected && hasLease && inInfer && (continuous || warmupReady),
+            label: "动作块推理",
+            command: "infer rollout chunk",
+            endpoint: "POST /v1/infers/rollout",
+            variant: "default",
+            enabled: connected && hasLease && inInfer && warmupReady && !rolloutBusy,
+            whyDisabled: !inInfer
+                ? "需先进入推理会话"
+                : !warmupReady
+                ? "需先「连接并预热」（未预热时 rollout 会 409）"
+                : "推理进行中（先停止）",
+            run: async () => {
+                // 一次推理取一块：启动即回执本块动作帧，随后按控制频率逐帧下发、块耗尽自动停
+                const resp = await api!.inferRollout("chunk");
+                onRollout?.(resp);
+                return resp;
+            },
+        },
+        {
+            label: stopping ? "停止推理" : "持续推理",
+            command: stopping ? "infer rollout stop" : "infer rollout continuous",
+            endpoint: stopping ? "POST /v1/infers/rollout/stop" : "POST /v1/infers/rollout",
+            variant: stopping ? "danger" : "primary",
+            enabled: connected && hasLease && inInfer && (stopping || warmupReady),
             whyDisabled: !inInfer ? "需先进入推理会话" : "需先「连接并预热」（未预热时 rollout 会 409）",
             run: async () => {
-                const resp = continuous ? await api!.stopInferRollout() : await api!.inferRollout("continuous");
+                const resp = stopping ? await api!.stopInferRollout() : await api!.inferRollout("continuous");
                 onRollout?.(resp as InferRolloutResponse);
                 return resp;
             },

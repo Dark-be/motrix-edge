@@ -19,7 +19,7 @@ type SessionKind = "capture" | "infer";
  * 1. **未进入** —— 选会话类型 → 一个主按钮「进入」→ 默认收起的推理配置；
  *    采集的「预检」是只读辅助，放同一行。
  * 2. **已进入** —— **统一录制控件**（采集 / 推理同一对命令，见 `RecordingControl`）
- *    + 该会话特有的操作（采集：元信息；推理：预热 / 单步 / 持续）+ 退出。
+ *    + 该会话特有的操作（采集：元信息；推理：预热 / 单步 / 动作块 / 持续）+ 退出。
  * 3. **诊断** —— 推理的策略配置（只读）、RTC 参数、服务端 metadata：默认收起。
  *
  * 急停**不在这里**：它是全局安全动作（TopBar 按钮 + `Esc` 快捷键，最高优先旁路），
@@ -48,7 +48,7 @@ export function SessionDeck({
     onLog: (msg: string, ok: boolean) => void;
     /** 固定会话类型（数采页 = capture / 推理页 = infer）：不再显示类型切换 */
     fixedKind?: SessionKind;
-    /** 单步 / 持续推理回执（推理页据此把动作块喂给 3D 视口画期望轨迹） */
+    /** 单步 / 动作块 / 持续推理回执（推理页据此把动作块喂给 3D 视口画期望轨迹） */
     onRollout?: (resp: InferRolloutResponse) => void;
     /** 追加在卡片内的页面专属内容（如采集页的采集状态：同一张卡里看状态 + 操作） */
     extra?: ReactNode;

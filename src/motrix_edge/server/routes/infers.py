@@ -14,7 +14,7 @@
 
 """routes.infers —— ``/v1/infers/*`` 的 HTTP 映射（推理会话控制）。
 
-无回合概念：``enter`` → ``rollout``（单步 / 持续）→ ``exit``；录制由 ``episode/start·end·cancel``
+无回合概念：``enter`` → ``rollout``（单步 / 持续 / 动作块）→ ``exit``；录制由 ``episode/start·end·cancel``
 （= ``capture episode start/end/cancel``）、元信息由 ``sync``（= ``capture sync``）。每个动作都映射为
 **一条命令**（经 ``CommandService.submit``，由推理会话消费）——与 CLI 逐条对应，路由不做业务
 判断；``GET /v1/infers`` 是只读快照（``server/status.py``）。未注入 → 501。
@@ -70,7 +70,7 @@ def build_router(services: Services) -> APIRouter:
     def infers_status():
         """状态快照：node_state / session_type / state / adapter / policy / connected / metadata /
         prompt / prompt_required / warmed_up / warming / warmup_error / dropped_actions / recording /
-        continuous / capture_status / rtc / policy_config / lease_id。"""
+        continuous / chunk / capture_status / rtc / policy_config / lease_id。"""
         return infer_snapshot(_node(), leases)
 
     @router.post("/v1/infers")
@@ -104,13 +104,15 @@ def build_router(services: Services) -> APIRouter:
 
     @router.post("/v1/infers/rollout")
     def infers_rollout(req: InferRolloutRequest | None = None, x_lease_id: str | None = Header(default=None)):
-        """推理闭环（infer rollout）：单步（缺省）或 continuous 持续。
+        """推理闭环（infer rollout）：单步（缺省）/ continuous 持续 / chunk 动作块。
 
-        body：``mode``（single 缺省 / continuous）。
+        body：``mode``（single 缺省 / continuous / chunk）。
+        ``chunk`` = 一次推理取一块，**启动即回执**（``state=chunk`` / ``started`` + 本块动作帧），
+        随后在会话循环里按 ``infer_freq`` 逐帧下发，块内帧耗尽自动回 READY；运行位见
+        ``GET /v1/infers`` 的 ``chunk``，``infer rollout stop`` 可提前结束。
         需要 prompt 的策略（如 openpi）不随 rollout 传 prompt（prompt 是普通策略配置项，经
         ``POST /v1/infers/config`` 预置）；lerobot-act 不需要。
-        须已在推理会话且持有租约；continuous 启动即回执 started，直到 ``infer rollout stop`` /
-        session quit / estop。
+        须已在推理会话且持有租约。
         """
         mode = req.mode if req is not None else None
         return accepted(_commands().submit(CMD_INFER_ROLLOUT, {"mode": mode}, lease_id=x_lease_id))
@@ -123,7 +125,8 @@ def build_router(services: Services) -> APIRouter:
         ``infer rollout`` / 改配置。未在持续推理中 → 409。受控操作：须持有租约。
         """
         data = _commands().submit(CMD_INFER_ROLLOUT_STOP, lease_id=x_lease_id)
-        return {**accepted(data), "continuous": False}  # 会话回执不含该位，按语义补（前端据此复位按钮）
+        # 会话回执不含运行位，按语义补（前端据此复位按钮）：两种有界 / 持续推理都已被停止
+        return {**accepted(data), "continuous": False, "chunk": False}
 
     @router.post("/v1/infers/episode/start")
     def infers_episode_start(x_lease_id: str | None = Header(default=None)):

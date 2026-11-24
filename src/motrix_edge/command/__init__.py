@@ -97,6 +97,7 @@ from .naming import (
     resolve_capability,
 )
 from .params import (
+    ROLLOUT_MODE_CHUNK,
     ROLLOUT_MODE_CONTINUOUS,
     ROLLOUT_MODE_SINGLE,
     parse_alpha,

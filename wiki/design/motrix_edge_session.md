@@ -124,7 +124,7 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     一个在飞请求（见 [policy 设计](./motrix_edge_policy.md) 的预热门控）。
 -   **回执有效期**：`infer rollout` 单步在下发动作前自查 `deadline_exceeded`（提交方已超时放弃）
     → **丢弃动作**（真机不动）并回执 504，丢弃步数计入 `dropped_actions`。
--   `infer rollout [mode]`：推理闭环步进，两种模式（参数缺省 = `single`）：
+-   `infer rollout [mode]`：推理闭环步进，三种模式（参数缺省 = `single`）：
     -   `single`（缺省）：单步推理 —— `obs = adapter.observe()` → `action = rtc.infer(obs)`
         → 下发本步动作（按策略声明的动作布局选通路：`joint` → `adapter.rollout(action)`；
         `joint+gripper` → `adapter.rollout(action, layout="joint+gripper", arms=...)`，见
@@ -133,6 +133,15 @@ capture）实例化；仅 infer 会话额外消费 `policy_type`（缺省用配�
     -   `continuous`（`infer rollout continuous`）：**持续推理** —— 启动即回执 `started`，
         然后持续执行推理闭环，直到 `session quit` / `robot estop` 停止（持续期间每步轮询
         命令响应退出 / 复位 / 急停；重复 `infer rollout` → rejected）。
+    -   `chunk`（`infer rollout chunk`）：**动作块推理** —— 每次命令**只推理一次**，按
+        `infer_freq` 的节奏把 RTC 这一块的动作帧逐帧下发，块内动作帧耗尽即回到会话 READY
+        （推理耗时不再进入逐步控制环，等于开环执行一块）。**启动即回执**（与 `continuous` 同款）：
+        回执 `state=chunk` / `started` + 本块动作帧（`count` / `action` / `actions`，前端据此画整块
+        期望轨迹），执行在会话循环里继续——`infer_freq` 低时一块可能持续几十秒，不能让控制面
+        一直等。进入即 `rtc.reset()`（丢掉上一轮残留后缀 / 作废在途预取，只执行这一块）；逐帧下发
+        前轮询命令：`infer rollout stop` 提前结束、退出 / 急停 / 复位丢弃剩余帧、录制边界照常生效。
+        运行位 `chunk` 由 `GET /v1/infers` 上报（`continuous` 之外新增的一位），前端据此把
+        「持续 / 停止推理」按钮扩展为「持续 / 动作块运行中 → 停止推理」。
     -   多步（`count`）与 `drain` 模式**已取消**：动作块只作策略内部缓存、由 rtc 统一管理；
         录制 rollout 走 `capture episode start/end`（多余的 `count` 字段被忽略）。
 -   命令：`infer connect`、`infer rollout [mode]`、`infer config` / `infer model`、

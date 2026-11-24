@@ -318,10 +318,12 @@ export class EdgeApi {
         return this.request("POST", "/v1/infers", { lease: true, body });
     }
 
-    inferRollout(mode?: "single" | "continuous"): Promise<InferRolloutResponse> {
-        // 推理闭环：单步（缺省，一次 观测→推理→动作）或 continuous 持续；多步 / drain 已取消。
+    inferRollout(mode?: "single" | "continuous" | "chunk"): Promise<InferRolloutResponse> {
+        // 推理闭环：单步（缺省，一次 观测→推理→动作）/ continuous 持续 / chunk 动作块
+        // （一次推理，启动即回执；块内动作帧在会话循环里按 infer_freq 逐帧下发，用 stop 提前结束）。
+        // 多步 / drain 已取消。
         const body: Record<string, unknown> = {};
-        if (mode === "continuous") body.mode = mode;
+        if (mode === "continuous" || mode === "chunk") body.mode = mode;
         return this.request("POST", "/v1/infers/rollout", { lease: true, body });
     }
 
