@@ -16,17 +16,19 @@
 
 本仓库同仓承载两层代码，**进程分离、职责分离**，经 `RobotAdapter` 相接：
 
-| 层                     | 位置                                | 职责                                                                        | 对另一层的关系                                        |
-| ---------------------- | ----------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------- |
-| **Edge（任务运行时）** | `src/motrix_edge/`                  | 任务会话、节点生命周期、观测收集与 action 校验 / 限速、HTTP + WebRTC 控制面 | 经 `RobotAdapter` 发现并调用承载端                    |
-| **机器人承载端**       | `robot-pipeline/`（独立 uv 子项目） | 机械臂底层控制循环、限速逼近、遥操作、数据采集（MCAP）                      | 只提供 `/v1` 指令契约与共享内存观测，不感知策略与任务 |
+| 层                     | 位置                                      | 职责                                                                        | 对另一层的关系                                        |
+| ---------------------- | ----------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------- |
+| **Edge（任务运行时）** | `src/motrix_edge/`                        | 任务会话、节点生命周期、观测收集与 action 校验 / 限速、HTTP + WebRTC 控制面 | 经 `RobotAdapter` 发现并调用承载端                    |
+| **机器人承载端**       | `robot-pipeline/` 或外部 ROS Robot Server | 机器人底层控制循环、限速逼近、遥操作、数据采集（MCAP）                      | 只提供 `/v1` 指令契约与共享内存观测，不感知策略与任务 |
 
 -   **耦合仅限契约**：`/v1` 端点与 body 字段、观测键、共享内存布局**单点定义**在
     [adapter 包](./motrix_edge_adapter.md)（`base.py` / `http_contract.py` / `shm_contract.py`），
-    robot-pipeline 直接 `import motrix_edge.adapter.*` 复用，不本地拷贝；契约变更两侧同步。
+    robot-pipeline 与外部 ROS Robot Server 直接 `import motrix_edge.adapter.*` 复用，不本地拷贝；
+    契约变更两侧同步。ROS / DDS 依赖只存在于 Robot Server，Edge 进程不加载 `rclpy`。
 -   **机器人生死不归 Edge**：承载端独立部署、自行启动，Edge 只**发现并复用**已运行的进程
     （IDLE 探测绑定），不拉起 / 不重启——断电急停会使机械臂失力下坠，重启决策留在现场。
--   子项目结构、启动与联调见 [robot-pipeline/README.md](../../robot-pipeline/README.md)。
+-   子项目结构、启动与联调见 [robot-pipeline/README.md](../../robot-pipeline/README.md)；ROS 机器人接入
+    模板见[机器人适配器设计](./motrix_edge_adapter.md#ros-robot-server-接入模板)。
 
 ## 目标与成功标准
 
@@ -66,8 +68,8 @@
         CLI 键盘 ──CommandBus.push──▶ EdgeNode（主线程）
                                          │
                                          ▼
-                      session（Capture / Infer）──RobotAdapter──▶ robot-pipeline
-                                         │                        （承载端进程）
+                      session（Capture / Infer）──RobotAdapter──▶ Robot Server
+                                         │                        （原生 / ROS 承载端进程）
                       policy（InferSession 内）──ws──▶ 推理节点（Endpoint）
 ```
 

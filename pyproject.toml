@@ -66,6 +66,7 @@ test_robot = "motrix_edge.adapter.test_adapter:TestRobotAdapter"
 dual_piper = "motrix_edge.adapter.dual_piper_adapter:DualPiperAdapter"
 single_piper = "motrix_edge.adapter.single_piper_adapter:SinglePiperAdapter"
 simulation_piper = "motrix_edge.adapter.simulation_piper_adapter:SimulationPiperAdapter"
+r1pro_ros = "motrix_edge.adapter.r1pro_ros_adapter:R1ProRosAdapter"
 
 [[tool.uv.index]]
 name = "motphys"

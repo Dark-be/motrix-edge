@@ -28,7 +28,8 @@ adapter/
 ├── shm_contract.py    # adapter ↔ SDK 进程的共享内存观测契约（ObsShmReader / ObsShmWriter）
 ├── http_shm_adapter.py    # HttpShmAdapter：HTTP 指令下行 + 共享内存观测上行的公共基类（行为全部在此）
 ├── test_adapter.py    # TestRobotAdapter（测试 / 无硬件联调；HttpShmAdapter 瘦子类）
-└── dual_piper_adapter.py  # DualPiperAdapter（双臂 Piper；HttpShmAdapter 瘦子类）
+├── dual_piper_adapter.py  # DualPiperAdapter（双臂 Piper；HttpShmAdapter 瘦子类）
+└── r1pro_ros_adapter.py   # R1ProRosAdapter（ROS 2 / R1 Pro；HttpShmAdapter 瘦子类）
 ```
 
 ## 能力裁剪（启用臂 / 相机，RobotAdapter.configure）
@@ -246,10 +247,10 @@ adapter:
 | POST | `/v1/capture/sync`                      | `{meta}`                                                              | `{status}`                                                                                   |
 | POST | `/v1/capture/start` / `/v1/capture/end` | —                                                                     | `{status}`                                                                                   |
 
--   **共享内存观测上行**（`shm_contract.py`）：SDK 进程按 `run_hz` 持续把观测（qpos + 目标
+-   **共享内存观测上行**（`shm_contract.py`）：Robot Server 按观测调度持续把最新观测（qpos + 目标
     action + raw RGB 图像）写入共享内存（`ObsShmWriter`），adapter 经 `ObsShmReader` 读取并
-    编码 JPEG 返回；布局版本随字段变化递增（当前 v2 = qpos + action + images，v1 仅 qpos +
-    images，版本不一致时 attach 直接报错）。
+    编码 JPEG 返回；布局版本随字段变化递增（当前 v9，包含 qpos / qpos_err / torque / action /
+    pose / pose_target / images / depths，未启用的可选区维度为 0；版本不一致时 attach 直接报错）。
     `read()` 对**无帧 / 撕裂帧 / 陈旧帧**一律返回 `None`：写者每帧更新 header `timestamp`，
     超过 `STALE_AFTER`（1s）未更新即判定陈旧（写者停机、或进程重启后旧段被同名重建）——
     此时不返回冻结帧，并按同一节奏尝试重新 attach 同名新段，避免把过期观测当实时观测。
@@ -274,6 +275,69 @@ adapter:
 -   **DualPiperAdapter**（`dual_piper_adapter.py`）：双臂 Piper（每臂 6 关节 + 1 夹爪；joint / pose
     每臂 6、gripper 每臂 1）；相机布局与能力同 TestRobotAdapter，共享内存 `dual_piper_obs`；
     真实承载端是同仓的 [robot-pipeline](../../robot-pipeline/README.md)。
+-   **R1ProRosAdapter**（`r1pro_ros_adapter.py`）：ROS 2 / R1 Pro（每臂 7 关节 + 1 夹爪）；首版
+    支持 joint / joint_delta / gripper / gripper_delta 及其 joint+gripper 组合布局，四路 640×480
+    RGB，相机顺序为 head-left / head-right / left-wrist / right-wrist，共享内存
+    `r1pro_ros_obs`。采集由 ROS Robot Server 内部 recorder 完成，Edge 仅通过 capture HTTP 端点
+    控制 episode 生命周期。
+
+## ROS Robot Server 接入模板
+
+ROS 是机器人承载端的实现细节，**不进入 Edge 进程**。接入新的 ROS 机器人时沿用同一拓扑：
+
+```text
+Edge InferSession --目标频率--> HttpShmAdapter --HTTP--> ROS Robot Server
+                                              <--SHM--- 最新观测
+                                                          │
+                                      ROS topic / action / TF / recorder
+```
+
+### Edge 侧模板
+
+Edge adapter 继承 `HttpShmAdapter`，只声明机器人静态事实并注册 entry point：
+
+```python
+class MyRosAdapter(HttpShmAdapter):
+    ADAPTER_TYPE = "my_ros_robot"
+    ACTION_DIM_PER_ARM = {
+        "joint": 7,
+        "joint_delta": 7,
+        "gripper": 1,
+        "gripper_delta": 1,
+    }
+    ACTION_SPACES = (
+        ActionSpace.JOINT,
+        ActionSpace.JOINT_DELTA,
+        ActionSpace.GRIPPER,
+        ActionSpace.GRIPPER_DELTA,
+    )
+    ARM_NAMES = ("left", "right")
+    IMAGES = {"cam_head": (640, 480)}
+    CAPABILITIES = {
+        AdapterCapability.CAPTURE: True,
+        AdapterCapability.EXECUTE: True,
+        AdapterCapability.STREAMING: True,
+    }
+```
+
+不要新增只有转发行为的 `RosAdapter` 中间基类：HTTP / SHM、discover、能力裁剪与采集命令已经由
+`HttpShmAdapter` 完整实现；ROS 机型子类只需声明布局。只有多台 ROS 机器人出现新的**共同 Edge
+行为**时，才提取额外基类。
+
+### ROS Robot Server 侧模板
+
+Robot Server 与同仓 robot-pipeline 遵循同一边界：
+
+1. 直接复用 `motrix_edge.adapter.http_contract` 与 `shm_contract.ObsShmWriter`，不复制协议常量。
+2. `/v1/rollout` 只更新机器人 target；策略目标频率不等于底层控制频率。插值、限速、目标保持和
+   ROS 发布频率由 Robot Server / 底层控制器负责。
+3. ROS callback 更新最新状态与相机缓存；写入 SHM 前把所有彩色图统一到 adapter 声明的尺寸。SHM
+   只服务推理、预览和状态调试，不作为采集数据源。
+4. 采集在 Robot Server 内部订阅原始 ROS 数据并写 MCAP；Edge 只调用 `/v1/capture/sync`、`start`、
+   `end`、`cancel`，并轮询 `/v1/capture/status`。
+5. `/v1/safe_stop` 是软停：停止接受新目标并让底层保持安全目标；硬件断电急停不属于本契约。
+6. Robot Server 的 discover `type` 必须与 Edge entry point 名一致；相机路数、顺序和尺寸必须与
+   adapter `IMAGES` 严格一致，否则 Edge 拒绝错位观测。
 
 ## 接入方式（外部 SDK / 包）
 
