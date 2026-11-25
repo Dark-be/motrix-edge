@@ -242,11 +242,9 @@ def effective_config_path(name: str) -> Path:
     return resolve_config_file(_yml_name(name))
 
 
-def _base_config(name: str, chain: tuple[str, ...] = ()) -> dict:
-    """加载机型配置及其父配置，不包含机器档案，也不写入文件。"""
+def _base_config(name: str) -> dict:
+    """加载单份机型配置，不包含机器档案，也不写入文件。"""
     name = _yml_name(name)
-    if name in chain:
-        raise ValueError(f"配置继承循环: {' -> '.join((*chain, name))}")
     path = config_path(name)
     text = path.read_text(encoding="utf-8") if path.exists() else packaged_config_text(name)
     if text is None:
@@ -254,12 +252,9 @@ def _base_config(name: str, chain: tuple[str, ...] = ()) -> dict:
     config = yaml.safe_load(text) or {}
     if not isinstance(config, dict):
         raise ValueError(f"配置 {name} 必须是 YAML 映射")
-    parent = config.pop("extends", None)
-    if parent is None:
-        return config
-    if not isinstance(parent, str) or not parent or Path(parent).name != parent:
-        raise ValueError(f"配置 {name} 的 extends 必须是配置文件名")
-    return deep_merge(_base_config(parent, (*chain, name)), config)
+    if "extends" in config:
+        raise ValueError(f"配置 {name} 不支持 extends；请将完整机型配置写在同一文件中")
+    return config
 
 
 def load_config(name: str, machine: str | None = None) -> dict:

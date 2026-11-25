@@ -117,9 +117,9 @@ host/port）、`robot`（name / type / max_joint_speed_rad_s / init_joint / `por
 -   `dual_alicia_piper.yml` —— `robot.type: dual_alicia_piper_robot`，同样启用多频调度与逐相机 profile
 -   `single_piper.yml` —— `robot.type: single_piper_robot`
 
-机型配置可用顶层 `extends` 继承一个同目录配置；加载顺序为父机型 → 子机型 → 机器档案，字典递归
-合并、列表整体替换。相机序列号只写在机器档案 `robot.cameras`，分辨率与帧率写在
-`streams.cameras.profiles`，不再用第二份 recorder 配置重复设备身份。
+每个机型 YAML 都是完整配置，不支持通过 `extends` 继承其他机型配置。机器档案只写单台机器的差异，
+加载时深合并到机型配置；相机序列号写在机器档案 `robot.cameras`，分辨率与帧率写在机型配置的
+`streams.cameras.profiles`。
 
 配置和日志共用运行根目录。`MOTRIX_ROBOT_PIPELINE_DIR` 指定根目录，未设置时使用
 `<cwd>/motrix-robot-pipeline`；现场配置放 `<root>/config`，日志放 `<root>/logs`。加载配置时现场

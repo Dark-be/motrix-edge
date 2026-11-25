@@ -95,19 +95,11 @@
 
 -   `CaptureMetaStore` 写 `capture.yml`：在首次显式写操作时创建 `<根>/config/capture.yml`。
 
-### robot-pipeline 机型继承
+### robot-pipeline 机型配置与机器档案
 
-robot-pipeline 的机型 YAML 可用顶层 `extends` 继承同一配置命名空间中的一个父配置：
-
-```yaml
-extends: dual_piper.yml
-streams:
-    control_hz: 100
-```
-
-加载顺序固定为「父机型 → 子机型 → 机器档案」。父、子配置各自仍遵循「运行根现场文件优先、包内
-示例兜底」；机器档案只在整条继承链合并后叠加一次。字典递归合并，列表和标量由子配置整体替换。
-`extends` 只接受不含目录部分的配置文件名，且循环继承在启动期报错。
+每个 robot-pipeline 机型 YAML 都是完整、独立的配置，不支持通过 `extends` 继承其他机型。加载时先按
+「运行根现场文件优先、包内示例兜底」选定一份机型配置，再叠加一份机器档案。机器档案只写单台机器
+不同的值；字典递归合并，列表和标量由机器档案整体替换。
 
 相机身份与采集 profile 分属不同层：
 
