@@ -26,7 +26,14 @@ import numpy as np
 from utils.data_handler import debug_print
 from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
-from motrix_edge.adapter.base import KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR, KEY_TAU_FF, KEY_TORQUE
+from motrix_edge.adapter.base import (
+    KEY_ACTION,
+    KEY_JOINT_VELOCITY,
+    KEY_QPOS,
+    KEY_QPOS_ERR,
+    KEY_TAU_FF,
+    KEY_TORQUE,
+)
 
 # 位姿键在 edge 观测契约里带 ``observations/`` 前缀（与 robot 原始的 ``pose`` / ``pose_action`` 不同名，
 # 故取别名避免与类属性同名）：``standard_observation()`` 的输出键就是这一套。
@@ -98,6 +105,7 @@ class BaseRobot:
     KEY_JOINT_ERROR = "joint_error"  # 关节跟踪误差 = 目标 - 实测
     KEY_GRIPPER_ERROR = "gripper_error"  # 夹爪跟踪误差 = 目标 - 实测
     KEY_POSE_ACTION = "pose_action"  # 关节目标的 FK 位姿（pose_dim() > 0）
+    KEY_JOINT_VELOCITY = "joint_velocity"  # 执行臂实测关节速度（rad/s；可选电机状态流）
     KEY_TORQUE = "torque"  # 执行臂实测电机力矩（每臂 6 维，N·m；可选流）
     KEY_TAU_FF = "tau_ff"  # 状态拍当前生效的 MIT 前馈力矩（每臂 6 维，N·m；仅录制）
     KEY_TIMESTAMP = "timestamp"  # 观测帧时刻（观测线程打点）
@@ -527,6 +535,18 @@ class BaseRobot:
         if self.torque_stream_enabled:
             layout.update(
                 {
+                    "joint_velocity_space": "joint_velocity",
+                    "joint_velocity_unit": "rad/s",
+                    "joint_velocity_dims": [
+                        {
+                            "index": arm_index * per_arm + offset,
+                            "arm": arm,
+                            "kind": "joint_velocity",
+                            "name": name,
+                        }
+                        for arm_index, arm in enumerate(arms)
+                        for offset, name in enumerate(labels)
+                    ],
                     "torque_space": "joint_torque",
                     "torque_unit": "N.m",
                     "torque_dims": [
@@ -561,6 +581,12 @@ class BaseRobot:
     def get_observation_torque(self) -> np.ndarray | None:
         """返回逐执行臂关节力矩（N·m）；不支持或当拍不可用返回 ``None``。"""
         return None
+
+    def get_observation_joint_signals(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """读取关节角与同拍附加信号；机型可覆写以复用一次硬件快照。"""
+        joint = self.get_observation_joint()
+        torque = self.get_observation_torque() if self.torque_stream_enabled else None
+        return joint, {} if torque is None else {self.KEY_TORQUE: torque}
 
     def configure_tau_ff_stream(self, enabled: bool) -> None:
         """启停 MIT 前馈力矩录制流；不支持的机型保持关闭。"""
@@ -1356,7 +1382,7 @@ class BaseRobot:
         """采样并缓存分离的关节、夹爪及其目标；位姿由同拍关节正解。"""
         self.seq += 1
         state_timestamp_ns = time.time_ns()
-        joint = self.get_observation_joint()
+        joint, joint_signals = self.get_observation_joint_signals()
         gripper = self.get_observation_gripper()
         action_timestamp_ns = time.time_ns()
         joint_target = self.get_joint_target()
@@ -1377,13 +1403,21 @@ class BaseRobot:
             self.KEY_GRIPPER_ERROR: gripper_action - gripper,
         }
         if self.torque_stream_enabled:
-            torque = self.get_observation_torque()
-            if torque is not None:
-                values = np.asarray(torque, dtype=np.float64).reshape(-1)
+            signal_keys = (
+                (self.KEY_JOINT_VELOCITY, KEY_JOINT_VELOCITY),
+                (self.KEY_TORQUE, KEY_TORQUE),
+            )
+            for raw_key, contract_key in signal_keys:
+                signal = joint_signals.get(raw_key)
+                if signal is None:
+                    continue
+                values = np.asarray(signal, dtype=np.float64).reshape(-1)
                 if values.shape[0] != self.joint_dim():
-                    raise ValueError(f"{self.name}: torque dim {values.shape[0]} != joint_dim {self.joint_dim()}")
-                state[self.KEY_TORQUE] = values
-                state[KEY_TIMESTAMPS_NS][KEY_TORQUE] = state_timestamp_ns
+                    raise ValueError(f"{self.name}: {raw_key} dim {values.shape[0]} != joint_dim {self.joint_dim()}")
+                if not np.all(np.isfinite(values)):
+                    raise ValueError(f"{self.name}: {raw_key} contains non-finite values")
+                state[raw_key] = values
+                state[KEY_TIMESTAMPS_NS][contract_key] = state_timestamp_ns
         if self.tau_ff_stream_enabled:
             tau_ff = self.get_observation_tau_ff()
             if tau_ff is not None:
@@ -1457,6 +1491,8 @@ class BaseRobot:
             fused[OBSERVATION_POSE_ACTION_KEY] = values[self.KEY_POSE_ACTION]
         if values.get(self.KEY_TORQUE) is not None:
             fused[KEY_TORQUE] = np.asarray(values[self.KEY_TORQUE], dtype=np.float64)
+        if values.get(self.KEY_JOINT_VELOCITY) is not None:
+            fused[KEY_JOINT_VELOCITY] = np.asarray(values[self.KEY_JOINT_VELOCITY], dtype=np.float64)
         if values.get(self.KEY_TAU_FF) is not None:
             fused[KEY_TAU_FF] = np.asarray(values[self.KEY_TAU_FF], dtype=np.float64)
         for key, value in values.items():

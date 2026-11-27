@@ -55,6 +55,7 @@ from motrix_edge.adapter.http_contract import FIELD_DEPTH  # 相机元数据的�
 # 每臂 ``[joint..., gripper]`` 交错；action 与其同维同布局。
 KEY_QPOS = "observations/qpos"
 KEY_QPOS_ERR = "observations/qpos_err"
+KEY_JOINT_VELOCITY = "observations/joint_velocity"
 KEY_TORQUE = "observations/torque"
 # 机器人侧录制流：状态采样时当前生效的 MIT 前馈力矩；暂不进入 Edge 共享内存。
 KEY_TAU_FF = "observations/tau_ff"

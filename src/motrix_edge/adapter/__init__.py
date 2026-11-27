@@ -36,6 +36,7 @@ from motrix_edge.utils.data_handler import debug_print
 from .base import (
     CAMERA_PREFIX,
     KEY_ACTION,
+    KEY_JOINT_VELOCITY,
     KEY_POSE,
     KEY_QPOS,
     KEY_QPOS_ERR,
@@ -233,6 +234,7 @@ __all__ = [
     "ADAPTER_EP_GROUP",
     "CAMERA_PREFIX",
     "KEY_ACTION",
+    "KEY_JOINT_VELOCITY",
     "KEY_QPOS",
     "KEY_QPOS_ERR",
     "KEY_TAU_FF",

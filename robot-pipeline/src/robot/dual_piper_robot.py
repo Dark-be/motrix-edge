@@ -32,7 +32,7 @@ from utils.data_handler import debug_print  # noqa: E402
 from utils.observation_time import KEY_TIMESTAMP_METADATA, KEY_TIMESTAMP_NS, KEY_TIMESTAMPS_NS
 
 from robot.base_robot import BaseRobot, CartesianActionError
-from robot.controller.piper_controller import PiperController  # noqa: E402
+from robot.controller.piper_controller import MotorState, PiperController  # noqa: E402
 from robot.sensor.realsense_sensor import RealsenseSensor  # noqa: E402
 from robot.sensor.v4l2_sensor import V4l2Sensor  # noqa: E402
 
@@ -88,43 +88,58 @@ class DualPiperRobot(BaseRobot):
         self.controllers.update({name: PiperController(name) for name in self.MASTER_CONTROLLERS.values()})
         self.sensors: dict = {name: RealsenseSensor(name) for name in self.IMAGE_NAMES}
         self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条）
-        self._torque_read_error: str | None = None
         self._tau_ff_read_error: str | None = None
         # 控制线程只在所有执行臂都成功提交后原子替换；状态线程永远读到完整的上一拍或本拍。
         self._last_tau_ff: np.ndarray | None = None
 
     # ---- 取数：关节 / 末端位姿（同一拍关节角正解）----
-    def get_observation_joint(self) -> np.ndarray:
-        """当前帧关节角（扁平 ``joint_dim()`` 维），逐臂读取并按 ``ARM_NAMES`` 展开。
-
-        发布为 robot 原始键 ``joint``；夹爪由 ``gripper`` 发布。任一臂读不到时抛 ``RuntimeError``。
-        """
-        return self._read_joints()
-
     def supports_torque_stream(self) -> bool:
         return True
 
+    def get_observation_joint(self) -> np.ndarray:
+        """从高速电机状态读取当前关节角；任一臂缺失时本拍失败，不回退其他反馈源。"""
+        return self._read_motor_observation().q
+
+    def get_observation_joint_signals(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """一次读取高速电机缓存，同时产生 q / qd / torque。"""
+        states = self._read_motor_observation()
+        signals = {}
+        if self.torque_stream_enabled:
+            signals = {
+                self.KEY_JOINT_VELOCITY: states.vel,
+                self.KEY_TORQUE: states.tau,
+            }
+        return states.q, signals
+
     def get_observation_torque(self) -> np.ndarray | None:
-        """逐执行臂读取 6 维电机力矩缓存，按 ``ARM_NAMES`` 展开（N·m）。"""
-        parts: list[np.ndarray] = []
+        """独立读取逐执行臂力矩；状态采样改走 joint + torque 配对入口。"""
+        return self._read_motor_observation().tau
+
+    def _read_motor_observation(self) -> MotorState:
+        """读取执行臂高速电机缓存；所有字段按 ``ARM_NAMES`` 聚合。"""
+        joint_parts: list[np.ndarray] = []
+        velocity_parts: list[np.ndarray] = []
+        torque_parts: list[np.ndarray] = []
         for arm in self.ARM_NAMES:
             states = self._controller_for_arm(arm).get_motor_states()
             if states is None:
-                reason = f"arm {arm!r} motor state unavailable"
-                if reason != self._torque_read_error:
-                    self._torque_read_error = reason
-                    debug_print(self.name, f"torque unavailable ({reason}); dropping this sample", "WARNING")
-                return None
-            values = np.asarray(states.tau, dtype=np.float64).reshape(-1)
-            if values.shape[0] != self.JOINT_DIM_PER_ARM or not np.all(np.isfinite(values)):
-                reason = f"arm {arm!r} torque invalid (dim={values.shape[0]})"
-                if reason != self._torque_read_error:
-                    self._torque_read_error = reason
-                    debug_print(self.name, f"torque unavailable ({reason}); dropping this sample", "WARNING")
-                return None
-            parts.append(values)
-        self._torque_read_error = None
-        return np.concatenate(parts)
+                raise RuntimeError(f"{self.name}: arm {arm!r} motor state unavailable")
+            fields = {
+                "position": np.asarray(states.q, dtype=np.float64).reshape(-1),
+                "velocity": np.asarray(states.vel, dtype=np.float64).reshape(-1),
+                "torque": np.asarray(states.tau, dtype=np.float64).reshape(-1),
+            }
+            for name, values in fields.items():
+                if values.shape[0] != self.JOINT_DIM_PER_ARM or not np.all(np.isfinite(values)):
+                    raise RuntimeError(f"{self.name}: arm {arm!r} motor {name} invalid (dim={values.shape[0]})")
+            joint_parts.append(fields["position"].copy())
+            velocity_parts.append(fields["velocity"].copy())
+            torque_parts.append(fields["torque"].copy())
+        return MotorState(
+            q=np.concatenate(joint_parts),
+            vel=np.concatenate(velocity_parts),
+            tau=np.concatenate(torque_parts),
+        )
 
     def supports_tau_ff_stream(self) -> bool:
         return True
@@ -156,7 +171,7 @@ class DualPiperRobot(BaseRobot):
         同一原因只告警一条。位姿系由 ``robot.tcp`` 决定（见基类 ``pose_to_tcp()``）。
         """
         try:
-            joints = self._read_joints() if joint is None else np.asarray(joint, dtype=np.float64).reshape(-1)
+            joints = self.get_observation_joint() if joint is None else np.asarray(joint, dtype=np.float64).reshape(-1)
             if joints.shape[0] < self.joint_dim() or not np.all(np.isfinite(joints[: self.joint_dim()])):
                 raise ValueError(f"joint reading invalid (dim={joints.shape[0]})")
         except Exception as exc:  # noqa: BLE001 读数不可用：本拍不出位姿，下一拍重试
@@ -195,16 +210,6 @@ class DualPiperRobot(BaseRobot):
             gripper = self._controller_for_arm(arm).get_gripper()
             values.append(np.nan if gripper is None else float(np.asarray(gripper, dtype=np.float64).reshape(-1)[0]))
         return np.asarray(values, dtype=np.float64)
-
-    def _read_joints(self) -> np.ndarray:
-        """逐臂读关节角（扁平 ``joint_dim()`` 维，顺序对齐 ``ARM_NAMES``）；任一臂读不到 → ``RuntimeError``。"""
-        parts: list[np.ndarray] = []
-        for arm in self.ARM_NAMES:
-            joint = self._controller_for_arm(arm).get_joint()
-            if joint is None:
-                raise RuntimeError(f"{self.name}: arm {arm!r} joint read failed (None)")
-            parts.append(self._joint_block(joint, source=f"arm {arm!r}"))
-        return np.concatenate(parts)
 
     # ---- 下发：关节段（限速跟踪）/ 夹爪段（直接跟随）----
     def _apply_commands(self, joints: np.ndarray, gripper: np.ndarray):

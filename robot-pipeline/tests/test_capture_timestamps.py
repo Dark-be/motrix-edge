@@ -119,7 +119,10 @@ def test_state_and_each_camera_keep_independent_sampling_times(monkeypatch):
             "cameras": {key: key for key in module.DualPiperRobot.IMAGE_NAMES},
         }
     )
-    robot.controllers = {key: Mock(get_joint=lambda: np.zeros(6), get_gripper=lambda: 0.5) for key in robot.controllers}
+    motor_state = SimpleNamespace(q=np.zeros(6), vel=np.zeros(6), current=np.zeros(6), tau=np.zeros(6))
+    robot.controllers = {
+        key: Mock(get_motor_states=lambda: motor_state, get_gripper=lambda: 0.5) for key in robot.controllers
+    }
     times = iter([1001, 1002, 1003])
     monkeypatch.setattr(base.time, "time_ns", lambda: next(times))
     robot.sample_state()
@@ -244,6 +247,29 @@ def test_torque_uses_the_qpos_source_timestamp():
     )
     calls = collector._writer.write_message.call_args_list
     assert [call.kwargs["topic"] for call in calls] == ["observations/qpos", "observations/torque"]
+    assert [call.kwargs["log_time"] for call in calls] == [123, 123]
+
+
+def test_velocity_uses_the_qpos_source_timestamp():
+    module = _load("collector.mcap_collector")
+    collector = module.ActMcapCollector({})
+    collector._writer = Mock()
+    collector._schema_qpos = object()
+    collector.collect_qpos(
+        {
+            "observations/qpos": [0.0],
+            "observations/joint_velocity": [1.25],
+            "timestamps_ns": {
+                "observations/qpos": 123,
+                "observations/joint_velocity": 123,
+            },
+        }
+    )
+    calls = collector._writer.write_message.call_args_list
+    assert [call.kwargs["topic"] for call in calls] == [
+        "observations/qpos",
+        "observations/joint_velocity",
+    ]
     assert [call.kwargs["log_time"] for call in calls] == [123, 123]
 
 

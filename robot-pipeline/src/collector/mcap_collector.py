@@ -24,6 +24,7 @@
     topic                        schema                               内容
     ---------------------------  -----------------------------------  --------------------------
     observations/qpos            std_msgs/msg/Float64MultiArray       状态向量（每臂「值 + 夹爪」）
+    observations/joint_velocity  std_msgs/msg/Float64MultiArray       从臂关节速度（每臂 6 维，rad/s）
     observations/torque          std_msgs/msg/Float64MultiArray       从臂关节力矩（每臂 6 维，N·m）
     observations/tau_ff          std_msgs/msg/Float64MultiArray       当前生效的 MIT 前馈（每臂 6 维，N·m）
     action                       std_msgs/msg/Float64MultiArray       同维同布局的目标向量
@@ -69,6 +70,7 @@ from utils.observation_time import KEY_TIMESTAMPS_NS
 
 # standard_obs keys（见 ``BaseRobot.standard_observation()``）
 KEY_QPOS = "observations/qpos"  # 每臂「关节 + 夹爪」交错
+KEY_JOINT_VELOCITY = "observations/joint_velocity"
 KEY_TORQUE = "observations/torque"  # 执行臂逐关节力矩（N·m，不含夹爪）
 KEY_TAU_FF = "observations/tau_ff"  # 状态拍当前生效的 MIT 前馈力矩（N·m，不含夹爪）
 KEY_ACTION = "action"  # 同维同布局的目标向量
@@ -110,6 +112,7 @@ TYPE_COMPRESSED_IMAGE = "sensor_msgs/msg/CompressedImage"
 
 # topic 名（每信号一个）
 TOPIC_QPOS = "observations/qpos"
+TOPIC_JOINT_VELOCITY = "observations/joint_velocity"
 TOPIC_TORQUE = "observations/torque"
 TOPIC_TAU_FF = "observations/tau_ff"
 TOPIC_ACTION = "action"
@@ -117,6 +120,12 @@ TOPIC_IMAGE_PREFIX = "observations/images/"
 
 
 class ActMcapCollector:
+    _JOINT_SIGNALS = (
+        (KEY_JOINT_VELOCITY, TOPIC_JOINT_VELOCITY),
+        (KEY_TORQUE, TOPIC_TORQUE),
+        (KEY_TAU_FF, TOPIC_TAU_FF),
+    )
+
     def __init__(self, collector_config: dict):
         self.name = "ActMcapCollector"
         self._save_dir = Path(collector_config.get("save_dir", "./data"))
@@ -252,10 +261,7 @@ class ActMcapCollector:
             raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
         # 兼容入口保持原子校验：任一显式时间非法时，一条消息都不能先写出去。
         topics = [TOPIC_QPOS, TOPIC_ACTION]
-        if KEY_TORQUE in standard_obs:
-            topics.append(TOPIC_TORQUE)
-        if KEY_TAU_FF in standard_obs:
-            topics.append(TOPIC_TAU_FF)
+        topics.extend(topic for key, topic in self._JOINT_SIGNALS if key in standard_obs)
         self._resolve_times(standard_obs, topics, timestamps)
         self.collect_qpos(standard_obs)
         self.collect_action(standard_obs)
@@ -282,54 +288,37 @@ class ActMcapCollector:
             sequence=seq,
         )
         self._step_count += 1
-        if KEY_TORQUE in standard_obs:
-            self.collect_torque(standard_obs)
-        if KEY_TAU_FF in standard_obs:
-            self.collect_tau_ff(standard_obs)
+        for key, topic in self._JOINT_SIGNALS:
+            if key in standard_obs:
+                self._collect_joint_signal(standard_obs, key=key, topic=topic)
 
     def collect_torque(self, standard_obs: dict):
         """写入一条与 qpos 同状态拍的执行臂关节力矩采样。"""
-        if self._writer is None:
-            raise RuntimeError("ActMcapCollector not started; call start() first")
-        timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
-        if not isinstance(timestamps, Mapping):
-            raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
-        ts_ns = self._resolve_times(standard_obs, (TOPIC_TORQUE,), timestamps)[TOPIC_TORQUE]
-        torque = np.asarray(standard_obs[KEY_TORQUE], dtype=np.float64).reshape(-1)
-        if not np.all(np.isfinite(torque)):
-            raise ValueError("observations/torque contains non-finite values")
-        self._first_ts_ns = ts_ns if self._first_ts_ns is None else min(self._first_ts_ns, ts_ns)
-        self._last_ts_ns = ts_ns if self._last_ts_ns is None else max(self._last_ts_ns, ts_ns)
-        seq = self._message_seq
-        self._message_seq += 1
-        self._writer.write_message(
-            topic=TOPIC_TORQUE,
-            schema=self._schema_qpos,
-            message={"layout": {"dim": [], "data_offset": 0}, "data": torque.tolist()},
-            log_time=ts_ns,
-            publish_time=ts_ns,
-            sequence=seq,
-        )
+        self._collect_joint_signal(standard_obs, key=KEY_TORQUE, topic=TOPIC_TORQUE)
 
     def collect_tau_ff(self, standard_obs: dict):
         """写入状态采样时当前生效的 MIT 前馈力矩。"""
+        self._collect_joint_signal(standard_obs, key=KEY_TAU_FF, topic=TOPIC_TAU_FF)
+
+    def _collect_joint_signal(self, standard_obs: dict, *, key: str, topic: str) -> None:
+        """写入一条与 qpos 同拍的逐关节浮点信号。"""
         if self._writer is None:
             raise RuntimeError("ActMcapCollector not started; call start() first")
         timestamps = standard_obs.get(KEY_TIMESTAMPS_NS, {})
         if not isinstance(timestamps, Mapping):
             raise ValueError("timestamps_ns must map topic names to integer Unix nanoseconds")
-        ts_ns = self._resolve_times(standard_obs, (TOPIC_TAU_FF,), timestamps)[TOPIC_TAU_FF]
-        tau_ff = np.asarray(standard_obs[KEY_TAU_FF], dtype=np.float64).reshape(-1)
-        if not np.all(np.isfinite(tau_ff)):
-            raise ValueError("observations/tau_ff contains non-finite values")
+        ts_ns = self._resolve_times(standard_obs, (topic,), timestamps)[topic]
+        values = np.asarray(standard_obs[key], dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"{key} contains non-finite values")
         self._first_ts_ns = ts_ns if self._first_ts_ns is None else min(self._first_ts_ns, ts_ns)
         self._last_ts_ns = ts_ns if self._last_ts_ns is None else max(self._last_ts_ns, ts_ns)
         seq = self._message_seq
         self._message_seq += 1
         self._writer.write_message(
-            topic=TOPIC_TAU_FF,
+            topic=topic,
             schema=self._schema_qpos,
-            message={"layout": {"dim": [], "data_offset": 0}, "data": tau_ff.tolist()},
+            message={"layout": {"dim": [], "data_offset": 0}, "data": values.tolist()},
             log_time=ts_ns,
             publish_time=ts_ns,
             sequence=seq,
@@ -556,7 +545,7 @@ class ActMcapCollector:
     def _signal_layouts(self) -> dict:
         """返回不混入 qpos/action 向量的逐关节信号布局。"""
         result = {}
-        for name in ("torque", "tau_ff"):
+        for name in ("joint_velocity", "torque", "tau_ff"):
             dims = self._state_layout.get(f"{name}_dims") or []
             if dims:
                 result[f"observations/{name}"] = {

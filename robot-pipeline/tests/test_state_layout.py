@@ -41,6 +41,7 @@ import pytest
 
 from motrix_edge.adapter.base import (
     KEY_ACTION,
+    KEY_JOINT_VELOCITY,
     KEY_POSE,
     KEY_POSE_ACTION,
     KEY_QPOS,
@@ -89,6 +90,7 @@ class _FakeArm:
         self.joint = None if joint is None else np.asarray(joint, dtype=np.float64)
         self.gripper = None if gripper is None else float(gripper)
         self.last_torque_ff = None
+        self.motor_state_reads = 0
 
     def get_joint(self):
         return None if self.joint is None else self.joint.copy()
@@ -97,7 +99,14 @@ class _FakeArm:
         return None if self.gripper is None else self.gripper
 
     def get_motor_states(self):
-        return SimpleNamespace(tau=self.joint.copy()) if self.joint is not None else None
+        self.motor_state_reads += 1
+        if self.joint is None:
+            return None
+        return SimpleNamespace(
+            q=self.joint.copy(),
+            vel=self.joint.copy() + 100,
+            tau=self.joint.copy(),
+        )
 
     def set_joint(self, joint, torque_ff=None):
         self.joint = np.asarray(joint, dtype=np.float64).copy()
@@ -239,12 +248,40 @@ def test_torque_stream_matches_arm_order_and_qpos_timestamp(dual_piper):
     assert [item["arm"] for item in robot.state_layout()["torque_dims"]] == ["left"] * 6 + ["right"] * 6
 
 
-def test_torque_stream_disabled_does_not_read_sdk(dual_piper):
-    robot = _robot(dual_piper)
+def test_torque_stream_reuses_motor_state_for_joint_and_torque(dual_piper):
+    robot = _robot(dual_piper, left_joint=np.arange(6) + 1, right_joint=np.arange(6) + 11)
+    robot.configure_torque_stream(True)
     for controller in (robot.controllers["left_arm"], robot.controllers["right_arm"]):
-        controller.get_motor_states = lambda: pytest.fail("disabled torque stream must not read SDK")
+        controller.get_joint = lambda: pytest.fail("paired motor state must supply joint angles")
 
-    assert KEY_TORQUE not in robot.standard_observation(robot.sample_state())
+    state = robot.sample_state()
+
+    assert state[robot.KEY_JOINT].tolist() == pytest.approx([1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16])
+    assert state[robot.KEY_TORQUE].tolist() == pytest.approx(state[robot.KEY_JOINT])
+    assert state[robot.KEY_JOINT_VELOCITY].tolist() == pytest.approx(state[robot.KEY_JOINT] + 100)
+    assert [robot.controllers[name].motor_state_reads for name in ("left_arm", "right_arm")] == [1, 1]
+    layout = robot.state_layout()
+    assert layout["joint_velocity_unit"] == "rad/s"
+
+
+def test_motor_state_failure_does_not_fall_back_to_joint_feedback(dual_piper):
+    robot = _robot(dual_piper, left_joint=np.arange(6), right_joint=np.arange(6) + 10)
+    robot.configure_torque_stream(True)
+    robot.controllers["right_arm"].get_motor_states = lambda: None
+
+    robot.controllers["right_arm"].get_joint = lambda: pytest.fail("motor state failure must not fall back")
+
+    with pytest.raises(RuntimeError, match="arm 'right' motor state unavailable"):
+        robot.sample_state()
+
+
+def test_torque_stream_disabled_reads_only_motor_positions(dual_piper):
+    robot = _robot(dual_piper)
+
+    obs = robot.standard_observation(robot.sample_state())
+
+    assert KEY_TORQUE not in obs and KEY_JOINT_VELOCITY not in obs
+    assert [robot.controllers[name].motor_state_reads for name in ("left_arm", "right_arm")] == [1, 1]
 
 
 def test_tau_ff_stream_uses_complete_command_snapshot(dual_piper):
@@ -347,7 +384,7 @@ def test_robot_rejects_short_joint_block(dual_piper):
     """控制器少回关节时立即报错，不能拼出长度不完整但看似有效的整机向量。"""
     robot = _robot(dual_piper, left_joint=np.arange(5), right_joint=np.arange(6))
 
-    with pytest.raises(RuntimeError, match=r"joint dim 5 < JOINT_DIM_PER_ARM 6"):
+    with pytest.raises(RuntimeError, match=r"motor position invalid \(dim=5\)"):
         robot.get_observation_joint()
 
 
@@ -764,6 +801,23 @@ def test_set_joint_records_the_effective_mit_t_ref(piper_controller):
 
     assert ctrl.last_torque_ff.tolist() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
     assert [call.kwargs["t_ff"] for call in ctrl.robot.move_mit.call_args_list] == pytest.approx(ctrl.last_torque_ff)
+
+
+def test_motor_state_collects_position_velocity_and_torque(piper_controller):
+    from unittest.mock import Mock
+
+    ctrl = piper_controller.PiperController()
+    ctrl.robot = Mock()
+    ctrl.robot.get_motor_states.side_effect = [
+        SimpleNamespace(msg=SimpleNamespace(position=i, velocity=i + 10, torque=i + 30)) for i in range(6)
+    ]
+
+    states = ctrl.get_motor_states()
+
+    assert states.q.tolist() == pytest.approx(range(6))
+    assert states.vel.tolist() == pytest.approx(range(10, 16))
+    assert states.tau.tolist() == pytest.approx(range(30, 36))
+    assert [call.args[0] for call in ctrl.robot.get_motor_states.call_args_list] == [1, 2, 3, 4, 5, 6]
 
 
 def test_set_joint_keeps_last_complete_mit_snapshot_on_failure(piper_controller):

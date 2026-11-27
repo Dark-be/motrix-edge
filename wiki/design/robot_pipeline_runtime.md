@@ -251,17 +251,18 @@ rx←j4 ry←j5 rz←j6`，平移 0.2 m/rad）从**同一拍 qpos** 派生——
 
 ## 频率与诊断
 
-### 从臂电机力矩流
+### 从臂电机状态流
 
-Piper 执行臂可选发布 `observations/torque`：每臂 6 个关节力矩，单位 N·m，臂顺序与
-`observations/qpos` 一致但**不含夹爪**。开关位于 `streams.torque.enabled`，缺省为 `true`
-（不支持力矩的机型会忽略）；关闭时不调用 SDK、不进入标准观测、共享内存或 MCAP。力矩不单独设频率，始终跟随
-`follower_state_hz`，并与同拍 qpos 共用源时间戳和 `sample_seq`，避免动力学数据错拍。
+Piper 执行臂以 SDK 高速 motor state 作为关节反馈的单一来源：按臂一次聚合六个关节的
+`position / velocity / torque`，其中 position 进入 `observations/qpos`；其余两项分别写入
+`observations/joint_velocity`（rad/s）和 `observations/torque`
+（N·m）。这些逐关节 topic 的臂顺序与 qpos 一致但**不含夹爪**，不能混入 qpos，否则会破坏
+qpos/action 同维契约。
 
-SDK 读取的是后台 CAN 读线程维护的电机状态缓存；任一执行臂当拍读取失败时只缺失该拍 torque，
-qpos/action 仍照常产出。采集器把力矩写为独立 ROS2 `Float64MultiArray` topic，不能混入 qpos，
-否则会破坏 qpos/action 同维契约。共享内存为该流保留独立可选区，维度为 0 表示开关关闭或机型
-不支持。
+`streams.torque.enabled` 缺省为 `true`，控制两个附加 motor-state topic 是否发布；无论开关状态，
+qpos 都取 motor state 的 position，不再读取或回退到 SDK 聚合 joint feedback。任一执行臂 motor state
+缺失或字段非法时整条状态拍失败，留给状态线程的既有错误处理重试。三个信号来自同一份缓存快照，
+均跟随 `follower_state_hz`，并与 qpos 共用源时间戳和 `sample_seq`。
 
 -   **频率**：`HZ`（控制线程，默认 30Hz）、`STATE_HZ`（状态线程 / 采集 state+action，`streams.follower_state_hz`，默认 100Hz）
     与 `OBS_HZ`（观测线程，默认 10Hz）相互独立；
