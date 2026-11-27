@@ -94,6 +94,8 @@ streams:
   follower_state_hz: 100 # 状态 / action 采集频率（同拍成对，100Hz）；控制拍仍按 control_hz
   torque:
     enabled: true # 从臂逐关节电机力矩（N·m），与 qpos 同状态拍录制；false = 不读取 / 不发布
+  tau_ff:
+    enabled: true # 状态拍当前生效的 MIT 前馈力矩（N·m）；仅录制，不进入 Edge 共享内存
   recording:
     queue_size: 512
     jpeg_quality: 90

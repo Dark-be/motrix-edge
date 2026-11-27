@@ -89,6 +89,9 @@ class DualPiperRobot(BaseRobot):
         self.sensors: dict = {name: RealsenseSensor(name) for name in self.IMAGE_NAMES}
         self._pose_read_error: str | None = None  # 位姿不可用原因（同原因只告警一条）
         self._torque_read_error: str | None = None
+        self._tau_ff_read_error: str | None = None
+        # 控制线程只在所有执行臂都成功提交后原子替换；状态线程永远读到完整的上一拍或本拍。
+        self._last_tau_ff: np.ndarray | None = None
 
     # ---- 取数：关节 / 末端位姿（同一拍关节角正解）----
     def get_observation_joint(self) -> np.ndarray:
@@ -122,6 +125,28 @@ class DualPiperRobot(BaseRobot):
             parts.append(values)
         self._torque_read_error = None
         return np.concatenate(parts)
+
+    def supports_tau_ff_stream(self) -> bool:
+        return True
+
+    def get_observation_tau_ff(self) -> np.ndarray | None:
+        """返回最近一次完整成功提交的逐执行臂 MIT 前馈力矩（N·m）。"""
+        snapshot = self._last_tau_ff
+        if snapshot is None:
+            reason = "no complete MIT command submitted"
+            if reason != self._tau_ff_read_error:
+                self._tau_ff_read_error = reason
+                debug_print(self.name, f"tau_ff unavailable ({reason}); dropping this sample", "WARNING")
+            return None
+        values = np.asarray(snapshot, dtype=np.float64).reshape(-1)
+        if values.shape[0] != self.joint_dim() or not np.all(np.isfinite(values)):
+            reason = f"invalid command snapshot (dim={values.shape[0]})"
+            if reason != self._tau_ff_read_error:
+                self._tau_ff_read_error = reason
+                debug_print(self.name, f"tau_ff unavailable ({reason}); dropping this sample", "WARNING")
+            return None
+        self._tau_ff_read_error = None
+        return values.copy()
 
     def get_observation_pose(self, joint: np.ndarray | None = None) -> np.ndarray | None:
         """末端位姿（扁平 ``pose_dim()`` 维：各臂 ``xyz + rpy``）——由同一拍关节角正解。
@@ -186,6 +211,8 @@ class DualPiperRobot(BaseRobot):
         """逐臂下发关节和夹爪；Piper 夹爪死区按闭合处理。"""
         joints = np.asarray(joints, dtype=np.float64).reshape(-1)
         gripper = np.asarray(gripper, dtype=np.float64).reshape(-1)
+        submitted_tau_ff: list[np.ndarray] = []
+        complete_mit_command = True
         for index, arm in enumerate(self.ARM_NAMES):
             start = index * self.JOINT_DIM_PER_ARM
             joint = joints[start : start + self.JOINT_DIM_PER_ARM].copy()
@@ -196,6 +223,13 @@ class DualPiperRobot(BaseRobot):
             # set_joint 按软限位就地裁切，传 copy 以免改到 self.joint_command
             controller.set_joint(joint)
             controller.set_gripper(grip)
+            value = getattr(controller, "last_torque_ff", None)
+            if not isinstance(value, np.ndarray):
+                complete_mit_command = False
+            else:
+                submitted_tau_ff.append(value.astype(np.float64, copy=True).reshape(-1))
+        # 任何臂下发抛异常都会跳过这里并保留上一条完整快照；joint 通路则明确变为不可用。
+        self._last_tau_ff = np.concatenate(submitted_tau_ff) if complete_mit_command else None
 
     def _solve_pose(self, pose: np.ndarray, seed: np.ndarray) -> np.ndarray:
         """绝对目标位姿（每臂 ``xyz + rpy``）→ 关节段目标（逐臂静态逆解，起点 ``seed``）。

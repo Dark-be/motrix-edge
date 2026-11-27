@@ -39,7 +39,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from motrix_edge.adapter.base import KEY_ACTION, KEY_POSE, KEY_POSE_ACTION, KEY_QPOS, KEY_QPOS_ERR, KEY_TORQUE
+from motrix_edge.adapter.base import (
+    KEY_ACTION,
+    KEY_POSE,
+    KEY_POSE_ACTION,
+    KEY_QPOS,
+    KEY_QPOS_ERR,
+    KEY_TAU_FF,
+    KEY_TORQUE,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ROBOT_PIPELINE_SRC = _REPO_ROOT / "robot-pipeline" / "src"
@@ -80,6 +88,7 @@ class _FakeArm:
     def __init__(self, joint=None, gripper=1.0):
         self.joint = None if joint is None else np.asarray(joint, dtype=np.float64)
         self.gripper = None if gripper is None else float(gripper)
+        self.last_torque_ff = None
 
     def get_joint(self):
         return None if self.joint is None else self.joint.copy()
@@ -92,6 +101,7 @@ class _FakeArm:
 
     def set_joint(self, joint, torque_ff=None):
         self.joint = np.asarray(joint, dtype=np.float64).copy()
+        self.last_torque_ff = np.zeros(6, dtype=np.float64) if torque_ff is None else np.asarray(torque_ff).copy()
 
     def set_gripper(self, value):
         self.gripper = float(value)
@@ -235,6 +245,47 @@ def test_torque_stream_disabled_does_not_read_sdk(dual_piper):
         controller.get_motor_states = lambda: pytest.fail("disabled torque stream must not read SDK")
 
     assert KEY_TORQUE not in robot.standard_observation(robot.sample_state())
+
+
+def test_tau_ff_stream_uses_complete_command_snapshot(dual_piper):
+    robot = _robot(dual_piper)
+    robot.configure_tau_ff_stream(True)
+    robot._last_tau_ff = np.arange(12, dtype=np.float64) + 0.5
+
+    obs = robot.standard_observation(robot.sample_state())
+
+    assert obs[KEY_TAU_FF].tolist() == pytest.approx(np.arange(12) + 0.5)
+    assert obs["timestamps_ns"][KEY_TAU_FF] == obs["timestamps_ns"][KEY_QPOS]
+    layout = robot.state_layout()
+    assert layout["tau_ff_unit"] == "N.m"
+    assert [item["arm"] for item in layout["tau_ff_dims"]] == ["left"] * 6 + ["right"] * 6
+
+
+def test_tau_ff_snapshot_changes_only_after_all_arms_succeed(dual_piper):
+    robot = _robot(dual_piper)
+    left = robot.controllers["left_arm"]
+    right = robot.controllers["right_arm"]
+
+    def submit(controller, values):
+        def set_joint(_joint, torque_ff=None):
+            controller.last_torque_ff = np.asarray(values, dtype=np.float64)
+
+        return set_joint
+
+    left.set_joint = submit(left, np.arange(6))
+    right.set_joint = submit(right, np.arange(6) + 10)
+
+    robot._apply_commands(np.zeros(12), np.ones(2))
+    previous = robot.get_observation_tau_ff()
+    assert previous.tolist() == pytest.approx([0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15])
+
+    def fail(_joint, torque_ff=None):
+        raise RuntimeError("right arm submission failed")
+
+    right.set_joint = fail
+    with pytest.raises(RuntimeError, match="right arm submission failed"):
+        robot._apply_commands(np.ones(12), np.ones(2))
+    assert robot.get_observation_tau_ff().tolist() == pytest.approx(previous)
 
 
 def test_standard_observation_without_first_sample(dual_piper):
@@ -574,6 +625,9 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
         "state_dims": [{"index": 0, "arm": "left", "kind": "joint", "name": "j1"}],
         "action_space": "joint",
         "action_dims": [{"index": 0, "arm": "left", "kind": "joint", "name": "j1"}],
+        "tau_ff_space": "joint_torque",
+        "tau_ff_unit": "N.m",
+        "tau_ff_dims": [{"index": 0, "arm": "left", "kind": "tau_ff", "name": "j1"}],
     }
     instance = collector.ActMcapCollector({"save_dir": str(tmp_path)})
     instance.set_robot_meta(robot_name="dual_piper_001", robot_type="dual_piper")
@@ -608,6 +662,13 @@ def test_collector_writes_layout_into_episode_json(collector, tmp_path):
     assert meta["schema_version"] == 1
     assert meta["robot"] == {"name": "dual_piper_001", "type": "dual_piper"}
     assert meta["vector_layout"] == {"space": "joint", "dims": layout["state_dims"]}
+    assert meta["signal_layouts"] == {
+        "observations/tau_ff": {
+            "space": "joint_torque",
+            "unit": "N.m",
+            "dims": layout["tau_ff_dims"],
+        }
+    }
     assert meta["task"] == {"operator": "张三,李四", "task_name": "桌面整理", "description": "演示"}
     assert meta["dropped"] == {"image:head": 2}
     assert "recording" not in meta
@@ -690,6 +751,46 @@ def test_control_detail_carries_config_facts_only(piper_controller, gravity):
     assert detail["mit_params"][0]["kp"] == 6.0
     assert "degrades" not in detail["gravity"] and "clips" not in detail["gravity"]
     assert _control_arm(piper_controller).control_detail["gravity"] is None
+
+
+def test_set_joint_records_the_effective_mit_t_ref(piper_controller):
+    from unittest.mock import Mock
+
+    ctrl = piper_controller.PiperController()
+    ctrl.robot = Mock()
+    ctrl.mit_params = [dict(item, t_ref=index / 10) for index, item in enumerate(ctrl.mit_params)]
+
+    ctrl.set_joint(np.zeros(6, dtype=np.float64))
+
+    assert ctrl.last_torque_ff.tolist() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    assert [call.kwargs["t_ff"] for call in ctrl.robot.move_mit.call_args_list] == pytest.approx(ctrl.last_torque_ff)
+
+
+def test_set_joint_keeps_last_complete_mit_snapshot_on_failure(piper_controller):
+    from unittest.mock import Mock
+
+    ctrl = piper_controller.PiperController()
+    ctrl.robot = Mock()
+    ctrl.last_torque_ff = np.full(6, -1.0)
+    ctrl.robot.move_mit.side_effect = [None, None, RuntimeError("CAN failure")]
+
+    with pytest.raises(RuntimeError, match="CAN failure"):
+        ctrl.set_joint(np.zeros(6, dtype=np.float64), torque_ff=np.arange(6, dtype=np.float64))
+    assert ctrl.last_torque_ff.tolist() == pytest.approx([-1.0] * 6)
+
+
+def test_set_joint_does_not_report_tau_ff_for_joint_mode(piper_controller):
+    from unittest.mock import Mock
+
+    ctrl = piper_controller.PiperController()
+    ctrl.robot = Mock()
+    ctrl.ctrl_mode = "joint"
+    ctrl.last_torque_ff = np.ones(6)
+
+    ctrl.set_joint(np.zeros(6, dtype=np.float64), torque_ff=np.arange(6, dtype=np.float64))
+
+    ctrl.robot.move_j.assert_called_once()
+    assert ctrl.last_torque_ff is None
 
 
 def test_control_layout_records_execution_controllers_only(dual_piper, piper_controller):

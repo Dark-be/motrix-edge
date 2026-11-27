@@ -90,6 +90,17 @@ class BaseEnv:
         configure_torque_stream = getattr(self.robot, "configure_torque_stream", None)
         if callable(configure_torque_stream):
             configure_torque_stream(torque_enabled)
+        tau_ff_config = self.stream_config.get("tau_ff", {})
+        if tau_ff_config is None:
+            tau_ff_config = {}
+        if not isinstance(tau_ff_config, dict):
+            raise ValueError("streams.tau_ff must be a mapping")
+        tau_ff_enabled = tau_ff_config.get("enabled", True)
+        if not isinstance(tau_ff_enabled, bool):
+            raise ValueError("streams.tau_ff.enabled must be a bool")
+        configure_tau_ff_stream = getattr(self.robot, "configure_tau_ff_stream", None)
+        if callable(configure_tau_ff_stream):
+            configure_tau_ff_stream(tau_ff_enabled)
         camera_profiles = (self.stream_config.get("cameras") or {}).get("profiles") or {}
         if self.multirate:
             self.HZ = self._positive_hz(self.stream_config.get("control_hz", self.HZ), "control_hz")
@@ -477,6 +488,7 @@ class BaseEnv:
                 "enabled": self.multirate,
                 "state_hz": self.STATE_HZ,
                 "torque": {"enabled": bool(getattr(self.robot, "torque_stream_enabled", False))},
+                "tau_ff": {"enabled": bool(getattr(self.robot, "tau_ff_stream_enabled", False))},
                 "observation_hz": self.OBS_HZ,
                 "camera_frames": camera_counts,
                 "camera_errors": camera_errors,
