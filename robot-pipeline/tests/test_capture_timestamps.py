@@ -247,6 +247,64 @@ def test_torque_uses_the_qpos_source_timestamp():
     assert [call.kwargs["log_time"] for call in calls] == [123, 123]
 
 
+def test_tau_ff_uses_the_qpos_source_timestamp():
+    module = _load("collector.mcap_collector")
+    collector = module.ActMcapCollector({})
+    collector._writer = Mock()
+    collector._schema_qpos = object()
+    collector.collect_qpos(
+        {
+            "observations/qpos": [0.0],
+            "observations/tau_ff": [0.25],
+            "timestamps_ns": {"observations/qpos": 123, "observations/tau_ff": 123},
+        }
+    )
+    calls = collector._writer.write_message.call_args_list
+    assert [call.kwargs["topic"] for call in calls] == ["observations/qpos", "observations/tau_ff"]
+    assert [call.kwargs["log_time"] for call in calls] == [123, 123]
+
+
+def test_tau_ff_rejects_non_finite_values():
+    module = _load("collector.mcap_collector")
+    collector = module.ActMcapCollector({})
+    collector._writer = Mock()
+    collector._schema_qpos = object()
+
+    with pytest.raises(ValueError, match="tau_ff contains non-finite"):
+        collector.collect_qpos(
+            {
+                "observations/qpos": [0.0],
+                "observations/tau_ff": [float("nan")],
+                "timestamps_ns": {"observations/qpos": 123, "observations/tau_ff": 123},
+            }
+        )
+
+
+def test_tau_ff_is_persisted_as_an_mcap_topic(tmp_path):
+    pytest.importorskip("mcap_ros2")
+    from mcap.reader import make_reader
+
+    collector = _load("collector.mcap_collector").ActMcapCollector({"save_dir": str(tmp_path)})
+    collector.start()
+    collector.collect_state(
+        {
+            "observations/qpos": [0.0],
+            "observations/tau_ff": [0.25],
+            "action": [0.1],
+            "timestamps_ns": {
+                "observations/qpos": 100,
+                "observations/tau_ff": 100,
+                "action": 101,
+            },
+        }
+    )
+    path = collector.finish()
+
+    with path.open("rb") as stream:
+        topics = [channel.topic for _, channel, _ in make_reader(stream).iter_messages(log_time_order=False)]
+    assert topics == ["observations/qpos", "observations/tau_ff", "action"]
+
+
 def test_cv2_timestamps_before_read(monkeypatch):
     module = _load("robot.sensor.cv2_sensor")
     sensor = module.Cv2Sensor("wrist")

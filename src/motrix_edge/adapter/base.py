@@ -56,6 +56,8 @@ from motrix_edge.adapter.http_contract import FIELD_DEPTH  # 相机元数据的�
 KEY_QPOS = "observations/qpos"
 KEY_QPOS_ERR = "observations/qpos_err"
 KEY_TORQUE = "observations/torque"
+# 机器人侧录制流：状态采样时当前生效的 MIT 前馈力矩；暂不进入 Edge 共享内存。
+KEY_TAU_FF = "observations/tau_ff"
 KEY_ACTION = "action"
 # 末端位姿（每臂 6 维：xyz + rpy，物理顺序同 ``ARM_NAMES``；单位米 / 弧度）——位姿原语的输入；
 # 机器人不提供位姿时该键不出现（``POSE_DIM_PER_ARM = 0``）。

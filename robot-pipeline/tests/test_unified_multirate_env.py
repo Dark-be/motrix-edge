@@ -19,6 +19,7 @@ from pathlib import Path
 
 import env.base_env as env_module
 import numpy as np
+import pytest
 from utils.observation_time import KEY_TIMESTAMPS_NS
 
 from motrix_edge.adapter.base import CAMERA_PREFIX, KEY_ACTION, KEY_QPOS, KEY_QPOS_ERR
@@ -45,12 +46,16 @@ class Robot:
         self.disconnected = False
         self.max_joint_step_rad = None
         self.torque_stream_enabled = False
+        self.tau_ff_stream_enabled = False
 
     def configure_control_hz(self, control_hz):
         self.max_joint_step_rad = self.max_joint_speed_rad_s / control_hz
 
     def configure_torque_stream(self, enabled):
         self.torque_stream_enabled = bool(enabled)
+
+    def configure_tau_ff_stream(self, enabled):
+        self.tau_ff_stream_enabled = bool(enabled)
 
     def state_layout(self):
         return {"state_space": "joint"}
@@ -178,6 +183,16 @@ def test_torque_stream_defaults_enabled(tmp_path, monkeypatch):
     env_module.BaseEnv(robot, {"type": "act_mcap", "save_dir": str(tmp_path)}, {})
 
     assert robot.torque_stream_enabled is True
+    assert robot.tau_ff_stream_enabled is True
+
+
+@pytest.mark.parametrize("config", [False, [], "enabled", {"enabled": 1}])
+def test_tau_ff_stream_config_rejects_invalid_types(tmp_path, monkeypatch, config):
+    robot = Robot()
+    monkeypatch.setattr(env_module, "get_collector", lambda value: Collector(value))
+
+    with pytest.raises(ValueError, match=r"streams\.tau_ff"):
+        env_module.BaseEnv(robot, {"type": "act_mcap", "save_dir": str(tmp_path)}, {"tau_ff": config})
 
 
 def test_unified_env_records_paired_state_action_and_camera_streams(tmp_path, monkeypatch):
@@ -191,6 +206,7 @@ def test_unified_env_records_paired_state_action_and_camera_streams(tmp_path, mo
             "control_hz": 80,
             "follower_state_hz": 60,
             "torque": {"enabled": True},
+            "tau_ff": {"enabled": True},
             "observation_hz": 20,
             "recording": {"queue_size": 32},
             "cameras": {
@@ -224,4 +240,5 @@ def test_unified_env_records_paired_state_action_and_camera_streams(tmp_path, mo
     assert summary["accepted"]["image:head"] > summary["accepted"]["image:wrist"] > 0
     assert robot.max_joint_step_rad == 2.0 / 80
     assert robot.torque_stream_enabled is True
+    assert robot.tau_ff_stream_enabled is True
     assert robot.disconnected

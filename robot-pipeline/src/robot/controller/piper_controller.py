@@ -125,7 +125,8 @@ class PiperController(ArmController):
         self._limit_warned: tuple[int, ...] | None = None  # 限位告警去重（同一组超限关节只打一条）
         # 重力前馈（可选，缺省 None = 纯位置环）：装载见 enable_gravity_compensation()
         self.gravity: GravityCompensator | None = None
-        self.last_torque_ff: np.ndarray | None = None  # 最近一拍的 t_ff（可观测 / 现场验收）
+        # 最近一次**完整成功提交**的 MIT t_ff；joint 通路与尚未成功下发时为 None。
+        self.last_torque_ff: np.ndarray | None = None
         self._gravity_warned: str | None = None  # 前馈降级 / 限幅告警去重（同一原因只打一条）
 
     def connect(
@@ -354,6 +355,11 @@ class PiperController(ArmController):
             self._limit_warned = None  # 回到限位内：下次超限重新告警一条
 
         if self.ctrl_mode == "mit":
+            effective_torque_ff = (
+                np.asarray([item["t_ref"] for item in self.mit_params], dtype=np.float64)
+                if torque_ff is None
+                else torque_ff
+            )
             for i in range(6):
                 self.robot.move_mit(
                     joint_index=i + 1,
@@ -361,13 +367,15 @@ class PiperController(ArmController):
                     v_des=self.mit_params[i]["vel_ref"],
                     kp=self.mit_params[i]["kp"],
                     kd=self.mit_params[i]["kd"],
-                    t_ff=self.mit_params[i]["t_ref"] if torque_ff is None else float(torque_ff[i]),
+                    t_ff=float(effective_torque_ff[i]),
                 )
+            # 只在六个 move_mit 都成功返回后替换快照；异常时保留上一条完整命令。
+            self.last_torque_ff = effective_torque_ff.copy()
 
         elif self.ctrl_mode == "joint":
             self.robot.move_j(joint.tolist())
+            self.last_torque_ff = None
 
-        self.last_torque_ff = None if torque_ff is None else np.asarray(torque_ff, dtype=np.float64).copy()
         debug_print(self.name, f"set joint to {joint}", "DEBUG")
 
     def _warn_joint_limits(self, requested: np.ndarray, clipped: np.ndarray) -> None:
